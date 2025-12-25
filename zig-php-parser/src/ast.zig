@@ -1,0 +1,94 @@
+const std = @import("std");
+const Token = @import("token.zig").Token;
+
+pub const Node = struct {
+    tag: Tag,
+    main_token: Token,
+    data: Data,
+
+    pub const Index = u32;
+    pub const StringId = u32;
+
+    pub const Tag = enum {
+        root, attribute,
+        class_decl, interface_decl, trait_decl, enum_decl,
+        property_decl, property_hook, method_decl, parameter,
+        const_decl, global_stmt, static_stmt, go_stmt,
+        closure, arrow_function, anonymous_class,
+        if_stmt, while_stmt, for_stmt, foreach_stmt, match_expr, match_arm,
+        method_call, function_call, function_decl,
+        block, expression_stmt, assignment, echo_stmt, return_stmt,
+        variable, literal_int, literal_string, array_init, binary_expr,
+        unary_expr, ternary_expr, unpacking_expr,
+    };
+
+    pub const Modifier = packed struct {
+        is_public: bool = false, is_protected: bool = false, is_private: bool = false,
+        is_static: bool = false, is_final: bool = false, is_abstract: bool = false,
+        is_readonly: bool = false,
+    };
+
+    pub const Data = union {
+        attribute: struct { name: StringId, args: []const Index },
+        container_decl: struct { 
+            attributes: []const Index, name: StringId, modifiers: Modifier, 
+            extends: ?Index, implements: []const Index, members: []const Index 
+        },
+        method_decl: struct { 
+            attributes: []const Index, name: StringId, modifiers: Modifier, 
+            params: []const Index, return_type: ?Index, body: ?Index 
+        },
+        property_decl: struct { 
+            attributes: []const Index, name: StringId, modifiers: Modifier, 
+            type: ?Index, default_value: ?Index, hooks: []const Index
+        },
+        property_hook: struct {
+            name: StringId, // get or set
+            body: Index,
+        },
+        parameter: struct { 
+            attributes: []const Index, name: StringId, type: ?Index, 
+            is_promoted: bool, modifiers: Modifier, is_variadic: bool
+        },
+        const_decl: struct { name: StringId, value: Index },
+        global_stmt: struct { vars: []const Index },
+        static_stmt: struct { vars: []const Index },
+        go_stmt: struct { call: Index },
+        closure: struct { 
+            attributes: []const Index, params: []const Index, captures: []const Index, 
+            return_type: ?Index, body: Index, is_static: bool 
+        },
+        arrow_function: struct { 
+            attributes: []const Index, params: []const Index, return_type: ?Index, 
+            body: Index, is_static: bool 
+        },
+        anonymous_class: struct { 
+            attributes: []const Index, extends: ?Index, implements: []const Index, 
+            members: []const Index, args: []const Index 
+        },
+        if_stmt: struct { condition: Index, then_branch: Index, else_branch: ?Index },
+        while_stmt: struct { condition: Index, body: Index },
+        foreach_stmt: struct { iterable: Index, key: ?Index, value: Index, body: Index },
+        match_expr: struct { expression: Index, arms: []const Index },
+        match_arm: struct { conditions: []const Index, body: Index },
+        method_call: struct { target: Index, method_name: StringId, args: []const Index },
+        function_call: struct { name: Index, args: []const Index }, 
+        array_init: struct { elements: []const Index },
+        literal_string: struct { value: StringId },
+        root: struct { stmts: []const Index },
+        echo_stmt: struct { expr: Index },
+        return_stmt: struct { expr: ?Index },
+        assignment: struct { target: Index, value: Index },
+        binary_expr: struct { lhs: Index, op: Token.Tag, rhs: Index },
+        unary_expr: struct { op: Token.Tag, expr: Index },
+        ternary_expr: struct { cond: Index, then_expr: ?Index, else_expr: Index },
+        unpacking_expr: struct { expr: Index },
+        function_decl: struct { 
+            attributes: []const Index, name: StringId, params: []const Index, body: Index 
+        },
+        block: struct { stmts: []const Index },
+        variable: struct { name: StringId },
+        literal_int: struct { value: i64 },
+        none: void,
+    };
+};
