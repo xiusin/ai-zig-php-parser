@@ -2,7 +2,7 @@ const std = @import("std");
 const Lexer = @import("lexer.zig").Lexer;
 const Token = @import("token.zig").Token;
 const ast = @import("ast.zig");
-const PHPContext = @import("root.zig").PHPContext;
+pub const PHPContext = @import("root.zig").PHPContext;
 
 pub const Parser = struct {
     lexer: Lexer,

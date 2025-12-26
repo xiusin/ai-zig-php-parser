@@ -1,32 +1,46 @@
 const std = @import("std");
-const gc = @import("runtime/gc.zig");
-const Value = @import("runtime/value.zig").Value;
+const ast = @import("compiler/ast.zig");
+const parser = @import("compiler/parser.zig");
+const vm = @import("runtime/vm.zig");
+const types = @import("runtime/types.zig");
+const Value = types.Value;
+const Environment = @import("runtime/environment.zig");
+const PHPContext = @import("compiler/parser.zig").PHPContext;
+
+fn printFn(vm_ptr: *anyopaque, args: []const Value) !Value {
+    const vm_instance = @ptrCast(*vm.VM, @alignCast(@constCast(vm_ptr)));
+    for (args) |arg| {
+        try arg.print();
+        std.debug.print(" ", .{});
+    }
+    std.debug.print("\n", .{});
+    return Value.initNull();
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var mm = gc.MemoryManager.init(allocator);
-    defer mm.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
 
-    const str_val = Value{
-        .tag = .string,
-        .data = .{ .string = try mm.allocString("hello") },
+    var context = PHPContext.init(arena_allocator);
+    // defer context.deinit();
+
+    const php_code = "$message = \"Hello from a variable!\"; echo $message;";
+    var p = try parser.Parser.init(arena_allocator, &context, php_code);
+    const program = p.parse() catch |err| {
+        std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});
+        return;
     };
-    const arr = try mm.allocArray();
-    try arr.data.put(.{ .tag = .integer, .data = .{ .integer = 0 } }, str_val);
 
-    std.debug.print("Initial array ref_count = {d}, string ref_count = {d}\n", .{arr.*.ref_count, str_val.data.string.*.ref_count});
+    var vm_instance = try vm.VM.init(allocator);
+    vm_instance.context = &context;
+    defer vm_instance.deinit();
 
-    const arr_val = Value{ .tag = .array, .data = .{ .array = arr } };
+    vm_instance.defineBuiltin("print", printFn);
 
-    gc.incRef(@TypeOf(arr_val.data.array))(arr_val.data.array);
-    std.debug.print("Array ref_count incremented to {d}\n", .{arr.*.ref_count});
-
-    gc.decRef(&mm, arr_val);
-    std.debug.print("Array ref_count decremented to {d}\n", .{arr.*.ref_count});
-
-    // This should free both the array and the string
-    gc.decRef(&mm, arr_val);
+    _ = try vm_instance.run(program);
 }

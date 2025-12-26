@@ -1,5 +1,5 @@
 const std = @import("std");
-const Value = @import("value.zig").Value;
+const Value = @import("types.zig").Value;
 
 pub fn Box(comptime T: type) type {
     return struct {
