@@ -70,14 +70,30 @@ pub const Lexer = struct {
             ',' => .{ .tag = .comma, .loc = .{ .start = start, .end = self.pos } },
             '.' => if (self.match('.')) (if (self.match('.')) .{ .tag = .ellipsis, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .dot, .loc = .{ .start = start, .end = self.pos } },
             '$' => self.lexVariable(start),
-            '-' => if (self.match('>')) .{ .tag = .arrow, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .minus, .loc = .{ .start = start, .end = self.pos } },
+            '+' => if (self.match('+')) .{ .tag = .plus_plus, .loc = .{ .start = start, .end = self.pos } }
+                  else if (self.match('=')) .{ .tag = .plus_equal, .loc = .{ .start = start, .end = self.pos } }
+                  else .{ .tag = .plus, .loc = .{ .start = start, .end = self.pos } },
+            '-' => if (self.match('>')) .{ .tag = .arrow, .loc = .{ .start = start, .end = self.pos } } 
+                  else if (self.match('-')) .{ .tag = .minus_minus, .loc = .{ .start = start, .end = self.pos } }
+                  else if (self.match('=')) .{ .tag = .minus_equal, .loc = .{ .start = start, .end = self.pos } }
+                  else .{ .tag = .minus, .loc = .{ .start = start, .end = self.pos } },
+            '*' => if (self.match('=')) .{ .tag = .asterisk_equal, .loc = .{ .start = start, .end = self.pos } }
+                  else .{ .tag = .asterisk, .loc = .{ .start = start, .end = self.pos } },
+            '/' => if (self.match('=')) .{ .tag = .slash_equal, .loc = .{ .start = start, .end = self.pos } }
+                  else .{ .tag = .slash, .loc = .{ .start = start, .end = self.pos } },
+            '%' => if (self.match('=')) .{ .tag = .percent_equal, .loc = .{ .start = start, .end = self.pos } }
+                  else .{ .tag = .percent, .loc = .{ .start = start, .end = self.pos } },
+            '?' => if (self.match('?')) .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } }
+                  else .{ .tag = .question, .loc = .{ .start = start, .end = self.pos } },
             '=' => if (self.match('>')) .{ .tag = .fat_arrow, .loc = .{ .start = start, .end = self.pos } } 
                   else if (self.match('=')) (if (self.match('=')) .{ .tag = .equal_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .equal_equal, .loc = .{ .start = start, .end = self.pos } })
                   else .{ .tag = .equal, .loc = .{ .start = start, .end = self.pos } },
             '!' => if (self.match('=')) (if (self.match('=')) .{ .tag = .bang_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .bang_equal, .loc = .{ .start = start, .end = self.pos } })
-                  else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } },
+                  else .{ .tag = .bang, .loc = .{ .start = start, .end = self.pos } },
             '&' => if (self.match('&')) .{ .tag = .double_ampersand, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .ampersand, .loc = .{ .start = start, .end = self.pos } },
-            '|' => if (self.match('|')) .{ .tag = .double_pipe, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .pipe, .loc = .{ .start = start, .end = self.pos } },
+            '|' => if (self.match('|')) .{ .tag = .double_pipe, .loc = .{ .start = start, .end = self.pos } } 
+                  else if (self.match('>')) .{ .tag = .pipe_greater, .loc = .{ .start = start, .end = self.pos } }
+                  else .{ .tag = .pipe, .loc = .{ .start = start, .end = self.pos } },
             '<' => if (self.match('<')) {
                 if (self.match('<')) return self.lexHeredocStart(start);
                 return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
@@ -256,6 +272,7 @@ pub const Lexer = struct {
         else if (std.mem.eql(u8, text, "case")) .k_case
         else if (std.mem.eql(u8, text, "catch")) .k_catch
         else if (std.mem.eql(u8, text, "clone")) .k_clone
+        else if (std.mem.eql(u8, text, "with")) .k_with
         else if (std.mem.eql(u8, text, "continue")) .k_continue
         else if (std.mem.eql(u8, text, "declare")) .k_declare
         else if (std.mem.eql(u8, text, "do")) .k_do
@@ -269,13 +286,80 @@ pub const Lexer = struct {
         else if (std.mem.eql(u8, text, "throw")) .k_throw
         else if (std.mem.eql(u8, text, "try")) .k_try
         else if (std.mem.eql(u8, text, "yield")) .k_yield
+        else if (std.mem.eql(u8, text, "from")) .k_from
+        else if (std.mem.eql(u8, text, "true")) .k_true
+        else if (std.mem.eql(u8, text, "false")) .k_false
+        else if (std.mem.eql(u8, text, "null")) .k_null
+        else if (std.mem.eql(u8, text, "array")) .k_array
+        else if (std.mem.eql(u8, text, "callable")) .k_callable
+        else if (std.mem.eql(u8, text, "iterable")) .k_iterable
+        else if (std.mem.eql(u8, text, "object")) .k_object
+        else if (std.mem.eql(u8, text, "mixed")) .k_mixed
+        else if (std.mem.eql(u8, text, "never")) .k_never
+        else if (std.mem.eql(u8, text, "void")) .k_void
         else .t_string;
         return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
     }
 
     fn lexNumber(self: *Lexer, start: usize) Token {
-        while (self.pos < self.buffer.len and (std.ascii.isDigit(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) self.pos += 1;
-        return .{ .tag = .t_lnumber, .loc = .{ .start = start, .end = self.pos } };
+        var has_dot = false;
+        var has_exp = false;
+        
+        // Handle different number formats
+        if (self.buffer[self.pos] == '0' and self.pos + 1 < self.buffer.len) {
+            const next_char = self.buffer[self.pos + 1];
+            if (next_char == 'x' or next_char == 'X') {
+                // Hexadecimal
+                self.pos += 2;
+                while (self.pos < self.buffer.len and (std.ascii.isHex(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
+                    self.pos += 1;
+                }
+                return .{ .tag = .t_lnumber, .loc = .{ .start = start, .end = self.pos } };
+            } else if (next_char == 'b' or next_char == 'B') {
+                // Binary
+                self.pos += 2;
+                while (self.pos < self.buffer.len and (self.buffer[self.pos] == '0' or self.buffer[self.pos] == '1' or self.buffer[self.pos] == '_')) {
+                    self.pos += 1;
+                }
+                return .{ .tag = .t_lnumber, .loc = .{ .start = start, .end = self.pos } };
+            } else if (next_char == 'o' or next_char == 'O') {
+                // Octal
+                self.pos += 2;
+                while (self.pos < self.buffer.len and (self.buffer[self.pos] >= '0' and self.buffer[self.pos] <= '7' or self.buffer[self.pos] == '_')) {
+                    self.pos += 1;
+                }
+                return .{ .tag = .t_lnumber, .loc = .{ .start = start, .end = self.pos } };
+            }
+        }
+        
+        // Decimal number
+        while (self.pos < self.buffer.len and (std.ascii.isDigit(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
+            self.pos += 1;
+        }
+        
+        // Check for decimal point
+        if (self.pos < self.buffer.len and self.buffer[self.pos] == '.' and 
+            self.pos + 1 < self.buffer.len and std.ascii.isDigit(self.buffer[self.pos + 1])) {
+            has_dot = true;
+            self.pos += 1;
+            while (self.pos < self.buffer.len and (std.ascii.isDigit(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
+                self.pos += 1;
+            }
+        }
+        
+        // Check for scientific notation
+        if (self.pos < self.buffer.len and (self.buffer[self.pos] == 'e' or self.buffer[self.pos] == 'E')) {
+            has_exp = true;
+            self.pos += 1;
+            if (self.pos < self.buffer.len and (self.buffer[self.pos] == '+' or self.buffer[self.pos] == '-')) {
+                self.pos += 1;
+            }
+            while (self.pos < self.buffer.len and (std.ascii.isDigit(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
+                self.pos += 1;
+            }
+        }
+        
+        return .{ .tag = if (has_dot or has_exp) .t_dnumber else .t_lnumber, .loc = .{ .start = start, .end = self.pos } };
     }
 
     fn lexSingleQuoteString(self: *Lexer, start: usize) Token {

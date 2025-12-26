@@ -19,7 +19,7 @@ pub fn main() !void {
     var context = PHPContext.init(arena_allocator);
     // defer context.deinit();
 
-    const php_code = "$a = [1, \"hello\", 3]; echo count($a);";
+    const php_code = "<?php echo 42;";
     var p = try parser.Parser.init(arena_allocator, &context, php_code);
     const program = p.parse() catch |err| {
         std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});

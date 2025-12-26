@@ -98,7 +98,7 @@ export fn php_parser_parse(ctx: *PHPContext, source: [*:0]const u8) i32 {
     defer std.heap.c_allocator.free(source_z);
 
     const root_idx = ctx.parseSource(source_z) catch |err| {
-        std::debug.print("Parse error: {}\n", .{err});
+        std.debug.print("Parse error: {}\n", .{err});
         return -1;
     };
     return @intCast(root_idx);
