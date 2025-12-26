@@ -7,10 +7,12 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "php-interpreter",
         .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
-    exe.setTarget(target);
-    exe.setOptimize(optimize);
+    exe.addPackagePath("compiler", "src/compiler");
+    exe.addPackagePath("runtime", "src/runtime");
     exe.linkLibC();
 
     b.installArtifact(exe);
