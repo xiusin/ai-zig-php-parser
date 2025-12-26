@@ -25,8 +25,11 @@ pub const Token = struct {
         // Control Flow
         k_if, k_else, k_elseif, k_while, k_do, k_for, k_foreach, k_as, k_match, k_default,
         k_switch, k_case, k_break, k_continue, k_return, k_try, k_catch, k_finally, k_throw,
+        k_goto, k_yield, k_yield_from,
         // Other Keywords
         k_function, k_fn, k_new, k_echo, k_global, k_const, k_namespace, k_declare, k_list,
+        k_and, k_or, k_xor, k_instanceof, k_clone, k_print, k_var, k_unset,
+        k_include, k_include_once, k_require, k_require_once,
         k_go, // Coroutine
         k_get, k_set, // PHP 8.4 Property Hooks
         // Symbols
@@ -36,7 +39,7 @@ pub const Token = struct {
         plus, minus, asterisk, slash, percent, equal,
         equal_equal, equal_equal_equal, bang_equal, bang_equal_equal,
         less, greater, less_equal, greater_equal, spaceship,
-        double_question, double_ampersand, double_pipe,
+        double_question, double_ampersand, double_pipe, ampersand, pipe,
         t_attribute_start, // #[
     };
 };

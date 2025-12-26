@@ -2,7 +2,7 @@ const std = @import("std");
 const Lexer = @import("lexer.zig").Lexer;
 const Token = @import("token.zig").Token;
 const ast = @import("ast.zig");
-const PHPContext = @import("root.zig").PHPContext;
+pub const PHPContext = @import("root.zig").PHPContext;
 
 pub const Parser = struct {
     lexer: Lexer,
@@ -140,6 +140,7 @@ pub const Parser = struct {
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer params.deinit(self.allocator);
             while (self.curr.tag != .r_paren) {
                 try params.append(self.allocator, try self.parseParameter());
                 if (self.curr.tag == .comma) self.nextToken();
@@ -152,6 +153,7 @@ pub const Parser = struct {
             const name_tok = try self.eat(.t_variable);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             var hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer hooks.deinit(self.allocator);
             if (self.curr.tag == .l_brace) {
                 self.nextToken();
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
@@ -226,6 +228,7 @@ pub const Parser = struct {
         var extends: ?ast.Node.Index = null;
         if (self.curr.tag == .k_extends) { self.nextToken(); extends = try self.parseExpression(0); }
         var implements = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer implements.deinit(self.allocator);
         if (self.curr.tag == .k_implements) {
             self.nextToken();
             while (true) {
@@ -243,6 +246,7 @@ pub const Parser = struct {
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         _ = try self.eat(.l_paren); 
         var params = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer params.deinit(self.allocator);
         while (self.curr.tag != .r_paren) {
             try params.append(self.allocator, try self.parseParameter());
             if (self.curr.tag == .comma) self.nextToken();
@@ -266,11 +270,20 @@ pub const Parser = struct {
             }
             self.nextToken();
         }
+        var type_node: ?ast.Node.Index = null;
+        if (self.curr.tag == .t_string) {
+            type_node = try self.parseType();
+        }
+        var is_reference = false;
+        if (self.curr.tag == .ampersand) {
+            is_reference = true;
+            self.nextToken();
+        }
         var is_variadic = false;
         if (self.curr.tag == .ellipsis) { is_variadic = true; self.nextToken(); }
         const name_tok = try self.eat(.t_variable);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
-        return self.createNode(.{ .tag = .parameter, .main_token = name_tok, .data = .{ .parameter = .{ .attributes = attributes, .name = name_id, .type = null, .is_promoted = modifiers.is_public or modifiers.is_protected or modifiers.is_private, .modifiers = modifiers, .is_variadic = is_variadic } } });
+        return self.createNode(.{ .tag = .parameter, .main_token = name_tok, .data = .{ .parameter = .{ .attributes = attributes, .name = name_id, .type = type_node, .is_promoted = modifiers.is_public or modifiers.is_protected or modifiers.is_private, .modifiers = modifiers, .is_variadic = is_variadic, .is_reference = is_reference } } });
     }
 
     fn parseIf(self: *Parser) anyerror!ast.Node.Index {
@@ -307,6 +320,7 @@ pub const Parser = struct {
     fn parseGlobal(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_global);
         var vars = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer vars.deinit(self.allocator);
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(100));
             if (self.curr.tag != .comma) break; self.nextToken();
@@ -318,6 +332,7 @@ pub const Parser = struct {
     fn parseStatic(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_static);
         var vars = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer vars.deinit(self.allocator);
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(0));
             if (self.curr.tag != .comma) break; self.nextToken();
@@ -391,6 +406,7 @@ pub const Parser = struct {
                 left = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = method_id, .args = &.{} } } });
             } else if (tag == .l_paren) {
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                defer args.deinit(self.allocator);
                 while (self.curr.tag != .r_paren) {
                     try args.append(self.allocator, try self.parseExpression(0));
                     if (self.curr.tag == .comma) self.nextToken();
@@ -447,6 +463,7 @@ pub const Parser = struct {
     fn parseClosure(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_function); _ = try self.eat(.l_paren); _ = try self.eat(.r_paren);
         var captures = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer captures.deinit(self.allocator);
         if (self.curr.tag == .k_use) {
             self.nextToken(); _ = try self.eat(.l_paren);
             while (self.curr.tag != .r_paren) {
@@ -464,6 +481,7 @@ pub const Parser = struct {
         const token = try self.eat(.k_match); _ = try self.eat(.l_paren);
         const expr = try self.parseExpression(0); _ = try self.eat(.r_paren); _ = try self.eat(.l_brace);
         var arms = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer arms.deinit(self.allocator);
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             const cond = try self.parseExpression(0); _ = try self.eat(.fat_arrow); const body = try self.parseExpression(0);
             const arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{cond}, .body = body } } });
@@ -500,5 +518,62 @@ pub const Parser = struct {
         const idx: u32 = @intCast(self.context.nodes.items.len);
         try self.context.nodes.append(self.allocator, node);
         return idx;
+    }
+
+    fn parseType(self: *Parser) anyerror!ast.Node.Index {
+        return self.parseUnionType();
+    }
+
+    fn parseUnionType(self: *Parser) anyerror!ast.Node.Index {
+        const left = try self.parseIntersectionType();
+
+        if (self.curr.tag == .pipe) {
+            var types = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer types.deinit(self.allocator);
+            try types.append(self.allocator, left);
+
+            while (self.curr.tag == .pipe) {
+                self.nextToken();
+                try types.append(self.allocator, try self.parseIntersectionType());
+            }
+
+            const arena = self.context.arena.allocator();
+            return self.createNode(.{ .tag = .union_type, .main_token = self.curr, .data = .{ .union_type = .{ .types = try arena.dupe(ast.Node.Index, types.items) } } });
+        }
+
+        return left;
+    }
+
+    fn parseIntersectionType(self: *Parser) anyerror!ast.Node.Index {
+        const left = try self.parsePrimaryType();
+
+        if (self.curr.tag == .ampersand) {
+             var types = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer types.deinit(self.allocator);
+            try types.append(self.allocator, left);
+
+            while (self.curr.tag == .ampersand) {
+                self.nextToken();
+                try types.append(self.allocator, try self.parsePrimaryType());
+            }
+
+            const arena = self.context.arena.allocator();
+            return self.createNode(.{ .tag = .intersection_type, .main_token = self.curr, .data = .{ .intersection_type = .{ .types = try arena.dupe(ast.Node.Index, types.items) } } });
+        }
+
+        return left;
+    }
+
+    fn parsePrimaryType(self: *Parser) anyerror!ast.Node.Index {
+        if (self.curr.tag == .l_paren) {
+            self.nextToken();
+            const type_node = try self.parseType();
+            _ = try self.eat(.r_paren);
+            return type_node;
+        } else {
+            const type_name_tok = try self.eat(.t_string);
+            const type_name_id = try self.context.intern(self.lexer.buffer[type_name_tok.loc.start..type_name_tok.loc.end]);
+            return self.createNode(.{ .tag = .named_type, .main_token = type_name_tok, .data = .{ .named_type = .{ .name = type_name_id } } });
+        }
     }
 };

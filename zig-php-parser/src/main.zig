@@ -1,21 +1,34 @@
 const std = @import("std");
-const PHPContext = @import("root.zig").PHPContext;
-const ReflectionManager = @import("reflection.zig").ReflectionManager;
+const ast = @import("compiler/ast.zig");
+const parser = @import("compiler/parser.zig");
+const vm = @import("runtime/vm.zig");
+const types = @import("runtime/types.zig");
+const Value = types.Value;
+const Environment = @import("runtime/environment.zig");
+const PHPContext = @import("compiler/parser.zig").PHPContext;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ctx = PHPContext.init(allocator);
-    defer ctx.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
 
-    const flat_source = "<?php namespace App\\Core; use Library\\Logger; class Service { public $status { get => $this->_status; } public function execute(...$params) { go task(...$params); } }";
+    var context = PHPContext.init(arena_allocator);
+    // defer context.deinit();
 
-    _ = try ctx.parseSource(flat_source);
-    std.debug.print("PHP 8.5 Advanced Features Parser: Success.\n", .{});
-    std.debug.print("Nodes: {d}, Namespace: {s}\n", .{
-        ctx.nodes.items.len,
-        if (ctx.current_namespace) |id| ctx.string_pool.keys()[id] else "None"
-    });
+    const php_code = "$a = [1, \"hello\", 3]; echo count($a);";
+    var p = try parser.Parser.init(arena_allocator, &context, php_code);
+    const program = p.parse() catch |err| {
+        std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    var vm_instance = try vm.VM.init(allocator);
+    vm_instance.context = &context;
+    defer vm_instance.deinit();
+
+    _ = try vm_instance.run(program);
 }

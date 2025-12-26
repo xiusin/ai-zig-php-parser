@@ -6,6 +6,7 @@ pub const Lexer = struct {
     pos: usize = 0,
     state: State = .initial,
     heredoc_label: ?[]const u8 = null,
+    interp_nesting_level: u32 = 0,
 
     pub const State = enum {
         initial,
@@ -20,24 +21,42 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) Token {
-        if (self.state == .script) self.skipWhitespace();
+        const in_interp_expr = (self.state == .double_quote or self.state == .heredoc) and self.interp_nesting_level > 0;
+
+        if (self.state == .script or in_interp_expr) {
+            self.skipWhitespace();
+        }
+
         if (self.pos >= self.buffer.len) return .{ .tag = .eof, .loc = .{ .start = self.pos, .end = self.pos } };
         
         const start = self.pos;
         const char = self.buffer[self.pos];
 
-        if (self.state == .initial) {
-            if (char == '<' and std.mem.startsWith(u8, self.buffer[self.pos..], "<?php")) {
-                self.pos += 5; self.state = .script;
-                return .{ .tag = .t_open_tag, .loc = .{ .start = start, .end = self.pos } };
+        if (in_interp_expr) {
+            if (char == '}') {
+                self.interp_nesting_level -= 1;
+                self.pos += 1;
+                return .{ .tag = .r_brace, .loc = .{ .start = start, .end = self.pos } };
             }
-            while (self.pos < self.buffer.len and self.buffer[self.pos] != '<') self.pos += 1;
-            return .{ .tag = .t_inline_html, .loc = .{ .start = start, .end = self.pos } };
+            if (char == '{') {
+                self.interp_nesting_level += 1;
+            }
+        } else {
+            switch (self.state) {
+                .initial => {
+                    if (char == '<' and std.mem.startsWith(u8, self.buffer[self.pos..], "<?php")) {
+                        self.pos += 5; self.state = .script;
+                        return .{ .tag = .t_open_tag, .loc = .{ .start = start, .end = self.pos } };
+                    }
+                    while (self.pos < self.buffer.len and self.buffer[self.pos] != '<') self.pos += 1;
+                    return .{ .tag = .t_inline_html, .loc = .{ .start = start, .end = self.pos } };
+                },
+                .script => {},
+                .double_quote => return self.lexInterpolation(start, '"'),
+                .heredoc => return self.lexInterpolation(start, 0),
+                .nowdoc => return self.lexNowdoc(start),
+            }
         }
-
-        if (self.state == .double_quote) return self.lexInterpolation(start, '"');
-        if (self.state == .heredoc) return self.lexInterpolation(start, 0);
-        if (self.state == .nowdoc) return self.lexNowdoc(start);
 
         self.pos += 1;
         return switch (char) {
@@ -57,6 +76,8 @@ pub const Lexer = struct {
                   else .{ .tag = .equal, .loc = .{ .start = start, .end = self.pos } },
             '!' => if (self.match('=')) (if (self.match('=')) .{ .tag = .bang_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .bang_equal, .loc = .{ .start = start, .end = self.pos } })
                   else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } },
+            '&' => if (self.match('&')) .{ .tag = .double_ampersand, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .ampersand, .loc = .{ .start = start, .end = self.pos } },
+            '|' => if (self.match('|')) .{ .tag = .double_pipe, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .pipe, .loc = .{ .start = start, .end = self.pos } },
             '<' => if (self.match('<')) {
                 if (self.match('<')) return self.lexHeredocStart(start);
                 return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
@@ -97,6 +118,7 @@ pub const Lexer = struct {
             if (self.pos + 1 < self.buffer.len) {
                 if (self.buffer[self.pos + 1] == '{') {
                     self.pos += 2;
+                    self.interp_nesting_level += 1;
                     return .{ .tag = .t_dollar_open_curly_brace, .loc = .{ .start = start, .end = self.pos } };
                 }
                 if (std.ascii.isAlphabetic(self.buffer[self.pos + 1]) or self.buffer[self.pos + 1] == '_') {
@@ -104,9 +126,11 @@ pub const Lexer = struct {
                 }
             }
         }
+
         if (self.buffer[self.pos] == '{' and self.pos + 1 < self.buffer.len and self.buffer[self.pos+1] == '$') {
-            self.pos += 2;
-            return .{ .tag = .t_curly_open, .loc = .{ .start = start, .end = self.pos } };
+             self.pos += 2;
+             self.interp_nesting_level += 1;
+             return .{ .tag = .t_curly_open, .loc = .{ .start = start, .end = self.pos } };
         }
 
         while (self.pos < self.buffer.len) {
@@ -228,6 +252,23 @@ pub const Lexer = struct {
         else if (std.mem.eql(u8, text, "echo")) .k_echo
         else if (std.mem.eql(u8, text, "get")) .k_get
         else if (std.mem.eql(u8, text, "set")) .k_set
+        else if (std.mem.eql(u8, text, "break")) .k_break
+        else if (std.mem.eql(u8, text, "case")) .k_case
+        else if (std.mem.eql(u8, text, "catch")) .k_catch
+        else if (std.mem.eql(u8, text, "clone")) .k_clone
+        else if (std.mem.eql(u8, text, "continue")) .k_continue
+        else if (std.mem.eql(u8, text, "declare")) .k_declare
+        else if (std.mem.eql(u8, text, "do")) .k_do
+        else if (std.mem.eql(u8, text, "finally")) .k_finally
+        else if (std.mem.eql(u8, text, "goto")) .k_goto
+        else if (std.mem.eql(u8, text, "include")) .k_include
+        else if (std.mem.eql(u8, text, "instanceof")) .k_instanceof
+        else if (std.mem.eql(u8, text, "print")) .k_print
+        else if (std.mem.eql(u8, text, "require")) .k_require
+        else if (std.mem.eql(u8, text, "switch")) .k_switch
+        else if (std.mem.eql(u8, text, "throw")) .k_throw
+        else if (std.mem.eql(u8, text, "try")) .k_try
+        else if (std.mem.eql(u8, text, "yield")) .k_yield
         else .t_string;
         return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
     }

@@ -20,6 +20,7 @@ pub const Node = struct {
         block, expression_stmt, assignment, echo_stmt, return_stmt,
         variable, literal_int, literal_string, array_init, binary_expr,
         unary_expr, ternary_expr, unpacking_expr,
+        named_type, union_type, intersection_type,
     };
 
     pub const Modifier = packed struct {
@@ -46,9 +47,9 @@ pub const Node = struct {
             name: StringId, // get or set
             body: Index,
         },
-        parameter: struct { 
-            attributes: []const Index, name: StringId, type: ?Index, 
-            is_promoted: bool, modifiers: Modifier, is_variadic: bool
+        parameter: struct {
+            attributes: []const Index, name: StringId, type: ?Index,
+            is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool
         },
         const_decl: struct { name: StringId, value: Index },
         global_stmt: struct { vars: []const Index },
@@ -89,6 +90,9 @@ pub const Node = struct {
         block: struct { stmts: []const Index },
         variable: struct { name: StringId },
         literal_int: struct { value: i64 },
+        named_type: struct { name: StringId },
+        union_type: struct { types: []const Index },
+        intersection_type: struct { types: []const Index },
         none: void,
     };
 };
