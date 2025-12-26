@@ -76,6 +76,8 @@ pub const Lexer = struct {
                   else .{ .tag = .equal, .loc = .{ .start = start, .end = self.pos } },
             '!' => if (self.match('=')) (if (self.match('=')) .{ .tag = .bang_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .bang_equal, .loc = .{ .start = start, .end = self.pos } })
                   else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } },
+            '&' => if (self.match('&')) .{ .tag = .double_ampersand, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .ampersand, .loc = .{ .start = start, .end = self.pos } },
+            '|' => if (self.match('|')) .{ .tag = .double_pipe, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .pipe, .loc = .{ .start = start, .end = self.pos } },
             '<' => if (self.match('<')) {
                 if (self.match('<')) return self.lexHeredocStart(start);
                 return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
@@ -250,6 +252,23 @@ pub const Lexer = struct {
         else if (std.mem.eql(u8, text, "echo")) .k_echo
         else if (std.mem.eql(u8, text, "get")) .k_get
         else if (std.mem.eql(u8, text, "set")) .k_set
+        else if (std.mem.eql(u8, text, "break")) .k_break
+        else if (std.mem.eql(u8, text, "case")) .k_case
+        else if (std.mem.eql(u8, text, "catch")) .k_catch
+        else if (std.mem.eql(u8, text, "clone")) .k_clone
+        else if (std.mem.eql(u8, text, "continue")) .k_continue
+        else if (std.mem.eql(u8, text, "declare")) .k_declare
+        else if (std.mem.eql(u8, text, "do")) .k_do
+        else if (std.mem.eql(u8, text, "finally")) .k_finally
+        else if (std.mem.eql(u8, text, "goto")) .k_goto
+        else if (std.mem.eql(u8, text, "include")) .k_include
+        else if (std.mem.eql(u8, text, "instanceof")) .k_instanceof
+        else if (std.mem.eql(u8, text, "print")) .k_print
+        else if (std.mem.eql(u8, text, "require")) .k_require
+        else if (std.mem.eql(u8, text, "switch")) .k_switch
+        else if (std.mem.eql(u8, text, "throw")) .k_throw
+        else if (std.mem.eql(u8, text, "try")) .k_try
+        else if (std.mem.eql(u8, text, "yield")) .k_yield
         else .t_string;
         return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
     }

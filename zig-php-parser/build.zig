@@ -82,6 +82,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+// Link against libc for the GeneralPurposeAllocator.
     exe.linkSystemLibrary("c");
 
     // This declares intent for the executable to be installed into the
@@ -122,6 +123,7 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
+    // Link against libc for the GeneralPurposeAllocator.
     mod_tests.linkSystemLibrary("c");
 
     // A run step that will run the test executable.
@@ -133,6 +135,7 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    // Link against libc for the GeneralPurposeAllocator.
     exe_tests.linkSystemLibrary("c");
 
     // A run step that will run the second test executable.

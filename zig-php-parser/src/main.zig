@@ -10,7 +10,7 @@ pub fn main() !void {
     var ctx = PHPContext.init(allocator);
     defer ctx.deinit();
 
-    const flat_source = "<?php function foo((A&B)|string $p): int|string {} ?>";
+    const flat_source = "<?php function process((TypeA&TypeB)|TypeC &$data, int|string $id): void {} ?>";
 
     _ = try ctx.parseSource(flat_source);
     std.debug.print("PHP 8.5 Advanced Features Parser: Success.\n", .{});

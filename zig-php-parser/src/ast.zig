@@ -47,9 +47,9 @@ pub const Node = struct {
             name: StringId, // get or set
             body: Index,
         },
-        parameter: struct { 
-            attributes: []const Index, name: StringId, type: ?Index, 
-            is_promoted: bool, modifiers: Modifier, is_variadic: bool
+        parameter: struct {
+            attributes: []const Index, name: StringId, type: ?Index,
+            is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool
         },
         const_decl: struct { name: StringId, value: Index },
         global_stmt: struct { vars: []const Index },
