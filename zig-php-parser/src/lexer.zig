@@ -6,6 +6,7 @@ pub const Lexer = struct {
     pos: usize = 0,
     state: State = .initial,
     heredoc_label: ?[]const u8 = null,
+    interp_nesting_level: u32 = 0,
 
     pub const State = enum {
         initial,
@@ -20,24 +21,42 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) Token {
-        if (self.state == .script) self.skipWhitespace();
+        const in_interp_expr = (self.state == .double_quote or self.state == .heredoc) and self.interp_nesting_level > 0;
+
+        if (self.state == .script or in_interp_expr) {
+            self.skipWhitespace();
+        }
+
         if (self.pos >= self.buffer.len) return .{ .tag = .eof, .loc = .{ .start = self.pos, .end = self.pos } };
         
         const start = self.pos;
         const char = self.buffer[self.pos];
 
-        if (self.state == .initial) {
-            if (char == '<' and std.mem.startsWith(u8, self.buffer[self.pos..], "<?php")) {
-                self.pos += 5; self.state = .script;
-                return .{ .tag = .t_open_tag, .loc = .{ .start = start, .end = self.pos } };
+        if (in_interp_expr) {
+            if (char == '}') {
+                self.interp_nesting_level -= 1;
+                self.pos += 1;
+                return .{ .tag = .r_brace, .loc = .{ .start = start, .end = self.pos } };
             }
-            while (self.pos < self.buffer.len and self.buffer[self.pos] != '<') self.pos += 1;
-            return .{ .tag = .t_inline_html, .loc = .{ .start = start, .end = self.pos } };
+            if (char == '{') {
+                self.interp_nesting_level += 1;
+            }
+        } else {
+            switch (self.state) {
+                .initial => {
+                    if (char == '<' and std.mem.startsWith(u8, self.buffer[self.pos..], "<?php")) {
+                        self.pos += 5; self.state = .script;
+                        return .{ .tag = .t_open_tag, .loc = .{ .start = start, .end = self.pos } };
+                    }
+                    while (self.pos < self.buffer.len and self.buffer[self.pos] != '<') self.pos += 1;
+                    return .{ .tag = .t_inline_html, .loc = .{ .start = start, .end = self.pos } };
+                },
+                .script => {},
+                .double_quote => return self.lexInterpolation(start, '"'),
+                .heredoc => return self.lexInterpolation(start, 0),
+                .nowdoc => return self.lexNowdoc(start),
+            }
         }
-
-        if (self.state == .double_quote) return self.lexInterpolation(start, '"');
-        if (self.state == .heredoc) return self.lexInterpolation(start, 0);
-        if (self.state == .nowdoc) return self.lexNowdoc(start);
 
         self.pos += 1;
         return switch (char) {
@@ -97,6 +116,7 @@ pub const Lexer = struct {
             if (self.pos + 1 < self.buffer.len) {
                 if (self.buffer[self.pos + 1] == '{') {
                     self.pos += 2;
+                    self.interp_nesting_level += 1;
                     return .{ .tag = .t_dollar_open_curly_brace, .loc = .{ .start = start, .end = self.pos } };
                 }
                 if (std.ascii.isAlphabetic(self.buffer[self.pos + 1]) or self.buffer[self.pos + 1] == '_') {
@@ -104,9 +124,11 @@ pub const Lexer = struct {
                 }
             }
         }
+
         if (self.buffer[self.pos] == '{' and self.pos + 1 < self.buffer.len and self.buffer[self.pos+1] == '$') {
-            self.pos += 2;
-            return .{ .tag = .t_curly_open, .loc = .{ .start = start, .end = self.pos } };
+             self.pos += 2;
+             self.interp_nesting_level += 1;
+             return .{ .tag = .t_curly_open, .loc = .{ .start = start, .end = self.pos } };
         }
 
         while (self.pos < self.buffer.len) {

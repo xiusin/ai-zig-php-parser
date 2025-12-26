@@ -266,11 +266,15 @@ pub const Parser = struct {
             }
             self.nextToken();
         }
+        var type_node: ?ast.Node.Index = null;
+        if (self.curr.tag == .t_string) {
+            type_node = try self.parseType();
+        }
         var is_variadic = false;
         if (self.curr.tag == .ellipsis) { is_variadic = true; self.nextToken(); }
         const name_tok = try self.eat(.t_variable);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
-        return self.createNode(.{ .tag = .parameter, .main_token = name_tok, .data = .{ .parameter = .{ .attributes = attributes, .name = name_id, .type = null, .is_promoted = modifiers.is_public or modifiers.is_protected or modifiers.is_private, .modifiers = modifiers, .is_variadic = is_variadic } } });
+        return self.createNode(.{ .tag = .parameter, .main_token = name_tok, .data = .{ .parameter = .{ .attributes = attributes, .name = name_id, .type = type_node, .is_promoted = modifiers.is_public or modifiers.is_protected or modifiers.is_private, .modifiers = modifiers, .is_variadic = is_variadic } } });
     }
 
     fn parseIf(self: *Parser) anyerror!ast.Node.Index {
@@ -500,5 +504,62 @@ pub const Parser = struct {
         const idx: u32 = @intCast(self.context.nodes.items.len);
         try self.context.nodes.append(self.allocator, node);
         return idx;
+    }
+
+    fn parseType(self: *Parser) anyerror!ast.Node.Index {
+        return self.parseUnionType();
+    }
+
+    fn parseUnionType(self: *Parser) anyerror!ast.Node.Index {
+        const left = try self.parseIntersectionType();
+
+        if (self.curr.tag == .double_pipe) {
+            var types = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer types.deinit(self.allocator);
+            try types.append(self.allocator, left);
+
+            while (self.curr.tag == .double_pipe) {
+                self.nextToken();
+                try types.append(self.allocator, try self.parseIntersectionType());
+            }
+
+            const arena = self.context.arena.allocator();
+            return self.createNode(.{ .tag = .union_type, .main_token = self.curr, .data = .{ .union_type = .{ .types = try arena.dupe(ast.Node.Index, types.items) } } });
+        }
+
+        return left;
+    }
+
+    fn parseIntersectionType(self: *Parser) anyerror!ast.Node.Index {
+        const left = try self.parsePrimaryType();
+
+        if (self.curr.tag == .double_ampersand) {
+             var types = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer types.deinit(self.allocator);
+            try types.append(self.allocator, left);
+
+            while (self.curr.tag == .double_ampersand) {
+                self.nextToken();
+                try types.append(self.allocator, try self.parsePrimaryType());
+            }
+
+            const arena = self.context.arena.allocator();
+            return self.createNode(.{ .tag = .intersection_type, .main_token = self.curr, .data = .{ .intersection_type = .{ .types = try arena.dupe(ast.Node.Index, types.items) } } });
+        }
+
+        return left;
+    }
+
+    fn parsePrimaryType(self: *Parser) anyerror!ast.Node.Index {
+        if (self.curr.tag == .l_paren) {
+            self.nextToken();
+            const type_node = try self.parseType();
+            _ = try self.eat(.r_paren);
+            return type_node;
+        } else {
+            const type_name_tok = try self.eat(.t_string);
+            const type_name_id = try self.context.intern(self.lexer.buffer[type_name_tok.loc.start..type_name_tok.loc.end]);
+            return self.createNode(.{ .tag = .named_type, .main_token = type_name_tok, .data = .{ .named_type = .{ .name = type_name_id } } });
+        }
     }
 };
