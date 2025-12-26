@@ -5,19 +5,30 @@ const types = @import("types.zig");
 const Value = types.Value;
 const PHPContext = @import("../compiler/parser.zig").PHPContext;
 
+fn countFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    if (args.len != 1) return error.ArgumentCountMismatch;
+    const arg = args[0];
+    if (arg.tag != .array) return error.InvalidArgumentType;
+    return Value{ .tag = .integer, .data = .{ .integer = @intCast(arg.data.array.data.count()) } };
+}
+
 pub const VM = struct {
     allocator: std.mem.Allocator,
     global: *Environment,
     context: *PHPContext,
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
-        const vm = try allocator.create(VM);
+        var vm = try allocator.create(VM);
         vm.* = .{
             .allocator = allocator,
             .global = try allocator.create(Environment),
             .context = undefined,
         };
         vm.global.* = Environment.init(allocator);
+
+        vm.defineBuiltin("count", countFn);
+
         return vm;
     }
 
@@ -77,13 +88,24 @@ pub const VM = struct {
             },
             .assignment => {
                 const target_node = self.context.nodes.items[ast_node.data.assignment.target];
-                if (target_node.tag != .variable) {
+                if (target_node.tag != .variable and target_node.tag != .array_access) {
                     return error.InvalidAssignmentTarget;
                 }
-                const name_id = target_node.data.variable.name;
-                const name = self.context.string_pool.keys()[name_id];
+
                 const value = try self.eval(ast_node.data.assignment.value);
-                try self.global.set(name, value);
+
+                if (target_node.tag == .variable) {
+                    const name_id = target_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    try self.global.set(name, value);
+                } else if (target_node.tag == .array_access) {
+                    const array_val = try self.eval(target_node.data.array_access.array);
+                    if (array_val.tag != .array) return error.NotAnArray;
+
+                    const key_val = try self.eval(target_node.data.array_access.key orelse return error.ArrayKeyNotProvided);
+                    try array_val.data.array.data.put(key_val, value);
+                }
+
                 return value;
             },
             .variable => {
@@ -101,6 +123,31 @@ pub const VM = struct {
                 try value.print();
                 std.debug.print("\n", .{});
                 return Value.initNull();
+            },
+            .array_expr => {
+                var array = Value.Array.initContext(self.allocator, .{});
+                for (ast_node.data.array_expr.items) |item_node_idx| {
+                    const item_node = self.context.nodes.items[item_node_idx];
+                    const value = try self.eval(item_node.data.array_item.value);
+                    if (item_node.data.array_item.key) |key_node_idx| {
+                        const key = try self.eval(key_node_idx);
+                        try array.put(key, value);
+                    } else {
+                        try array.put(Value{ .tag = .integer, .data = .{ .integer = @intCast(array.count()) } }, value);
+                    }
+                }
+                const box = try types.gc.Box(Value.Array).init(self.allocator, array);
+                return Value{ .tag = .array, .data = .{ .array = box } };
+            },
+            .array_access => {
+                const array_val = try self.eval(ast_node.data.array_access.array);
+                if (array_val.tag != .array) return error.NotAnArray;
+
+                const key_val = try self.eval(ast_node.data.array_access.key orelse return error.ArrayKeyNotProvided);
+                return array_val.data.array.data.get(key_val) orelse return Value.initNull();
+            },
+            .literal_int => {
+                return Value{ .tag = .integer, .data = .{ .integer = ast_node.data.literal_int.value } };
             },
             else => {
                 std.debug.print("Unsupported node type: {s}\n", .{@tagName(ast_node.tag)});
