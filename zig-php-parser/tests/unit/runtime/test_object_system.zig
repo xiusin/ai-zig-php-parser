@@ -1,7 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
-const types = @import("runtime/types.zig");
-const VM = @import("runtime/vm.zig").VM;
+const main = @import("main");
+const types = main.runtime.types;
+const VM = main.runtime.vm.VM;
 
 test "PHPClass creation and basic functionality" {
     const allocator = testing.allocator;

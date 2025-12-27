@@ -30,34 +30,20 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests
     const test_step = b.step("test", "Run unit tests");
-    
-    // List of all test files
-    const test_files = [_][]const u8{
-        "src/test_enhanced_types.zig",
-        "src/test_gc.zig",
-        "src/test_enhanced_functions.zig",
-        "src/test_enhanced_parser.zig",
-        "src/test_error_handling.zig",
-        "src/test_object_integration.zig",
-        "src/test_object_system.zig",
-        "src/test_reflection.zig",
-        "src/test_attribute_system.zig",
-    };
-    
-    // Add all test files
-    for (test_files) |test_file| {
-        const test_exe = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(test_file),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        test_exe.linkLibC();
-        
-        const run_test = b.addRunArtifact(test_exe);
-        test_step.dependOn(&run_test.step);
-    }
+    const test_runner = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "main", .module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }) },
+            },
+        }),
+    });
+    test_runner.linkLibC();
+
+    const run_tests = b.addRunArtifact(test_runner);
+    test_step.dependOn(&run_tests.step);
 
     // PHP compatibility tests
     const compat_test_step = b.step("test-compat", "Run PHP compatibility tests");

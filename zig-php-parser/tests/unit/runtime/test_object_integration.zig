@@ -1,8 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
-const types = @import("runtime/types.zig");
-const VM = @import("runtime/vm.zig").VM;
-const gc = @import("runtime/gc.zig");
+const main = @import("main");
+const types = main.runtime.types;
+const VM = main.runtime.vm.VM;
+const gc = main.runtime.gc;
 
 // Helper function to properly release a Value
 fn releaseValue(value: types.Value, allocator: std.mem.Allocator) void {

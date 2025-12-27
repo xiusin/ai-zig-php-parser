@@ -1,9 +1,10 @@
 const std = @import("std");
 const testing = std.testing;
-const Lexer = @import("compiler/lexer.zig").Lexer;
-const Parser = @import("compiler/parser.zig").Parser;
-const Token = @import("compiler/token.zig").Token;
-const PHPContext = @import("compiler/root.zig").PHPContext;
+const main = @import("main");
+const Lexer = main.compiler.lexer.Lexer;
+const Parser = main.compiler.parser.Parser;
+const Token = main.compiler.token.Token;
+const PHPContext = main.compiler.parser.PHPContext;
 
 test "enhanced lexer - PHP 8.5 features" {
     // Test pipe operator
