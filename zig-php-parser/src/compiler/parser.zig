@@ -24,7 +24,9 @@ pub const Parser = struct {
         };
     }
 
-    pub fn deinit(self: *Parser) void { _ = self; }
+    pub fn deinit(self: *Parser) void {
+        _ = self;
+    }
 
     fn nextToken(self: *Parser) void {
         self.curr = self.peek;
@@ -34,7 +36,8 @@ pub const Parser = struct {
     fn reportError(self: *Parser, msg: []const u8) void {
         const err = @import("root.zig").Error{
             .msg = self.context.arena.allocator().dupe(u8, msg) catch msg,
-            .line = 0, .column = 0,
+            .line = 0,
+            .column = 0,
         };
         self.context.errors.append(self.allocator, err) catch {};
     }
@@ -57,9 +60,7 @@ pub const Parser = struct {
                 return;
             }
             switch (self.curr.tag) {
-                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn,
-                .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, 
-                .k_use, .k_try, .k_throw, .k_match, .k_switch => return,
+                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn, .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, .k_use, .k_try, .k_throw, .k_match, .k_switch => return,
                 else => self.nextToken(),
             }
         }
@@ -69,13 +70,13 @@ pub const Parser = struct {
         // Enhanced error recovery - try to find a recovery point
         var recovery_attempts: u8 = 0;
         const max_recovery_attempts = 10;
-        
+
         while (self.curr.tag != .eof and recovery_attempts < max_recovery_attempts) {
             // Check if current token is one of the expected tokens
             for (expected) |exp_tag| {
                 if (self.curr.tag == exp_tag) return;
             }
-            
+
             // Check for statement boundaries
             switch (self.curr.tag) {
                 .semicolon => {
@@ -86,9 +87,7 @@ pub const Parser = struct {
                     // Don't consume the closing brace, let the caller handle it
                     return;
                 },
-                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn,
-                .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, 
-                .k_use, .k_try, .k_throw, .k_match, .k_switch => {
+                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn, .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, .k_use, .k_try, .k_throw, .k_match, .k_switch => {
                     // Found a statement start, stop here
                     return;
                 },
@@ -105,7 +104,8 @@ pub const Parser = struct {
         defer stmts.deinit(self.allocator);
         while (self.curr.tag != .eof) {
             if (self.curr.tag == .t_open_tag or self.curr.tag == .t_close_tag or self.curr.tag == .t_inline_html) {
-                self.nextToken(); continue;
+                self.nextToken();
+                continue;
             }
             const stmt = self.parseStatement() catch {
                 self.synchronize();
@@ -150,6 +150,7 @@ pub const Parser = struct {
             .k_go => self.parseGo(),
             .k_return => self.parseReturn(),
             .k_public, .k_protected, .k_private, .k_readonly, .k_final, .k_abstract => self.parseClassMember(attributes),
+            .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
                 return self.parseExpressionStatement();
@@ -221,7 +222,9 @@ pub const Parser = struct {
         self.nextToken();
         var body: ast.Node.Index = 0;
         if (self.curr.tag == .fat_arrow) {
-            self.nextToken(); body = try self.parseExpression(0); _ = try self.eat(.semicolon);
+            self.nextToken();
+            body = try self.parseExpression(0);
+            _ = try self.eat(.semicolon);
         } else {
             body = try self.parseBlock();
         }
@@ -258,10 +261,10 @@ pub const Parser = struct {
             while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
                 const name_tok = try self.eat(.t_string);
                 const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
-                
+
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
                 defer args.deinit(self.allocator);
-                
+
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
@@ -270,17 +273,8 @@ pub const Parser = struct {
                     }
                     _ = try self.eat(.r_paren);
                 }
-                
-                const attr_node = try self.createNode(.{ 
-                    .tag = .attribute, 
-                    .main_token = name_tok, 
-                    .data = .{ 
-                        .attribute = .{ 
-                            .name = name_id, 
-                            .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) 
-                        } 
-                    } 
-                });
+
+                const attr_node = try self.createNode(.{ .tag = .attribute, .main_token = name_tok, .data = .{ .attribute = .{ .name = name_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
                 try attrs.append(self.allocator, attr_node);
                 if (self.curr.tag == .comma) self.nextToken();
             }
@@ -290,25 +284,30 @@ pub const Parser = struct {
     }
 
     fn parseContainer(self: *Parser, tag: ast.Node.Tag, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
-        const token = self.curr; self.nextToken();
+        const token = self.curr;
+        self.nextToken();
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         var extends: ?ast.Node.Index = null;
-        if (self.curr.tag == .k_extends) { self.nextToken(); extends = try self.parseExpression(0); }
+        if (self.curr.tag == .k_extends) {
+            self.nextToken();
+            extends = try self.parseExpression(0);
+        }
         var implements = std.ArrayListUnmanaged(ast.Node.Index){};
         defer implements.deinit(self.allocator);
         if (self.curr.tag == .k_implements) {
             self.nextToken();
             while (true) {
                 try implements.append(self.allocator, try self.parseExpression(0));
-                if (self.curr.tag != .comma) break; self.nextToken();
+                if (self.curr.tag != .comma) break;
+                self.nextToken();
             }
         }
-        
+
         _ = try self.eat(.l_brace);
         var members = std.ArrayListUnmanaged(ast.Node.Index){};
         defer members.deinit(self.allocator);
-        
+
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             var member_attributes: []const ast.Node.Index = &.{};
             if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
@@ -320,7 +319,7 @@ pub const Parser = struct {
             }
         }
         _ = try self.eat(.r_brace);
-        
+
         return self.createNode(.{ .tag = tag, .main_token = token, .data = .{ .container_decl = .{ .attributes = attributes, .name = name_id, .modifiers = .{}, .extends = extends, .implements = try self.context.arena.allocator().dupe(ast.Node.Index, implements.items), .members = try self.context.arena.allocator().dupe(ast.Node.Index, members.items) } } });
     }
 
@@ -328,7 +327,7 @@ pub const Parser = struct {
         const token = try self.eat(.k_function);
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
-        _ = try self.eat(.l_paren); 
+        _ = try self.eat(.l_paren);
         var params = std.ArrayListUnmanaged(ast.Node.Index){};
         defer params.deinit(self.allocator);
         while (self.curr.tag != .r_paren) {
@@ -364,39 +363,52 @@ pub const Parser = struct {
             self.nextToken();
         }
         var is_variadic = false;
-        if (self.curr.tag == .ellipsis) { is_variadic = true; self.nextToken(); }
+        if (self.curr.tag == .ellipsis) {
+            is_variadic = true;
+            self.nextToken();
+        }
         const name_tok = try self.eat(.t_variable);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
-        
+
         var default_value: ?ast.Node.Index = null;
         if (self.curr.tag == .equal) {
             self.nextToken();
             default_value = try self.parseExpression(0);
         }
-        
+
         return self.createNode(.{ .tag = .parameter, .main_token = name_tok, .data = .{ .parameter = .{ .attributes = attributes, .name = name_id, .type = type_node, .default_value = default_value, .is_promoted = modifiers.is_public or modifiers.is_protected or modifiers.is_private, .modifiers = modifiers, .is_variadic = is_variadic, .is_reference = is_reference } } });
     }
 
     fn parseIf(self: *Parser) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_if); _ = try self.eat(.l_paren);
-        const cond = try self.parseExpression(0); _ = try self.eat(.r_paren);
+        const token = try self.eat(.k_if);
+        _ = try self.eat(.l_paren);
+        const cond = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
         const then = try self.parseStatement();
         var else_branch: ?ast.Node.Index = null;
-        if (self.curr.tag == .k_else) { self.nextToken(); else_branch = try self.parseStatement(); }
+        if (self.curr.tag == .k_else) {
+            self.nextToken();
+            else_branch = try self.parseStatement();
+        }
         return self.createNode(.{ .tag = .if_stmt, .main_token = token, .data = .{ .if_stmt = .{ .condition = cond, .then_branch = then, .else_branch = else_branch } } });
     }
 
     fn parseWhile(self: *Parser) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_while); _ = try self.eat(.l_paren);
-        const cond = try self.parseExpression(0); _ = try self.eat(.r_paren);
+        const token = try self.eat(.k_while);
+        _ = try self.eat(.l_paren);
+        const cond = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
         const body = try self.parseStatement();
         return self.createNode(.{ .tag = .while_stmt, .main_token = token, .data = .{ .while_stmt = .{ .condition = cond, .body = body } } });
     }
 
     fn parseForeach(self: *Parser) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_foreach); _ = try self.eat(.l_paren);
-        const iterable = try self.parseExpression(0); _ = try self.eat(.k_as);
-        const value = try self.parseExpression(0); _ = try self.eat(.r_paren);
+        const token = try self.eat(.k_foreach);
+        _ = try self.eat(.l_paren);
+        const iterable = try self.parseExpression(0);
+        _ = try self.eat(.k_as);
+        const value = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
         const body = try self.parseStatement();
         return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = null, .value = value, .body = body } } });
     }
@@ -404,87 +416,58 @@ pub const Parser = struct {
     fn parseTry(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_try);
         const body = try self.parseBlock();
-        
+
         var catch_clauses = std.ArrayListUnmanaged(ast.Node.Index){};
         defer catch_clauses.deinit(self.allocator);
-        
+
         while (self.curr.tag == .k_catch) {
             const catch_token = try self.eat(.k_catch);
             _ = try self.eat(.l_paren);
-            
+
             var exception_type: ?ast.Node.Index = null;
             var variable: ?ast.Node.Index = null;
-            
+
             if (self.curr.tag == .t_string) {
                 exception_type = try self.parseType();
             }
-            
+
             if (self.curr.tag == .t_variable) {
                 const var_token = try self.eat(.t_variable);
                 const var_name = try self.context.intern(self.lexer.buffer[var_token.loc.start..var_token.loc.end]);
                 variable = try self.createNode(.{ .tag = .variable, .main_token = var_token, .data = .{ .variable = .{ .name = var_name } } });
             }
-            
+
             _ = try self.eat(.r_paren);
             const catch_body = try self.parseBlock();
-            
-            const catch_clause = try self.createNode(.{ 
-                .tag = .catch_clause, 
-                .main_token = catch_token, 
-                .data = .{ 
-                    .catch_clause = .{ 
-                        .exception_type = exception_type, 
-                        .variable = variable, 
-                        .body = catch_body 
-                    } 
-                } 
-            });
+
+            const catch_clause = try self.createNode(.{ .tag = .catch_clause, .main_token = catch_token, .data = .{ .catch_clause = .{ .exception_type = exception_type, .variable = variable, .body = catch_body } } });
             try catch_clauses.append(self.allocator, catch_clause);
         }
-        
+
         var finally_clause: ?ast.Node.Index = null;
         if (self.curr.tag == .k_finally) {
             const finally_token = try self.eat(.k_finally);
             const finally_body = try self.parseBlock();
-            finally_clause = try self.createNode(.{ 
-                .tag = .finally_clause, 
-                .main_token = finally_token, 
-                .data = .{ 
-                    .finally_clause = .{ .body = finally_body } 
-                } 
-            });
+            finally_clause = try self.createNode(.{ .tag = .finally_clause, .main_token = finally_token, .data = .{ .finally_clause = .{ .body = finally_body } } });
         }
-        
+
         const arena = self.context.arena.allocator();
-        return self.createNode(.{ 
-            .tag = .try_stmt, 
-            .main_token = token, 
-            .data = .{ 
-                .try_stmt = .{ 
-                    .body = body, 
-                    .catch_clauses = try arena.dupe(ast.Node.Index, catch_clauses.items), 
-                    .finally_clause = finally_clause 
-                } 
-            } 
-        });
+        return self.createNode(.{ .tag = .try_stmt, .main_token = token, .data = .{ .try_stmt = .{ .body = body, .catch_clauses = try arena.dupe(ast.Node.Index, catch_clauses.items), .finally_clause = finally_clause } } });
     }
 
     fn parseThrow(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_throw);
         const expression = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ 
-            .tag = .throw_stmt, 
-            .main_token = token, 
-            .data = .{ 
-                .throw_stmt = .{ .expression = expression } 
-            } 
-        });
+        return self.createNode(.{ .tag = .throw_stmt, .main_token = token, .data = .{ .throw_stmt = .{ .expression = expression } } });
     }
 
     fn parseFor(self: *Parser) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_for); _ = try self.eat(.l_paren);
-        _ = try self.eat(.semicolon); _ = try self.eat(.semicolon); _ = try self.eat(.r_paren);
+        const token = try self.eat(.k_for);
+        _ = try self.eat(.l_paren);
+        _ = try self.eat(.semicolon);
+        _ = try self.eat(.semicolon);
+        _ = try self.eat(.r_paren);
         _ = try self.parseStatement();
         return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .none = {} } });
     }
@@ -495,7 +478,8 @@ pub const Parser = struct {
         defer vars.deinit(self.allocator);
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(100));
-            if (self.curr.tag != .comma) break; self.nextToken();
+            if (self.curr.tag != .comma) break;
+            self.nextToken();
         }
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .global_stmt, .main_token = token, .data = .{ .global_stmt = .{ .vars = try self.context.arena.allocator().dupe(ast.Node.Index, vars.items) } } });
@@ -507,7 +491,8 @@ pub const Parser = struct {
         defer vars.deinit(self.allocator);
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(0));
-            if (self.curr.tag != .comma) break; self.nextToken();
+            if (self.curr.tag != .comma) break;
+            self.nextToken();
         }
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .static_stmt, .main_token = token, .data = .{ .static_stmt = .{ .vars = try self.context.arena.allocator().dupe(ast.Node.Index, vars.items) } } });
@@ -517,13 +502,16 @@ pub const Parser = struct {
         const token = try self.eat(.k_const);
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
-        _ = try self.eat(.equal); const val = try self.parseExpression(0); _ = try self.eat(.semicolon);
+        _ = try self.eat(.equal);
+        const val = try self.parseExpression(0);
+        _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .const_decl, .main_token = token, .data = .{ .const_decl = .{ .name = name_id, .value = val } } });
     }
 
     fn parseGo(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_go);
-        const call = try self.parseExpression(0); _ = try self.eat(.semicolon);
+        const call = try self.parseExpression(0);
+        _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .go_stmt, .main_token = token, .data = .{ .go_stmt = .{ .call = call } } });
     }
 
@@ -537,7 +525,7 @@ pub const Parser = struct {
 
     fn parseEcho(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_echo);
-        const expr = try self.parseExpression(0); 
+        const expr = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .echo_stmt, .main_token = token, .data = .{ .echo_stmt = .{ .expr = expr } } });
     }
@@ -545,7 +533,8 @@ pub const Parser = struct {
     fn parseAssignment(self: *Parser) anyerror!ast.Node.Index {
         const target = try self.parseExpression(100);
         const op = try self.eat(.equal);
-        const val = try self.parseExpression(0); _ = try self.eat(.semicolon);
+        const val = try self.parseExpression(0);
+        _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val } } });
     }
 
@@ -572,14 +561,13 @@ pub const Parser = struct {
             const tag = self.curr.tag;
             const next_p = self.getPrecedence(tag);
             if (next_p <= precedence) break;
-            const op = self.curr; self.nextToken();
+            const op = self.curr;
+            self.nextToken();
             if (tag == .arrow) {
                 const member_name_tok = try self.eat(.t_string);
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
-                
                 if (self.curr.tag == .l_paren) {
-                    // Method call: ->name(args)
-                    self.nextToken(); // consume (
+                    self.nextToken();
                     var args = std.ArrayListUnmanaged(ast.Node.Index){};
                     defer args.deinit(self.allocator);
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
@@ -589,8 +577,30 @@ pub const Parser = struct {
                     _ = try self.eat(.r_paren);
                     left = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
                 } else {
-                    // Property access: ->name
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
+                }
+            } else if (tag == .double_colon) {
+                // Static access: ClassName::member
+                const left_node = self.context.nodes.items[left];
+                if (left_node.tag != .variable) {
+                    self.reportError("Invalid static access target");
+                    return error.InvalidStaticAccess;
+                }
+                const class_name_id = left_node.data.variable.name;
+                const member_name_tok = try self.eat(.t_string);
+                const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
+                if (self.curr.tag == .l_paren) {
+                    self.nextToken();
+                    var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                    defer args.deinit(self.allocator);
+                    while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                        try args.append(self.allocator, try self.parseExpression(0));
+                        if (self.curr.tag == .comma) self.nextToken();
+                    }
+                    _ = try self.eat(.r_paren);
+                    left = try self.createNode(.{ .tag = .static_method_call, .main_token = op, .data = .{ .static_method_call = .{ .class_name = class_name_id, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+                } else {
+                    left = try self.createNode(.{ .tag = .class_constant_access, .main_token = op, .data = .{ .class_constant_access = .{ .class_name = class_name_id, .constant_name = member_id } } });
                 }
             } else if (tag == .l_paren) {
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -602,11 +612,10 @@ pub const Parser = struct {
                 _ = try self.eat(.r_paren);
                 left = try self.createNode(.{ .tag = .function_call, .main_token = op, .data = .{ .function_call = .{ .name = left, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
             } else if (tag == .pipe_greater) {
-                // Pipe operator: left |> right
                 const right = try self.parseExpression(next_p);
                 left = try self.createNode(.{ .tag = .pipe_expr, .main_token = op, .data = .{ .pipe_expr = .{ .left = left, .right = right } } });
             } else if (tag == .equal) {
-                const right = try self.parseExpression(precedence); // Right-associative
+                const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
             } else {
                 const right = try self.parseExpression(next_p);
@@ -637,7 +646,8 @@ pub const Parser = struct {
                 return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = 0 } } });
             },
             .ellipsis => {
-                const token = self.curr; self.nextToken();
+                const token = self.curr;
+                self.nextToken();
                 const expr = try self.parseExpression(100);
                 return self.createNode(.{ .tag = .unpacking_expr, .main_token = token, .data = .{ .unpacking_expr = .{ .expr = expr } } });
             },
@@ -664,10 +674,10 @@ pub const Parser = struct {
                 const t = try self.eat(.t_constant_encapsed_string);
                 const raw_text = self.lexer.buffer[t.loc.start..t.loc.end];
                 // Remove quotes from string literal
-                const string_content = if (raw_text.len >= 2 and 
-                    ((raw_text[0] == '"' and raw_text[raw_text.len-1] == '"') or
-                     (raw_text[0] == '\'' and raw_text[raw_text.len-1] == '\'')))
-                    raw_text[1..raw_text.len-1]
+                const string_content = if (raw_text.len >= 2 and
+                    ((raw_text[0] == '"' and raw_text[raw_text.len - 1] == '"') or
+                        (raw_text[0] == '\'' and raw_text[raw_text.len - 1] == '\'')))
+                    raw_text[1 .. raw_text.len - 1]
                 else
                     raw_text;
                 return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content) } } });
@@ -678,7 +688,10 @@ pub const Parser = struct {
             },
             .l_bracket => self.parseArrayLiteral(),
             .l_paren => {
-                self.nextToken(); const expr = try self.parseExpression(0); _ = try self.eat(.r_paren); return expr;
+                self.nextToken();
+                const expr = try self.parseExpression(0);
+                _ = try self.eat(.r_paren);
+                return expr;
             },
             else => {
                 self.reportError("Unexpected token in expression");
@@ -694,7 +707,7 @@ pub const Parser = struct {
         while (self.curr.tag != .t_double_quote and self.curr.tag != .eof) {
             var part: ast.Node.Index = 0;
             const op_token = self.curr;
-            
+
             switch (self.curr.tag) {
                 .t_encapsed_and_whitespace => {
                     const t = try self.eat(.t_encapsed_and_whitespace);
@@ -728,19 +741,22 @@ pub const Parser = struct {
         }
 
         _ = try self.eat(.t_double_quote);
-        
+
         if (left) |l| return l;
-        
+
         // Empty string ""
         return self.createNode(.{ .tag = .literal_string, .main_token = start_token, .data = .{ .literal_string = .{ .value = try self.context.intern("") } } });
     }
 
     fn parseClosure(self: *Parser) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_function); _ = try self.eat(.l_paren); _ = try self.eat(.r_paren);
+        const token = try self.eat(.k_function);
+        _ = try self.eat(.l_paren);
+        _ = try self.eat(.r_paren);
         var captures = std.ArrayListUnmanaged(ast.Node.Index){};
         defer captures.deinit(self.allocator);
         if (self.curr.tag == .k_use) {
-            self.nextToken(); _ = try self.eat(.l_paren);
+            self.nextToken();
+            _ = try self.eat(.l_paren);
             while (self.curr.tag != .r_paren) {
                 try captures.append(self.allocator, try self.parseExpression(0));
                 if (self.curr.tag == .comma) self.nextToken();
@@ -753,12 +769,17 @@ pub const Parser = struct {
     }
 
     fn parseMatch(self: *Parser) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_match); _ = try self.eat(.l_paren);
-        const expr = try self.parseExpression(0); _ = try self.eat(.r_paren); _ = try self.eat(.l_brace);
+        const token = try self.eat(.k_match);
+        _ = try self.eat(.l_paren);
+        const expr = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
+        _ = try self.eat(.l_brace);
         var arms = std.ArrayListUnmanaged(ast.Node.Index){};
         defer arms.deinit(self.allocator);
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
-            const cond = try self.parseExpression(0); _ = try self.eat(.fat_arrow); const body = try self.parseExpression(0);
+            const cond = try self.parseExpression(0);
+            _ = try self.eat(.fat_arrow);
+            const body = try self.parseExpression(0);
             const arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{cond}, .body = body } } });
             try arms.append(self.allocator, arm);
             if (self.curr.tag == .comma) self.nextToken();
@@ -771,14 +792,15 @@ pub const Parser = struct {
     fn parseNewOrAnonymousClass(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_new);
         if (self.curr.tag == .k_class) {
-            self.nextToken(); const body = try self.parseBlock();
+            self.nextToken();
+            const body = try self.parseBlock();
             return self.createNode(.{ .tag = .anonymous_class, .main_token = token, .data = .{ .anonymous_class = .{ .attributes = &.{}, .extends = null, .implements = &.{}, .members = &.{body}, .args = &.{} } } });
         }
-        
+
         const class_name = try self.parsePrimary();
         var args = std.ArrayListUnmanaged(ast.Node.Index){};
         defer args.deinit(self.allocator);
-        
+
         if (self.curr.tag == .l_paren) {
             self.nextToken();
             while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
@@ -787,72 +809,57 @@ pub const Parser = struct {
             }
             _ = try self.eat(.r_paren);
         }
-        
+
         return self.createNode(.{ .tag = .object_instantiation, .main_token = token, .data = .{ .object_instantiation = .{ .class_name = class_name, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
     }
 
     fn parseCloneExpression(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_clone);
         const object = try self.parseExpression(100);
-        
+
         if (self.curr.tag == .k_with) {
             self.nextToken();
             _ = try self.eat(.l_brace);
-            
+
             var properties = std.ArrayListUnmanaged(ast.Node.Index){};
             defer properties.deinit(self.allocator);
-            
+
             while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
                 const prop_name = try self.parseExpression(0);
                 _ = try self.eat(.colon);
                 const prop_value = try self.parseExpression(0);
-                
+
                 // Create a property assignment node
-                const assignment = try self.createNode(.{ 
-                    .tag = .assignment, 
-                    .main_token = token, 
-                    .data = .{ .assignment = .{ .target = prop_name, .value = prop_value } } 
-                });
+                const assignment = try self.createNode(.{ .tag = .assignment, .main_token = token, .data = .{ .assignment = .{ .target = prop_name, .value = prop_value } } });
                 try properties.append(self.allocator, assignment);
-                
+
                 if (self.curr.tag == .comma) self.nextToken();
             }
             _ = try self.eat(.r_brace);
-            
+
             // Create array node for properties
-            const props_array = try self.createNode(.{ 
-                .tag = .array_init, 
-                .main_token = token, 
-                .data = .{ .array_init = .{ .elements = try self.context.arena.allocator().dupe(ast.Node.Index, properties.items) } } 
-            });
-            
-            return self.createNode(.{ 
-                .tag = .clone_with_expr, 
-                .main_token = token, 
-                .data = .{ .clone_with_expr = .{ .object = object, .properties = props_array } } 
-            });
+            const props_array = try self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = try self.context.arena.allocator().dupe(ast.Node.Index, properties.items) } } });
+
+            return self.createNode(.{ .tag = .clone_with_expr, .main_token = token, .data = .{ .clone_with_expr = .{ .object = object, .properties = props_array } } });
         } else {
             // Regular clone without modifications
-            return self.createNode(.{ 
-                .tag = .unary_expr, 
-                .main_token = token, 
-                .data = .{ .unary_expr = .{ .op = .k_clone, .expr = object } } 
-            });
+            return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = .k_clone, .expr = object } } });
         }
     }
 
     fn getPrecedence(self: *Parser, tag: Token.Tag) u8 {
         _ = self;
         return switch (tag) {
-            .l_paren => 110, 
+            .l_paren => 110,
             .arrow => 100,
+            .double_colon => 100, // Static access has same precedence as instance access
             .pipe_greater => 90, // Pipe operator has high precedence
-            .asterisk, .slash, .percent => 60, 
+            .asterisk, .slash, .percent => 60,
             .plus, .minus, .dot => 50, // String concatenation has same precedence as addition/subtraction
             .less, .greater, .less_equal, .greater_equal, .spaceship => 40,
             .equal_equal, .equal_equal_equal, .bang_equal, .bang_equal_equal => 35,
             .ampersand => 30, // Bitwise AND
-            .pipe => 25, // Bitwise OR  
+            .pipe => 25, // Bitwise OR
             .double_ampersand => 20, // Logical AND
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
@@ -870,70 +877,50 @@ pub const Parser = struct {
     fn parseArrowFunction(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_fn);
         _ = try self.eat(.l_paren);
-        
+
         var params = std.ArrayListUnmanaged(ast.Node.Index){};
         defer params.deinit(self.allocator);
-        
+
         while (self.curr.tag != .r_paren) {
             try params.append(self.allocator, try self.parseParameter());
             if (self.curr.tag == .comma) self.nextToken();
         }
         _ = try self.eat(.r_paren);
-        
+
         var return_type: ?ast.Node.Index = null;
         if (self.curr.tag == .colon) {
             self.nextToken();
             return_type = try self.parseType();
         }
-        
+
         _ = try self.eat(.fat_arrow);
         const body = try self.parseExpression(0);
-        
+
         const arena = self.context.arena.allocator();
-        return self.createNode(.{ 
-            .tag = .arrow_function, 
-            .main_token = token, 
-            .data = .{ 
-                .arrow_function = .{ 
-                    .attributes = &.{}, 
-                    .params = try arena.dupe(ast.Node.Index, params.items), 
-                    .return_type = return_type, 
-                    .body = body, 
-                    .is_static = false 
-                } 
-            } 
-        });
+        return self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = try arena.dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body, .is_static = false } } });
     }
 
     fn parseArrayLiteral(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.l_bracket);
-        
+
         var elements = std.ArrayListUnmanaged(ast.Node.Index){};
         defer elements.deinit(self.allocator);
-        
+
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
             const element = try self.parseExpression(0);
             try elements.append(self.allocator, element);
-            
+
             if (self.curr.tag == .comma) {
                 self.nextToken();
             } else {
                 break;
             }
         }
-        
+
         _ = try self.eat(.r_bracket);
-        
+
         const arena = self.context.arena.allocator();
-        return self.createNode(.{ 
-            .tag = .array_init, 
-            .main_token = token, 
-            .data = .{ 
-                .array_init = .{ 
-                    .elements = try arena.dupe(ast.Node.Index, elements.items) 
-                } 
-            } 
-        });
+        return self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = try arena.dupe(ast.Node.Index, elements.items) } } });
     }
 
     fn parseType(self: *Parser) anyerror!ast.Node.Index {
@@ -964,7 +951,7 @@ pub const Parser = struct {
         const left = try self.parsePrimaryType();
 
         if (self.curr.tag == .ampersand) {
-             var types = std.ArrayListUnmanaged(ast.Node.Index){};
+            var types = std.ArrayListUnmanaged(ast.Node.Index){};
             defer types.deinit(self.allocator);
             try types.append(self.allocator, left);
 

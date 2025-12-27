@@ -10,65 +10,98 @@ pub const Node = struct {
     pub const StringId = u32;
 
     pub const Tag = enum {
-        root, attribute,
-        class_decl, interface_decl, trait_decl, enum_decl, struct_decl,
-        property_decl, property_hook, method_decl, parameter,
-        const_decl, global_stmt, static_stmt, go_stmt,
-        closure, arrow_function, anonymous_class,
-        if_stmt, while_stmt, for_stmt, foreach_stmt, match_expr, match_arm,
-        try_stmt, catch_clause, finally_clause, throw_stmt,
-        method_call, property_access, function_call, function_decl,
-        block, expression_stmt, assignment, echo_stmt, return_stmt,
-        variable, literal_int, literal_float, literal_string, array_init, binary_expr,
-        unary_expr, ternary_expr, unpacking_expr,
-        pipe_expr, clone_with_expr, struct_instantiation, object_instantiation,
-        named_type, union_type, intersection_type,
+        root,
+        attribute,
+        class_decl,
+        interface_decl,
+        trait_decl,
+        enum_decl,
+        struct_decl,
+        property_decl,
+        property_hook,
+        method_decl,
+        parameter,
+        const_decl,
+        global_stmt,
+        static_stmt,
+        go_stmt,
+        closure,
+        arrow_function,
+        anonymous_class,
+        if_stmt,
+        while_stmt,
+        for_stmt,
+        foreach_stmt,
+        match_expr,
+        match_arm,
+        try_stmt,
+        catch_clause,
+        finally_clause,
+        throw_stmt,
+        method_call,
+        property_access,
+        function_call,
+        function_decl,
+        static_method_call,
+        static_property_access, // 静态成员访问
+        use_stmt,
+        namespace_stmt,
+        include_stmt,
+        require_stmt, // 命名空间和文件加载
+        block,
+        expression_stmt,
+        assignment,
+        echo_stmt,
+        return_stmt,
+        variable,
+        literal_int,
+        literal_float,
+        literal_string,
+        array_init,
+        binary_expr,
+        unary_expr,
+        ternary_expr,
+        unpacking_expr,
+        pipe_expr,
+        clone_with_expr,
+        struct_instantiation,
+        object_instantiation,
+        named_type,
+        union_type,
+        intersection_type,
+        class_constant_access, // 类常量访问 ClassName::CONST
+        self_expr,
+        parent_expr,
+        static_expr, // self, parent, static 关键字
     };
 
     pub const Modifier = packed struct {
-        is_public: bool = false, is_protected: bool = false, is_private: bool = false,
-        is_static: bool = false, is_final: bool = false, is_abstract: bool = false,
+        is_public: bool = false,
+        is_protected: bool = false,
+        is_private: bool = false,
+        is_static: bool = false,
+        is_final: bool = false,
+        is_abstract: bool = false,
         is_readonly: bool = false,
     };
 
     pub const Data = union {
         attribute: struct { name: StringId, args: []const Index },
-        container_decl: struct { 
-            attributes: []const Index, name: StringId, modifiers: Modifier, 
-            extends: ?Index, implements: []const Index, members: []const Index 
-        },
-        method_decl: struct { 
-            attributes: []const Index, name: StringId, modifiers: Modifier, 
-            params: []const Index, return_type: ?Index, body: ?Index 
-        },
-        property_decl: struct { 
-            attributes: []const Index, name: StringId, modifiers: Modifier, 
-            type: ?Index, default_value: ?Index, hooks: []const Index
-        },
+        container_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, extends: ?Index, implements: []const Index, members: []const Index },
+        method_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, params: []const Index, return_type: ?Index, body: ?Index },
+        property_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, type: ?Index, default_value: ?Index, hooks: []const Index },
         property_hook: struct {
             name: StringId, // get or set
             body: Index,
         },
-        parameter: struct {
-            attributes: []const Index, name: StringId, type: ?Index, default_value: ?Index,
-            is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool
-        },
+        parameter: struct { attributes: []const Index, name: StringId, type: ?Index, default_value: ?Index, is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool },
         const_decl: struct { name: StringId, value: Index },
         global_stmt: struct { vars: []const Index },
         static_stmt: struct { vars: []const Index },
         go_stmt: struct { call: Index },
-        closure: struct { 
-            attributes: []const Index, params: []const Index, captures: []const Index, 
-            return_type: ?Index, body: Index, is_static: bool 
-        },
-        arrow_function: struct { 
-            attributes: []const Index, params: []const Index, return_type: ?Index, 
-            body: Index, is_static: bool 
-        },
-        anonymous_class: struct { 
-            attributes: []const Index, extends: ?Index, implements: []const Index, 
-            members: []const Index, args: []const Index 
-        },
+        closure: struct { attributes: []const Index, params: []const Index, captures: []const Index, return_type: ?Index, body: Index, is_static: bool },
+        arrow_function: struct { attributes: []const Index, params: []const Index, return_type: ?Index, body: Index, is_static: bool },
+        anonymous_class: struct { attributes: []const Index, extends: ?Index, implements: []const Index, members: []const Index, args: []const Index },
         if_stmt: struct { condition: Index, then_branch: Index, else_branch: ?Index },
         while_stmt: struct { condition: Index, body: Index },
         foreach_stmt: struct { iterable: Index, key: ?Index, value: Index, body: Index },
@@ -80,7 +113,13 @@ pub const Node = struct {
         match_arm: struct { conditions: []const Index, body: Index },
         method_call: struct { target: Index, method_name: StringId, args: []const Index },
         property_access: struct { target: Index, property_name: StringId },
-        function_call: struct { name: Index, args: []const Index }, 
+        static_method_call: struct { class_name: StringId, method_name: StringId, args: []const Index },
+        static_property_access: struct { class_name: StringId, property_name: StringId },
+        class_constant_access: struct { class_name: StringId, constant_name: StringId },
+        use_stmt: struct { namespace: StringId, alias: ?StringId, use_type: u8 }, // use_type: 0=class, 1=function, 2=const
+        namespace_stmt: struct { name: StringId },
+        include_stmt: struct { path: Index, is_once: bool, is_require: bool },
+        function_call: struct { name: Index, args: []const Index },
         array_init: struct { elements: []const Index },
         literal_string: struct { value: StringId },
         root: struct { stmts: []const Index },
@@ -95,9 +134,7 @@ pub const Node = struct {
         clone_with_expr: struct { object: Index, properties: Index },
         struct_instantiation: struct { struct_type: Index, args: []const Index },
         object_instantiation: struct { class_name: Index, args: []const Index },
-        function_decl: struct { 
-            attributes: []const Index, name: StringId, params: []const Index, body: Index 
-        },
+        function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index },
         block: struct { stmts: []const Index },
         variable: struct { name: StringId },
         literal_int: struct { value: i64 },
