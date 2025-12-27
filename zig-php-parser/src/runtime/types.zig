@@ -799,6 +799,11 @@ pub const Value = struct {
         return .{ .tag = .string, .data = .{ .string = box } };
     }
     
+    pub fn initStringWithManager(memory_manager: *gc.MemoryManager, str: []const u8) !Self {
+        const box = try memory_manager.allocString(str);
+        return .{ .tag = .string, .data = .{ .string = box } };
+    }
+    
     pub fn initArray(allocator: std.mem.Allocator) !Self {
         const php_array = try allocator.create(PHPArray);
         php_array.* = PHPArray.init(allocator);
@@ -808,6 +813,11 @@ pub const Value = struct {
             .gc_info = .{},
             .data = php_array,
         };
+        return .{ .tag = .array, .data = .{ .array = box } };
+    }
+    
+    pub fn initArrayWithManager(memory_manager: *gc.MemoryManager) !Self {
+        const box = try memory_manager.allocArray();
         return .{ .tag = .array, .data = .{ .array = box } };
     }
     
@@ -823,6 +833,11 @@ pub const Value = struct {
         return .{ .tag = .object, .data = .{ .object = box } };
     }
     
+    pub fn initObjectWithManager(memory_manager: *gc.MemoryManager, class: *PHPClass) !Self {
+        const box = try memory_manager.allocObject(class);
+        return .{ .tag = .object, .data = .{ .object = box } };
+    }
+    
     pub fn initResource(allocator: std.mem.Allocator, resource: PHPResource) !Self {
         const php_resource = try allocator.create(PHPResource);
         php_resource.* = resource;
@@ -832,6 +847,11 @@ pub const Value = struct {
             .gc_info = .{},
             .data = php_resource,
         };
+        return .{ .tag = .resource, .data = .{ .resource = box } };
+    }
+    
+    pub fn initResourceWithManager(memory_manager: *gc.MemoryManager, resource: PHPResource) !Self {
+        const box = try memory_manager.allocResource(resource);
         return .{ .tag = .resource, .data = .{ .resource = box } };
     }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../compiler/ast.zig");
+const Token = @import("../compiler/token.zig").Token;
 const Environment = @import("environment.zig").Environment;
 const types = @import("types.zig");
 const Value = types.Value;
@@ -233,7 +234,7 @@ fn getClassFn(vm: *VM, args: []const Value) !Value {
     }
     
     const object = object_val.data.object.data;
-    return Value.initString(vm.allocator, object.class.name.data);
+    return Value.initStringWithManager(&vm.memory_manager, object.class.name.data);
 }
 
 fn getClassMethodsFn(vm: *VM, args: []const Value) !Value {
@@ -258,23 +259,16 @@ fn getClassMethodsFn(vm: *VM, args: []const Value) !Value {
         return Value.initNull();
     };
     
-    var php_array = try vm.allocator.create(types.PHPArray);
-    php_array.* = types.PHPArray.init(vm.allocator);
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.data.array.data;
     
     var iterator = class.methods.iterator();
     while (iterator.next()) |entry| {
-        const method_name_value = try Value.initString(vm.allocator, entry.key_ptr.*);
+        const method_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
         try php_array.push(method_name_value);
     }
     
-    const box = try vm.allocator.create(types.gc.Box(*types.PHPArray));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = php_array,
-    };
-    
-    return Value{ .tag = .array, .data = .{ .array = box } };
+    return php_array_value;
 }
 
 fn getClassVarsFn(vm: *VM, args: []const Value) !Value {
@@ -299,8 +293,8 @@ fn getClassVarsFn(vm: *VM, args: []const Value) !Value {
         return Value.initNull();
     };
     
-    var php_array = try vm.allocator.create(types.PHPArray);
-    php_array.* = types.PHPArray.init(vm.allocator);
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.data.array.data;
     
     var iterator = class.properties.iterator();
     while (iterator.next()) |entry| {
@@ -315,14 +309,7 @@ fn getClassVarsFn(vm: *VM, args: []const Value) !Value {
         }
     }
     
-    const box = try vm.allocator.create(types.gc.Box(*types.PHPArray));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = php_array,
-    };
-    
-    return Value{ .tag = .array, .data = .{ .array = box } };
+    return php_array_value;
 }
 
 fn getObjectVarsFn(vm: *VM, args: []const Value) !Value {
@@ -340,8 +327,8 @@ fn getObjectVarsFn(vm: *VM, args: []const Value) !Value {
     }
     
     const object = object_val.data.object.data;
-    var php_array = try vm.allocator.create(types.PHPArray);
-    php_array.* = types.PHPArray.init(vm.allocator);
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.data.array.data;
     
     var iterator = object.properties.iterator();
     while (iterator.next()) |entry| {
@@ -354,14 +341,7 @@ fn getObjectVarsFn(vm: *VM, args: []const Value) !Value {
         try php_array.set(key, property_value);
     }
     
-    const box = try vm.allocator.create(types.gc.Box(*types.PHPArray));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = php_array,
-    };
-    
-    return Value{ .tag = .array, .data = .{ .array = box } };
+    return php_array_value;
 }
 
 fn isAFn(vm: *VM, args: []const Value) !Value {
@@ -464,6 +444,7 @@ pub const VM = struct {
     try_catch_stack: std.ArrayList(TryCatchContext),
     stdlib: StandardLibrary,
     reflection_system: ReflectionSystem,
+    memory_manager: types.gc.MemoryManager,
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
         var vm = try allocator.create(VM);
@@ -478,6 +459,7 @@ pub const VM = struct {
             .try_catch_stack = std.ArrayList(TryCatchContext){},
             .stdlib = try StandardLibrary.init(allocator),
             .reflection_system = undefined, // Will be initialized after VM creation
+            .memory_manager = try types.gc.MemoryManager.init(allocator),
         };
         vm.global.* = Environment.init(allocator);
         vm.reflection_system = ReflectionSystem.init(allocator, vm);
@@ -505,6 +487,18 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        // Clean up all global variables (this will release their references)
+        var global_iterator = self.global.vars.iterator();
+        while (global_iterator.next()) |entry| {
+            // Only release if it's a managed type
+            switch (entry.value_ptr.*.tag) {
+                .string, .array, .object, .resource, .user_function, .closure, .arrow_function => {
+                    types.gc.decRef(&self.memory_manager, entry.value_ptr.*);
+                },
+                else => {},
+            }
+        }
+        
         // Clean up try-catch stack
         self.try_catch_stack.deinit(self.allocator);
         
@@ -521,6 +515,9 @@ pub const VM = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.classes.deinit();
+        
+        // Clean up memory manager (this will force final garbage collection)
+        self.memory_manager.deinit();
         
         self.global.deinit();
         self.allocator.destroy(self.global);
@@ -567,7 +564,10 @@ pub const VM = struct {
         }
         
         // No catch block found, handle as uncaught exception
-        try self.error_handler.handleException(exception);
+        const result = self.error_handler.handleException(exception);
+        // Clean up the exception after handling
+        exception.deinit(self.allocator);
+        try result;
         return error.UncaughtException;
     }
     
@@ -614,8 +614,8 @@ pub const VM = struct {
             return self.throwException(exception);
         }
         
-        const object = try self.allocator.create(types.PHPObject);
-        object.* = types.PHPObject.init(self.allocator, class);
+        const value = try Value.initObjectWithManager(&self.memory_manager, class);
+        const object = value.data.object.data;
         
         // Initialize properties with default values
         var prop_iterator = class.properties.iterator();
@@ -625,15 +625,6 @@ pub const VM = struct {
                 try object.setProperty(entry.key_ptr.*, default_val);
             }
         }
-        
-        const box = try self.allocator.create(types.gc.Box(*types.PHPObject));
-        box.* = .{
-            .ref_count = 1,
-            .gc_info = .{},
-            .data = object,
-        };
-        
-        const value = Value{ .tag = .object, .data = .{ .object = box } };
         
         // Call constructor if it exists
         if (class.hasMethod("__construct")) {
@@ -723,14 +714,7 @@ pub const VM = struct {
             try closure.captureVariable(capture.name, capture.value);
         }
         
-        const box = try self.allocator.create(types.gc.Box(*types.Closure));
-        box.* = .{
-            .ref_count = 1,
-            .gc_info = .{},
-            .data = try self.allocator.create(types.Closure),
-        };
-        box.data.* = closure;
-        
+        const box = try self.memory_manager.allocClosure(closure);
         return Value{ .tag = .closure, .data = .{ .closure = box } };
     }
     
@@ -742,14 +726,7 @@ pub const VM = struct {
         // Auto-capture variables from current scope (simplified)
         // In a real implementation, this would analyze the body for variable references
         
-        const box = try self.allocator.create(types.gc.Box(*types.ArrowFunction));
-        box.* = .{
-            .ref_count = 1,
-            .gc_info = .{},
-            .data = try self.allocator.create(types.ArrowFunction),
-        };
-        box.data.* = arrow_function;
-        
+        const box = try self.memory_manager.allocArrowFunction(arrow_function);
         return Value{ .tag = .arrow_function, .data = .{ .arrow_function = box } };
     }
     
@@ -854,6 +831,140 @@ pub const VM = struct {
     pub fn run(self: *VM, node: ast.Node.Index) !Value {
         return self.eval(node);
     }
+    
+    fn evaluateBinaryOperation(self: *VM, left: Value, op: Token.Tag, right: Value) !Value {
+        return switch (op) {
+            .plus => {
+                // Addition
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initInt(left.data.integer + right.data.integer);
+                } else if (left.tag == .float and right.tag == .float) {
+                    return Value.initFloat(left.data.float + right.data.float);
+                } else if (left.tag == .integer and right.tag == .float) {
+                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) + right.data.float);
+                } else if (left.tag == .float and right.tag == .integer) {
+                    return Value.initFloat(left.data.float + @as(f64, @floatFromInt(right.data.integer)));
+                } else if (left.tag == .string and right.tag == .string) {
+                    // String concatenation - use proper string concatenation instead of allocPrint
+                    const left_str = left.data.string.data.data;
+                    const right_str = right.data.string.data.data;
+                    const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
+                    defer self.allocator.free(result); // Safe to free - initStringWithManager will copy
+                    return Value.initStringWithManager(&self.memory_manager, result);
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for addition", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            },
+            .minus => {
+                // Subtraction
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initInt(left.data.integer - right.data.integer);
+                } else if (left.tag == .float and right.tag == .float) {
+                    return Value.initFloat(left.data.float - right.data.float);
+                } else if (left.tag == .integer and right.tag == .float) {
+                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) - right.data.float);
+                } else if (left.tag == .float and right.tag == .integer) {
+                    return Value.initFloat(left.data.float - @as(f64, @floatFromInt(right.data.integer)));
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for subtraction", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            },
+            .asterisk => {
+                // Multiplication
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initInt(left.data.integer * right.data.integer);
+                } else if (left.tag == .float and right.tag == .float) {
+                    return Value.initFloat(left.data.float * right.data.float);
+                } else if (left.tag == .integer and right.tag == .float) {
+                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) * right.data.float);
+                } else if (left.tag == .float and right.tag == .integer) {
+                    return Value.initFloat(left.data.float * @as(f64, @floatFromInt(right.data.integer)));
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for multiplication", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            },
+            .slash => {
+                // Division
+                if (left.tag == .integer and right.tag == .integer) {
+                    if (right.data.integer == 0) {
+                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / @as(f64, @floatFromInt(right.data.integer)));
+                } else if (left.tag == .float and right.tag == .float) {
+                    if (right.data.float == 0.0) {
+                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                    return Value.initFloat(left.data.float / right.data.float);
+                } else if (left.tag == .integer and right.tag == .float) {
+                    if (right.data.float == 0.0) {
+                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / right.data.float);
+                } else if (left.tag == .float and right.tag == .integer) {
+                    if (right.data.integer == 0) {
+                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                    return Value.initFloat(left.data.float / @as(f64, @floatFromInt(right.data.integer)));
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for division", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            },
+            .dot => {
+                // String concatenation
+                const left_result = try self.valueToString(left);
+                defer if (left_result.needs_free) self.allocator.free(left_result.str);
+                
+                const right_result = try self.valueToString(right);
+                defer if (right_result.needs_free) self.allocator.free(right_result.str);
+                
+                const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_result.str, right_result.str });
+                defer self.allocator.free(result); // Safe to free - initStringWithManager will copy
+                
+                return Value.initStringWithManager(&self.memory_manager, result);
+            },
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported binary operator", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        };
+    }
+    
+    fn valueToString(self: *VM, value: Value) !struct { str: []const u8, needs_free: bool } {
+        return switch (value.tag) {
+            .integer => .{ 
+                .str = try std.fmt.allocPrint(self.allocator, "{d}", .{value.data.integer}), 
+                .needs_free = true 
+            },
+            .float => .{ 
+                .str = try std.fmt.allocPrint(self.allocator, "{d}", .{value.data.float}), 
+                .needs_free = true 
+            },
+            .string => .{ 
+                .str = value.data.string.data.data, 
+                .needs_free = false 
+            },
+            .boolean => .{ 
+                .str = if (value.data.boolean) "1" else "", 
+                .needs_free = false 
+            },
+            .null => .{ 
+                .str = "", 
+                .needs_free = false 
+            },
+            else => .{ 
+                .str = "Object", 
+                .needs_free = false 
+            },
+        };
+    }
 
     fn eval(self: *VM, node: ast.Node.Index) !Value {
         const ast_node = self.context.nodes.items[node];
@@ -862,6 +973,17 @@ pub const VM = struct {
             .root => {
                 var last_val = Value.initNull();
                 for (ast_node.data.root.stmts) |stmt| {
+                    // Release the previous value before evaluating the next one
+                    switch (last_val.tag) {
+                        .string => last_val.data.string.release(self.allocator),
+                        .array => last_val.data.array.release(self.allocator),
+                        .object => last_val.data.object.release(self.allocator),
+                        .resource => last_val.data.resource.release(self.allocator),
+                        .user_function => last_val.data.user_function.release(self.allocator),
+                        .closure => last_val.data.closure.release(self.allocator),
+                        .arrow_function => last_val.data.arrow_function.release(self.allocator),
+                        else => {},
+                    }
                     last_val = try self.eval(stmt);
                 }
                 return last_val;
@@ -1051,17 +1173,30 @@ pub const VM = struct {
             .literal_string => {
                 const str_id = ast_node.data.literal_string.value;
                 const str_val = self.context.string_pool.keys()[str_id];
-                return Value.initString(self.allocator, str_val);
+                return Value.initStringWithManager(&self.memory_manager, str_val);
             },
             .echo_stmt => {
                 const value = try self.eval(ast_node.data.echo_stmt.expr);
+                defer {
+                    // Release the value after printing
+                    switch (value.tag) {
+                        .string => value.data.string.release(self.allocator),
+                        .array => value.data.array.release(self.allocator),
+                        .object => value.data.object.release(self.allocator),
+                        .resource => value.data.resource.release(self.allocator),
+                        .user_function => value.data.user_function.release(self.allocator),
+                        .closure => value.data.closure.release(self.allocator),
+                        .arrow_function => value.data.arrow_function.release(self.allocator),
+                        else => {},
+                    }
+                }
                 try value.print();
                 std.debug.print("\n", .{});
                 return Value.initNull();
             },
             .array_init => {
-                var php_array = try self.allocator.create(types.PHPArray);
-                php_array.* = types.PHPArray.init(self.allocator);
+                const php_array_value = try Value.initArrayWithManager(&self.memory_manager);
+                const php_array = php_array_value.data.array.data;
                 
                 for (ast_node.data.array_init.elements, 0..) |item_node_idx, i| {
                     const value = try self.eval(item_node_idx);
@@ -1069,16 +1204,13 @@ pub const VM = struct {
                     try php_array.set(key, value);
                 }
                 
-                const box = try self.allocator.create(types.gc.Box(*types.PHPArray));
-                box.* = .{
-                    .ref_count = 1,
-                    .gc_info = .{},
-                    .data = php_array,
-                };
-                return Value{ .tag = .array, .data = .{ .array = box } };
+                return php_array_value;
             },
             .literal_int => {
                 return Value.initInt(ast_node.data.literal_int.value);
+            },
+            .literal_float => {
+                return Value.initFloat(ast_node.data.literal_float.value);
             },
             .try_stmt => {
                 const try_data = ast_node.data.try_stmt;
@@ -1252,15 +1384,8 @@ pub const VM = struct {
                 user_function.min_args = min_args;
                 user_function.max_args = max_args;
                 
-                // Store function in global scope
-                const box = try self.allocator.create(types.gc.Box(*types.UserFunction));
-                box.* = .{
-                    .ref_count = 1,
-                    .gc_info = .{},
-                    .data = try self.allocator.create(types.UserFunction),
-                };
-                box.data.* = user_function;
-                
+                // Store function in global scope using memory manager
+                const box = try self.memory_manager.allocUserFunction(user_function);
                 const function_value = Value{ .tag = .user_function, .data = .{ .user_function = box } };
                 try self.global.set(func_name, function_value);
                 
@@ -1294,14 +1419,60 @@ pub const VM = struct {
                 const php85 = @import("php85_features.zig");
                 const new_object = try php85.CloneWith.cloneWithProperties(self, object_value.data.object.data, properties_value.data.array.data);
                 
-                const box = try self.allocator.create(types.gc.Box(*types.PHPObject));
-                box.* = .{
-                    .ref_count = 1,
-                    .gc_info = .{},
-                    .data = new_object,
-                };
+                return Value.initObjectWithManager(&self.memory_manager, new_object.class);
+            },
+            .binary_expr => {
+                const binary_data = ast_node.data.binary_expr;
+                const left_value = try self.eval(binary_data.lhs);
+                defer {
+                    // Release left value after operation
+                    switch (left_value.tag) {
+                        .string => left_value.data.string.release(self.allocator),
+                        .array => left_value.data.array.release(self.allocator),
+                        .object => left_value.data.object.release(self.allocator),
+                        .resource => left_value.data.resource.release(self.allocator),
+                        .user_function => left_value.data.user_function.release(self.allocator),
+                        .closure => left_value.data.closure.release(self.allocator),
+                        .arrow_function => left_value.data.arrow_function.release(self.allocator),
+                        else => {},
+                    }
+                }
                 
-                return Value{ .tag = .object, .data = .{ .object = box } };
+                const right_value = try self.eval(binary_data.rhs);
+                defer {
+                    // Release right value after operation
+                    switch (right_value.tag) {
+                        .string => right_value.data.string.release(self.allocator),
+                        .array => right_value.data.array.release(self.allocator),
+                        .object => right_value.data.object.release(self.allocator),
+                        .resource => right_value.data.resource.release(self.allocator),
+                        .user_function => right_value.data.user_function.release(self.allocator),
+                        .closure => right_value.data.closure.release(self.allocator),
+                        .arrow_function => right_value.data.arrow_function.release(self.allocator),
+                        else => {},
+                    }
+                }
+                
+                return self.evaluateBinaryOperation(left_value, binary_data.op, right_value);
+            },
+            .block => {
+                const block_data = ast_node.data.block;
+                var last_val = Value.initNull();
+                for (block_data.stmts) |stmt| {
+                    // Release the previous value before evaluating the next one
+                    switch (last_val.tag) {
+                        .string => last_val.data.string.release(self.allocator),
+                        .array => last_val.data.array.release(self.allocator),
+                        .object => last_val.data.object.release(self.allocator),
+                        .resource => last_val.data.resource.release(self.allocator),
+                        .user_function => last_val.data.user_function.release(self.allocator),
+                        .closure => last_val.data.closure.release(self.allocator),
+                        .arrow_function => last_val.data.arrow_function.release(self.allocator),
+                        else => {},
+                    }
+                    last_val = try self.eval(stmt);
+                }
+                return last_val;
             },
             else => {
                 std.debug.print("Unsupported node type: {s}\n", .{@tagName(ast_node.tag)});

@@ -504,7 +504,8 @@ pub const Parser = struct {
 
     fn parseEcho(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_echo);
-        const expr = try self.parseExpression(0); _ = try self.eat(.semicolon);
+        const expr = try self.parseExpression(0); 
+        _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .echo_stmt, .main_token = token, .data = .{ .echo_stmt = .{ .expr = expr } } });
     }
 
@@ -609,7 +610,15 @@ pub const Parser = struct {
             },
             .t_constant_encapsed_string => {
                 const t = try self.eat(.t_constant_encapsed_string);
-                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                const raw_text = self.lexer.buffer[t.loc.start..t.loc.end];
+                // Remove quotes from string literal
+                const string_content = if (raw_text.len >= 2 and 
+                    ((raw_text[0] == '"' and raw_text[raw_text.len-1] == '"') or
+                     (raw_text[0] == '\'' and raw_text[raw_text.len-1] == '\'')))
+                    raw_text[1..raw_text.len-1]
+                else
+                    raw_text;
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content) } } });
             },
             .t_encapsed_and_whitespace => {
                 const t = try self.eat(.t_encapsed_and_whitespace);
@@ -725,7 +734,7 @@ pub const Parser = struct {
             .arrow => 100,
             .pipe_greater => 90, // Pipe operator has high precedence
             .asterisk, .slash, .percent => 60, 
-            .plus, .minus => 50,
+            .plus, .minus, .dot => 50, // String concatenation has same precedence as addition/subtraction
             .less, .greater, .less_equal, .greater_equal, .spaceship => 40,
             .equal_equal, .equal_equal_equal, .bang_equal, .bang_equal_equal => 35,
             .ampersand => 30, // Bitwise AND

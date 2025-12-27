@@ -12,7 +12,7 @@ pub const Token = struct {
         t_open_tag, t_open_tag_with_echo, t_close_tag,
         // Literals
         t_variable, t_constant_encapsed_string, t_lnumber, t_dnumber, t_inline_html,
-        t_string, t_string_varname,
+        t_string, t_string_varname, t_double_quote,
         t_heredoc_start, t_heredoc_end, t_nowdoc_start,
         t_encapsed_and_whitespace,
         // Interpolation
