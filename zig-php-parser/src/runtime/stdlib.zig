@@ -146,6 +146,9 @@ pub const StandardLibrary = struct {
             &.{ .name = "htmlspecialchars", .min_args = 1, .max_args = 4, .handler = htmlspecialcharsFn },
             &.{ .name = "htmlentities", .min_args = 1, .max_args = 4, .handler = htmlentitiesFn },
             &.{ .name = "number_format", .min_args = 1, .max_args = 4, .handler = numberFormatFn },
+            // Serialization functions
+            &.{ .name = "serialize", .min_args = 1, .max_args = 1, .handler = serializeFn },
+            &.{ .name = "unserialize", .min_args = 1, .max_args = 2, .handler = unserializeFn },
             // Debug functions
             &.{ .name = "var_dump", .min_args = 1, .max_args = 255, .handler = varDumpFn },
             &.{ .name = "print_r", .min_args = 1, .max_args = 2, .handler = printRFn },
@@ -249,6 +252,8 @@ pub const StandardLibrary = struct {
         const hash_functions = [_]*const BuiltinFunction{
             &.{ .name = "md5", .min_args = 1, .max_args = 2, .handler = md5Fn },
             &.{ .name = "sha1", .min_args = 1, .max_args = 2, .handler = sha1Fn },
+            &.{ .name = "sha256", .min_args = 1, .max_args = 2, .handler = sha256Fn },
+            &.{ .name = "sha512", .min_args = 1, .max_args = 2, .handler = sha512Fn },
             &.{ .name = "hash", .min_args = 2, .max_args = 3, .handler = hashFn },
             &.{ .name = "hash_algos", .min_args = 0, .max_args = 0, .handler = hashAlgosFn },
         };
@@ -1954,6 +1959,94 @@ fn sha1Fn(vm: *VM, args: []const Value) !Value {
     }
 }
 
+fn sha256Fn(vm: *VM, args: []const Value) !Value {
+    const str = args[0];
+    const raw_output = if (args.len > 1) args[1].toBool() else false;
+
+    if (str.tag != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "sha256() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const input = str.data.string.data.data;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(input);
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+
+    if (raw_output) {
+        const result_str = try PHPString.init(vm.allocator, &hash);
+
+        const box = try vm.allocator.create(types.gc.Box(*PHPString));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_str,
+        };
+
+        return Value{ .tag = .string, .data = .{ .string = box } };
+    } else {
+        var hex_buffer: [64]u8 = undefined;
+        const hex_str = try std.fmt.bufPrint(&hex_buffer, "{x:0>64}", .{hash});
+
+        const result_str = try PHPString.init(vm.allocator, hex_str);
+
+        const box = try vm.allocator.create(types.gc.Box(*PHPString));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_str,
+        };
+
+        return Value{ .tag = .string, .data = .{ .string = box } };
+    }
+}
+
+fn sha512Fn(vm: *VM, args: []const Value) !Value {
+    const str = args[0];
+    const raw_output = if (args.len > 1) args[1].toBool() else false;
+
+    if (str.tag != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "sha512() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const input = str.data.string.data.data;
+    var hasher = std.crypto.hash.sha2.Sha512.init(.{});
+    hasher.update(input);
+    var hash: [64]u8 = undefined;
+    hasher.final(&hash);
+
+    if (raw_output) {
+        const result_str = try PHPString.init(vm.allocator, &hash);
+
+        const box = try vm.allocator.create(types.gc.Box(*PHPString));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_str,
+        };
+
+        return Value{ .tag = .string, .data = .{ .string = box } };
+    } else {
+        var hex_buffer: [128]u8 = undefined;
+        const hex_str = try std.fmt.bufPrint(&hex_buffer, "{x:0>128}", .{hash});
+
+        const result_str = try PHPString.init(vm.allocator, hex_str);
+
+        const box = try vm.allocator.create(types.gc.Box(*PHPString));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_str,
+        };
+
+        return Value{ .tag = .string, .data = .{ .string = box } };
+    }
+}
+
 fn hashFn(vm: *VM, args: []const Value) !Value {
     const algo = args[0];
     const data = args[1];
@@ -1966,44 +2059,15 @@ fn hashFn(vm: *VM, args: []const Value) !Value {
     }
 
     const algorithm = algo.data.string.data.data;
-    const input = data.data.string.data.data;
 
     if (std.mem.eql(u8, algorithm, "md5")) {
         return md5Fn(vm, &[_]Value{ data, Value.initBool(raw_output) });
     } else if (std.mem.eql(u8, algorithm, "sha1")) {
         return sha1Fn(vm, &[_]Value{ data, Value.initBool(raw_output) });
     } else if (std.mem.eql(u8, algorithm, "sha256")) {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(input);
-        var hash: [32]u8 = undefined;
-        hasher.final(&hash);
-
-        if (raw_output) {
-            const result_str = try PHPString.init(vm.allocator, &hash);
-
-            const box = try vm.allocator.create(types.gc.Box(*PHPString));
-            box.* = .{
-                .ref_count = 1,
-                .gc_info = .{},
-                .data = result_str,
-            };
-
-            return Value{ .tag = .string, .data = .{ .string = box } };
-        } else {
-            var hex_buffer: [64]u8 = undefined;
-            const hex_str = try std.fmt.bufPrint(&hex_buffer, "{x:0>64}", .{hash});
-
-            const result_str = try PHPString.init(vm.allocator, hex_str);
-
-            const box = try vm.allocator.create(types.gc.Box(*PHPString));
-            box.* = .{
-                .ref_count = 1,
-                .gc_info = .{},
-                .data = result_str,
-            };
-
-            return Value{ .tag = .string, .data = .{ .string = box } };
-        }
+        return sha256Fn(vm, &[_]Value{ data, Value.initBool(raw_output) });
+    } else if (std.mem.eql(u8, algorithm, "sha512")) {
+        return sha512Fn(vm, &[_]Value{ data, Value.initBool(raw_output) });
     } else {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "hash(): Unknown hashing algorithm", "builtin", 0);
         _ = try vm.throwException(exception);
@@ -2017,7 +2081,7 @@ fn hashAlgosFn(vm: *VM, args: []const Value) !Value {
     var result_array = try vm.allocator.create(PHPArray);
     result_array.* = PHPArray.init(vm.allocator);
 
-    const algorithms = [_][]const u8{ "md5", "sha1", "sha256" };
+    const algorithms = [_][]const u8{ "md5", "sha1", "sha256", "sha512" };
 
     for (algorithms) |algo| {
         const algo_str = try Value.initString(vm.allocator, algo);
@@ -2943,4 +3007,185 @@ fn strvalFn(vm: *VM, args: []const Value) !Value {
 fn boolvalFn(vm: *VM, args: []const Value) !Value {
     _ = vm;
     return Value.initBool(args[0].toBool());
+}
+
+// Serialization Functions
+fn serializeFn(vm: *VM, args: []const Value) !Value {
+    const value = args[0];
+    var buffer = std.ArrayListUnmanaged(u8){};
+    defer buffer.deinit(vm.allocator);
+
+    try serializeValue(vm, &buffer, value);
+
+    return Value.initString(vm.allocator, buffer.items);
+}
+
+fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !void {
+    switch (value.tag) {
+        .null => try buffer.appendSlice(vm.allocator, "N;"),
+        .boolean => try buffer.writer(vm.allocator).print("b:{d};", .{if (value.data.boolean) @as(i64, 1) else @as(i64, 0)}),
+        .integer => try buffer.writer(vm.allocator).print("i:{d};", .{value.data.integer}),
+        .float => try buffer.writer(vm.allocator).print("d:{d};", .{value.data.float}),
+        .string => {
+            const str = value.data.string.data.data;
+            try buffer.writer(vm.allocator).print("s:{d}:\"{s}\";", .{ str.len, str });
+        },
+        .array => {
+            const arr = value.data.array.data;
+            const count = arr.count();
+            try buffer.writer(vm.allocator).print("a:{d}:{{", .{count});
+
+            var iterator = arr.elements.iterator();
+            while (iterator.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const val = entry.value_ptr.*;
+
+                // Serialize key
+                switch (key) {
+                    .integer => |i| try buffer.writer(vm.allocator).print("i:{d};", .{i}),
+                    .string => |s| try buffer.writer(vm.allocator).print("s:{d}:\"{s}\";", .{ s.data.len, s.data }),
+                }
+
+                // Serialize value
+                try serializeValue(vm, buffer, val);
+            }
+
+            try buffer.appendSlice(vm.allocator, "}");
+        },
+        .object => {
+            const obj = value.data.object.data;
+            const class_name = obj.class.name.data;
+            const props_count = obj.properties.count();
+
+            try buffer.writer(vm.allocator).print("O:{d}:\"{s}\":{d}:{{", .{ class_name.len, class_name, props_count });
+
+            var iterator = obj.properties.iterator();
+            while (iterator.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const val = entry.value_ptr.*;
+
+                // Serialize property name (as private property)
+                try buffer.writer(vm.allocator).print("s:{d}:\"\\0{s}\\0{s}\";", .{ key.len + 2, class_name, key });
+
+                // Serialize value
+                try serializeValue(vm, buffer, val);
+            }
+
+            try buffer.appendSlice(vm.allocator, "}");
+        },
+        else => try buffer.appendSlice(vm.allocator, "N;"),
+    }
+}
+
+fn unserializeFn(vm: *VM, args: []const Value) !Value {
+    const str = args[0];
+
+    if (str.tag != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "unserialize() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const data = str.data.string.data.data;
+    var pos: usize = 0;
+
+    return unserializeValue(vm, data, &pos);
+}
+
+fn unserializeValue(vm: *VM, data: []const u8, pos: *usize) !Value {
+    if (pos.* >= data.len) return Value.initNull();
+
+    const type_char = data[pos.*];
+    pos.* += 1;
+
+    return switch (type_char) {
+        'N' => blk: {
+            pos.* += 1; // Skip ';'
+            break :blk Value.initNull();
+        },
+        'b' => blk: {
+            pos.* += 1; // Skip ':'
+            const end = std.mem.indexOfScalarPos(u8, data, pos.*, ';') orelse data.len;
+            const bool_str = data[pos.*..end];
+            pos.* = end + 1;
+            const value = if (std.mem.eql(u8, bool_str, "1")) true else false;
+            break :blk Value.initBool(value);
+        },
+        'i' => blk: {
+            pos.* += 1; // Skip ':'
+            const end = std.mem.indexOfScalarPos(u8, data, pos.*, ';') orelse data.len;
+            const int_str = data[pos.*..end];
+            pos.* = end + 1;
+            const value = std.fmt.parseInt(i64, int_str, 10) catch 0;
+            break :blk Value.initInt(value);
+        },
+        'd' => blk: {
+            pos.* += 1; // Skip ':'
+            const end = std.mem.indexOfScalarPos(u8, data, pos.*, ';') orelse data.len;
+            const float_str = data[pos.*..end];
+            pos.* = end + 1;
+            const value = std.fmt.parseFloat(f64, float_str) catch 0;
+            break :blk Value.initFloat(value);
+        },
+        's' => blk: {
+            pos.* += 1; // Skip ':'
+            const colon = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const len_str = data[pos.*..colon];
+            pos.* = colon + 1;
+            const len = std.fmt.parseInt(usize, len_str, 10) catch 0;
+            pos.* += 1; // Skip '"'
+            const str_val = data[pos.* .. pos.* + len];
+            pos.* += len + 2; // Skip string and '";'
+
+            const result_str = try PHPString.init(vm.allocator, str_val);
+            const box = try vm.allocator.create(types.gc.Box(*PHPString));
+            box.* = .{
+                .ref_count = 1,
+                .gc_info = .{},
+                .data = result_str,
+            };
+
+            break :blk Value{ .tag = .string, .data = .{ .string = box } };
+        },
+        'a' => blk: {
+            pos.* += 1; // Skip ':'
+            const count_end = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const count_str = data[pos.*..count_end];
+            pos.* = count_end + 1;
+            const count = std.fmt.parseInt(usize, count_str, 10) catch 0;
+            pos.* += 1; // Skip '{'
+
+            var result_array = try vm.allocator.create(PHPArray);
+            result_array.* = PHPArray.init(vm.allocator);
+
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const key = try unserializeValue(vm, data, pos);
+                const val = try unserializeValue(vm, data, pos);
+
+                const array_key: ArrayKey = switch (key.tag) {
+                    .integer => ArrayKey{ .integer = key.data.integer },
+                    .string => blk2: {
+                        const str = try PHPString.init(vm.allocator, key.data.string.data.data);
+                        break :blk2 ArrayKey{ .string = str };
+                    },
+                    else => ArrayKey{ .integer = 0 },
+                };
+
+                try result_array.set(vm.allocator, array_key, val);
+            }
+
+            pos.* += 1; // Skip '}'
+
+            const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+            box.* = .{
+                .ref_count = 1,
+                .gc_info = .{},
+                .data = result_array,
+            };
+
+            break :blk Value{ .tag = .array, .data = .{ .array = box } };
+        },
+        else => Value.initNull(),
+    };
 }

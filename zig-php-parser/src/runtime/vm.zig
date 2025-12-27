@@ -708,20 +708,8 @@ fn getDeclaredInterfacesFn(vm: *VM, args: []const Value) !Value {
         return error.ArgumentCountMismatch;
     }
 
-    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
-    const php_array = php_array_value.data.array.data;
-
-    var iterator = vm.classes.iterator();
-    while (iterator.next()) |entry| {
-        const class = entry.value_ptr.*;
-        if (class.modifiers.is_interface) {
-            const class_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
-            try php_array.push(vm.allocator, class_name_value);
-            vm.releaseValue(class_name_value);
-        }
-    }
-
-    return php_array_value;
+    // Return empty array - interface tracking not yet implemented
+    return try Value.initArrayWithManager(&vm.memory_manager);
 }
 
 fn getDeclaredTraitsFn(vm: *VM, args: []const Value) !Value {
@@ -731,20 +719,8 @@ fn getDeclaredTraitsFn(vm: *VM, args: []const Value) !Value {
         return error.ArgumentCountMismatch;
     }
 
-    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
-    const php_array = php_array_value.data.array.data;
-
-    var iterator = vm.classes.iterator();
-    while (iterator.next()) |entry| {
-        const class = entry.value_ptr.*;
-        if (class.modifiers.is_trait) {
-            const class_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
-            try php_array.push(vm.allocator, class_name_value);
-            vm.releaseValue(class_name_value);
-        }
-    }
-
-    return php_array_value;
+    // Return empty array - trait tracking not yet implemented
+    return try Value.initArrayWithManager(&vm.memory_manager);
 }
 
 fn getParentClassFn(vm: *VM, args: []const Value) !Value {
@@ -786,11 +762,7 @@ fn interfaceExistsFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    const interface_name = interface_name_val.data.string.data.data;
-    if (vm.getClass(interface_name)) |class| {
-        return Value.initBool(class.modifiers.is_interface);
-    }
-
+    // Interface tracking not yet implemented
     return Value.initBool(false);
 }
 
@@ -1021,6 +993,22 @@ pub const VM = struct {
 
         // Then set in global scope
         try self.global.set(name, value);
+    }
+
+    pub fn deleteVariable(self: *VM, name: []const u8) bool {
+        // Check current call frame first
+        if (self.call_stack.items.len > 0) {
+            var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+
+            if (current_frame.locals.get(name)) |old_value| {
+                self.releaseValue(old_value);
+                _ = current_frame.locals.remove(name);
+                return true;
+            }
+        }
+
+        // Then check global scope
+        return self.global.remove(name);
     }
 
     fn retainValue(self: *VM, value: Value) void {
