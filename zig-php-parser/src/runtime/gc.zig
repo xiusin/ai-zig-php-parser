@@ -32,18 +32,28 @@ pub fn Box(comptime T: type) type {
         }
         
         pub fn release(self: *@This(), allocator: std.mem.Allocator) void {
-            if (self.ref_count > 0) {
-                self.ref_count -= 1;
-                if (self.ref_count == 0) {
-                    self.destroy(allocator);
-                } else {
-                    // Mark as potential cycle root when ref count decreases
-                    self.gc_info.color = .purple;
-                }
+            // Safety check to prevent double-free
+            if (self.ref_count == 0) {
+                return; // Already freed
+            }
+            
+            self.ref_count -= 1;
+            if (self.ref_count == 0) {
+                // Mark as freed to prevent double-free
+                self.gc_info.color = .black;
+                self.destroy(allocator);
+            } else {
+                // Mark as potential cycle root when ref count decreases
+                self.gc_info.color = .purple;
             }
         }
         
         fn destroy(self: *@This(), allocator: std.mem.Allocator) void {
+            // Additional safety check - if already marked as black, it's been destroyed
+            if (self.gc_info.color == .black and self.ref_count == 0) {
+                return; // Already destroyed
+            }
+            
             // Call destructor if this is an object with __destruct method
             switch (T) {
                 *PHPString => {
@@ -99,6 +109,10 @@ pub fn Box(comptime T: type) type {
                 },
                 else => {},
             }
+            
+            // Mark as destroyed
+            self.gc_info.color = .black;
+            self.ref_count = 0;
             allocator.destroy(self);
         }
         

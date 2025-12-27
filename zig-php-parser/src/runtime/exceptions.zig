@@ -514,7 +514,7 @@ pub const ExceptionFactory = struct {
     }
     
     pub fn createUndefinedVariableError(allocator: std.mem.Allocator, variable_name: []const u8, file: []const u8, line: u32) !*PHPException {
-        const message = try std.fmt.allocPrint(allocator, "Undefined variable: ${s}", .{variable_name});
+        const message = try std.fmt.allocPrint(allocator, "Undefined variable: {s}", .{variable_name});
         defer allocator.free(message);
         return PHPException.init(allocator, .undefined_variable_error, message, file, line);
     }

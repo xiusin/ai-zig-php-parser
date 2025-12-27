@@ -106,10 +106,7 @@ pub const Lexer = struct {
             '0'...'9' => self.lexNumber(start),
             'a'...'z', 'A'...'Z', '_' => self.lexIdentifier(start),
             '\'' => self.lexSingleQuoteString(start),
-            '"' => {
-                self.state = .double_quote;
-                return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
-            },
+            '"' => self.lexDoubleQuoteString(start),
             else => .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } },
         };
     }
@@ -369,6 +366,43 @@ pub const Lexer = struct {
         }
         if (self.pos < self.buffer.len) self.pos += 1;
         return .{ .tag = .t_constant_encapsed_string, .loc = .{ .start = start, .end = self.pos } };
+    }
+
+    fn lexDoubleQuoteString(self: *Lexer, start: usize) Token {
+        // Check if this is a simple string without interpolation
+        var pos = self.pos;
+        var has_interpolation = false;
+        
+        while (pos < self.buffer.len and self.buffer[pos] != '"') {
+            if (self.buffer[pos] == '\\') {
+                pos += 1; // Skip escaped character
+            } else if (self.buffer[pos] == '$') {
+                // Check if this is variable interpolation
+                if (pos + 1 < self.buffer.len and 
+                    (std.ascii.isAlphabetic(self.buffer[pos + 1]) or self.buffer[pos + 1] == '_' or self.buffer[pos + 1] == '{')) {
+                    has_interpolation = true;
+                    break;
+                }
+            } else if (self.buffer[pos] == '{' and pos + 1 < self.buffer.len and self.buffer[pos + 1] == '$') {
+                has_interpolation = true;
+                break;
+            }
+            pos += 1;
+        }
+        
+        if (has_interpolation) {
+            // Handle interpolated string - set state and return appropriate token
+            self.state = .double_quote;
+            return .{ .tag = .t_double_quote, .loc = .{ .start = start, .end = self.pos } };
+        } else {
+            // Simple string without interpolation - consume the whole string
+            while (self.pos < self.buffer.len and self.buffer[self.pos] != '"') {
+                if (self.buffer[self.pos] == '\\') self.pos += 1; // Skip escaped character
+                self.pos += 1;
+            }
+            if (self.pos < self.buffer.len) self.pos += 1; // Consume closing quote
+            return .{ .tag = .t_constant_encapsed_string, .loc = .{ .start = start, .end = self.pos } };
+        }
     }
 
     fn lexString(self: *Lexer, start: usize) Token {
