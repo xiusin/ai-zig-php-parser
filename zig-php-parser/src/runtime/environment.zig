@@ -31,6 +31,15 @@ pub const Environment = struct {
     pub fn get(self: *Environment, name: []const u8) ?Value {
         return self.vars.get(name);
     }
+
+    pub fn remove(self: *Environment, name: []const u8) bool {
+        if (self.vars.fetchRemove(name)) |entry| {
+            // Release the value's reference
+            self.releaseValue(entry.value);
+            return true;
+        }
+        return false;
+    }
     
     fn retainValue(self: *Environment, value: Value) void {
         _ = self;
