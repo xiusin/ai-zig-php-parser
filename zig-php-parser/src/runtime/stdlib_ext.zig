@@ -105,7 +105,7 @@ pub const FileSystemFunctions = struct {
     }
 
     /// file_put_contents - 写入文件内容
-    pub fn filePutContents(vm: anytype, args: []const Value) !Value {
+    pub fn filePutContents(_: anytype, args: []const Value) !Value {
         if (args.len < 2) {
             return Value.initBool(false);
         }
@@ -321,7 +321,7 @@ pub const FileSystemFunctions = struct {
         };
         defer dir.close();
 
-        var result = try Value.initArrayWithManager(&vm.memory_manager);
+        const result = try Value.initArrayWithManager(&vm.memory_manager);
         const arr = result.data.array.data;
         var index: i64 = 0;
 
@@ -609,10 +609,16 @@ pub const JsonFunctions = struct {
     }
 };
 
-test "file functions" {
-    // 测试文件函数
-}
+/// 注册扩展函数到标准库
+pub fn registerExtendedFunctions(stdlib: anytype) !void {
+    // 注册数据库函数
+    // 注册cURL函数
+    // 注册HTTP函数
+    // 注册协程函数
+    // 注册文件函数
+    // 注册日期函数
 
-test "date functions" {
-    // 测试日期函数
+    // 示例：注册一些基本函数
+    // 这里需要实际实现函数注册
+    _ = stdlib; // 暂时不使用
 }

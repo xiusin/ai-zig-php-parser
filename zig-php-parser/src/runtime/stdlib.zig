@@ -57,6 +57,10 @@ pub const StandardLibrary = struct {
         const php85 = @import("php85_features.zig");
         try php85.registerUriFunctions(&stdlib);
 
+        // Register extended functions
+        const stdlib_ext = @import("stdlib_ext.zig");
+        try stdlib_ext.registerExtendedFunctions(&stdlib);
+
         return stdlib;
     }
 
