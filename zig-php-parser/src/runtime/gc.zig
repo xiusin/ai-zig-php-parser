@@ -39,8 +39,6 @@ pub fn Box(comptime T: type) type {
             
             self.ref_count -= 1;
             if (self.ref_count == 0) {
-                // Mark as freed to prevent double-free
-                self.gc_info.color = .black;
                 self.destroy(allocator);
             } else {
                 // Mark as potential cycle root when ref count decreases
@@ -49,8 +47,8 @@ pub fn Box(comptime T: type) type {
         }
         
         fn destroy(self: *@This(), allocator: std.mem.Allocator) void {
-            // Additional safety check - if already marked as black, it's been destroyed
-            if (self.gc_info.color == .black and self.ref_count == 0) {
+            // Additional safety check - if already destroyed, don't destroy again
+            if (self.gc_info.color == .black) {
                 return; // Already destroyed
             }
             
