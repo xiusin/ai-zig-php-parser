@@ -62,15 +62,5 @@ pub fn main() !void {
     const result = try vm_instance.run(program);
     
     // Release the final result to prevent memory leak
-    switch (result.tag) {
-        .string => result.data.string.release(allocator),
-        .array => result.data.array.release(allocator),
-        .object => result.data.object.release(allocator),
-        .struct_instance => result.data.struct_instance.release(allocator),
-        .resource => result.data.resource.release(allocator),
-        .user_function => result.data.user_function.release(allocator),
-        .closure => result.data.closure.release(allocator),
-        .arrow_function => result.data.arrow_function.release(allocator),
-        else => {},
-    }
+    result.release(allocator);
 }

@@ -100,8 +100,8 @@ test "garbage collection - cycle detection setup" {
     const val2 = Value{ .tag = .array, .data = .{ .array = array2 } };
     
     // Make them reference each other (creating a cycle)
-    try array1.data.push(val2);
-    try array2.data.push(val1);
+    try array1.data.push(allocator, val2);
+    try array2.data.push(allocator, val1);
     
     // Both arrays should have ref_count > 1 due to circular references
     try testing.expect(array1.ref_count >= 1);
