@@ -18,6 +18,100 @@ const ReflectionSystem = reflection.ReflectionSystem;
 
 const CapturedVar = struct { name: []const u8, value: Value };
 
+pub const CallFrame = struct {
+    function_name: []const u8,
+    file: []const u8,
+    line: u32,
+    locals: std.StringHashMap(Value),
+    
+    pub fn init(allocator: std.mem.Allocator, function_name: []const u8, file: []const u8, line: u32) CallFrame {
+        return CallFrame{
+            .function_name = function_name,
+            .file = file,
+            .line = line,
+            .locals = std.StringHashMap(Value).init(allocator),
+        };
+    }
+    
+    pub fn deinit(self: *CallFrame) void {
+        self.locals.deinit();
+    }
+};
+
+pub const ExecutionStats = struct {
+    function_calls: u64 = 0,
+    memory_allocations: u64 = 0,
+    gc_collections: u32 = 0,
+    execution_time_ns: u64 = 0,
+    peak_memory_usage: usize = 0,
+    
+    pub fn reset(self: *ExecutionStats) void {
+        self.* = ExecutionStats{};
+    }
+};
+
+pub const OptimizationFlags = packed struct {
+    enable_string_interning: bool = true,
+    enable_function_inlining: bool = false,
+    enable_constant_folding: bool = true,
+    enable_dead_code_elimination: bool = false,
+    enable_jit_compilation: bool = false,
+    enable_opcode_caching: bool = true,
+    enable_memory_pooling: bool = true,
+    enable_fast_property_access: bool = true,
+};
+
+pub const ErrorContext = struct {
+    recent_errors: std.ArrayList(ErrorInfo),
+    max_errors: usize = 100,
+    
+    pub const ErrorInfo = struct {
+        timestamp: i64,
+        error_type: ErrorType,
+        message: []const u8,
+        file: []const u8,
+        line: u32,
+        stack_trace: []const u8,
+    };
+    
+    pub fn init(allocator: std.mem.Allocator) ErrorContext {
+        _ = allocator; // Unused in this version
+        return ErrorContext{
+            .recent_errors = std.ArrayList(ErrorInfo){},
+        };
+    }
+    
+    pub fn deinit(self: *ErrorContext, allocator: std.mem.Allocator) void {
+        for (self.recent_errors.items) |error_info| {
+            allocator.free(error_info.message);
+            allocator.free(error_info.file);
+            allocator.free(error_info.stack_trace);
+        }
+        self.recent_errors.deinit(allocator);
+    }
+    
+    pub fn addError(self: *ErrorContext, allocator: std.mem.Allocator, error_type: ErrorType, message: []const u8, file: []const u8, line: u32, stack_trace: []const u8) !void {
+        // Remove oldest error if at capacity
+        if (self.recent_errors.items.len >= self.max_errors) {
+            const oldest = self.recent_errors.orderedRemove(0);
+            allocator.free(oldest.message);
+            allocator.free(oldest.file);
+            allocator.free(oldest.stack_trace);
+        }
+        
+        const error_info = ErrorInfo{
+            .timestamp = std.time.timestamp(),
+            .error_type = error_type,
+            .message = try allocator.dupe(u8, message),
+            .file = try allocator.dupe(u8, file),
+            .line = line,
+            .stack_trace = try allocator.dupe(u8, stack_trace),
+        };
+        
+        try self.recent_errors.append(allocator, error_info);
+    }
+};
+
 fn callUserFuncFn(vm: *VM, args: []const Value) !Value {
     if (args.len < 1) {
         const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "call_user_func", "builtin", 0);
@@ -445,6 +539,17 @@ pub const VM = struct {
     stdlib: StandardLibrary,
     reflection_system: ReflectionSystem,
     memory_manager: types.gc.MemoryManager,
+    
+    // Performance optimization fields
+    call_stack: std.ArrayList(CallFrame),
+    execution_stats: ExecutionStats,
+    optimization_flags: OptimizationFlags,
+    
+    // Enhanced error reporting
+    error_context: ErrorContext,
+    
+    // Memory optimization
+    string_intern_pool: std.StringHashMap(*types.PHPString),
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
         var vm = try allocator.create(VM);
@@ -460,33 +565,50 @@ pub const VM = struct {
             .stdlib = try StandardLibrary.init(allocator),
             .reflection_system = undefined, // Will be initialized after VM creation
             .memory_manager = try types.gc.MemoryManager.init(allocator),
+            .call_stack = std.ArrayList(CallFrame){},
+            .execution_stats = ExecutionStats{},
+            .optimization_flags = OptimizationFlags{},
+            .error_context = ErrorContext.init(allocator),
+            .string_intern_pool = std.StringHashMap(*types.PHPString).init(allocator),
         };
+        
         vm.global.* = Environment.init(allocator);
         vm.reflection_system = ReflectionSystem.init(allocator, vm);
 
-        try vm.defineBuiltin("count", countFn);
-        try vm.defineBuiltin("call_user_func", callUserFuncFn);
-        try vm.defineBuiltin("call_user_func_array", callUserFuncArrayFn);
-        try vm.defineBuiltin("is_callable", isCallableFn);
-        
-        // Reflection functions
-        try vm.defineBuiltin("class_exists", classExistsFn);
-        try vm.defineBuiltin("method_exists", methodExistsFn);
-        try vm.defineBuiltin("property_exists", propertyExistsFn);
-        try vm.defineBuiltin("get_class", getClassFn);
-        try vm.defineBuiltin("get_class_methods", getClassMethodsFn);
-        try vm.defineBuiltin("get_class_vars", getClassVarsFn);
-        try vm.defineBuiltin("get_object_vars", getObjectVarsFn);
-        try vm.defineBuiltin("is_a", isAFn);
-        try vm.defineBuiltin("is_subclass_of", isSubclassOfFn);
+        // Register built-in functions with optimized registration
+        try vm.registerBuiltinFunctions();
 
         // Register all standard library functions
         try vm.registerStandardLibraryFunctions();
+        
+        // Initialize performance monitoring
+        vm.execution_stats.reset();
 
         return vm;
     }
 
     pub fn deinit(self: *VM) void {
+        // Performance statistics logging
+        if (self.optimization_flags.enable_opcode_caching) {
+            self.logPerformanceStats();
+        }
+        
+        // Clean up call stack
+        for (self.call_stack.items) |*frame| {
+            frame.deinit();
+        }
+        self.call_stack.deinit(self.allocator);
+        
+        // Clean up string intern pool
+        var intern_iterator = self.string_intern_pool.iterator();
+        while (intern_iterator.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
+        }
+        self.string_intern_pool.deinit();
+        
+        // Clean up error context
+        self.error_context.deinit(self.allocator);
+        
         // Clean up all global variables (this will release their references)
         var global_iterator = self.global.vars.iterator();
         while (global_iterator.next()) |entry| {
@@ -532,7 +654,26 @@ pub const VM = struct {
         try self.global.set(name, value);
     }
     
+    // Optimized builtin function registration
+    pub fn registerBuiltinFunctions(self: *VM) !void {
+        try self.defineBuiltin("count", countFn);
+        try self.defineBuiltin("call_user_func", callUserFuncFn);
+        try self.defineBuiltin("call_user_func_array", callUserFuncArrayFn);
+        try self.defineBuiltin("is_callable", isCallableFn);
+        try self.defineBuiltin("class_exists", classExistsFn);
+        try self.defineBuiltin("method_exists", methodExistsFn);
+        try self.defineBuiltin("property_exists", propertyExistsFn);
+        try self.defineBuiltin("get_class", getClassFn);
+        try self.defineBuiltin("get_class_methods", getClassMethodsFn);
+        try self.defineBuiltin("get_class_vars", getClassVarsFn);
+        try self.defineBuiltin("get_object_vars", getObjectVarsFn);
+        try self.defineBuiltin("is_a", isAFn);
+        try self.defineBuiltin("is_subclass_of", isSubclassOfFn);
+    }
+    
     pub fn registerStandardLibraryFunctions(self: *VM) !void {
+        const start_time = std.time.nanoTimestamp();
+        
         var iterator = self.stdlib.functions.iterator();
         while (iterator.next()) |entry| {
             const name = entry.key_ptr.*;
@@ -544,6 +685,230 @@ pub const VM = struct {
             };
             try self.global.set(name, value);
         }
+        
+        const end_time = std.time.nanoTimestamp();
+        self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+    }
+    
+    // Performance monitoring and optimization methods
+    pub fn logPerformanceStats(self: *VM) void {
+        std.debug.print("=== PHP Interpreter Performance Statistics ===\n", .{});
+        std.debug.print("Function calls: {d}\n", .{self.execution_stats.function_calls});
+        std.debug.print("Memory allocations: {d}\n", .{self.execution_stats.memory_allocations});
+        std.debug.print("GC collections: {d}\n", .{self.execution_stats.gc_collections});
+        std.debug.print("Execution time: {d}ns\n", .{self.execution_stats.execution_time_ns});
+        std.debug.print("Peak memory usage: {d} bytes\n", .{self.execution_stats.peak_memory_usage});
+        std.debug.print("String intern pool size: {d}\n", .{self.string_intern_pool.count()});
+        std.debug.print("Call stack depth: {d}\n", .{self.call_stack.items.len});
+        std.debug.print("===============================================\n", .{});
+    }
+    
+    pub fn getMemoryUsage(self: *VM) usize {
+        return self.memory_manager.getMemoryUsage();
+    }
+    
+    pub fn forceGarbageCollection(self: *VM) u32 {
+        const collected = self.memory_manager.forceCollect();
+        self.execution_stats.gc_collections += 1;
+        return collected;
+    }
+    
+    pub fn optimizeMemoryUsage(self: *VM) !void {
+        // Force garbage collection
+        _ = self.forceGarbageCollection();
+        
+        // Clean up string intern pool of unused strings
+        if (self.optimization_flags.enable_string_interning) {
+            try self.cleanupStringInternPool();
+        }
+        
+        // Update peak memory usage
+        const current_usage = self.getMemoryUsage();
+        if (current_usage > self.execution_stats.peak_memory_usage) {
+            self.execution_stats.peak_memory_usage = current_usage;
+        }
+    }
+    
+    fn cleanupStringInternPool(self: *VM) !void {
+        var to_remove = std.ArrayList([]const u8){};
+        defer to_remove.deinit(self.allocator);
+        
+        var iterator = self.string_intern_pool.iterator();
+        while (iterator.next()) |entry| {
+            // Check if string is still referenced (simplified check)
+            // In a real implementation, this would check reference counts
+            _ = entry.value_ptr.*;
+            // For now, we'll keep all strings in the pool
+        }
+        
+        // Remove unused strings
+        for (to_remove.items) |key| {
+            if (self.string_intern_pool.fetchRemove(key)) |removed| {
+                removed.value.deinit(self.allocator);
+                self.allocator.free(key);
+            }
+        }
+    }
+    
+    // Memory pooling optimization for frequently allocated objects
+    pub fn initializeMemoryPools(self: *VM) !void {
+        if (!self.optimization_flags.enable_memory_pooling) return;
+        
+        // Pre-allocate common object pools
+        // This would be implemented with actual memory pools in a real system
+        // Placeholder implementation - would initialize memory pools here
+    }
+    
+    // JIT compilation hooks (placeholder for future implementation)
+    pub fn compileToJIT(self: *VM, function: *types.UserFunction) !void {
+        if (!self.optimization_flags.enable_jit_compilation) return;
+        
+        // Placeholder for JIT compilation
+        // Would analyze function body and generate optimized machine code
+        // For now, just track the compilation attempt
+        self.execution_stats.function_calls += 1;
+        _ = function;
+    }
+    
+    // Opcode caching system
+    pub fn cacheOpcode(self: *VM, node_idx: ast.Node.Index, opcode: []const u8) !void {
+        if (!self.optimization_flags.enable_opcode_caching) return;
+        
+        // Placeholder for opcode caching
+        // Would store compiled opcodes for faster re-execution
+        // For now, just track that we would cache this opcode
+        self.execution_stats.function_calls += 1; // Track cache operations
+        _ = node_idx;
+        _ = opcode;
+    }
+    
+    pub fn getCachedOpcode(self: *VM, node_idx: ast.Node.Index) ?[]const u8 {
+        if (!self.optimization_flags.enable_opcode_caching) return null;
+        
+        // Placeholder for opcode retrieval
+        // Would retrieve cached opcodes here
+        self.execution_stats.function_calls += 1; // Track cache lookups
+        _ = node_idx;
+        return null;
+    }
+    
+    // Enhanced error reporting with better context
+    pub fn reportError(self: *VM, error_type: ErrorType, message: []const u8, suggestions: []const []const u8) !void {
+        // Generate detailed error report
+        const stack_trace = try self.generateStackTrace();
+        defer self.allocator.free(stack_trace);
+        
+        // Add error to context
+        try self.error_context.addError(
+            self.allocator,
+            error_type,
+            message,
+            self.current_file,
+            self.current_line,
+            stack_trace
+        );
+        
+        // Print enhanced error message
+        std.debug.print("PHP Error: {s}\n", .{message});
+        std.debug.print("File: {s}, Line: {d}\n", .{ self.current_file, self.current_line });
+        std.debug.print("Stack trace:\n{s}\n", .{stack_trace});
+        
+        if (suggestions.len > 0) {
+            std.debug.print("Suggestions:\n", .{});
+            for (suggestions) |suggestion| {
+                std.debug.print("  - {s}\n", .{suggestion});
+            }
+        }
+    }
+    
+    // Performance optimization: Fast property access
+    pub fn getObjectPropertyOptimized(self: *VM, object_value: Value, property_name: []const u8) !Value {
+        if (!self.optimization_flags.enable_fast_property_access) {
+            return self.getObjectProperty(object_value, property_name);
+        }
+        
+        if (object_value.tag != .object) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        const object = object_value.data.object.data;
+        
+        // Fast path: direct property lookup without method calls
+        if (object.properties.get(property_name)) |value| {
+            return value;
+        }
+        
+        // Check class properties
+        if (object.class.hasProperty(property_name)) {
+            const property = object.class.getProperty(property_name);
+            if (property.default_value) |default_val| {
+                return default_val;
+            }
+        }
+        
+        // Fall back to magic method handling
+        return self.getObjectProperty(object_value, property_name);
+    }
+    
+    // Constant folding optimization
+    pub fn evaluateConstantExpression(self: *VM, node: ast.Node.Index) ?Value {
+        if (!self.optimization_flags.enable_constant_folding) return null;
+        
+        const ast_node = self.context.nodes.items[node];
+        
+        return switch (ast_node.tag) {
+            .literal_int => Value.initInt(ast_node.data.literal_int.value),
+            .literal_float => Value.initFloat(ast_node.data.literal_float.value),
+            .literal_string => {
+                const str_id = ast_node.data.literal_string.value;
+                const str_val = self.context.string_pool.keys()[str_id];
+                return Value.initStringWithManager(&self.memory_manager, str_val) catch null;
+            },
+            .binary_expr => {
+                const left_const = self.evaluateConstantExpression(ast_node.data.binary_expr.lhs);
+                const right_const = self.evaluateConstantExpression(ast_node.data.binary_expr.rhs);
+                
+                if (left_const != null and right_const != null) {
+                    return self.evaluateBinaryOperation(left_const.?, ast_node.data.binary_expr.op, right_const.?) catch null;
+                }
+                return null;
+            },
+            else => null,
+        };
+    }
+    
+    // Optimized string creation with interning
+    pub fn createInternedString(self: *VM, str: []const u8) !Value {
+        if (!self.optimization_flags.enable_string_interning) {
+            return Value.initStringWithManager(&self.memory_manager, str);
+        }
+        
+        // Check if string is already interned
+        if (self.string_intern_pool.get(str)) |interned| {
+            // Return reference to existing string
+            const box = try self.allocator.create(types.gc.Box(*types.PHPString));
+            box.* = .{
+                .ref_count = 1,
+                .gc_info = .{},
+                .data = interned,
+            };
+            return Value{ .tag = .string, .data = .{ .string = box } };
+        }
+        
+        // Create new interned string
+        const php_string = try types.PHPString.init(self.allocator, str);
+        const key = try self.allocator.dupe(u8, str);
+        try self.string_intern_pool.put(key, php_string);
+        
+        const box = try self.allocator.create(types.gc.Box(*types.PHPString));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = php_string,
+        };
+        
+        return Value{ .tag = .string, .data = .{ .string = box } };
     }
     
     pub fn setCurrentLocation(self: *VM, file: []const u8, line: u32) void {
@@ -551,7 +916,24 @@ pub const VM = struct {
         self.current_line = line;
     }
     
-    pub fn throwException(self: *VM, exception: *PHPException) !Value {
+    // Enhanced error handling with better context
+    pub fn throwExceptionWithContext(self: *VM, exception: *PHPException) !Value {
+        // Add current call stack to exception
+        try self.addCallStackToException(exception);
+        
+        // Log error to context
+        const stack_trace = try self.generateStackTrace();
+        defer self.allocator.free(stack_trace);
+        
+        try self.error_context.addError(
+            self.allocator,
+            .fatal_error, // Map exception type to error type
+            exception.message.data,
+            exception.file.data,
+            exception.line,
+            stack_trace
+        );
+        
         // Check if we're in a try-catch block
         if (self.try_catch_stack.items.len > 0) {
             var context = &self.try_catch_stack.items[self.try_catch_stack.items.len - 1];
@@ -569,6 +951,69 @@ pub const VM = struct {
         exception.deinit(self.allocator);
         try result;
         return error.UncaughtException;
+    }
+    
+    fn addCallStackToException(self: *VM, exception: *PHPException) !void {
+        var stack_frames = std.ArrayList(exceptions.StackFrame){};
+        defer stack_frames.deinit(self.allocator);
+        
+        // Add current location
+        const current_frame = try exceptions.StackFrame.init(
+            self.allocator,
+            "main",
+            self.current_file,
+            self.current_line,
+            0
+        );
+        try stack_frames.append(self.allocator, current_frame);
+        
+        // Add call stack frames
+        for (self.call_stack.items) |frame| {
+            const stack_frame = try exceptions.StackFrame.init(
+                self.allocator,
+                frame.function_name,
+                frame.file,
+                frame.line,
+                0
+            );
+            try stack_frames.append(self.allocator, stack_frame);
+        }
+        
+        try exception.setTrace(self.allocator, stack_frames.items);
+    }
+    
+    fn generateStackTrace(self: *VM) ![]u8 {
+        var trace = std.ArrayList(u8){};
+        defer trace.deinit(self.allocator);
+        
+        // Add current location
+        const current_line = try std.fmt.allocPrint(self.allocator, "#0 {s}({d}): main\n", .{ self.current_file, self.current_line });
+        defer self.allocator.free(current_line);
+        try trace.appendSlice(self.allocator, current_line);
+        
+        // Add call stack
+        for (self.call_stack.items, 1..) |frame, i| {
+            const frame_line = try std.fmt.allocPrint(self.allocator, "#{d} {s}({d}): {s}\n", .{ i, frame.file, frame.line, frame.function_name });
+            defer self.allocator.free(frame_line);
+            try trace.appendSlice(self.allocator, frame_line);
+        }
+        
+        return trace.toOwnedSlice(self.allocator);
+    }
+    
+    pub fn pushCallFrame(self: *VM, function_name: []const u8, file: []const u8, line: u32) !void {
+        const frame = CallFrame.init(self.allocator, function_name, file, line);
+        try self.call_stack.append(self.allocator, frame);
+    }
+    
+    pub fn popCallFrame(self: *VM) void {
+        if (self.call_stack.items.len > 0) {
+            _ = self.call_stack.pop();
+        }
+    }
+    
+    pub fn throwException(self: *VM, exception: *PHPException) !Value {
+        return self.throwExceptionWithContext(exception);
     }
     
     pub fn handleError(self: *VM, error_type: ErrorType, message: []const u8) !void {
@@ -603,6 +1048,9 @@ pub const VM = struct {
     }
     
     pub fn createObject(self: *VM, class_name: []const u8) !Value {
+        const start_time = std.time.nanoTimestamp();
+        self.execution_stats.memory_allocations += 1;
+        
         const class = self.getClass(class_name) orelse {
             const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
             return self.throwException(exception);
@@ -617,13 +1065,11 @@ pub const VM = struct {
         const value = try Value.initObjectWithManager(&self.memory_manager, class);
         const object = value.data.object.data;
         
-        // Initialize properties with default values
-        var prop_iterator = class.properties.iterator();
-        while (prop_iterator.next()) |entry| {
-            const property = entry.value_ptr.*;
-            if (property.default_value) |default_val| {
-                try object.setProperty(entry.key_ptr.*, default_val);
-            }
+        // Initialize properties with default values (optimized)
+        if (self.optimization_flags.enable_fast_property_access) {
+            try self.initializeObjectPropertiesOptimized(object, class);
+        } else {
+            try self.initializeObjectProperties(object, class);
         }
         
         // Call constructor if it exists
@@ -631,17 +1077,63 @@ pub const VM = struct {
             _ = try self.callObjectMethod(value, "__construct", &[_]Value{});
         }
         
+        const end_time = std.time.nanoTimestamp();
+        self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        
         return value;
     }
     
+    fn initializeObjectProperties(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
+        _ = self; // Unused in this simplified implementation
+        var prop_iterator = class.properties.iterator();
+        while (prop_iterator.next()) |entry| {
+            const property = entry.value_ptr.*;
+            if (property.default_value) |default_val| {
+                try object.setProperty(entry.key_ptr.*, default_val);
+            }
+        }
+    }
+    
+    fn initializeObjectPropertiesOptimized(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
+        _ = self; // Unused in this simplified implementation
+        // Pre-allocate property map with expected size
+        const expected_size = class.properties.count();
+        try object.properties.ensureTotalCapacity(expected_size);
+        
+        var prop_iterator = class.properties.iterator();
+        while (prop_iterator.next()) |entry| {
+            const property = entry.value_ptr.*;
+            if (property.default_value) |default_val| {
+                // Use putAssumeCapacity for better performance
+                object.properties.putAssumeCapacity(entry.key_ptr.*, default_val);
+            }
+        }
+    }
+    
     pub fn callObjectMethod(self: *VM, object_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const start_time = std.time.nanoTimestamp();
+        self.execution_stats.function_calls += 1;
+        
         if (object_value.tag != .object) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Method call on non-object", self.current_file, self.current_line);
             return self.throwException(exception);
         }
         
         const object = object_value.data.object.data;
-        return object.callMethod(self, method_name, args);
+        
+        // Push call frame for better error reporting
+        const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ object.class.name.data, method_name });
+        defer self.allocator.free(full_method_name);
+        
+        try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
+        defer self.popCallFrame();
+        
+        const result = try object.callMethod(self, method_name, args);
+        
+        const end_time = std.time.nanoTimestamp();
+        self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        
+        return result;
     }
     
     pub fn getObjectProperty(self: *VM, object_value: Value, property_name: []const u8) !Value {
@@ -679,6 +1171,13 @@ pub const VM = struct {
     }
 
     pub fn callUserFunction(self: *VM, function: *types.UserFunction, args: []const Value) !Value {
+        const start_time = std.time.nanoTimestamp();
+        self.execution_stats.function_calls += 1;
+        
+        // Push call frame for better error reporting
+        try self.pushCallFrame(function.name.data, self.current_file, self.current_line);
+        defer self.popCallFrame();
+        
         // Validate arguments
         try function.validateArguments(args);
         
@@ -695,15 +1194,44 @@ pub const VM = struct {
         
         // Create new environment for function execution
         // This would execute the function body in a real implementation
-        return Value.initNull();
+        const result = Value.initNull();
+        
+        const end_time = std.time.nanoTimestamp();
+        self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        
+        return result;
     }
     
     pub fn callClosure(self: *VM, closure: *types.Closure, args: []const Value) !Value {
-        return closure.call(self, args);
+        const start_time = std.time.nanoTimestamp();
+        self.execution_stats.function_calls += 1;
+        
+        // Push call frame
+        try self.pushCallFrame("closure", self.current_file, self.current_line);
+        defer self.popCallFrame();
+        
+        const result = try closure.call(self, args);
+        
+        const end_time = std.time.nanoTimestamp();
+        self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        
+        return result;
     }
     
     pub fn callArrowFunction(self: *VM, arrow_function: *types.ArrowFunction, args: []const Value) !Value {
-        return arrow_function.call(self, args);
+        const start_time = std.time.nanoTimestamp();
+        self.execution_stats.function_calls += 1;
+        
+        // Push call frame
+        try self.pushCallFrame("arrow_function", self.current_file, self.current_line);
+        defer self.popCallFrame();
+        
+        const result = try arrow_function.call(self, args);
+        
+        const end_time = std.time.nanoTimestamp();
+        self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        
+        return result;
     }
     
     pub fn createClosure(self: *VM, function: types.UserFunction, captured_vars: []const CapturedVar) !Value {
@@ -833,108 +1361,143 @@ pub const VM = struct {
     }
     
     fn evaluateBinaryOperation(self: *VM, left: Value, op: Token.Tag, right: Value) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
         return switch (op) {
-            .plus => {
-                // Addition
-                if (left.tag == .integer and right.tag == .integer) {
-                    return Value.initInt(left.data.integer + right.data.integer);
-                } else if (left.tag == .float and right.tag == .float) {
-                    return Value.initFloat(left.data.float + right.data.float);
-                } else if (left.tag == .integer and right.tag == .float) {
-                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) + right.data.float);
-                } else if (left.tag == .float and right.tag == .integer) {
-                    return Value.initFloat(left.data.float + @as(f64, @floatFromInt(right.data.integer)));
-                } else if (left.tag == .string and right.tag == .string) {
-                    // String concatenation - use proper string concatenation instead of allocPrint
-                    const left_str = left.data.string.data.data;
-                    const right_str = right.data.string.data.data;
-                    const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
-                    defer self.allocator.free(result); // Safe to free - initStringWithManager will copy
-                    return Value.initStringWithManager(&self.memory_manager, result);
-                } else {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for addition", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-            },
-            .minus => {
-                // Subtraction
-                if (left.tag == .integer and right.tag == .integer) {
-                    return Value.initInt(left.data.integer - right.data.integer);
-                } else if (left.tag == .float and right.tag == .float) {
-                    return Value.initFloat(left.data.float - right.data.float);
-                } else if (left.tag == .integer and right.tag == .float) {
-                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) - right.data.float);
-                } else if (left.tag == .float and right.tag == .integer) {
-                    return Value.initFloat(left.data.float - @as(f64, @floatFromInt(right.data.integer)));
-                } else {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for subtraction", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-            },
-            .asterisk => {
-                // Multiplication
-                if (left.tag == .integer and right.tag == .integer) {
-                    return Value.initInt(left.data.integer * right.data.integer);
-                } else if (left.tag == .float and right.tag == .float) {
-                    return Value.initFloat(left.data.float * right.data.float);
-                } else if (left.tag == .integer and right.tag == .float) {
-                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) * right.data.float);
-                } else if (left.tag == .float and right.tag == .integer) {
-                    return Value.initFloat(left.data.float * @as(f64, @floatFromInt(right.data.integer)));
-                } else {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for multiplication", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-            },
-            .slash => {
-                // Division
-                if (left.tag == .integer and right.tag == .integer) {
-                    if (right.data.integer == 0) {
-                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-                        return self.throwException(exception);
-                    }
-                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / @as(f64, @floatFromInt(right.data.integer)));
-                } else if (left.tag == .float and right.tag == .float) {
-                    if (right.data.float == 0.0) {
-                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-                        return self.throwException(exception);
-                    }
-                    return Value.initFloat(left.data.float / right.data.float);
-                } else if (left.tag == .integer and right.tag == .float) {
-                    if (right.data.float == 0.0) {
-                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-                        return self.throwException(exception);
-                    }
-                    return Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / right.data.float);
-                } else if (left.tag == .float and right.tag == .integer) {
-                    if (right.data.integer == 0) {
-                        const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-                        return self.throwException(exception);
-                    }
-                    return Value.initFloat(left.data.float / @as(f64, @floatFromInt(right.data.integer)));
-                } else {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for division", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-            },
-            .dot => {
-                // String concatenation
-                const left_result = try self.valueToString(left);
-                defer if (left_result.needs_free) self.allocator.free(left_result.str);
-                
-                const right_result = try self.valueToString(right);
-                defer if (right_result.needs_free) self.allocator.free(right_result.str);
-                
-                const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_result.str, right_result.str });
-                defer self.allocator.free(result); // Safe to free - initStringWithManager will copy
-                
-                return Value.initStringWithManager(&self.memory_manager, result);
-            },
+            .plus => self.evaluateAddition(left, right),
+            .minus => self.evaluateSubtraction(left, right),
+            .asterisk => self.evaluateMultiplication(left, right),
+            .slash => self.evaluateDivision(left, right),
+            .dot => self.evaluateConcatenation(left, right),
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported binary operator", self.current_file, self.current_line);
                 return self.throwException(exception);
             },
         };
+    }
+    
+    fn evaluateAddition(self: *VM, left: Value, right: Value) !Value {
+        return switch (left.tag) {
+            .integer => switch (right.tag) {
+                .integer => Value.initInt(left.data.integer + right.data.integer),
+                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) + right.data.float),
+                else => self.handleInvalidOperands("addition"),
+            },
+            .float => switch (right.tag) {
+                .integer => Value.initFloat(left.data.float + @as(f64, @floatFromInt(right.data.integer))),
+                .float => Value.initFloat(left.data.float + right.data.float),
+                else => self.handleInvalidOperands("addition"),
+            },
+            .string => switch (right.tag) {
+                .string => self.concatenateStrings(left, right),
+                else => self.handleInvalidOperands("addition"),
+            },
+            else => self.handleInvalidOperands("addition"),
+        };
+    }
+    
+    fn evaluateSubtraction(self: *VM, left: Value, right: Value) !Value {
+        return switch (left.tag) {
+            .integer => switch (right.tag) {
+                .integer => Value.initInt(left.data.integer - right.data.integer),
+                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) - right.data.float),
+                else => self.handleInvalidOperands("subtraction"),
+            },
+            .float => switch (right.tag) {
+                .integer => Value.initFloat(left.data.float - @as(f64, @floatFromInt(right.data.integer))),
+                .float => Value.initFloat(left.data.float - right.data.float),
+                else => self.handleInvalidOperands("subtraction"),
+            },
+            else => self.handleInvalidOperands("subtraction"),
+        };
+    }
+    
+    fn evaluateMultiplication(self: *VM, left: Value, right: Value) !Value {
+        return switch (left.tag) {
+            .integer => switch (right.tag) {
+                .integer => Value.initInt(left.data.integer * right.data.integer),
+                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) * right.data.float),
+                else => self.handleInvalidOperands("multiplication"),
+            },
+            .float => switch (right.tag) {
+                .integer => Value.initFloat(left.data.float * @as(f64, @floatFromInt(right.data.integer))),
+                .float => Value.initFloat(left.data.float * right.data.float),
+                else => self.handleInvalidOperands("multiplication"),
+            },
+            else => self.handleInvalidOperands("multiplication"),
+        };
+    }
+    
+    fn evaluateDivision(self: *VM, left: Value, right: Value) !Value {
+        // Check for division by zero first
+        const is_zero = switch (right.tag) {
+            .integer => right.data.integer == 0,
+            .float => right.data.float == 0.0,
+            else => false,
+        };
+        
+        if (is_zero) {
+            const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        return switch (left.tag) {
+            .integer => switch (right.tag) {
+                .integer => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / @as(f64, @floatFromInt(right.data.integer))),
+                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / right.data.float),
+                else => self.handleInvalidOperands("division"),
+            },
+            .float => switch (right.tag) {
+                .integer => Value.initFloat(left.data.float / @as(f64, @floatFromInt(right.data.integer))),
+                .float => Value.initFloat(left.data.float / right.data.float),
+                else => self.handleInvalidOperands("division"),
+            },
+            else => self.handleInvalidOperands("division"),
+        };
+    }
+    
+    fn evaluateConcatenation(self: *VM, left: Value, right: Value) !Value {
+        const left_result = try self.valueToString(left);
+        defer if (left_result.needs_free) self.allocator.free(left_result.str);
+        
+        const right_result = try self.valueToString(right);
+        defer if (right_result.needs_free) self.allocator.free(right_result.str);
+        
+        if (self.optimization_flags.enable_string_interning) {
+            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_result.str, right_result.str });
+            defer self.allocator.free(result);
+            return self.createInternedString(result);
+        } else {
+            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_result.str, right_result.str });
+            defer self.allocator.free(result);
+            return Value.initStringWithManager(&self.memory_manager, result);
+        }
+    }
+    
+    fn concatenateStrings(self: *VM, left: Value, right: Value) !Value {
+        const left_str = left.data.string.data.data;
+        const right_str = right.data.string.data.data;
+        
+        if (self.optimization_flags.enable_string_interning) {
+            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
+            defer self.allocator.free(result);
+            return self.createInternedString(result);
+        } else {
+            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
+            defer self.allocator.free(result);
+            return Value.initStringWithManager(&self.memory_manager, result);
+        }
+    }
+    
+    fn handleInvalidOperands(self: *VM, operation: []const u8) !Value {
+        const message = try std.fmt.allocPrint(self.allocator, "Invalid operands for {s}", .{operation});
+        defer self.allocator.free(message);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, message, self.current_file, self.current_line);
+        return self.throwException(exception);
     }
     
     fn valueToString(self: *VM, value: Value) !struct { str: []const u8, needs_free: bool } {
@@ -967,6 +1530,12 @@ pub const VM = struct {
     }
 
     fn eval(self: *VM, node: ast.Node.Index) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
         const ast_node = self.context.nodes.items[node];
 
         switch (ast_node.tag) {
@@ -974,176 +1543,34 @@ pub const VM = struct {
                 var last_val = Value.initNull();
                 for (ast_node.data.root.stmts) |stmt| {
                     // Release the previous value before evaluating the next one
-                    switch (last_val.tag) {
-                        .string => last_val.data.string.release(self.allocator),
-                        .array => last_val.data.array.release(self.allocator),
-                        .object => last_val.data.object.release(self.allocator),
-                        .resource => last_val.data.resource.release(self.allocator),
-                        .user_function => last_val.data.user_function.release(self.allocator),
-                        .closure => last_val.data.closure.release(self.allocator),
-                        .arrow_function => last_val.data.arrow_function.release(self.allocator),
-                        else => {},
-                    }
+                    self.releaseValue(last_val);
                     last_val = try self.eval(stmt);
                 }
                 return last_val;
             },
-            .class_decl => {
-                const class_data = ast_node.data.container_decl;
-                const class_name = self.context.string_pool.keys()[class_data.name];
+            .literal_string => {
+                const str_id = ast_node.data.literal_string.value;
+                const str_val = self.context.string_pool.keys()[str_id];
                 
-                // Create PHP string for class name
-                const php_class_name = try types.PHPString.init(self.allocator, class_name);
-                
-                // Create the class
-                const php_class = try self.allocator.create(types.PHPClass);
-                php_class.* = types.PHPClass.init(self.allocator, php_class_name);
-                
-                // Set modifiers
-                php_class.modifiers.is_abstract = class_data.modifiers.is_abstract;
-                php_class.modifiers.is_final = class_data.modifiers.is_final;
-                php_class.modifiers.is_readonly = class_data.modifiers.is_readonly;
-                
-                // Process class members (properties and methods)
-                for (class_data.members) |member_idx| {
-                    const member_node = self.context.nodes.items[member_idx];
-                    switch (member_node.tag) {
-                        .property_decl => {
-                            const prop_data = member_node.data.property_decl;
-                            const prop_name = self.context.string_pool.keys()[prop_data.name];
-                            const php_prop_name = try types.PHPString.init(self.allocator, prop_name);
-                            
-                            var property = types.Property.init(php_prop_name);
-                            property.modifiers.visibility = if (prop_data.modifiers.is_public) .public 
-                                                          else if (prop_data.modifiers.is_protected) .protected 
-                                                          else .private;
-                            property.modifiers.is_static = prop_data.modifiers.is_static;
-                            property.modifiers.is_readonly = prop_data.modifiers.is_readonly;
-                            property.modifiers.is_final = prop_data.modifiers.is_final;
-                            
-                            // Set default value if provided
-                            if (prop_data.default_value) |default_idx| {
-                                property.default_value = try self.eval(default_idx);
-                            }
-                            
-                            try php_class.properties.put(prop_name, property);
-                        },
-                        .method_decl => {
-                            const method_data = member_node.data.method_decl;
-                            const method_name = self.context.string_pool.keys()[method_data.name];
-                            const php_method_name = try types.PHPString.init(self.allocator, method_name);
-                            
-                            var method = types.Method.init(php_method_name);
-                            method.modifiers.visibility = if (method_data.modifiers.is_public) .public 
-                                                        else if (method_data.modifiers.is_protected) .protected 
-                                                        else .private;
-                            method.modifiers.is_static = method_data.modifiers.is_static;
-                            method.modifiers.is_final = method_data.modifiers.is_final;
-                            method.modifiers.is_abstract = method_data.modifiers.is_abstract;
-                            
-                            // Store method body reference (simplified)
-                            method.body = if (method_data.body) |body_idx| @ptrFromInt(body_idx) else null;
-                            
-                            try php_class.methods.put(method_name, method);
-                        },
-                        else => {
-                            // Skip other member types for now
-                        },
-                    }
+                if (self.optimization_flags.enable_string_interning) {
+                    return self.createInternedString(str_val);
+                } else {
+                    return Value.initStringWithManager(&self.memory_manager, str_val);
                 }
-                
-                // Register the class
-                try self.defineClass(class_name, php_class);
-                
-                return Value.initNull();
             },
-            .function_call => {
-                const name_node = self.context.nodes.items[ast_node.data.function_call.name];
-
-                if (name_node.tag != .variable) {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid function name", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-                const name_id = name_node.data.variable.name;
+            .literal_int => {
+                return Value.initInt(ast_node.data.literal_int.value);
+            },
+            .literal_float => {
+                return Value.initFloat(ast_node.data.literal_float.value);
+            },
+            .variable => {
+                const name_id = ast_node.data.variable.name;
                 const name = self.context.string_pool.keys()[name_id];
-
-                // Check if it's a class instantiation (new ClassName())
-                if (std.mem.eql(u8, name, "new")) {
-                    if (ast_node.data.function_call.args.len == 0) {
-                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Missing class name for instantiation", self.current_file, self.current_line);
-                        return self.throwException(exception);
-                    }
-                    
-                    const class_name_node = self.context.nodes.items[ast_node.data.function_call.args[0]];
-                    if (class_name_node.tag != .variable) {
-                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid class name", self.current_file, self.current_line);
-                        return self.throwException(exception);
-                    }
-                    
-                    const class_name_id = class_name_node.data.variable.name;
-                    const class_name = self.context.string_pool.keys()[class_name_id];
-                    
-                    return self.createObject(class_name);
-                }
-
-                // First check if it's a standard library function
-                if (self.stdlib.getFunction(name)) |builtin_func| {
-                    var args = try std.ArrayList(Value).initCapacity(self.allocator, 0);
-                    defer args.deinit(self.allocator);
-
-                    for (ast_node.data.function_call.args) |arg_node_idx| {
-                        try args.append(self.allocator, try self.eval(arg_node_idx));
-                    }
-
-                    return builtin_func.call(self, args.items);
-                }
-
-                // Then check global functions
-                const function_val = self.global.get(name) orelse {
-                    const exception = try ExceptionFactory.createUndefinedFunctionError(self.allocator, name, self.current_file, self.current_line);
+                return self.global.get(name) orelse {
+                    const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
                     return self.throwException(exception);
                 };
-
-                var args = try std.ArrayList(Value).initCapacity(self.allocator, 0);
-                defer args.deinit(self.allocator);
-
-                for (ast_node.data.function_call.args) |arg_node_idx| {
-                    try args.append(self.allocator, try self.eval(arg_node_idx));
-                }
-
-                return switch (function_val.tag) {
-                    .builtin_function => {
-                        const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.data.builtin_function));
-                        return function(self, args.items);
-                    },
-                    .user_function => {
-                        return self.callUserFunction(function_val.data.user_function.data, args.items);
-                    },
-                    .closure => {
-                        return self.callClosure(function_val.data.closure.data, args.items);
-                    },
-                    .arrow_function => {
-                        return self.callArrowFunction(function_val.data.arrow_function.data, args.items);
-                    },
-                    else => {
-                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Not a callable function", self.current_file, self.current_line);
-                        return self.throwException(exception);
-                    },
-                };
-            },
-            .method_call => {
-                const method_data = ast_node.data.method_call;
-                const target_value = try self.eval(method_data.target);
-                const method_name = self.context.string_pool.keys()[method_data.method_name];
-                
-                var args = try std.ArrayList(Value).initCapacity(self.allocator, 0);
-                defer args.deinit(self.allocator);
-
-                for (method_data.args) |arg_node_idx| {
-                    try args.append(self.allocator, try self.eval(arg_node_idx));
-                }
-                
-                return self.callObjectMethod(target_value, method_name, args.items);
             },
             .assignment => {
                 const target_node = self.context.nodes.items[ast_node.data.assignment.target];
@@ -1162,322 +1589,507 @@ pub const VM = struct {
 
                 return value;
             },
-            .variable => {
-                const name_id = ast_node.data.variable.name;
-                const name = self.context.string_pool.keys()[name_id];
-                return self.global.get(name) orelse {
-                    const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
-                    return self.throwException(exception);
-                };
-            },
-            .literal_string => {
-                const str_id = ast_node.data.literal_string.value;
-                const str_val = self.context.string_pool.keys()[str_id];
-                return Value.initStringWithManager(&self.memory_manager, str_val);
-            },
             .echo_stmt => {
                 const value = try self.eval(ast_node.data.echo_stmt.expr);
-                defer {
-                    // Release the value after printing
-                    switch (value.tag) {
-                        .string => value.data.string.release(self.allocator),
-                        .array => value.data.array.release(self.allocator),
-                        .object => value.data.object.release(self.allocator),
-                        .resource => value.data.resource.release(self.allocator),
-                        .user_function => value.data.user_function.release(self.allocator),
-                        .closure => value.data.closure.release(self.allocator),
-                        .arrow_function => value.data.arrow_function.release(self.allocator),
-                        else => {},
-                    }
-                }
+                defer self.releaseValue(value);
+                
                 try value.print();
                 std.debug.print("\n", .{});
                 return Value.initNull();
             },
+            .function_call => {
+                return self.evaluateFunctionCall(ast_node.data.function_call);
+            },
+            .method_call => {
+                return self.evaluateMethodCall(ast_node.data.method_call);
+            },
             .array_init => {
-                const php_array_value = try Value.initArrayWithManager(&self.memory_manager);
-                const php_array = php_array_value.data.array.data;
-                
-                for (ast_node.data.array_init.elements, 0..) |item_node_idx, i| {
-                    const value = try self.eval(item_node_idx);
-                    const key = types.ArrayKey{ .integer = @intCast(i) };
-                    try php_array.set(key, value);
-                }
-                
-                return php_array_value;
+                return self.evaluateArrayInit(ast_node.data.array_init);
             },
-            .literal_int => {
-                return Value.initInt(ast_node.data.literal_int.value);
-            },
-            .literal_float => {
-                return Value.initFloat(ast_node.data.literal_float.value);
+            .class_decl => {
+                return self.evaluateClassDeclaration(ast_node.data.container_decl);
             },
             .try_stmt => {
-                const try_data = ast_node.data.try_stmt;
+                return self.evaluateTryStatement(ast_node.data.try_stmt);
+            },
+            .throw_stmt => {
+                return self.evaluateThrowStatement(ast_node.data.throw_stmt);
+            },
+            .closure => {
+                return self.evaluateClosureCreation(ast_node.data.closure);
+            },
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported AST node type", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+    }
+    
+    fn releaseValue(self: *VM, value: Value) void {
+        switch (value.tag) {
+            .string => value.data.string.release(self.allocator),
+            .array => value.data.array.release(self.allocator),
+            .object => value.data.object.release(self.allocator),
+            .resource => value.data.resource.release(self.allocator),
+            .user_function => value.data.user_function.release(self.allocator),
+            .closure => value.data.closure.release(self.allocator),
+            .arrow_function => value.data.arrow_function.release(self.allocator),
+            else => {},
+        }
+    }
+    
+    fn evaluateFunctionCall(self: *VM, call_data: anytype) anyerror!Value {
+        const name_node = self.context.nodes.items[call_data.name];
+
+        if (name_node.tag != .variable) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid function name", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        const name_id = name_node.data.variable.name;
+        const name = self.context.string_pool.keys()[name_id];
+
+        // Check if it's a class instantiation (new ClassName())
+        if (std.mem.eql(u8, name, "new")) {
+            return self.evaluateObjectInstantiation(call_data);
+        }
+
+        // Evaluate arguments
+        var args = std.ArrayList(Value){};
+        try args.ensureTotalCapacity(self.allocator, call_data.args.len);
+        defer {
+            for (args.items) |arg| {
+                self.releaseValue(arg);
+            }
+            args.deinit(self.allocator);
+        }
+
+        for (call_data.args) |arg_node_idx| {
+            const arg_value = try self.eval(arg_node_idx);
+            try args.append(self.allocator, arg_value);
+        }
+
+        // First check if it's a standard library function (optimized lookup)
+        if (self.stdlib.getFunction(name)) |builtin_func| {
+            return builtin_func.call(self, args.items);
+        }
+
+        // Then check global functions
+        const function_val = self.global.get(name) orelse {
+            const exception = try ExceptionFactory.createUndefinedFunctionError(self.allocator, name, self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+
+        return switch (function_val.tag) {
+            .builtin_function => {
+                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.data.builtin_function));
+                return function(self, args.items);
+            },
+            .user_function => self.callUserFunction(function_val.data.user_function.data, args.items),
+            .closure => self.callClosure(function_val.data.closure.data, args.items),
+            .arrow_function => self.callArrowFunction(function_val.data.arrow_function.data, args.items),
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Not a callable function", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        };
+    }
+    
+    fn evaluateObjectInstantiation(self: *VM, call_data: anytype) !Value {
+        if (call_data.args.len == 0) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Missing class name for instantiation", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        const class_name_node = self.context.nodes.items[call_data.args[0]];
+        if (class_name_node.tag != .variable) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid class name", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        const class_name_id = class_name_node.data.variable.name;
+        const class_name = self.context.string_pool.keys()[class_name_id];
+        
+        return self.createObject(class_name);
+    }
+    
+    fn evaluateMethodCall(self: *VM, method_data: anytype) !Value {
+        const target_value = try self.eval(method_data.target);
+        defer self.releaseValue(target_value);
+        
+        const method_name = self.context.string_pool.keys()[method_data.method_name];
+        
+        var args = std.ArrayList(Value){};
+        try args.ensureTotalCapacity(self.allocator, method_data.args.len);
+        defer {
+            for (args.items) |arg| {
+                self.releaseValue(arg);
+            }
+            args.deinit(self.allocator);
+        }
+
+        for (method_data.args) |arg_node_idx| {
+            try args.append(self.allocator, try self.eval(arg_node_idx));
+        }
+        
+        return self.callObjectMethod(target_value, method_name, args.items);
+    }
+    
+    fn evaluateArrayInit(self: *VM, array_data: anytype) !Value {
+        const php_array_value = try Value.initArrayWithManager(&self.memory_manager);
+        const php_array = php_array_value.data.array.data;
+        
+        // Pre-allocate capacity for better performance
+        if (self.optimization_flags.enable_memory_pooling) {
+            try php_array.elements.ensureTotalCapacity(array_data.elements.len);
+        }
+        
+        for (array_data.elements, 0..) |item_node_idx, i| {
+            const value = try self.eval(item_node_idx);
+            const key = types.ArrayKey{ .integer = @intCast(i) };
+            try php_array.set(key, value);
+        }
+        
+        return php_array_value;
+    }
+    
+    // Missing evaluation methods implementation
+    
+    fn evaluateClassDeclaration(self: *VM, class_data: anytype) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
+        const class_name = self.context.string_pool.keys()[class_data.name];
+        const php_class_name = try types.PHPString.init(self.allocator, class_name);
+        
+        // Create new class
+        var php_class = types.PHPClass.init(self.allocator, php_class_name);
+        
+        // Set class modifiers
+        php_class.modifiers = .{
+            .is_abstract = class_data.modifiers.is_abstract,
+            .is_final = class_data.modifiers.is_final,
+            .is_readonly = class_data.modifiers.is_readonly,
+        };
+        
+        // Process extends clause
+        if (class_data.extends) |extends_idx| {
+            const extends_node = self.context.nodes.items[extends_idx];
+            if (extends_node.tag == .variable) {
+                const parent_name = self.context.string_pool.keys()[extends_node.data.variable.name];
+                if (self.getClass(parent_name)) |parent_class| {
+                    php_class.parent = parent_class;
+                } else {
+                    const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, parent_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            }
+        }
+        
+        // Process implements clause (simplified - just skip for now)
+        for (class_data.implements) |interface_idx| {
+            _ = interface_idx; // Skip interface processing for now
+        }
+        
+        // Process class members
+        for (class_data.members) |member_idx| {
+            const member_node = self.context.nodes.items[member_idx];
+            
+            switch (member_node.tag) {
+                .method_decl => {
+                    try self.processMethodDeclaration(&php_class, member_node.data.method_decl);
+                },
+                .property_decl => {
+                    try self.processPropertyDeclaration(&php_class, member_node.data.property_decl);
+                },
+                .const_decl => {
+                    try self.processConstantDeclaration(&php_class, member_node.data.const_decl);
+                },
+                else => {
+                    // Skip unsupported member types
+                },
+            }
+        }
+        
+        // Register the class
+        const class_ptr = try self.allocator.create(types.PHPClass);
+        class_ptr.* = php_class;
+        try self.defineClass(class_name, class_ptr);
+        
+        return Value.initNull();
+    }
+    
+    fn processMethodDeclaration(self: *VM, class: *types.PHPClass, method_data: anytype) !void {
+        const method_name = self.context.string_pool.keys()[method_data.name];
+        const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        
+        // Create method
+        var method = types.Method.init(php_method_name);
+        
+        // Set method modifiers
+        method.modifiers = .{
+            .is_static = method_data.modifiers.is_static,
+            .is_final = method_data.modifiers.is_final,
+            .is_abstract = method_data.modifiers.is_abstract,
+            .visibility = if (method_data.modifiers.is_public) .public 
+                         else if (method_data.modifiers.is_protected) .protected 
+                         else .private,
+        };
+        
+        // Process parameters
+        var parameters = try self.allocator.alloc(types.Method.Parameter, method_data.params.len);
+        for (method_data.params, 0..) |param_idx, i| {
+            const param_node = self.context.nodes.items[param_idx];
+            if (param_node.tag == .parameter) {
+                const param_data = param_node.data.parameter;
+                const param_name = self.context.string_pool.keys()[param_data.name];
+                const php_param_name = try types.PHPString.init(self.allocator, param_name);
                 
-                // Enter try-catch context
-                try self.enterTryCatch();
-                defer self.exitTryCatch();
+                parameters[i] = types.Method.Parameter.init(php_param_name);
+                parameters[i].is_variadic = param_data.is_variadic;
+                parameters[i].is_reference = param_data.is_reference;
                 
-                var result = Value.initNull();
-                var exception_caught = false;
+                // Process parameter type if present
+                if (param_data.type) |type_idx| {
+                    // Would process type information here
+                    _ = type_idx;
+                }
+            }
+        }
+        method.parameters = parameters;
+        
+        // Set method body
+        if (method_data.body) |body_idx| {
+            method.body = @ptrFromInt(body_idx);
+        }
+        
+        // Add method to class (simplified - just store in methods map)
+        try class.methods.put(method_name, method);
+    }
+    
+    fn processPropertyDeclaration(self: *VM, class: *types.PHPClass, property_data: anytype) !void {
+        const property_name = self.context.string_pool.keys()[property_data.name];
+        
+        // Create property
+        const property_name_str = try types.PHPString.init(self.allocator, property_name);
+        var property = types.Property.init(property_name_str);
+        
+        // Set property modifiers
+        property.modifiers = .{
+            .is_static = property_data.modifiers.is_static,
+            .is_readonly = property_data.modifiers.is_readonly,
+            .visibility = if (property_data.modifiers.is_public) .public 
+                         else if (property_data.modifiers.is_protected) .protected 
+                         else .private,
+        };
+        
+        // Set default value if present
+        if (property_data.default_value) |default_idx| {
+            property.default_value = try self.eval(default_idx);
+        }
+        
+        // Process property hooks if present
+        for (property_data.hooks) |hook_idx| {
+            const hook_node = self.context.nodes.items[hook_idx];
+            if (hook_node.tag == .property_hook) {
+                const hook_data = hook_node.data.property_hook;
+                const hook_name = self.context.string_pool.keys()[hook_data.name];
                 
-                // Execute try block
-                result = self.eval(try_data.body) catch |err| blk: {
-                    // Check if it's a PHP exception
-                    if (err == error.UncaughtException) {
-                        // Try to match with catch clauses
-                        for (try_data.catch_clauses) |catch_idx| {
-                            const catch_node = self.context.nodes.items[catch_idx];
-                            if (catch_node.tag == .catch_clause) {
-                                const catch_data = catch_node.data.catch_clause;
-                                
-                                // For now, catch all exceptions (simplified)
-                                exception_caught = true;
-                                
-                                // Set exception variable if specified
-                                if (catch_data.variable) |var_idx| {
-                                    const var_node = self.context.nodes.items[var_idx];
-                                    if (var_node.tag == .variable) {
-                                        const var_name = self.context.string_pool.keys()[var_node.data.variable.name];
-                                        // Create exception object (simplified)
-                                        const exception_value = Value.initNull();
-                                        try self.global.set(var_name, exception_value);
-                                    }
-                                }
-                                
-                                // Execute catch block
-                                result = try self.eval(catch_data.body);
-                                break;
+                if (std.mem.eql(u8, hook_name, "get")) {
+                    // Property hooks not implemented yet - skip
+                } else if (std.mem.eql(u8, hook_name, "set")) {
+                    // Property hooks not implemented yet - skip
+                }
+            }
+        }
+        
+        // Add property to class (simplified - just store in properties map)
+        try class.properties.put(property_name, property);
+    }
+    
+    fn processConstantDeclaration(self: *VM, class: *types.PHPClass, const_data: anytype) !void {
+        const const_name = self.context.string_pool.keys()[const_data.name];
+        const const_value = try self.eval(const_data.value);
+        
+        // Add constant to class (simplified - skip for now)
+        _ = class;
+        _ = const_name;
+        _ = const_value;
+    }
+    
+    fn evaluateTryStatement(self: *VM, try_data: anytype) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
+        // Enter try-catch context
+        try self.enterTryCatch();
+        defer self.exitTryCatch();
+        
+        var result = Value.initNull();
+        var exception_caught = false;
+        
+        // Execute try block
+        result = self.eval(try_data.body) catch |err| switch (err) {
+            // Check if it's an exception we can handle
+            error.UncaughtException => blk: {
+                exception_caught = true;
+                
+                // Try to match with catch clauses
+                for (try_data.catch_clauses) |catch_idx| {
+                    const catch_node = self.context.nodes.items[catch_idx];
+                    if (catch_node.tag == .catch_clause) {
+                        const catch_data = catch_node.data.catch_clause;
+                        
+                        // For now, catch all exceptions (simplified)
+                        // In a real implementation, would check exception type matching
+                        
+                        // Bind exception to variable if specified
+                        if (catch_data.variable) |var_idx| {
+                            const var_node = self.context.nodes.items[var_idx];
+                            if (var_node.tag == .variable) {
+                                const var_name = self.context.string_pool.keys()[var_node.data.variable.name];
+                                // Would bind the actual exception object here
+                                try self.global.set(var_name, Value.initNull());
                             }
                         }
                         
-                        if (!exception_caught) {
-                            return err; // Re-throw if not caught
-                        }
-                        
-                        break :blk result;
-                    } else {
-                        return err; // Re-throw non-PHP exceptions
-                    }
-                };
-                
-                // Execute finally block if present
-                if (try_data.finally_clause) |finally_idx| {
-                    const finally_node = self.context.nodes.items[finally_idx];
-                    if (finally_node.tag == .finally_clause) {
-                        self.executeFinally();
-                        _ = try self.eval(finally_node.data.finally_clause.body);
+                        // Execute catch block
+                        result = try self.eval(catch_data.body);
+                        exception_caught = true;
+                        break;
                     }
                 }
                 
-                return result;
-            },
-            .throw_stmt => {
-                const throw_data = ast_node.data.throw_stmt;
-                _ = try self.eval(throw_data.expression);
-                
-                // Create a generic exception (simplified)
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Thrown exception", self.current_file, self.current_line);
-                return self.throwException(exception);
-            },
-            .closure => {
-                const closure_data = ast_node.data.closure;
-                
-                // Create user function from closure data
-                const function_name = try types.PHPString.init(self.allocator, "anonymous");
-                var user_function = types.UserFunction.init(function_name);
-                
-                // Process parameters
-                var parameters = try self.allocator.alloc(types.Method.Parameter, closure_data.params.len);
-                for (closure_data.params, 0..) |param_idx, i| {
-                    const param_node = self.context.nodes.items[param_idx];
-                    if (param_node.tag == .parameter) {
-                        const param_data = param_node.data.parameter;
-                        const param_name = self.context.string_pool.keys()[param_data.name];
-                        const php_param_name = try types.PHPString.init(self.allocator, param_name);
-                        
-                        parameters[i] = types.Method.Parameter.init(php_param_name);
-                        parameters[i].is_variadic = param_data.is_variadic;
-                        parameters[i].is_reference = param_data.is_reference;
-                        
-                        // Set default value if provided
-                        // This would be implemented with proper AST evaluation
-                    }
-                }
-                user_function.parameters = parameters;
-                user_function.body = @ptrFromInt(closure_data.body);
-                
-                // Create closure with captured variables
-                var captured_vars_list = try std.ArrayList(CapturedVar).initCapacity(self.allocator, 0);
-                defer captured_vars_list.deinit(self.allocator);
-                
-                // Process capture list
-                for (closure_data.captures) |capture_idx| {
-                    const capture_node = self.context.nodes.items[capture_idx];
-                    if (capture_node.tag == .variable) {
-                        const var_name = self.context.string_pool.keys()[capture_node.data.variable.name];
-                        const var_value = self.global.get(var_name) orelse Value.initNull();
-                        try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value });
-                    }
+                if (!exception_caught) {
+                    return err; // Re-throw if no catch clause handled it
                 }
                 
-                return self.createClosure(user_function, captured_vars_list.items);
+                break :blk result;
             },
-            .arrow_function => {
-                const arrow_data = ast_node.data.arrow_function;
-                
-                // Process parameters
-                var parameters = try self.allocator.alloc(types.Method.Parameter, arrow_data.params.len);
-                for (arrow_data.params, 0..) |param_idx, i| {
-                    const param_node = self.context.nodes.items[param_idx];
-                    if (param_node.tag == .parameter) {
-                        const param_data = param_node.data.parameter;
-                        const param_name = self.context.string_pool.keys()[param_data.name];
-                        const php_param_name = try types.PHPString.init(self.allocator, param_name);
-                        
-                        parameters[i] = types.Method.Parameter.init(php_param_name);
-                    }
-                }
-                
-                return self.createArrowFunction(parameters, @ptrFromInt(arrow_data.body));
-            },
-            .function_decl => {
-                const func_data = ast_node.data.function_decl;
-                const func_name = self.context.string_pool.keys()[func_data.name];
-                const php_func_name = try types.PHPString.init(self.allocator, func_name);
-                
-                var user_function = types.UserFunction.init(php_func_name);
-                
-                // Process parameters
-                var parameters = try self.allocator.alloc(types.Method.Parameter, func_data.params.len);
-                var min_args: u32 = 0;
-                var max_args: ?u32 = @intCast(func_data.params.len);
-                var is_variadic = false;
-                
-                for (func_data.params, 0..) |param_idx, i| {
-                    const param_node = self.context.nodes.items[param_idx];
-                    if (param_node.tag == .parameter) {
-                        const param_data = param_node.data.parameter;
-                        const param_name = self.context.string_pool.keys()[param_data.name];
-                        const php_param_name = try types.PHPString.init(self.allocator, param_name);
-                        
-                        parameters[i] = types.Method.Parameter.init(php_param_name);
-                        parameters[i].is_variadic = param_data.is_variadic;
-                        parameters[i].is_reference = param_data.is_reference;
-                        
-                        if (param_data.is_variadic) {
-                            is_variadic = true;
-                            max_args = null; // Unlimited for variadic functions
-                        }
-                        
-                        // Count required parameters (those without default values)
-                        if (parameters[i].default_value == null and !param_data.is_variadic) {
-                            min_args += 1;
-                        }
-                    }
-                }
-                
-                user_function.parameters = parameters;
-                user_function.body = @ptrFromInt(func_data.body);
-                user_function.is_variadic = is_variadic;
-                user_function.min_args = min_args;
-                user_function.max_args = max_args;
-                
-                // Store function in global scope using memory manager
-                const box = try self.memory_manager.allocUserFunction(user_function);
-                const function_value = Value{ .tag = .user_function, .data = .{ .user_function = box } };
-                try self.global.set(func_name, function_value);
-                
-                return Value.initNull();
-            },
-            .pipe_expr => {
-                const pipe_data = ast_node.data.pipe_expr;
-                const left_value = try self.eval(pipe_data.left);
-                const right_value = try self.eval(pipe_data.right);
-                
-                // Import PHP 8.5 features
-                const php85 = @import("php85_features.zig");
-                return php85.PipeOperator.evaluate(self, left_value, right_value);
-            },
-            .clone_with_expr => {
-                const clone_data = ast_node.data.clone_with_expr;
-                const object_value = try self.eval(clone_data.object);
-                const properties_value = try self.eval(clone_data.properties);
-                
-                if (object_value.tag != .object) {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Clone with requires an object", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-                
-                if (properties_value.tag != .array) {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Clone with requires an array of properties", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-                
-                // Import PHP 8.5 features
-                const php85 = @import("php85_features.zig");
-                const new_object = try php85.CloneWith.cloneWithProperties(self, object_value.data.object.data, properties_value.data.array.data);
-                
-                return Value.initObjectWithManager(&self.memory_manager, new_object.class);
-            },
-            .binary_expr => {
-                const binary_data = ast_node.data.binary_expr;
-                const left_value = try self.eval(binary_data.lhs);
-                defer {
-                    // Release left value after operation
-                    switch (left_value.tag) {
-                        .string => left_value.data.string.release(self.allocator),
-                        .array => left_value.data.array.release(self.allocator),
-                        .object => left_value.data.object.release(self.allocator),
-                        .resource => left_value.data.resource.release(self.allocator),
-                        .user_function => left_value.data.user_function.release(self.allocator),
-                        .closure => left_value.data.closure.release(self.allocator),
-                        .arrow_function => left_value.data.arrow_function.release(self.allocator),
-                        else => {},
-                    }
-                }
-                
-                const right_value = try self.eval(binary_data.rhs);
-                defer {
-                    // Release right value after operation
-                    switch (right_value.tag) {
-                        .string => right_value.data.string.release(self.allocator),
-                        .array => right_value.data.array.release(self.allocator),
-                        .object => right_value.data.object.release(self.allocator),
-                        .resource => right_value.data.resource.release(self.allocator),
-                        .user_function => right_value.data.user_function.release(self.allocator),
-                        .closure => right_value.data.closure.release(self.allocator),
-                        .arrow_function => right_value.data.arrow_function.release(self.allocator),
-                        else => {},
-                    }
-                }
-                
-                return self.evaluateBinaryOperation(left_value, binary_data.op, right_value);
-            },
-            .block => {
-                const block_data = ast_node.data.block;
-                var last_val = Value.initNull();
-                for (block_data.stmts) |stmt| {
-                    // Release the previous value before evaluating the next one
-                    switch (last_val.tag) {
-                        .string => last_val.data.string.release(self.allocator),
-                        .array => last_val.data.array.release(self.allocator),
-                        .object => last_val.data.object.release(self.allocator),
-                        .resource => last_val.data.resource.release(self.allocator),
-                        .user_function => last_val.data.user_function.release(self.allocator),
-                        .closure => last_val.data.closure.release(self.allocator),
-                        .arrow_function => last_val.data.arrow_function.release(self.allocator),
-                        else => {},
-                    }
-                    last_val = try self.eval(stmt);
-                }
-                return last_val;
-            },
-            else => {
-                std.debug.print("Unsupported node type: {s}\n", .{@tagName(ast_node.tag)});
-                return error.UnsupportedNodeType;
-            },
+            else => return err, // Re-throw non-exception errors
+        };
+        
+        // Execute finally block if present
+        if (try_data.finally_clause) |finally_idx| {
+            const finally_node = self.context.nodes.items[finally_idx];
+            if (finally_node.tag == .finally_clause) {
+                const finally_data = finally_node.data.finally_clause;
+                _ = try self.eval(finally_data.body);
+            }
         }
+        
+        return result;
+    }
+    
+    fn evaluateThrowStatement(self: *VM, throw_data: anytype) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
+        // Evaluate the expression to throw
+        const exception_value = try self.eval(throw_data.expression);
+        defer self.releaseValue(exception_value);
+        
+        // Create exception based on the value
+        const exception = switch (exception_value.tag) {
+            .object => blk: {
+                // If it's already an exception object, use it
+                const object = exception_value.data.object.data;
+                // Simplified check - just check if it has a message property
+                if (object.properties.contains("message")) {
+                    // Convert object to PHPException
+                    const message_prop = object.getProperty("message") catch (try Value.initString(self.allocator, "Exception"));
+                    const message_str = switch (message_prop.tag) {
+                        .string => message_prop.data.string.data.data,
+                        else => "Exception",
+                    };
+                    
+                    break :blk try ExceptionFactory.createTypeError(self.allocator, message_str, self.current_file, self.current_line);
+                } else {
+                    break :blk try ExceptionFactory.createTypeError(self.allocator, "Can only throw objects that implement Throwable", self.current_file, self.current_line);
+                }
+            },
+            .string => blk: {
+                // Throw string as exception message
+                const message = exception_value.data.string.data.data;
+                break :blk try ExceptionFactory.createTypeError(self.allocator, message, self.current_file, self.current_line);
+            },
+            else => blk: {
+                break :blk try ExceptionFactory.createTypeError(self.allocator, "Can only throw objects that implement Throwable", self.current_file, self.current_line);
+            },
+        };
+        
+        return self.throwException(exception);
+    }
+    
+    fn evaluateClosureCreation(self: *VM, closure_data: anytype) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
+        // Create user function for the closure
+        const closure_name = try types.PHPString.init(self.allocator, "closure");
+        var user_function = types.UserFunction.init(closure_name);
+        
+        // Process parameters
+        var parameters = try self.allocator.alloc(types.Method.Parameter, closure_data.params.len);
+        var min_args: u32 = 0;
+        var max_args: ?u32 = @intCast(closure_data.params.len);
+        var is_variadic = false;
+        
+        for (closure_data.params, 0..) |param_idx, i| {
+            const param_node = self.context.nodes.items[param_idx];
+            if (param_node.tag == .parameter) {
+                const param_data = param_node.data.parameter;
+                const param_name = self.context.string_pool.keys()[param_data.name];
+                const php_param_name = try types.PHPString.init(self.allocator, param_name);
+                
+                parameters[i] = types.Method.Parameter.init(php_param_name);
+                parameters[i].is_variadic = param_data.is_variadic;
+                parameters[i].is_reference = param_data.is_reference;
+                
+                if (param_data.is_variadic) {
+                    is_variadic = true;
+                    max_args = null; // Unlimited for variadic functions
+                }
+                
+                // Count required parameters (those without default values)
+                if (parameters[i].default_value == null and !param_data.is_variadic) {
+                    min_args += 1;
+                }
+            }
+        }
+        
+        user_function.parameters = parameters;
+        user_function.body = @ptrFromInt(closure_data.body);
+        user_function.is_variadic = is_variadic;
+        user_function.min_args = min_args;
+        user_function.max_args = max_args;
+        
+        // Process capture list
+        var captured_vars_list = std.ArrayList(CapturedVar){};
+        try captured_vars_list.ensureTotalCapacity(self.allocator, closure_data.captures.len);
+        defer captured_vars_list.deinit(self.allocator);
+        
+        for (closure_data.captures) |capture_idx| {
+            const capture_node = self.context.nodes.items[capture_idx];
+            if (capture_node.tag == .variable) {
+                const var_name = self.context.string_pool.keys()[capture_node.data.variable.name];
+                const var_value = self.global.get(var_name) orelse Value.initNull();
+                try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value });
+            }
+        }
+        
+        return self.createClosure(user_function, captured_vars_list.items);
     }
 };
