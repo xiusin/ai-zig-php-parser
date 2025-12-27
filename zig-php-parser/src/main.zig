@@ -1,4 +1,8 @@
 const std = @import("std");
+
+pub const compiler = @import("compiler/root.zig");
+pub const runtime = @import("runtime/root.zig");
+
 const ast = @import("compiler/ast.zig");
 const parser = @import("compiler/parser.zig");
 const vm = @import("runtime/vm.zig");
