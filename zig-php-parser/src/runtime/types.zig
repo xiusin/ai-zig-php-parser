@@ -435,6 +435,213 @@ pub const PHPClass = struct {
     }
 };
 
+pub const PHPStruct = struct {
+    name: *PHPString,
+    fields: std.StringHashMap(StructField),
+    methods: std.StringHashMap(Method),
+    embedded_structs: []const *PHPStruct,
+    interfaces: []const *PHPInterface,
+    type_info: StructTypeInfo,
+    
+    pub const StructField = struct {
+        name: *PHPString,
+        type: ?TypeInfo,
+        default_value: ?Value,
+        modifiers: Modifier,
+        offset: usize, // Used for memory layout optimization
+    };
+    
+    pub const StructTypeInfo = struct {
+        is_value_type: bool,
+        size: usize,
+        alignment: usize,
+        has_pointers: bool,
+    };
+    
+    pub const Modifier = packed struct {
+        is_public: bool = true, // Structs default to public
+        is_protected: bool = false,
+        is_private: bool = false,
+        is_readonly: bool = false,
+    };
+    
+    pub fn init(allocator: std.mem.Allocator, name: *PHPString) PHPStruct {
+        return PHPStruct{
+            .name = name,
+            .fields = std.StringHashMap(StructField).init(allocator),
+            .methods = std.StringHashMap(Method).init(allocator),
+            .embedded_structs = &[_]*PHPStruct{},
+            .interfaces = &[_]*PHPInterface{},
+            .type_info = StructTypeInfo{
+                .is_value_type = true, // Default to value type
+                .size = 0,
+                .alignment = 1,
+                .has_pointers = false,
+            },
+        };
+    }
+    
+    pub fn deinit(self: *PHPStruct) void {
+        self.fields.deinit();
+        self.methods.deinit();
+    }
+    
+    pub fn addField(self: *PHPStruct, field: StructField) !void {
+        try self.fields.put(field.name.data, field);
+        self.updateTypeInfo();
+    }
+    
+    pub fn addMethod(self: *PHPStruct, method: Method) !void {
+        try self.methods.put(method.name.data, method);
+    }
+    
+    pub fn hasField(self: *PHPStruct, name: []const u8) bool {
+        // Check own fields
+        if (self.fields.contains(name)) return true;
+        
+        // Check embedded structs
+        for (self.embedded_structs) |embedded| {
+            if (embedded.hasField(name)) return true;
+        }
+        
+        return false;
+    }
+    
+    pub fn getField(self: *PHPStruct, name: []const u8) ?*StructField {
+        // Check own fields first
+        if (self.fields.getPtr(name)) |field| return field;
+        
+        // Check embedded structs
+        for (self.embedded_structs) |embedded| {
+            if (embedded.getField(name)) |field| return field;
+        }
+        
+        return null;
+    }
+    
+    pub fn hasMethod(self: *PHPStruct, name: []const u8) bool {
+        // Check own methods
+        if (self.methods.contains(name)) return true;
+        
+        // Check embedded structs
+        for (self.embedded_structs) |embedded| {
+            if (embedded.hasMethod(name)) return true;
+        }
+        
+        return false;
+    }
+    
+    pub fn getMethod(self: *PHPStruct, name: []const u8) ?*Method {
+        // Check own methods first
+        if (self.methods.getPtr(name)) |method| return method;
+        
+        // Check embedded structs
+        for (self.embedded_structs) |embedded| {
+            if (embedded.getMethod(name)) |method| return method;
+        }
+        
+        return null;
+    }
+    
+    pub fn implementsInterface(self: *PHPStruct, interface: *PHPInterface) bool {
+        // Check if explicitly implements interface
+        for (self.interfaces) |impl_interface| {
+            if (impl_interface == interface) return true;
+        }
+        
+        // Check duck typing - if struct has all interface methods
+        var method_iter = interface.methods.iterator();
+        while (method_iter.next()) |entry| {
+            if (!self.hasMethod(entry.key_ptr.*)) return false;
+        }
+        
+        return true;
+    }
+    
+    fn updateTypeInfo(self: *PHPStruct) void {
+        var total_size: usize = 0;
+        var has_pointers = false;
+        
+        var field_iter = self.fields.iterator();
+        while (field_iter.next()) |entry| {
+            const field = entry.value_ptr.*;
+            // Simplified size calculation - would need proper type size calculation
+            total_size += 8; // Assume 8 bytes per field for now
+            
+            if (field.type) |type_info| {
+                switch (type_info.kind) {
+                    .string, .array, .object, .struct_instance => has_pointers = true,
+                    else => {},
+                }
+            }
+        }
+        
+        // Add embedded struct sizes
+        for (self.embedded_structs) |embedded| {
+            total_size += embedded.type_info.size;
+            if (embedded.type_info.has_pointers) has_pointers = true;
+        }
+        
+        self.type_info.size = total_size;
+        self.type_info.has_pointers = has_pointers;
+        
+        // Decide if value type or reference type
+        const size_threshold = 64; // bytes
+        self.type_info.is_value_type = total_size <= size_threshold and !has_pointers;
+    }
+};
+
+pub const StructInstance = struct {
+    struct_type: *PHPStruct,
+    fields: std.StringHashMap(Value),
+    embedded_instances: []StructInstance,
+    
+    pub fn init(allocator: std.mem.Allocator, struct_type: *PHPStruct) StructInstance {
+        return StructInstance{
+            .struct_type = struct_type,
+            .fields = std.StringHashMap(Value).init(allocator),
+            .embedded_instances = &[_]StructInstance{},
+        };
+    }
+    
+    pub fn deinit(self: *StructInstance) void {
+        self.fields.deinit();
+    }
+    
+    pub fn getField(self: *StructInstance, name: []const u8) !Value {
+        // First check direct fields
+        if (self.fields.get(name)) |value| {
+            return value;
+        }
+        
+        // Then check embedded struct fields
+        for (self.embedded_instances) |*embedded| {
+            if (embedded.getField(name)) |value| {
+                return value;
+            } else |_| {}
+        }
+        
+        return error.FieldNotFound;
+    }
+    
+    pub fn setField(self: *StructInstance, name: []const u8, value: Value) !void {
+        try self.fields.put(name, value);
+    }
+    
+    pub fn callMethod(self: *StructInstance, vm: *anyopaque, name: []const u8, args: []const Value) !Value {
+        // Find method in struct type
+        if (self.struct_type.getMethod(name)) |method| {
+            // Would call VM method execution here
+            _ = vm;
+            _ = args;
+            _ = method;
+            return Value.initNull(); // Placeholder
+        }
+        
+        return error.MethodNotFound;
+    }
+};
+
 pub const PropertyHook = struct {
     type: HookType,
     body: ?*anyopaque, // Would be AST node reference in real implementation
@@ -560,6 +767,8 @@ pub const Method = struct {
                 .array => std.mem.eql(u8, type_name, "array"),
                 .object => std.mem.eql(u8, type_name, "object") or 
                           std.mem.eql(u8, type_name, value.data.object.data.class.name.data),
+                .struct_instance => std.mem.eql(u8, type_name, "struct") or
+                                   std.mem.eql(u8, type_name, value.data.struct_instance.data.struct_type.name.data),
                 .resource => std.mem.eql(u8, type_name, "resource"),
                 .builtin_function, .user_function, .closure, .arrow_function => std.mem.eql(u8, type_name, "callable"),
             };
@@ -761,13 +970,31 @@ pub const PHPResource = struct {
 
 pub const TypeInfo = struct {
     name: *PHPString,
+    kind: Kind,
     is_nullable: bool = false,
     is_union: bool = false,
     union_types: []const *TypeInfo = &[_]*TypeInfo{},
     
-    pub fn init(name: *PHPString) TypeInfo {
+    pub const Kind = enum {
+        null,
+        boolean,
+        integer,
+        float,
+        string,
+        array,
+        object,
+        struct_instance,
+        resource,
+        callable,
+        mixed,
+        void,
+        never,
+    };
+    
+    pub fn init(name: *PHPString, kind: Kind) TypeInfo {
         return TypeInfo{
             .name = name,
+            .kind = kind,
         };
     }
 };
@@ -844,6 +1071,25 @@ pub const Value = struct {
         return .{ .tag = .object, .data = .{ .object = box } };
     }
     
+    pub fn initStruct(allocator: std.mem.Allocator, struct_type: *PHPStruct) !Self {
+        const struct_instance = try allocator.create(StructInstance);
+        struct_instance.* = StructInstance.init(allocator, struct_type);
+        const box = try allocator.create(gc.Box(*StructInstance));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = struct_instance,
+        };
+        return .{ .tag = .struct_instance, .data = .{ .struct_instance = box } };
+    }
+    
+    pub fn initStructWithManager(memory_manager: *gc.MemoryManager, struct_type: *PHPStruct) !Self {
+        // Would need to add allocStruct method to memory manager
+        _ = memory_manager;
+        _ = struct_type;
+        return error.NotImplemented; // Placeholder
+    }
+    
     pub fn initResource(allocator: std.mem.Allocator, resource: PHPResource) !Self {
         const php_resource = try allocator.create(PHPResource);
         php_resource.* = resource;
@@ -870,6 +1116,7 @@ pub const Value = struct {
             .string => std.debug.print("{s}", .{self.data.string.data.data}),
             .array => std.debug.print("Array({d})", .{self.data.array.data.count()}),
             .object => std.debug.print("Object({s})", .{self.data.object.data.class.name.data}),
+            .struct_instance => std.debug.print("Struct({s})", .{self.data.struct_instance.data.struct_type.name.data}),
             .resource => std.debug.print("Resource({s})", .{self.data.resource.data.type_name.data}),
             .builtin_function => std.debug.print("builtin_function", .{}),
             .user_function => std.debug.print("user_function", .{}),
@@ -887,7 +1134,7 @@ pub const Value = struct {
             .float => self.data.float != 0.0,
             .string => self.data.string.data.length > 0 and !std.mem.eql(u8, self.data.string.data.data, "0"),
             .array => self.data.array.data.count() > 0,
-            .object, .resource => true,
+            .object, .struct_instance, .resource => true,
             else => true,
         };
     }
@@ -899,6 +1146,7 @@ pub const Value = struct {
             .integer => self.data.integer,
             .float => @intFromFloat(self.data.float),
             .string => std.fmt.parseInt(i64, self.data.string.data.data, 10) catch 0,
+            .struct_instance => 1, // Structs convert to 1 like objects
             else => error.InvalidConversion,
         };
     }
@@ -910,6 +1158,7 @@ pub const Value = struct {
             .integer => @floatFromInt(self.data.integer),
             .float => self.data.float,
             .string => std.fmt.parseFloat(f64, self.data.string.data.data) catch 0.0,
+            .struct_instance => 1.0, // Structs convert to 1.0 like objects
             else => error.InvalidConversion,
         };
     }
@@ -931,6 +1180,12 @@ pub const Value = struct {
             .string => PHPString.init(allocator, self.data.string.data.data),
             .array => PHPString.init(allocator, "Array"),
             .object => PHPString.init(allocator, "Object"),
+            .struct_instance => {
+                const struct_name = self.data.struct_instance.data.struct_type.name.data;
+                const str = try std.fmt.allocPrint(allocator, "Struct({s})", .{struct_name});
+                defer allocator.free(str);
+                return PHPString.init(allocator, str);
+            },
             .resource => PHPString.init(allocator, "Resource"),
             else => error.InvalidConversion,
         };
@@ -987,6 +1242,7 @@ pub const Value = struct {
         // Composite types
         array,
         object,
+        struct_instance,
         resource,
         
         // Callable types
@@ -1004,6 +1260,7 @@ pub const Value = struct {
         string: *gc.Box(*PHPString),
         array: *gc.Box(*PHPArray),
         object: *gc.Box(*PHPObject),
+        struct_instance: *gc.Box(*StructInstance),
         resource: *gc.Box(*PHPResource),
         builtin_function: *const anyopaque,
         user_function: *gc.Box(*UserFunction),

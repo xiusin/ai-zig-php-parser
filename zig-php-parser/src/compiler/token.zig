@@ -19,7 +19,7 @@ pub const Token = struct {
         t_dollar_open_curly_brace, // ${
         t_curly_open,              // {$
         // Class-like Keywords
-        k_class, k_interface, k_trait, k_enum, k_extends, k_implements, k_use,
+        k_class, k_interface, k_trait, k_enum, k_struct, k_extends, k_implements, k_use,
         // Modifiers
         k_public, k_private, k_protected, k_static, k_readonly, k_final, k_abstract,
         // Control Flow

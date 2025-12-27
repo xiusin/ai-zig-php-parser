@@ -235,6 +235,7 @@ pub const Lexer = struct {
         else if (std.mem.eql(u8, text, "interface")) .k_interface
         else if (std.mem.eql(u8, text, "trait")) .k_trait
         else if (std.mem.eql(u8, text, "enum")) .k_enum
+        else if (std.mem.eql(u8, text, "struct")) .k_struct
         else if (std.mem.eql(u8, text, "extends")) .k_extends
         else if (std.mem.eql(u8, text, "implements")) .k_implements
         else if (std.mem.eql(u8, text, "use")) .k_use

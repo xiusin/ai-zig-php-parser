@@ -132,6 +132,7 @@ pub const Parser = struct {
             .k_interface => self.parseContainer(.interface_decl, attributes),
             .k_trait => self.parseContainer(.trait_decl, attributes),
             .k_enum => self.parseContainer(.enum_decl, attributes),
+            .k_struct => self.parseContainer(.struct_decl, attributes),
             .k_function => {
                 if (self.peek.tag == .l_paren) return self.parseExpressionStatement();
                 return self.parseFunction(attributes);

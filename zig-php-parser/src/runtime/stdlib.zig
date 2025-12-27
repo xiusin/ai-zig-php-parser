@@ -1814,6 +1814,7 @@ fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
             return try allocator.dupe(u8, result.items);
         },
         .object => try std.fmt.allocPrint(allocator, "{{\"class\":\"{s}\"}}", .{value.data.object.data.class.name.data}),
+        .struct_instance => try std.fmt.allocPrint(allocator, "{{\"struct\":\"{s}\"}}", .{value.data.struct_instance.data.struct_type.name.data}),
         else => try allocator.dupe(u8, "null"),
     };
 }
