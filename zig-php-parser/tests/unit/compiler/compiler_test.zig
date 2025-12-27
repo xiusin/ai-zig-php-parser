@@ -41,3 +41,45 @@ test "compile return 1 + 2" {
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpAdd)), chunk.code.items[4]);
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpReturn)), chunk.code.items[5]);
 }
+
+test "compile global variable declaration and access" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const source = "<?php $a = 10; return $a;";
+    var context = PHPContext.init(arena_allocator);
+    var parser = try Parser.init(arena_allocator, &context, source);
+    const root_node_index = try parser.parse();
+
+    var compiler = Compiler.init(allocator, &context);
+    const chunk = try compiler.compile(root_node_index);
+    defer chunk.deinit();
+
+    // Expected bytecode:
+    // OpConstant (10)
+    // OpSetGlobal ("$a")
+    // OpPop
+    // OpGetGlobal ("$a")
+    // OpReturn
+
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpConstant)), chunk.code.items[0]);
+    const const_10_idx = chunk.code.items[1];
+    try testing.expectEqual(@as(i64, 10), chunk.constants.items[const_10_idx].data.integer);
+
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpSetGlobal)), chunk.code.items[2]);
+    const var_a_idx = chunk.code.items[3];
+    try testing.expectEqualStrings("$a", chunk.constants.items[var_a_idx].data.string.data.data);
+
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpPop)), chunk.code.items[4]);
+
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpGetGlobal)), chunk.code.items[5]);
+    const var_a_idx_2 = chunk.code.items[6];
+    try testing.expectEqualStrings("$a", chunk.constants.items[var_a_idx_2].data.string.data.data);
+
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpReturn)), chunk.code.items[7]);
+}

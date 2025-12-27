@@ -40,6 +40,30 @@ pub const Compiler = struct {
                     try self.compileNode(stmt);
                 }
             },
+            .expression_stmt => {
+                try self.compileNode(node.data.expression_stmt.expr);
+                try self.emitByte(@intFromEnum(OpCode.OpPop), node.main_token.loc.start);
+            },
+            .assignment => {
+                const target_node = self.context.nodes.items[node.data.assignment.target];
+                if (target_node.tag == .variable) {
+                    const var_name_id = target_node.data.variable.name;
+                    const var_name = self.context.string_pool.keys()[var_name_id];
+
+                    try self.compileNode(node.data.assignment.value);
+
+                    const name_const_idx = try self.identifierConstant(var_name);
+                    try self.emitBytes(@intFromEnum(OpCode.OpSetGlobal), name_const_idx, node.main_token.loc.start);
+                } else {
+                    return error.InvalidAssignmentTarget;
+                }
+            },
+            .variable => {
+                const var_name_id = node.data.variable.name;
+                const var_name = self.context.string_pool.keys()[var_name_id];
+                const name_const_idx = try self.identifierConstant(var_name);
+                try self.emitBytes(@intFromEnum(OpCode.OpGetGlobal), name_const_idx, node.main_token.loc.start);
+            },
             .return_stmt => {
                 if (node.data.return_stmt.expr) |expr| {
                     try self.compileNode(expr);
@@ -88,5 +112,11 @@ pub const Compiler = struct {
     fn emitReturn(self: *Compiler) !void {
         try self.emitByte(@intFromEnum(OpCode.OpNull), 0);
         try self.emitByte(@intFromEnum(OpCode.OpReturn), 0);
+    }
+
+    fn identifierConstant(self: *Compiler, name: []const u8) !u8 {
+        // Create a string value for the variable name
+        const string_val = Value.initString(self.allocator, name) catch return error.OutOfMemory;
+        return self.chunk.addConstant(string_val);
     }
 };

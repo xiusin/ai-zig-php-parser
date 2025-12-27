@@ -12,6 +12,7 @@ pub const VM = struct {
     ip: usize, // instruction pointer
     stack: [STACK_MAX]Value,
     stack_top: usize,
+    globals: std.StringHashMap(Value),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) VM {
@@ -20,6 +21,7 @@ pub const VM = struct {
             .ip = 0,
             .stack = undefined,
             .stack_top = 0,
+            .globals = std.StringHashMap(Value).init(allocator),
             .allocator = allocator,
         };
     }
@@ -27,7 +29,23 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         // Free any remaining objects on the stack
         while (self.stack_top > 0) {
-            self.pop();
+            const val = self.pop();
+            self.releaseValue(val);
+        }
+
+        var it = self.globals.iterator();
+        while (it.next()) |entry| {
+            self.releaseValue(entry.value_ptr.*);
+        }
+        self.globals.deinit();
+    }
+
+    fn releaseValue(self: *VM, value: Value) void {
+        if (value.tag == .string) {
+            // In a real ref-counted system, we'd decrement.
+            // For now, as we're owning them in the VM, we free directly.
+            self.allocator.destroy(value.data.string.data);
+            self.allocator.destroy(value.data.string);
         }
     }
 
@@ -58,6 +76,22 @@ pub const VM = struct {
                 .OpSubtract => try self.binaryOp(.Subtract),
                 .OpMultiply => try self.binaryOp(.Multiply),
                 .OpDivide => try self.binaryOp(.Divide),
+                .OpSetGlobal => {
+                    const constant_index = self.chunk.code.items[self.ip];
+                    self.ip += 1;
+                    const var_name = self.chunk.constants.items[constant_index].data.string.data.data;
+                    try self.globals.put(var_name, self.peek(0));
+                },
+                .OpGetGlobal => {
+                    const constant_index = self.chunk.code.items[self.ip];
+                    self.ip += 1;
+                    const var_name = self.chunk.constants.items[constant_index].data.string.data.data;
+                    if (self.globals.get(var_name)) |value| {
+                        try self.push(value);
+                    } else {
+                        return error.UndefinedVariable;
+                    }
+                },
                 .OpReturn => {
                     const result = self.pop();
                     return result;
@@ -94,21 +128,64 @@ pub const VM = struct {
         const b = self.pop();
         const a = self.pop();
 
-        if (a.tag == .integer and b.tag == .integer) {
-            const result = switch (op) {
-                .Add => Value.initInt(a.data.integer + b.data.integer),
-                .Subtract => Value.initInt(a.data.integer - b.data.integer),
-                .Multiply => Value.initInt(a.data.integer * b.data.integer),
-                .Divide => {
-                    if (b.data.integer == 0) return error.DivisionByZero;
-                    // PHP division always results in a float
-                    return Value.initFloat(@as(f64, @floatFromInt(a.data.integer)) / @as(f64, @floatFromInt(b.data.integer)));
+        switch (a.tag) {
+            .integer => switch (b.tag) {
+                .integer => {
+                    const result = switch (op) {
+                        .Add => Value.initInt(a.data.integer + b.data.integer),
+                        .Subtract => Value.initInt(a.data.integer - b.data.integer),
+                        .Multiply => Value.initInt(a.data.integer * b.data.integer),
+                        .Divide => {
+                            if (b.data.integer == 0) return error.DivisionByZero;
+                            return Value.initFloat(@as(f64, @floatFromInt(a.data.integer)) / @as(f64, @floatFromInt(b.data.integer)));
+                        },
+                    };
+                    return self.push(result);
                 },
-            };
-            try self.push(result);
-        } else {
-            // Handle other types (float, etc.)
-            return error.InvalidTypesForBinaryOperation;
+                .float => {
+                    const a_float = @as(f64, @floatFromInt(a.data.integer));
+                    const result = switch (op) {
+                        .Add => Value.initFloat(a_float + b.data.float),
+                        .Subtract => Value.initFloat(a_float - b.data.float),
+                        .Multiply => Value.initFloat(a_float * b.data.float),
+                        .Divide => {
+                            if (b.data.float == 0.0) return error.DivisionByZero;
+                            return Value.initFloat(a_float / b.data.float);
+                        },
+                    };
+                    return self.push(result);
+                },
+                else => return error.InvalidTypesForBinaryOperation,
+            },
+            .float => switch (b.tag) {
+                .integer => {
+                    const b_float = @as(f64, @floatFromInt(b.data.integer));
+                    const result = switch (op) {
+                        .Add => Value.initFloat(a.data.float + b_float),
+                        .Subtract => Value.initFloat(a.data.float - b_float),
+                        .Multiply => Value.initFloat(a.data.float * b_float),
+                        .Divide => {
+                            if (b_float == 0.0) return error.DivisionByZero;
+                            return Value.initFloat(a.data.float / b_float);
+                        },
+                    };
+                    return self.push(result);
+                },
+                .float => {
+                    const result = switch (op) {
+                        .Add => Value.initFloat(a.data.float + b.data.float),
+                        .Subtract => Value.initFloat(a.data.float - b.data.float),
+                        .Multiply => Value.initFloat(a.data.float * b.data.float),
+                        .Divide => {
+                            if (b.data.float == 0.0) return error.DivisionByZero;
+                            return Value.initFloat(a.data.float / b.data.float);
+                        },
+                    };
+                    return self.push(result);
+                },
+                else => return error.InvalidTypesForBinaryOperation,
+            },
+            else => return error.InvalidTypesForBinaryOperation,
         }
     }
 };
