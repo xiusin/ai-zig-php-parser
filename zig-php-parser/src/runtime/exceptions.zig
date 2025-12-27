@@ -57,6 +57,7 @@ pub const PHPException = struct {
         undefined_variable_error,
         undefined_function_error,
         undefined_class_error,
+        undefined_struct_error,
         undefined_method_error,
         undefined_property_error,
         readonly_property_error,
@@ -183,6 +184,7 @@ pub const PHPException = struct {
             .undefined_variable_error => "UndefinedVariableError",
             .undefined_function_error => "UndefinedFunctionError",
             .undefined_class_error => "UndefinedClassError",
+            .undefined_struct_error => "UndefinedStructError",
             .undefined_method_error => "UndefinedMethodError",
             .undefined_property_error => "UndefinedPropertyError",
             .readonly_property_error => "ReadonlyPropertyError",
@@ -483,6 +485,7 @@ pub const ErrorRecovery = struct {
             .undefined_variable_error => "Check if the variable is declared and spelled correctly",
             .undefined_function_error => "Check if the function exists and is spelled correctly",
             .undefined_class_error => "Check if the class is defined and the namespace is correct",
+            .undefined_struct_error => "Check if the struct is defined and the namespace is correct",
             .undefined_method_error => "Check if the method exists in the class",
             .undefined_property_error => "Check if the property exists in the class",
             .type_error => "Check the types of arguments passed to the function",
@@ -529,6 +532,12 @@ pub const ExceptionFactory = struct {
         const message = try std.fmt.allocPrint(allocator, "Class '{s}' not found", .{class_name});
         defer allocator.free(message);
         return PHPException.init(allocator, .undefined_class_error, message, file, line);
+    }
+    
+    pub fn createUndefinedStructError(allocator: std.mem.Allocator, struct_name: []const u8, file: []const u8, line: u32) !*PHPException {
+        const message = try std.fmt.allocPrint(allocator, "Struct '{s}' not found", .{struct_name});
+        defer allocator.free(message);
+        return PHPException.init(allocator, .undefined_struct_error, message, file, line);
     }
     
     pub fn createUndefinedMethodError(allocator: std.mem.Allocator, class_name: []const u8, method_name: []const u8, file: []const u8, line: u32) !*PHPException {

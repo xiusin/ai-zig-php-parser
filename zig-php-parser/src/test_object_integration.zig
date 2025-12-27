@@ -10,6 +10,7 @@ fn releaseValue(value: types.Value, allocator: std.mem.Allocator) void {
         .string => value.data.string.release(allocator),
         .array => value.data.array.release(allocator),
         .object => value.data.object.release(allocator),
+        .struct_instance => value.data.struct_instance.release(allocator),
         .resource => value.data.resource.release(allocator),
         .user_function => value.data.user_function.release(allocator),
         .closure => value.data.closure.release(allocator),

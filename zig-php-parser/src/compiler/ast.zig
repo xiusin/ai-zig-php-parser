@@ -11,7 +11,7 @@ pub const Node = struct {
 
     pub const Tag = enum {
         root, attribute,
-        class_decl, interface_decl, trait_decl, enum_decl,
+        class_decl, interface_decl, trait_decl, enum_decl, struct_decl,
         property_decl, property_hook, method_decl, parameter,
         const_decl, global_stmt, static_stmt, go_stmt,
         closure, arrow_function, anonymous_class,
@@ -21,7 +21,7 @@ pub const Node = struct {
         block, expression_stmt, assignment, echo_stmt, return_stmt,
         variable, literal_int, literal_float, literal_string, array_init, binary_expr,
         unary_expr, ternary_expr, unpacking_expr,
-        pipe_expr, clone_with_expr,
+        pipe_expr, clone_with_expr, struct_instantiation,
         named_type, union_type, intersection_type,
     };
 
@@ -92,6 +92,7 @@ pub const Node = struct {
         unpacking_expr: struct { expr: Index },
         pipe_expr: struct { left: Index, right: Index },
         clone_with_expr: struct { object: Index, properties: Index },
+        struct_instantiation: struct { struct_type: Index, args: []const Index },
         function_decl: struct { 
             attributes: []const Index, name: StringId, params: []const Index, body: Index 
         },

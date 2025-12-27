@@ -66,6 +66,7 @@ pub fn main() !void {
         .string => result.data.string.release(allocator),
         .array => result.data.array.release(allocator),
         .object => result.data.object.release(allocator),
+        .struct_instance => result.data.struct_instance.release(allocator),
         .resource => result.data.resource.release(allocator),
         .user_function => result.data.user_function.release(allocator),
         .closure => result.data.closure.release(allocator),

@@ -532,6 +532,7 @@ pub const VM = struct {
     global: *Environment,
     context: *PHPContext,
     classes: std.StringHashMap(*types.PHPClass),
+    structs: std.StringHashMap(*types.PHPStruct),
     error_handler: ErrorHandler,
     current_file: []const u8,
     current_line: u32,
@@ -558,6 +559,7 @@ pub const VM = struct {
             .global = try allocator.create(Environment),
             .context = undefined,
             .classes = std.StringHashMap(*types.PHPClass).init(allocator),
+            .structs = std.StringHashMap(*types.PHPStruct).init(allocator),
             .error_handler = ErrorHandler.init(allocator),
             .current_file = "unknown",
             .current_line = 0,
@@ -1522,6 +1524,10 @@ pub const VM = struct {
                 .str = "", 
                 .needs_free = false 
             },
+            .struct_instance => .{
+                .str = try std.fmt.allocPrint(self.allocator, "Struct({s})", .{value.data.struct_instance.data.struct_type.name.data}),
+                .needs_free = true
+            },
             else => .{ 
                 .str = "Object", 
                 .needs_free = false 
@@ -1609,6 +1615,12 @@ pub const VM = struct {
             .class_decl => {
                 return self.evaluateClassDeclaration(ast_node.data.container_decl);
             },
+            .struct_decl => {
+                return self.evaluateStructDeclaration(ast_node.data.container_decl);
+            },
+            .struct_instantiation => {
+                return self.evaluateStructInstantiation(ast_node.data.struct_instantiation);
+            },
             .try_stmt => {
                 return self.evaluateTryStatement(ast_node.data.try_stmt);
             },
@@ -1666,6 +1678,7 @@ pub const VM = struct {
             .string => value.data.string.release(self.allocator),
             .array => value.data.array.release(self.allocator),
             .object => value.data.object.release(self.allocator),
+            .struct_instance => value.data.struct_instance.release(self.allocator),
             .resource => value.data.resource.release(self.allocator),
             .user_function => value.data.user_function.release(self.allocator),
             .closure => value.data.closure.release(self.allocator),
@@ -2364,6 +2377,188 @@ pub const VM = struct {
         _ = class;
         _ = const_name;
         _ = const_value;
+    }
+    
+    fn evaluateStructDeclaration(self: *VM, struct_data: anytype) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
+        const struct_name = self.context.string_pool.keys()[struct_data.name];
+        const php_struct_name = try types.PHPString.init(self.allocator, struct_name);
+        
+        // Create new struct
+        var php_struct = types.PHPStruct.init(self.allocator, php_struct_name);
+        
+        // Process struct members
+        for (struct_data.members) |member_idx| {
+            const member_node = self.context.nodes.items[member_idx];
+            
+            switch (member_node.tag) {
+                .method_decl => {
+                    try self.processStructMethodDeclaration(&php_struct, member_node.data.method_decl);
+                },
+                .property_decl => {
+                    try self.processStructFieldDeclaration(&php_struct, member_node.data.property_decl);
+                },
+                else => {
+                    // Skip unsupported member types
+                },
+            }
+        }
+        
+        // Register the struct
+        const struct_ptr = try self.allocator.create(types.PHPStruct);
+        struct_ptr.* = php_struct;
+        try self.defineStruct(struct_name, struct_ptr);
+        
+        return Value.initNull();
+    }
+    
+    fn evaluateStructInstantiation(self: *VM, struct_data: anytype) !Value {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+        
+        // Get struct type
+        const struct_type_node = self.context.nodes.items[struct_data.struct_type];
+        if (struct_type_node.tag != .variable) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid struct type", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        const struct_name = self.context.string_pool.keys()[struct_type_node.data.variable.name];
+        const struct_type = self.getStruct(struct_name) orelse {
+            const exception = try ExceptionFactory.createUndefinedStructError(self.allocator, struct_name, self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+        
+        // Create struct instance
+        const struct_instance = try self.allocator.create(types.StructInstance);
+        struct_instance.* = types.StructInstance.init(self.allocator, struct_type);
+        
+        // Evaluate constructor arguments
+        var args = std.ArrayList(Value){};
+        try args.ensureTotalCapacity(self.allocator, struct_data.args.len);
+        defer {
+            for (args.items) |arg| {
+                self.releaseValue(arg);
+            }
+            args.deinit(self.allocator);
+        }
+        
+        for (struct_data.args) |arg_idx| {
+            const arg_value = try self.eval(arg_idx);
+            try args.append(self.allocator, arg_value);
+        }
+        
+        // Initialize struct fields with default values
+        try self.initializeStructFields(struct_instance, struct_type);
+        
+        // Call constructor if it exists
+        if (struct_type.hasMethod("__construct")) {
+            _ = try struct_instance.callMethod(self, "__construct", args.items);
+        }
+        
+        // Create boxed value
+        return Value.initStruct(self.allocator, struct_type);
+    }
+    
+    fn processStructMethodDeclaration(self: *VM, struct_type: *types.PHPStruct, method_data: anytype) !void {
+        const method_name = self.context.string_pool.keys()[method_data.name];
+        const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        
+        // Create method
+        var method = types.Method.init(php_method_name);
+        
+        // Set method modifiers
+        method.modifiers = .{
+            .is_static = method_data.modifiers.is_static,
+            .is_final = method_data.modifiers.is_final,
+            .is_abstract = method_data.modifiers.is_abstract,
+            .visibility = if (method_data.modifiers.is_public) .public 
+                         else if (method_data.modifiers.is_protected) .protected 
+                         else .private,
+        };
+        
+        // Process parameters
+        const parameters = try self.allocator.alloc(types.Method.Parameter, method_data.params.len);
+        for (method_data.params, 0..) |param_idx, i| {
+            const param_node = self.context.nodes.items[param_idx];
+            if (param_node.tag == .parameter) {
+                const param_data = param_node.data.parameter;
+                const param_name = self.context.string_pool.keys()[param_data.name];
+                const php_param_name = try types.PHPString.init(self.allocator, param_name);
+                
+                parameters[i] = types.Method.Parameter.init(php_param_name);
+                parameters[i].is_variadic = param_data.is_variadic;
+                parameters[i].is_reference = param_data.is_reference;
+            }
+        }
+        method.parameters = parameters;
+        
+        // Set method body
+        if (method_data.body) |body_idx| {
+            method.body = @ptrFromInt(body_idx);
+        }
+        
+        // Add method to struct
+        try struct_type.addMethod(method);
+    }
+    
+    fn processStructFieldDeclaration(self: *VM, struct_type: *types.PHPStruct, field_data: anytype) !void {
+        const field_name = self.context.string_pool.keys()[field_data.name];
+        const php_field_name = try types.PHPString.init(self.allocator, field_name);
+        
+        // Create field
+        var field = types.PHPStruct.StructField{
+            .name = php_field_name,
+            .type = null, // Would process type information here
+            .default_value = null,
+            .modifiers = .{
+                .is_public = field_data.modifiers.is_public,
+                .is_protected = field_data.modifiers.is_protected,
+                .is_private = field_data.modifiers.is_private,
+                .is_readonly = field_data.modifiers.is_readonly,
+            },
+            .offset = 0, // Would calculate proper offset
+        };
+        
+        // Set default value if present
+        if (field_data.default_value) |default_idx| {
+            field.default_value = try self.eval(default_idx);
+        }
+        
+        // Add field to struct
+        try struct_type.addField(field);
+    }
+    
+    fn initializeStructFields(self: *VM, instance: *types.StructInstance, struct_type: *types.PHPStruct) !void {
+        _ = self; // Unused in this simplified implementation
+        var field_iter = struct_type.fields.iterator();
+        while (field_iter.next()) |entry| {
+            const field = entry.value_ptr.*;
+            const field_name = field.name.data;
+            
+            if (field.default_value) |default_val| {
+                try instance.setField(field_name, default_val);
+            } else {
+                // Initialize with null if no default value
+                try instance.setField(field_name, Value.initNull());
+            }
+        }
+    }
+    
+    pub fn defineStruct(self: *VM, name: []const u8, struct_type: *types.PHPStruct) !void {
+        try self.structs.put(name, struct_type);
+    }
+    
+    pub fn getStruct(self: *VM, name: []const u8) ?*types.PHPStruct {
+        return self.structs.get(name);
     }
     
     fn evaluateTryStatement(self: *VM, try_data: anytype) !Value {
