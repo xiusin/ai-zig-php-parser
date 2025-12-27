@@ -11,11 +11,6 @@ pub const Value = struct {
         return .{ .tag = .null, .data = .{} };
     }
 
-    pub fn initString(allocator: std.mem.Allocator, str: []const u8) !Self {
-        const box = try gc.Box([]const u8).init(allocator, str);
-        return .{ .tag = .string, .data = .{ .string = box } };
-    }
-
     pub fn print(self: Self) !void {
         switch (self.tag) {
             .null => std.debug.print("null", .{}),
@@ -24,11 +19,78 @@ pub const Value = struct {
             .float => std.debug.print("{any}", .{self.data.float}),
             .string => std.debug.print("{s}", .{self.data.string.data}),
             .array => std.debug.print("array", .{}),
+            .channel => std.debug.print("channel", .{}),
             .builtin_function => std.debug.print("builtin_function", .{}),
         }
     }
 
     pub const Array = std.ArrayHashMap(Self, Self, Context, false);
+
+    pub const Channel = struct {
+        buffer: std.ArrayListUnmanaged(Value),
+        capacity: usize,
+        mutex: std.Thread.Mutex,
+        // Opaque pointers to Coroutine structs
+        send_waiters: std.ArrayListUnmanaged(*anyopaque),
+        recv_waiters: std.ArrayListUnmanaged(*anyopaque),
+
+        pub fn send(self: *Channel, scheduler: *anyopaque, value: Value) !void {
+            const S = @import("scheduler.zig").Scheduler;
+            const sched: *S = @ptrCast(@alignCast(scheduler));
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (self.buffer.items.len < self.capacity) {
+                // Buffer has space, enqueue the value
+                try self.buffer.append(sched.allocator, value);
+
+                // If there's a coroutine waiting to receive, wake it up
+                if (self.recv_waiters.items.len > 0) {
+                    const waiter: *anyopaque = self.recv_waiters.orderedRemove(0);
+                    try sched.spawn(@ptrCast(@alignCast(waiter)));
+                }
+                return;
+            }
+
+            // Buffer is full, block the current coroutine
+            const current_co = sched.current_coroutine orelse @panic("no active coroutine to block");
+            try self.send_waiters.append(sched.allocator, current_co);
+
+            // This is a simplified yield. A real implementation would switch context.
+            sched.yield();
+        }
+
+        pub fn receive(self: *Channel, scheduler: *anyopaque) !Value {
+            const S = @import("scheduler.zig").Scheduler;
+            const sched: *S = @ptrCast(@alignCast(scheduler));
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (self.buffer.items.len > 0) {
+                // Buffer has data, dequeue and return it
+                const value = self.buffer.orderedRemove(0);
+
+                // If there's a coroutine waiting to send, wake it up
+                if (self.send_waiters.items.len > 0) {
+                    const waiter: *anyopaque = self.send_waiters.orderedRemove(0);
+                    try sched.spawn(@ptrCast(@alignCast(waiter)));
+                }
+                return value;
+            }
+
+            // Buffer is empty, block the current coroutine
+            const current_co = sched.current_coroutine orelse @panic("no active coroutine to block");
+            try self.recv_waiters.append(sched.allocator, current_co);
+
+            // Simplified yield.
+            sched.yield();
+
+            // When woken up, we assume the value is now in the buffer
+            return self.buffer.orderedRemove(0);
+        }
+    };
 
     pub const Context = struct {
         pub fn hash(_: Context, key: Value) u32 {
@@ -56,6 +118,7 @@ pub const Value = struct {
         float,
         string,
         array,
+        channel,
         builtin_function,
     };
 
@@ -67,6 +130,7 @@ pub const Value = struct {
         float: f64,
         string: *gc.Box([]const u8),
         array: *gc.Box(Array),
+        channel: *gc.Box(Channel),
         builtin_function: BuiltinFn,
     };
 };

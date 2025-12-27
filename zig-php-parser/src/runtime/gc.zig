@@ -3,7 +3,7 @@ const Value = @import("types.zig").Value;
 
 pub fn Box(comptime T: type) type {
     return struct {
-        ref_count: u32,
+        ref_count: std.atomic.Value(u32),
         data: T,
     };
 }
@@ -21,9 +21,10 @@ pub const MemoryManager = struct {
 
     pub fn allocString(self: *MemoryManager, data: []const u8) !*Box([]const u8) {
         const data_copy = try self.allocator.dupe(u8, data);
+        errdefer self.allocator.free(data_copy);
         const box = try self.allocator.create(Box([]const u8));
         box.* = .{
-            .ref_count = 1,
+            .ref_count = std.atomic.Value(u32).init(1),
             .data = data_copy,
         };
         return box;
@@ -32,39 +33,35 @@ pub const MemoryManager = struct {
     pub fn allocArray(self: *MemoryManager) !*Box(Value.Array) {
         const box = try self.allocator.create(Box(Value.Array));
         box.* = .{
-            .ref_count = 1,
+            .ref_count = std.atomic.Value(u32).init(1),
             .data = Value.Array.init(self.allocator),
         };
         return box;
     }
 };
 
-pub const Header = struct {
-    ref_count: u32,
-};
-
-pub fn incRef(comptime T: type) fn (ptr: T) void {
-    return struct {
-        fn anon(ptr: T) void {
-            ptr.ref_count += 1;
-        }
-    }.anon;
+pub fn incRef(val: Value) void {
+    switch (val.tag) {
+        .string => _ = val.data.string.ref_count.fetchAdd(1, .monotonic),
+        .array => _ = val.data.array.ref_count.fetchAdd(1, .monotonic),
+        .channel => _ = val.data.channel.ref_count.fetchAdd(1, .monotonic),
+        else => {},
+    }
 }
 
 pub fn decRef(mm: *MemoryManager, val: Value) void {
     switch (val.tag) {
         .string => {
-            val.data.string.ref_count -= 1;
-            if (val.data.string.ref_count == 0) {
-                std.debug.print("String freed at address: {any}\n", .{val.data.string});
+            if (val.data.string.ref_count.fetchSub(1, .release) == 1) {
+                // Ensure memory operations in other threads are visible before we free.
+                @fence(.acquire);
                 mm.allocator.free(val.data.string.data);
                 mm.allocator.destroy(val.data.string);
             }
         },
         .array => {
-            val.data.array.ref_count -= 1;
-            if (val.data.array.ref_count == 0) {
-                std.debug.print("Array freed at address: {any}\n", .{val.data.array});
+            if (val.data.array.ref_count.fetchSub(1, .release) == 1) {
+                @fence(.acquire);
                 var it = val.data.array.data.iterator();
                 while (it.next()) |entry| {
                     decRef(mm, entry.key_ptr.*);
@@ -72,6 +69,16 @@ pub fn decRef(mm: *MemoryManager, val: Value) void {
                 }
                 val.data.array.data.deinit();
                 mm.allocator.destroy(val.data.array);
+            }
+        },
+        .channel => {
+             if (val.data.channel.ref_count.fetchSub(1, .release) == 1) {
+                @fence(.acquire);
+                // The channel's internal buffers need deinitialization
+                val.data.channel.data.buffer.deinit(mm.allocator);
+                val.data.channel.data.send_waiters.deinit(mm.allocator);
+                val.data.channel.data.recv_waiters.deinit(mm.allocator);
+                mm.allocator.destroy(val.data.channel);
             }
         },
         else => {},
