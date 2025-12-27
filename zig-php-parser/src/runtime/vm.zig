@@ -6,8 +6,8 @@ const Value = types.Value;
 const Scheduler = @import("scheduler.zig").Scheduler;
 const Coroutine = @import("coroutine.zig").Coroutine;
 const PHPContext = @import("../compiler/parser.zig").PHPContext;
+const context = @import("context.zig");
 
-// Forward declaration to break circular dependency
 const Vm = @This();
 
 fn countFn(vm: *Vm, args: []const Value) !Value {
@@ -18,63 +18,29 @@ fn countFn(vm: *Vm, args: []const Value) !Value {
     return Value{ .tag = .integer, .data = .{ .integer = @intCast(arg.data.array.data.count()) } };
 }
 
-fn makeChannelFn(vm: *Vm, args: []const Value) !Value {
-    if (args.len > 1) return error.ArgumentCountMismatch;
-
-    var capacity: usize = 0;
-    if (args.len == 1) {
-        const arg = args[0];
-        if (arg.tag != .integer or arg.data.integer < 0) {
-            return error.InvalidArgument;
-        }
-        capacity = @intCast(arg.data.integer);
-    }
-
-    const box = try vm.allocator.create(gc.Box(Value.Channel));
-    errdefer vm.allocator.destroy(box);
-
-    box.* = .{
-        .ref_count = std.atomic.Value(u32).init(1),
-        .data = .{
-            .buffer = .{},
-            .capacity = capacity,
-            .mutex = .{},
-            .send_waiters = .{},
-            .recv_waiters = .{},
-        },
-    };
-    try box.data.buffer.ensureTotalCapacity(vm.allocator, capacity);
-
-    return Value{ .tag = .channel, .data = .{ .channel = box } };
-}
-
-pub const VM = struct {
+pub const Vm = struct {
     allocator: std.mem.Allocator,
-    global: *Environment,
-    scheduler: Scheduler,
-    context: *PHPContext,
+    env: *Environment,
+    ctx: *PHPContext,
+    scheduler: *Scheduler,
+    co: *Coroutine,
 
-    pub fn init(allocator: std.mem.Allocator) !*VM {
-        var vm = try allocator.create(VM);
-        errdefer allocator.destroy(vm);
+    pub fn init(allocator: std.mem.Allocator, ctx: *PHPContext, scheduler: *Scheduler, co: *Coroutine) Vm {
+        var env = allocator.create(Environment) catch @panic("Failed to allocate environment");
+        env.* = Environment.init(allocator, null);
 
-        vm.* = .{
+        return Vm{
             .allocator = allocator,
-            .global = try Environment.init(allocator),
-            .scheduler = Scheduler.init(allocator),
-            .context = undefined,
+            .env = env,
+            .ctx = ctx,
+            .scheduler = scheduler,
+            .co = co,
         };
-
-        vm.defineBuiltin("count", countFn);
-        vm.defineBuiltin("make_channel", makeChannelFn);
-
-        return vm;
     }
 
-    pub fn deinit(self: *VM) void {
-        self.scheduler.deinit();
-        self.global.deinit();
-        self.allocator.destroy(self);
+    pub fn deinit(self: *Vm) void {
+        self.env.deinit();
+        self.allocator.destroy(self.env);
     }
 
     pub fn defineBuiltin(self: *VM, name: []const u8, function: types.Value.BuiltinFn) void {
@@ -86,18 +52,7 @@ pub const VM = struct {
     }
 
     pub fn run(self: *VM, node: ast.Node.Index) !Value {
-        // Create the main coroutine to run the script's top-level code
-        const main_coroutine = try Coroutine.init(self.allocator, 16 * 1024); // 16KB stack
-        main_coroutine.context = self.eval; // Point to the eval function
-
-        try self.scheduler.spawn(main_coroutine);
-
-        // Start the scheduler loop
-        try self.scheduler.run();
-
-        // For now, we assume the result of the script is the last value
-        // of the main coroutine. A more complex system is needed for real results.
-        return Value.initNull();
+        return self.eval(node);
     }
 
     fn eval(self: *VM, node: ast.Node.Index) !Value {
@@ -110,18 +65,6 @@ pub const VM = struct {
                     last_val = try self.eval(stmt);
                 }
                 return last_val;
-            },
-            .go_stmt => {
-                const call_node_idx = ast_node.data.go_stmt.call;
-
-                const new_coroutine = try Coroutine.init(self.allocator, 16 * 1024);
-                // In a real implementation, we would capture the function and arguments
-                // and store them in the coroutine's context.
-                // For now, we'll just point to the AST node to be evaluated.
-                new_coroutine.context = @ptrFromInt(call_node_idx);
-
-                try self.scheduler.spawn(new_coroutine);
-                return Value.initNull();
             },
             .function_call => {
                 const name_node = self.context.nodes.items[ast_node.data.function_call.name];
@@ -176,10 +119,9 @@ pub const VM = struct {
                 return self.global.get(name) orelse error.UndefinedVariable;
             },
             .literal_string => {
-                 const str_id = ast_node.data.literal_string.value;
-                 const str_val = self.context.string_pool.keys()[str_id];
-                 const box = try gc.allocString(self, str_val);
-                 return Value{ .tag = .string, .data = .{ .string = box } };
+                const str_id = ast_node.data.literal_string.value;
+                const str_val = self.context.string_pool.keys()[str_id];
+                return Value.initString(self.allocator, str_val);
             },
             .echo_stmt => {
                 const value = try self.eval(ast_node.data.echo_stmt.expr);
@@ -188,22 +130,19 @@ pub const VM = struct {
                 return Value.initNull();
             },
             .array_expr => {
-                 var array_map = Value.Array.init(self.allocator);
-                 errdefer array_map.deinit();
-
-                 for (ast_node.data.array_expr.items) |item_node_idx| {
-                     const item_node = self.context.nodes.items[item_node_idx];
-                     const value = try self.eval(item_node.data.array_item.value);
-                     if (item_node.data.array_item.key) |key_node_idx| {
-                         const key = try self.eval(key_node_idx);
-                         try array_map.put(key, value);
-                     } else {
-                         try array_map.put(Value{ .tag = .integer, .data = .{ .integer = @intCast(array_map.count()) } }, value);
-                     }
-                 }
-                 const box = try gc.allocArray(self);
-                 box.data = array_map;
-                 return Value{ .tag = .array, .data = .{ .array = box } };
+                var array = Value.Array.initContext(self.allocator, .{});
+                for (ast_node.data.array_expr.items) |item_node_idx| {
+                    const item_node = self.context.nodes.items[item_node_idx];
+                    const value = try self.eval(item_node.data.array_item.value);
+                    if (item_node.data.array_item.key) |key_node_idx| {
+                        const key = try self.eval(key_node_idx);
+                        try array.put(key, value);
+                    } else {
+                        try array.put(Value{ .tag = .integer, .data = .{ .integer = @intCast(array.count()) } }, value);
+                    }
+                }
+                const box = try types.gc.Box(Value.Array).init(self.allocator, array);
+                return Value{ .tag = .array, .data = .{ .array = box } };
             },
             .array_access => {
                 const array_val = try self.eval(ast_node.data.array_access.array);
@@ -214,6 +153,23 @@ pub const VM = struct {
             },
             .literal_int => {
                 return Value{ .tag = .integer, .data = .{ .integer = ast_node.data.literal_int.value } };
+            },
+            .go_statement => |n| {
+                const call_node = self.ctx.nodes.items[n.call_expr];
+                if (call_node != .function_call) {
+                    return error.InvalidGoStatement;
+                }
+                const name = self.ctx.getStr(call_node.function_call.name);
+                var args = std.ArrayList(Value).init(self.allocator);
+                defer args.deinit();
+                for (call_node.function_call.args) |arg_idx| {
+                    const arg_node = self.ctx.nodes.items[arg_idx];
+                    try args.append(try self.eval(arg_node));
+                }
+                const co = try Coroutine.create(self.allocator, name, args.items);
+                try self.scheduler.schedule(co);
+
+                return Value.initNull();
             },
             else => {
                 std.debug.print("Unsupported node type: {s}\n", .{@tagName(ast_node.tag)});

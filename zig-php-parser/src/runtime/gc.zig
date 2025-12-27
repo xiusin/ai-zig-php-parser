@@ -53,7 +53,6 @@ pub fn decRef(mm: *MemoryManager, val: Value) void {
     switch (val.tag) {
         .string => {
             if (val.data.string.ref_count.fetchSub(1, .release) == 1) {
-                // Ensure memory operations in other threads are visible before we free.
                 @fence(.acquire);
                 mm.allocator.free(val.data.string.data);
                 mm.allocator.destroy(val.data.string);
@@ -72,9 +71,8 @@ pub fn decRef(mm: *MemoryManager, val: Value) void {
             }
         },
         .channel => {
-             if (val.data.channel.ref_count.fetchSub(1, .release) == 1) {
+            if (val.data.channel.ref_count.fetchSub(1, .release) == 1) {
                 @fence(.acquire);
-                // The channel's internal buffers need deinitialization
                 val.data.channel.data.buffer.deinit(mm.allocator);
                 val.data.channel.data.send_waiters.deinit(mm.allocator);
                 val.data.channel.data.recv_waiters.deinit(mm.allocator);
