@@ -1618,6 +1618,42 @@ pub const VM = struct {
             .closure => {
                 return self.evaluateClosureCreation(ast_node.data.closure);
             },
+            .arrow_function => {
+                return self.evaluateArrowFunction(ast_node.data.arrow_function);
+            },
+            .binary_expr => {
+                return self.evaluateBinaryExpression(ast_node.data.binary_expr);
+            },
+            .unary_expr => {
+                return self.evaluateUnaryExpression(ast_node.data.unary_expr);
+            },
+            .ternary_expr => {
+                return self.evaluateTernaryExpression(ast_node.data.ternary_expr);
+            },
+            .pipe_expr => {
+                return self.evaluatePipeExpression(ast_node.data.pipe_expr);
+            },
+            .clone_with_expr => {
+                return self.evaluateCloneWithExpression(ast_node.data.clone_with_expr);
+            },
+            .function_decl => {
+                return self.evaluateFunctionDeclaration(ast_node.data.function_decl);
+            },
+            .block => {
+                return self.evaluateBlock(ast_node.data.block);
+            },
+            .if_stmt => {
+                return self.evaluateIfStatement(ast_node.data.if_stmt);
+            },
+            .while_stmt => {
+                return self.evaluateWhileStatement(ast_node.data.while_stmt);
+            },
+            .foreach_stmt => {
+                return self.evaluateForeachStatement(ast_node.data.foreach_stmt);
+            },
+            .return_stmt => {
+                return self.evaluateReturnStatement(ast_node.data.return_stmt);
+            },
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported AST node type", self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -1754,7 +1790,417 @@ pub const VM = struct {
     }
     
     // Missing evaluation methods implementation
-    
+    fn evaluateArrowFunction(self: *VM, arrow_func: anytype) !Value {
+        // Arrow functions are similar to closures but with automatic variable capture
+        const closure_data = try self.allocator.create(types.Closure);
+        closure_data.* = types.Closure{
+            .function = types.UserFunction{
+                .name = try types.PHPString.init(self.allocator, "arrow_function"),
+                .parameters = &[_]types.Method.Parameter{}, // TODO: Convert arrow_func.params
+                .return_type = null,
+                .attributes = &[_]types.Attribute{},
+                .body = @constCast(@ptrCast(&arrow_func.body)),
+                .is_variadic = false,
+                .min_args = 0,
+                .max_args = null,
+            },
+            .captured_vars = std.StringHashMap(Value).init(self.allocator),
+            .is_static = arrow_func.is_static,
+        };
+        
+        const closure_box = try self.memory_manager.allocClosure(closure_data.*);
+        return Value{ .tag = .closure, .data = .{ .closure = closure_box } };
+    }
+
+    fn evaluateBinaryExpression(self: *VM, binary_expr: anytype) !Value {
+        const left = try self.eval(binary_expr.lhs);
+        defer self.releaseValue(left);
+        const right = try self.eval(binary_expr.rhs);
+        defer self.releaseValue(right);
+        
+        return self.evaluateBinaryOp(binary_expr.op, left, right);
+    }
+
+    fn evaluateUnaryExpression(self: *VM, unary_expr: anytype) !Value {
+        const operand = try self.eval(unary_expr.expr);
+        defer self.releaseValue(operand);
+        
+        return self.evaluateUnaryOp(unary_expr.op, operand);
+    }
+
+    fn evaluateTernaryExpression(self: *VM, ternary_expr: anytype) !Value {
+        const condition = try self.eval(ternary_expr.cond);
+        defer self.releaseValue(condition);
+        
+        const is_truthy = condition.toBool();
+        
+        if (is_truthy) {
+            if (ternary_expr.then_expr) |then_expr| {
+                return self.eval(then_expr);
+            } else {
+                return condition; // Elvis operator: condition ?: else_expr
+            }
+        } else {
+            return self.eval(ternary_expr.else_expr);
+        }
+    }
+
+    fn evaluatePipeExpression(self: *VM, pipe_expr: anytype) !Value {
+        const left = try self.eval(pipe_expr.left);
+        defer self.releaseValue(left);
+        
+        // The right side should be a callable (function, method, closure)
+        const right_node = self.context.nodes.items[pipe_expr.right];
+        
+        switch (right_node.tag) {
+            .function_call => {
+                // Modify the function call to include left as first argument
+                var args = std.ArrayList(Value){};
+                try args.ensureTotalCapacity(self.allocator, right_node.data.function_call.args.len + 1);
+                defer {
+                    for (args.items) |arg| {
+                        self.releaseValue(arg);
+                    }
+                    args.deinit(self.allocator);
+                }
+                
+                try args.append(self.allocator, left);
+                
+                // Add existing arguments
+                for (right_node.data.function_call.args) |arg_idx| {
+                    const arg_value = try self.eval(arg_idx);
+                    try args.append(self.allocator, arg_value);
+                }
+                
+                // Call the function with modified arguments
+                const func_name_node = self.context.nodes.items[right_node.data.function_call.name];
+                if (func_name_node.tag == .variable) {
+                    const name_id = func_name_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    return self.callUserFunc(name, args.items);
+                }
+            },
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid pipe target", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+        
+        return Value.initNull();
+    }
+
+    fn evaluateCloneWithExpression(self: *VM, clone_with_expr: anytype) !Value {
+        const object = try self.eval(clone_with_expr.object);
+        defer self.releaseValue(object);
+        
+        if (object.tag != .object) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Clone with can only be used on objects", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        // Clone the object
+        const cloned_object = try object.data.object.data.clone(self.allocator);
+        
+        // Apply property modifications
+        const properties = try self.eval(clone_with_expr.properties);
+        defer self.releaseValue(properties);
+        
+        if (properties.tag == .array) {
+            var iterator = properties.data.array.data.elements.iterator();
+            while (iterator.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const value = entry.value_ptr.*;
+                
+                switch (key) {
+                    .string => |prop_name| {
+                        try cloned_object.setProperty(prop_name.data, value);
+                    },
+                    else => {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid property key in clone with", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    },
+                }
+            }
+        }
+        
+        return object;
+    }
+
+    fn evaluateFunctionDeclaration(self: *VM, func_decl: anytype) !Value {
+        const name_id = func_decl.name;
+        const name = self.context.string_pool.keys()[name_id];
+        
+        const user_func = try self.allocator.create(types.UserFunction);
+        user_func.* = types.UserFunction{
+            .name = try types.PHPString.init(self.allocator, name),
+            .parameters = &[_]types.Method.Parameter{}, // TODO: Convert func_decl.params
+            .return_type = null,
+            .attributes = &[_]types.Attribute{}, // TODO: Convert func_decl.attributes
+            .body = @constCast(@ptrCast(&func_decl.body)),
+            .is_variadic = false,
+            .min_args = 0,
+            .max_args = null,
+        };
+        
+        const func_box = try self.memory_manager.allocUserFunction(user_func.*);
+        const func_value = Value{ .tag = .user_function, .data = .{ .user_function = func_box } };
+        try self.global.set(name, func_value);
+        
+        return Value.initNull();
+    }
+
+    fn evaluateBlock(self: *VM, block: anytype) !Value {
+        var last_val = Value.initNull();
+        for (block.stmts) |stmt| {
+            self.releaseValue(last_val);
+            last_val = try self.eval(stmt);
+        }
+        return last_val;
+    }
+
+    fn evaluateIfStatement(self: *VM, if_stmt: anytype) !Value {
+        const condition = try self.eval(if_stmt.condition);
+        defer self.releaseValue(condition);
+        
+        if (condition.toBool()) {
+            return self.eval(if_stmt.then_branch);
+        } else if (if_stmt.else_branch) |else_branch| {
+            return self.eval(else_branch);
+        }
+        
+        return Value.initNull();
+    }
+
+    fn evaluateWhileStatement(self: *VM, while_stmt: anytype) !Value {
+        var last_val = Value.initNull();
+        
+        while (true) {
+            const condition = try self.eval(while_stmt.condition);
+            defer self.releaseValue(condition);
+            
+            if (!condition.toBool()) break;
+            
+            self.releaseValue(last_val);
+            last_val = try self.eval(while_stmt.body);
+        }
+        
+        return last_val;
+    }
+
+    fn evaluateForeachStatement(self: *VM, foreach_stmt: anytype) !Value {
+        const iterable = try self.eval(foreach_stmt.iterable);
+        defer self.releaseValue(iterable);
+        
+        if (iterable.tag != .array) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Foreach can only iterate over arrays", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        var last_val = Value.initNull();
+        var iterator = iterable.data.array.data.elements.iterator();
+        
+        while (iterator.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            
+            // Set key variable if specified
+            if (foreach_stmt.key) |key_idx| {
+                const key_node = self.context.nodes.items[key_idx];
+                if (key_node.tag == .variable) {
+                    const key_name_id = key_node.data.variable.name;
+                    const key_name = self.context.string_pool.keys()[key_name_id];
+                    const key_value = switch (key) {
+                        .integer => |i| Value.initInt(i),
+                        .string => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
+                    };
+                    try self.global.set(key_name, key_value);
+                }
+            }
+            
+            // Set value variable
+            const value_node = self.context.nodes.items[foreach_stmt.value];
+            if (value_node.tag == .variable) {
+                const value_name_id = value_node.data.variable.name;
+                const value_name = self.context.string_pool.keys()[value_name_id];
+                try self.global.set(value_name, value);
+            }
+            
+            // Execute body
+            self.releaseValue(last_val);
+            last_val = try self.eval(foreach_stmt.body);
+        }
+        
+        return last_val;
+    }
+
+    fn evaluateReturnStatement(self: *VM, return_stmt: anytype) !Value {
+        if (return_stmt.expr) |expr| {
+            return self.eval(expr);
+        } else {
+            return Value.initNull();
+        }
+    }
+
+    fn evaluateBinaryOp(self: *VM, op: Token.Tag, left: Value, right: Value) !Value {
+        switch (op) {
+            .plus => return self.addValues(left, right),
+            .minus => return self.subtractValues(left, right),
+            .asterisk => return self.multiplyValues(left, right),
+            .slash => return self.divideValues(left, right),
+            .percent => return self.moduloValues(left, right),
+            .equal_equal => return Value.initBool(false), // TODO: implement proper comparison
+            .bang_equal => return Value.initBool(true), // TODO: implement proper comparison
+            .less => {
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initBool(left.data.integer < right.data.integer);
+                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+                    return Value.initBool(left_float < right_float);
+                }
+                return Value.initBool(false);
+            },
+            .less_equal => {
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initBool(left.data.integer <= right.data.integer);
+                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+                    return Value.initBool(left_float <= right_float);
+                }
+                return Value.initBool(false);
+            },
+            .greater => {
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initBool(left.data.integer > right.data.integer);
+                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+                    return Value.initBool(left_float > right_float);
+                }
+                return Value.initBool(false);
+            },
+            .greater_equal => {
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initBool(left.data.integer >= right.data.integer);
+                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+                    return Value.initBool(left_float >= right_float);
+                }
+                return Value.initBool(false);
+            },
+            .double_ampersand => return Value.initBool(left.toBool() and right.toBool()),
+            .double_pipe => return Value.initBool(left.toBool() or right.toBool()),
+            .dot => return self.concatenateValues(left, right),
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported binary operator", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+    }
+
+    fn evaluateUnaryOp(self: *VM, op: Token.Tag, operand: Value) !Value {
+        switch (op) {
+            .minus => return self.negateValue(operand),
+            .bang => return Value.initBool(!operand.toBool()),
+            .plus => return operand, // Unary plus
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported unary operator", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+    }
+
+    fn addValues(self: *VM, left: Value, right: Value) !Value {
+        if (left.tag == .integer and right.tag == .integer) {
+            return Value.initInt(left.data.integer + right.data.integer);
+        } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+            return Value.initFloat(left_float + right_float);
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for addition", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    fn subtractValues(self: *VM, left: Value, right: Value) !Value {
+        if (left.tag == .integer and right.tag == .integer) {
+            return Value.initInt(left.data.integer - right.data.integer);
+        } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+            return Value.initFloat(left_float - right_float);
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for subtraction", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    fn multiplyValues(self: *VM, left: Value, right: Value) !Value {
+        if (left.tag == .integer and right.tag == .integer) {
+            return Value.initInt(left.data.integer * right.data.integer);
+        } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+            return Value.initFloat(left_float * right_float);
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for multiplication", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    fn divideValues(self: *VM, left: Value, right: Value) !Value {
+        if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+            
+            if (right_float == 0.0) {
+                const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+            
+            return Value.initFloat(left_float / right_float);
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for division", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    fn moduloValues(self: *VM, left: Value, right: Value) !Value {
+        if (left.tag == .integer and right.tag == .integer) {
+            if (right.data.integer == 0) {
+                const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+            return Value.initInt(@mod(left.data.integer, right.data.integer));
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for modulo", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    fn concatenateValues(self: *VM, left: Value, right: Value) !Value {
+        const left_str = try left.toString(self.allocator);
+        defer self.allocator.free(left_str);
+        const right_str = try right.toString(self.allocator);
+        defer self.allocator.free(right_str);
+        
+        const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
+        return Value.initStringWithManager(&self.memory_manager, result);
+    }
+
+    fn negateValue(self: *VM, operand: Value) !Value {
+        switch (operand.tag) {
+            .integer => return Value.initInt(-operand.data.integer),
+            .float => return Value.initFloat(-operand.data.float),
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operand for negation", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+    }
     fn evaluateClassDeclaration(self: *VM, class_data: anytype) !Value {
         const start_time = std.time.nanoTimestamp();
         defer {
