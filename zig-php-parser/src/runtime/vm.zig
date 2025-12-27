@@ -543,6 +543,72 @@ fn countFn(vm: *VM, args: []const Value) !Value {
     return Value.initInt(@intCast(arg.data.array.data.count()));
 }
 
+// Variable handling functions
+fn unsetFn(vm: *VM, args: []const Value) !Value {
+    // unset() can take multiple arguments
+    if (args.len == 0) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, 0, "unset", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+    
+    // In PHP, unset() is a language construct, not a function
+    // For our implementation, we'll simulate the behavior by returning null
+    // The actual unsetting would need to be handled at the parser/compiler level
+    // This is a simplified implementation for demonstration
+    
+    // In a real implementation, unset would need variable references
+    // For now, we'll just return null to indicate successful "unset"
+    return Value.initNull();
+}
+
+fn emptyFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "empty", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+    
+    const arg = args[0];
+    
+    // PHP empty() returns true for:
+    // - null
+    // - false
+    // - 0 (integer)
+    // - 0.0 (float)
+    // - "" (empty string)
+    // - "0" (string containing only "0")
+    // - empty array
+    // - uninitialized variables (we treat as null)
+    
+    const is_empty = switch (arg.tag) {
+        .null => true,
+        .boolean => !arg.data.boolean,
+        .integer => arg.data.integer == 0,
+        .float => arg.data.float == 0.0,
+        .string => blk: {
+            const str_data = arg.data.string.data.data;
+            break :blk str_data.len == 0 or std.mem.eql(u8, str_data, "0");
+        },
+        .array => arg.data.array.data.count() == 0,
+        .object, .struct_instance, .resource => false, // Objects are never empty
+        .builtin_function, .user_function, .closure, .arrow_function => false, // Functions are never empty
+    };
+    
+    return Value.initBool(is_empty);
+}
+
+fn isNullFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "is_null", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+    
+    const arg = args[0];
+    return Value.initBool(arg.tag == .null);
+}
+
 pub const VM = struct {
     allocator: std.mem.Allocator,
     global: *Environment,
@@ -765,6 +831,11 @@ pub const VM = struct {
         try self.defineBuiltin("get_object_vars", getObjectVarsFn);
         try self.defineBuiltin("is_a", isAFn);
         try self.defineBuiltin("is_subclass_of", isSubclassOfFn);
+        
+        // Variable handling functions
+        try self.defineBuiltin("unset", unsetFn);
+        try self.defineBuiltin("empty", emptyFn);
+        try self.defineBuiltin("is_null", isNullFn);
     }
     
     pub fn registerStandardLibraryFunctions(self: *VM) !void {
