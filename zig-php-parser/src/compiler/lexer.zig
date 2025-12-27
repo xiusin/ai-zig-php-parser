@@ -80,6 +80,8 @@ pub const Lexer = struct {
             '*' => if (self.match('=')) .{ .tag = .asterisk_equal, .loc = .{ .start = start, .end = self.pos } }
                   else .{ .tag = .asterisk, .loc = .{ .start = start, .end = self.pos } },
             '/' => if (self.match('=')) .{ .tag = .slash_equal, .loc = .{ .start = start, .end = self.pos } }
+                  else if (self.match('/')) self.skipLineComment(start)
+                  else if (self.match('*')) self.skipBlockComment(start)
                   else .{ .tag = .slash, .loc = .{ .start = start, .end = self.pos } },
             '%' => if (self.match('=')) .{ .tag = .percent_equal, .loc = .{ .start = start, .end = self.pos } }
                   else .{ .tag = .percent, .loc = .{ .start = start, .end = self.pos } },
@@ -115,7 +117,7 @@ pub const Lexer = struct {
         if (end_char != 0 and self.buffer[self.pos] == end_char) {
             self.pos += 1;
             self.state = .script;
-            return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
+            return .{ .tag = .t_double_quote, .loc = .{ .start = start, .end = self.pos } };
         }
         
         if (self.heredoc_label) |label| {
@@ -141,7 +143,7 @@ pub const Lexer = struct {
         }
 
         if (self.buffer[self.pos] == '{' and self.pos + 1 < self.buffer.len and self.buffer[self.pos+1] == '$') {
-             self.pos += 2;
+             self.pos += 1;
              self.interp_nesting_level += 1;
              return .{ .tag = .t_curly_open, .loc = .{ .start = start, .end = self.pos } };
         }
@@ -219,6 +221,18 @@ pub const Lexer = struct {
     fn skipLineComment(self: *Lexer, start: usize) Token {
         _ = start;
         while (self.pos < self.buffer.len and self.buffer[self.pos] != '\n') self.pos += 1;
+        return self.next();
+    }
+
+    fn skipBlockComment(self: *Lexer, start: usize) Token {
+        _ = start;
+        while (self.pos < self.buffer.len) {
+            if (self.buffer[self.pos] == '*' and self.pos + 1 < self.buffer.len and self.buffer[self.pos + 1] == '/') {
+                self.pos += 2;
+                break;
+            }
+            self.pos += 1;
+        }
         return self.next();
     }
 

@@ -33,7 +33,22 @@ pub const CallFrame = struct {
         };
     }
     
-    pub fn deinit(self: *CallFrame) void {
+    pub fn deinit(self: *CallFrame, allocator: std.mem.Allocator) void {
+        var iterator = self.locals.iterator();
+        while (iterator.next()) |entry| {
+            const value = entry.value_ptr.*;
+            switch (value.tag) {
+                .string => value.data.string.release(allocator),
+                .array => value.data.array.release(allocator),
+                .object => value.data.object.release(allocator),
+                .struct_instance => value.data.struct_instance.release(allocator),
+                .resource => value.data.resource.release(allocator),
+                .user_function => value.data.user_function.release(allocator),
+                .closure => value.data.closure.release(allocator),
+                .arrow_function => value.data.arrow_function.release(allocator),
+                else => {},
+            }
+        }
         self.locals.deinit();
     }
 };
@@ -550,7 +565,7 @@ pub const VM = struct {
     error_context: ErrorContext,
     
     // Memory optimization
-    string_intern_pool: std.StringHashMap(*types.PHPString),
+    string_intern_pool: std.StringHashMap(*types.gc.Box(*types.PHPString)),
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
         var vm = try allocator.create(VM);
@@ -571,7 +586,7 @@ pub const VM = struct {
             .execution_stats = ExecutionStats{},
             .optimization_flags = OptimizationFlags{},
             .error_context = ErrorContext.init(allocator),
-            .string_intern_pool = std.StringHashMap(*types.PHPString).init(allocator),
+            .string_intern_pool = std.StringHashMap(*types.gc.Box(*types.PHPString)).init(allocator),
         };
         
         vm.global.* = Environment.init(allocator);
@@ -597,14 +612,15 @@ pub const VM = struct {
         
         // Clean up call stack
         for (self.call_stack.items) |*frame| {
-            frame.deinit();
+            frame.deinit(self.allocator);
         }
         self.call_stack.deinit(self.allocator);
         
         // Clean up string intern pool
         var intern_iterator = self.string_intern_pool.iterator();
         while (intern_iterator.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.*.release(self.allocator);
         }
         self.string_intern_pool.deinit();
         
@@ -616,7 +632,7 @@ pub const VM = struct {
         while (global_iterator.next()) |entry| {
             // Only release if it's a managed type
             switch (entry.value_ptr.*.tag) {
-                .string, .array, .object, .resource, .user_function, .closure, .arrow_function => {
+                .string, .array, .object, .struct_instance, .resource, .user_function, .closure, .arrow_function => {
                     types.gc.decRef(&self.memory_manager, entry.value_ptr.*);
                 },
                 else => {},
@@ -632,10 +648,18 @@ pub const VM = struct {
         // Clean up standard library
         self.stdlib.deinit();
         
+        // Clean up structs
+        var struct_iterator = self.structs.iterator();
+        while (struct_iterator.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.structs.deinit();
+        
         // Clean up classes
         var class_iterator = self.classes.iterator();
         while (class_iterator.next()) |entry| {
-            entry.value_ptr.*.deinit();
+            entry.value_ptr.*.deinit(self.allocator);
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.classes.deinit();
@@ -646,6 +670,54 @@ pub const VM = struct {
         self.global.deinit();
         self.allocator.destroy(self.global);
         self.allocator.destroy(self);
+    }
+
+    pub fn getVariable(self: *VM, name: []const u8) ?Value {
+        // Check current call frame first
+        if (self.call_stack.items.len > 0) {
+            const current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+            if (current_frame.locals.get(name)) |value| {
+                return value;
+            }
+        }
+        
+        // Then check global scope
+        return self.global.get(name);
+    }
+
+    pub fn setVariable(self: *VM, name: []const u8, value: Value) !void {
+        // Check current call frame first
+        if (self.call_stack.items.len > 0) {
+            var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+            
+            // If it's a new variable in local scope, retain it
+            // If it exists, set() will handle release/retain
+            if (current_frame.locals.get(name)) |old_value| {
+                self.releaseValue(old_value);
+            }
+            
+            self.retainValue(value);
+            try current_frame.locals.put(name, value);
+            return;
+        }
+        
+        // Then set in global scope
+        try self.global.set(name, value);
+    }
+
+    fn retainValue(self: *VM, value: Value) void {
+        _ = self;
+        switch (value.tag) {
+            .string => _ = value.data.string.retain(),
+            .array => _ = value.data.array.retain(),
+            .object => _ = value.data.object.retain(),
+            .struct_instance => _ = value.data.struct_instance.retain(),
+            .resource => _ = value.data.resource.retain(),
+            .user_function => _ = value.data.user_function.retain(),
+            .closure => _ = value.data.closure.retain(),
+            .arrow_function => _ = value.data.arrow_function.retain(),
+            else => {},
+        }
     }
 
     pub fn defineBuiltin(self: *VM, name: []const u8, function: anytype) !void {
@@ -732,21 +804,21 @@ pub const VM = struct {
     }
     
     fn cleanupStringInternPool(self: *VM) !void {
-        var to_remove = std.ArrayList([]const u8){};
-        defer to_remove.deinit(self.allocator);
+        var to_remove = std.ArrayList([]const u8).init(self.allocator);
+        defer to_remove.deinit();
         
         var iterator = self.string_intern_pool.iterator();
         while (iterator.next()) |entry| {
-            // Check if string is still referenced (simplified check)
-            // In a real implementation, this would check reference counts
-            _ = entry.value_ptr.*;
-            // For now, we'll keep all strings in the pool
+            // If reference count is 1, it means only the pool is holding it
+            if (entry.value_ptr.*.ref_count == 1) {
+                try to_remove.append(entry.key_ptr.*);
+            }
         }
         
         // Remove unused strings
         for (to_remove.items) |key| {
             if (self.string_intern_pool.fetchRemove(key)) |removed| {
-                removed.value.deinit(self.allocator);
+                removed.value.release(self.allocator);
                 self.allocator.free(key);
             }
         }
@@ -887,28 +959,24 @@ pub const VM = struct {
         }
         
         // Check if string is already interned
-        if (self.string_intern_pool.get(str)) |interned| {
-            // Return reference to existing string
-            const box = try self.allocator.create(types.gc.Box(*types.PHPString));
-            box.* = .{
-                .ref_count = 1,
-                .gc_info = .{},
-                .data = interned,
-            };
-            return Value{ .tag = .string, .data = .{ .string = box } };
+        if (self.string_intern_pool.get(str)) |interned_box| {
+            // Return reference to existing string and increment ref count
+            interned_box.ref_count += 1;
+            return Value{ .tag = .string, .data = .{ .string = interned_box } };
         }
         
         // Create new interned string
         const php_string = try types.PHPString.init(self.allocator, str);
         const key = try self.allocator.dupe(u8, str);
-        try self.string_intern_pool.put(key, php_string);
         
         const box = try self.allocator.create(types.gc.Box(*types.PHPString));
         box.* = .{
-            .ref_count = 1,
+            .ref_count = 2, // One for the pool, one for the returned Value
             .gc_info = .{},
             .data = php_string,
         };
+        
+        try self.string_intern_pool.put(key, box);
         
         return Value{ .tag = .string, .data = .{ .string = box } };
     }
@@ -1130,7 +1198,7 @@ pub const VM = struct {
         try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
         defer self.popCallFrame();
         
-        const result = try object.callMethod(self, method_name, args);
+        const result = try object.callMethod(self, object_value, method_name, args);
         
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
@@ -1138,6 +1206,25 @@ pub const VM = struct {
         return result;
     }
     
+    pub fn callStructMethod(self: *VM, struct_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const start_time = std.time.nanoTimestamp();
+        self.execution_stats.function_calls += 1;
+        
+        if (struct_value.tag != .struct_instance) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Method call on non-struct", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+        
+        const struct_inst = struct_value.data.struct_instance.data;
+        
+        const result = try struct_inst.callMethod(self, struct_value, method_name, args);
+        
+        const end_time = std.time.nanoTimestamp();
+        self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        
+        return result;
+    }
+
     pub fn getObjectProperty(self: *VM, object_value: Value, property_name: []const u8) !Value {
         if (object_value.tag != .object) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
@@ -1573,24 +1660,42 @@ pub const VM = struct {
             .variable => {
                 const name_id = ast_node.data.variable.name;
                 const name = self.context.string_pool.keys()[name_id];
-                return self.global.get(name) orelse {
+                if (self.getVariable(name)) |value| {
+                    self.retainValue(value);
+                    return value;
+                } else {
                     const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
                     return self.throwException(exception);
-                };
+                }
             },
             .assignment => {
-                const target_node = self.context.nodes.items[ast_node.data.assignment.target];
-                if (target_node.tag != .variable) {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid assignment target", self.current_file, self.current_line);
-                    return self.throwException(exception);
-                }
-
+                const target_idx = ast_node.data.assignment.target;
+                const target_node = self.context.nodes.items[target_idx];
+                
                 const value = try self.eval(ast_node.data.assignment.value);
 
                 if (target_node.tag == .variable) {
                     const name_id = target_node.data.variable.name;
                     const name = self.context.string_pool.keys()[name_id];
-                    try self.global.set(name, value);
+                    try self.setVariable(name, value);
+                } else if (target_node.tag == .property_access) {
+                    const obj_val = try self.eval(target_node.data.property_access.target);
+                    defer self.releaseValue(obj_val);
+                    
+                    const prop_name = self.context.string_pool.keys()[target_node.data.property_access.property_name];
+                    
+                    if (obj_val.tag == .struct_instance) {
+                        const struct_inst = obj_val.data.struct_instance.data;
+                        try struct_inst.setField(prop_name, value);
+                    } else if (obj_val.tag == .object) {
+                        try self.setObjectProperty(obj_val, prop_name, value);
+                    } else {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Property assignment on non-object", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid assignment target", self.current_file, self.current_line);
+                    return self.throwException(exception);
                 }
 
                 return value;
@@ -1609,6 +1714,9 @@ pub const VM = struct {
             .method_call => {
                 return self.evaluateMethodCall(ast_node.data.method_call);
             },
+            .property_access => {
+                return self.evaluatePropertyAccess(ast_node.data.property_access);
+            },
             .array_init => {
                 return self.evaluateArrayInit(ast_node.data.array_init);
             },
@@ -1620,6 +1728,9 @@ pub const VM = struct {
             },
             .struct_instantiation => {
                 return self.evaluateStructInstantiation(ast_node.data.struct_instantiation);
+            },
+            .object_instantiation => {
+                return self.evaluateObjectInstantiation(ast_node.data.object_instantiation);
             },
             .try_stmt => {
                 return self.evaluateTryStatement(ast_node.data.try_stmt);
@@ -1698,11 +1809,6 @@ pub const VM = struct {
         const name_id = name_node.data.variable.name;
         const name = self.context.string_pool.keys()[name_id];
 
-        // Check if it's a class instantiation (new ClassName())
-        if (std.mem.eql(u8, name, "new")) {
-            return self.evaluateObjectInstantiation(call_data);
-        }
-
         // Evaluate arguments
         var args = std.ArrayList(Value){};
         try args.ensureTotalCapacity(self.allocator, call_data.args.len);
@@ -1744,22 +1850,68 @@ pub const VM = struct {
         };
     }
     
-    fn evaluateObjectInstantiation(self: *VM, call_data: anytype) !Value {
-        if (call_data.args.len == 0) {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Missing class name for instantiation", self.current_file, self.current_line);
+    fn evaluatePropertyAccess(self: *VM, property_data: anytype) !Value {
+        const target_value = try self.eval(property_data.target);
+        defer self.releaseValue(target_value);
+        
+        const property_name = self.context.string_pool.keys()[property_data.property_name];
+        
+        if (target_value.tag == .struct_instance) {
+            const struct_inst = target_value.data.struct_instance.data;
+            const value = try struct_inst.getField(property_name);
+            self.retainValue(value);
+            return value;
+        } else if (target_value.tag == .object) {
+            return self.getObjectProperty(target_value, property_name);
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
             return self.throwException(exception);
         }
-        
-        const class_name_node = self.context.nodes.items[call_data.args[0]];
+    }
+
+    fn evaluateObjectInstantiation(self: *VM, instantiation_data: anytype) !Value {
+        const class_name_node = self.context.nodes.items[instantiation_data.class_name];
         if (class_name_node.tag != .variable) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid class name", self.current_file, self.current_line);
             return self.throwException(exception);
         }
         
-        const class_name_id = class_name_node.data.variable.name;
-        const class_name = self.context.string_pool.keys()[class_name_id];
+        const name_id = class_name_node.data.variable.name;
+        const name = self.context.string_pool.keys()[name_id];
         
-        return self.createObject(class_name);
+        // Check if it's a struct
+        if (self.getStruct(name)) |_| {
+            // Re-use evaluateStructInstantiation by building appropriate data
+            const struct_data = .{
+                .struct_type = instantiation_data.class_name,
+                .args = instantiation_data.args,
+            };
+            return self.evaluateStructInstantiation(struct_data);
+        }
+        
+        // Otherwise assume it's a class
+        const value = try self.createObject(name);
+        
+        // Handle constructor arguments if any
+        if (instantiation_data.args.len > 0) {
+            // Call constructor with arguments
+            var args = std.ArrayList(Value){};
+            defer {
+                for (args.items) |arg| {
+                    self.releaseValue(arg);
+                }
+                args.deinit(self.allocator);
+            }
+            
+            try args.ensureTotalCapacity(self.allocator, instantiation_data.args.len);
+            for (instantiation_data.args) |arg_idx| {
+                try args.append(self.allocator, try self.eval(arg_idx));
+            }
+            
+            _ = try self.callObjectMethod(value, "__construct", args.items);
+        }
+        
+        return value;
     }
     
     fn evaluateMethodCall(self: *VM, method_data: anytype) !Value {
@@ -1779,6 +1931,10 @@ pub const VM = struct {
 
         for (method_data.args) |arg_node_idx| {
             try args.append(self.allocator, try self.eval(arg_node_idx));
+        }
+        
+        if (target_value.tag == .struct_instance) {
+            return self.callStructMethod(target_value, method_name, args.items);
         }
         
         return self.callObjectMethod(target_value, method_name, args.items);
@@ -2196,11 +2352,12 @@ pub const VM = struct {
 
     fn concatenateValues(self: *VM, left: Value, right: Value) !Value {
         const left_str = try left.toString(self.allocator);
-        defer self.allocator.free(left_str);
+        defer left_str.deinit(self.allocator);
         const right_str = try right.toString(self.allocator);
-        defer self.allocator.free(right_str);
+        defer right_str.deinit(self.allocator);
         
-        const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
+        const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str.data, right_str.data });
+        defer self.allocator.free(result);
         return Value.initStringWithManager(&self.memory_manager, result);
     }
 
@@ -2459,13 +2616,21 @@ pub const VM = struct {
         // Initialize struct fields with default values
         try self.initializeStructFields(struct_instance, struct_type);
         
+        // Create boxed value for the instance
+        const box = try self.allocator.create(types.gc.Box(*types.StructInstance));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = struct_instance,
+        };
+        const instance_value = Value{ .tag = .struct_instance, .data = .{ .struct_instance = box } };
+
         // Call constructor if it exists
         if (struct_type.hasMethod("__construct")) {
-            _ = try struct_instance.callMethod(self, "__construct", args.items);
+            _ = try struct_instance.callMethod(self, instance_value, "__construct", args.items);
         }
         
-        // Create boxed value
-        return Value.initStruct(self.allocator, struct_type);
+        return instance_value;
     }
     
     fn processStructMethodDeclaration(self: *VM, struct_type: *types.PHPStruct, method_data: anytype) !void {

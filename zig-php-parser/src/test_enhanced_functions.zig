@@ -68,7 +68,7 @@ test "Parameter type validation" {
     defer type_name.deinit(allocator);
     
     var parameter = types.Method.Parameter.init(param_name);
-    parameter.type = types.TypeInfo.init(type_name);
+    parameter.type = types.TypeInfo.init(type_name, .integer);
     
     // Test with correct type
     const int_value = Value.initInt(42);
@@ -93,7 +93,7 @@ test "Parameter nullable type validation" {
     defer type_name.deinit(allocator);
     
     var parameter = types.Method.Parameter.init(param_name);
-    var type_info = types.TypeInfo.init(type_name);
+    var type_info = types.TypeInfo.init(type_name, .integer);
     type_info.is_nullable = true;
     parameter.type = type_info;
     

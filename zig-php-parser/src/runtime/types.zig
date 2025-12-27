@@ -335,9 +335,21 @@ pub const PHPClass = struct {
         };
     }
     
-    pub fn deinit(self: *PHPClass) void {
+    pub fn deinit(self: *PHPClass, allocator: std.mem.Allocator) void {
+        self.name.deinit(allocator);
+        
+        var prop_iter = self.properties.iterator();
+        while (prop_iter.next()) |entry| {
+            entry.value_ptr.name.deinit(allocator);
+        }
         self.properties.deinit();
+        
+        var method_iter = self.methods.iterator();
+        while (method_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
         self.methods.deinit();
+        
         self.constants.deinit();
     }
     
@@ -481,8 +493,19 @@ pub const PHPStruct = struct {
         };
     }
     
-    pub fn deinit(self: *PHPStruct) void {
+    pub fn deinit(self: *PHPStruct, allocator: std.mem.Allocator) void {
+        self.name.deinit(allocator);
+        
+        var field_iter = self.fields.iterator();
+        while (field_iter.next()) |entry| {
+            entry.value_ptr.name.deinit(allocator);
+        }
         self.fields.deinit();
+        
+        var method_iter = self.methods.iterator();
+        while (method_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
         self.methods.deinit();
     }
     
@@ -604,7 +627,22 @@ pub const StructInstance = struct {
         };
     }
     
-    pub fn deinit(self: *StructInstance) void {
+    pub fn deinit(self: *StructInstance, allocator: std.mem.Allocator) void {
+        var iterator = self.fields.iterator();
+        while (iterator.next()) |entry| {
+            const value = entry.value_ptr.*;
+            switch (value.tag) {
+                .string => value.data.string.release(allocator),
+                .array => value.data.array.release(allocator),
+                .object => value.data.object.release(allocator),
+                .struct_instance => value.data.struct_instance.release(allocator),
+                .resource => value.data.resource.release(allocator),
+                .user_function => value.data.user_function.release(allocator),
+                .closure => value.data.closure.release(allocator),
+                .arrow_function => value.data.arrow_function.release(allocator),
+                else => {},
+            }
+        }
         self.fields.deinit();
     }
     
@@ -628,14 +666,37 @@ pub const StructInstance = struct {
         try self.fields.put(name, value);
     }
     
-    pub fn callMethod(self: *StructInstance, vm: *anyopaque, name: []const u8, args: []const Value) !Value {
+    pub fn callMethod(self: *StructInstance, vm: *anyopaque, instance_value: Value, name: []const u8, args: []const Value) !Value {
         // Find method in struct type
         if (self.struct_type.getMethod(name)) |method| {
-            // Would call VM method execution here
-            _ = vm;
-            _ = args;
-            _ = method;
-            return Value.initNull(); // Placeholder
+            // Call VM method execution
+            const VM = @import("vm.zig").VM;
+            const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+            
+            // Create a call frame
+            try vm_instance.pushCallFrame(name, vm_instance.current_file, vm_instance.current_line);
+            defer vm_instance.popCallFrame();
+            
+            // Inject $this into the new call frame
+            try vm_instance.setVariable("$this", instance_value);
+            
+            // Inject arguments into the new call frame
+            for (method.parameters, 0..) |param, i| {
+                if (i < args.len) {
+                    try vm_instance.setVariable(param.name.data, args[i]);
+                } else if (param.default_value) |default| {
+                    try vm_instance.setVariable(param.name.data, default);
+                }
+            }
+            
+            // Execute body
+            if (method.body) |body_ptr| {
+                const ast = @import("../compiler/ast.zig");
+                const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+                return try vm_instance.run(body_node);
+            }
+            
+            return Value.initNull();
         }
         
         return error.MethodNotFound;
@@ -750,6 +811,11 @@ pub const Method = struct {
                 .attributes = &[_]Attribute{},
             };
         }
+
+        pub fn deinit(self: *Parameter, allocator: std.mem.Allocator) void {
+            self.name.deinit(allocator);
+            // Default value is a Value, but we assume it's managed by GC or released elsewhere if it's a definition
+        }
         
         pub fn validateType(self: *const Parameter, value: Value) !void {
             if (self.type == null) return; // No type constraint
@@ -789,6 +855,19 @@ pub const Method = struct {
             .body = null,
         };
     }
+
+    pub fn deinit(self: *Method, allocator: std.mem.Allocator) void {
+        self.name.deinit(allocator);
+        // Parameters is []const Parameter, but we need to deinit each one
+        // We'll create a mutable slice to iterate and deinit
+        for (0..self.parameters.len) |i| {
+            // Parameter.deinit takes *Parameter
+            var param = self.parameters[i];
+            param.deinit(allocator);
+        }
+        allocator.free(self.parameters);
+        // Attributes cleanup...
+    }
     
     pub fn isConstructor(self: *const Method) bool {
         return std.mem.eql(u8, self.name.data, "__construct");
@@ -816,12 +895,22 @@ pub const PHPObject = struct {
         };
     }
     
-    pub fn deinit(self: *PHPObject) void {
+    pub fn deinit(self: *PHPObject, allocator: std.mem.Allocator) void {
         // Release all property values
         var iterator = self.properties.iterator();
-        while (iterator.next()) |_| {
-            // TODO: Properly release Value memory based on its type
-            // For now, we'll let the GC handle it
+        while (iterator.next()) |entry| {
+            const value = entry.value_ptr.*;
+            switch (value.tag) {
+                .string => value.data.string.release(allocator),
+                .array => value.data.array.release(allocator),
+                .object => value.data.object.release(allocator),
+                .struct_instance => value.data.struct_instance.release(allocator),
+                .resource => value.data.resource.release(allocator),
+                .user_function => value.data.user_function.release(allocator),
+                .closure => value.data.closure.release(allocator),
+                .arrow_function => value.data.arrow_function.release(allocator),
+                else => {},
+            }
         }
         self.properties.deinit();
     }
@@ -891,7 +980,7 @@ pub const PHPObject = struct {
         return self.class.hasMethod(name);
     }
     
-    pub fn callMethod(self: *PHPObject, vm: *anyopaque, name: []const u8, args: []const Value) !Value {
+    pub fn callMethod(self: *PHPObject, vm: *anyopaque, instance_value: Value, name: []const u8, args: []const Value) !Value {
         const method = self.class.getMethod(name);
         if (method == null) {
             // Try magic __call method
@@ -902,9 +991,32 @@ pub const PHPObject = struct {
             return error.UndefinedMethod;
         }
         
-        // For now, return null - actual method execution would happen here
-        _ = vm;
-        _ = args;
+        const VM = @import("vm.zig").VM;
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+        
+        // Push call frame
+        try vm_instance.pushCallFrame(name, vm_instance.current_file, vm_instance.current_line);
+        defer vm_instance.popCallFrame();
+        
+        // Inject $this
+        try vm_instance.setVariable("$this", instance_value);
+        
+        // Inject arguments
+        for (method.?.parameters, 0..) |param, i| {
+            if (i < args.len) {
+                try vm_instance.setVariable(param.name.data, args[i]);
+            } else if (param.default_value) |default| {
+                try vm_instance.setVariable(param.name.data, default);
+            }
+        }
+        
+        // Execute body
+        if (method.?.body) |body_ptr| {
+            const ast = @import("../compiler/ast.zig");
+            const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+            return try vm_instance.run(body_node);
+        }
+        
         return Value.initNull();
     }
     
