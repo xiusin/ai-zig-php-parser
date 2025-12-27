@@ -1212,10 +1212,8 @@ pub const VM = struct {
             try self.initializeObjectProperties(object, class);
         }
 
-        // Call constructor if it exists
-        if (class.hasMethod("__construct")) {
-            _ = try self.callObjectMethod(value, "__construct", &[_]Value{});
-        }
+        // Don't call constructor here - it will be called by evaluateObjectInstantiation
+        // with the proper arguments
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
@@ -1951,9 +1949,9 @@ pub const VM = struct {
         // Otherwise assume it's a class
         const value = try self.createObject(name);
 
-        // Handle constructor arguments if any
-        if (instantiation_data.args.len > 0) {
-            // Call constructor with arguments
+        // Call constructor if it exists
+        const object = value.data.object.data;
+        if (object.class.hasMethod("__construct")) {
             var args = std.ArrayList(Value){};
             defer {
                 for (args.items) |arg| {
