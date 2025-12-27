@@ -7,6 +7,7 @@ const PHPResource = @import("types.zig").PHPResource;
 const UserFunction = @import("types.zig").UserFunction;
 const Closure = @import("types.zig").Closure;
 const ArrowFunction = @import("types.zig").ArrowFunction;
+const StructInstance = @import("types.zig").StructInstance;
 
 pub fn Box(comptime T: type) type {
     return struct {
@@ -72,12 +73,16 @@ pub fn Box(comptime T: type) type {
                         // TODO: Call __destruct method
                     }
                     
-                    // Decrease reference count for all properties
-                    var iterator = self.data.properties.iterator();
+                    self.data.deinit(allocator);
+                    allocator.destroy(self.data);
+                },
+                *StructInstance => {
+                    // Decrease reference count for all fields
+                    var iterator = self.data.fields.iterator();
                     while (iterator.next()) |entry| {
                         decrementValueRefCount(entry.value_ptr.*, allocator);
                     }
-                    self.data.deinit();
+                    self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },
                 *PHPResource => {
@@ -136,6 +141,12 @@ pub fn Box(comptime T: type) type {
                         markValueGray(entry.value_ptr.*);
                     }
                 },
+                *StructInstance => {
+                    var iterator = self.data.fields.iterator();
+                    while (iterator.next()) |entry| {
+                        markValueGray(entry.value_ptr.*);
+                    }
+                },
                 *Closure => {
                     var iterator = self.data.captured_vars.iterator();
                     while (iterator.next()) |entry| {
@@ -177,6 +188,12 @@ pub fn Box(comptime T: type) type {
                         scanValue(entry.value_ptr.*);
                     }
                 },
+                *StructInstance => {
+                    var iterator = self.data.fields.iterator();
+                    while (iterator.next()) |entry| {
+                        scanValue(entry.value_ptr.*);
+                    }
+                },
                 *Closure => {
                     var iterator = self.data.captured_vars.iterator();
                     while (iterator.next()) |entry| {
@@ -208,6 +225,12 @@ pub fn Box(comptime T: type) type {
                 },
                 *PHPObject => {
                     var iterator = self.data.properties.iterator();
+                    while (iterator.next()) |entry| {
+                        markValueBlack(entry.value_ptr.*);
+                    }
+                },
+                *StructInstance => {
+                    var iterator = self.data.fields.iterator();
                     while (iterator.next()) |entry| {
                         markValueBlack(entry.value_ptr.*);
                     }
@@ -246,6 +269,12 @@ pub fn Box(comptime T: type) type {
                 },
                 *PHPObject => {
                     var iterator = self.data.properties.iterator();
+                    while (iterator.next()) |entry| {
+                        collectValueWhite(entry.value_ptr.*, allocator);
+                    }
+                },
+                *StructInstance => {
+                    var iterator = self.data.fields.iterator();
                     while (iterator.next()) |entry| {
                         collectValueWhite(entry.value_ptr.*, allocator);
                     }
@@ -411,6 +440,9 @@ pub fn decRef(mm: *MemoryManager, val: Value) void {
         },
         .object => {
             val.data.object.release(mm.allocator);
+        },
+        .struct_instance => {
+            val.data.struct_instance.release(mm.allocator);
         },
         .resource => {
             val.data.resource.release(mm.allocator);

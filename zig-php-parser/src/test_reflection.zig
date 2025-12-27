@@ -236,7 +236,7 @@ test "ReflectionObject functionality" {
     try testing.expect(property_names.len == 2);
     
     // Clean up string value
-    object.properties.get("prop2").?.data.string.data.deinit(allocator);
+    object.properties.get("prop2").?.data.string.release(allocator);
 }
 
 test "Class inheritance reflection" {
@@ -294,7 +294,7 @@ test "ReflectionType functionality" {
     const type_name = try PHPString.init(allocator, "string");
     defer type_name.deinit(allocator);
     
-    var type_info = types.TypeInfo.init(type_name);
+    var type_info = types.TypeInfo.init(type_name, .string);
     type_info.is_nullable = true;
     
     // Create reflection type
@@ -380,8 +380,4 @@ test "Reflection builtin functions" {
     method_name_value.data.string.release(allocator);
     property_name_value.data.string.release(allocator);
     object_value.data.object.release(allocator);
-    non_existent_class.data.string.data.deinit(allocator);
-    get_class_result.data.string.data.deinit(allocator);
-    method_name_value.data.string.data.deinit(allocator);
-    property_name_value.data.string.data.deinit(allocator);
 }

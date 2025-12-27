@@ -17,11 +17,11 @@ pub const Node = struct {
         closure, arrow_function, anonymous_class,
         if_stmt, while_stmt, for_stmt, foreach_stmt, match_expr, match_arm,
         try_stmt, catch_clause, finally_clause, throw_stmt,
-        method_call, function_call, function_decl,
+        method_call, property_access, function_call, function_decl,
         block, expression_stmt, assignment, echo_stmt, return_stmt,
         variable, literal_int, literal_float, literal_string, array_init, binary_expr,
         unary_expr, ternary_expr, unpacking_expr,
-        pipe_expr, clone_with_expr, struct_instantiation,
+        pipe_expr, clone_with_expr, struct_instantiation, object_instantiation,
         named_type, union_type, intersection_type,
     };
 
@@ -50,7 +50,7 @@ pub const Node = struct {
             body: Index,
         },
         parameter: struct {
-            attributes: []const Index, name: StringId, type: ?Index,
+            attributes: []const Index, name: StringId, type: ?Index, default_value: ?Index,
             is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool
         },
         const_decl: struct { name: StringId, value: Index },
@@ -79,6 +79,7 @@ pub const Node = struct {
         match_expr: struct { expression: Index, arms: []const Index },
         match_arm: struct { conditions: []const Index, body: Index },
         method_call: struct { target: Index, method_name: StringId, args: []const Index },
+        property_access: struct { target: Index, property_name: StringId },
         function_call: struct { name: Index, args: []const Index }, 
         array_init: struct { elements: []const Index },
         literal_string: struct { value: StringId },
@@ -93,6 +94,7 @@ pub const Node = struct {
         pipe_expr: struct { left: Index, right: Index },
         clone_with_expr: struct { object: Index, properties: Index },
         struct_instantiation: struct { struct_type: Index, args: []const Index },
+        object_instantiation: struct { class_name: Index, args: []const Index },
         function_decl: struct { 
             attributes: []const Index, name: StringId, params: []const Index, body: Index 
         },
