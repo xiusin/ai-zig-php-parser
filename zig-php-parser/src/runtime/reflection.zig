@@ -69,14 +69,14 @@ pub const ReflectionClass = struct {
     }
     
     pub fn getMethods(self: *ReflectionClass) ![]ReflectionMethod {
-        var methods = std.ArrayList(ReflectionMethod).init(self.allocator);
-        defer methods.deinit();
+        var methods = std.ArrayList(ReflectionMethod){};
+        defer methods.deinit(self.allocator);
         
         // Get methods from this class
         var iterator = self.class.methods.iterator();
         while (iterator.next()) |entry| {
             const method = ReflectionMethod.init(self.allocator, entry.value_ptr, self.class);
-            try methods.append(method);
+            try methods.append(self.allocator, method);
         }
         
         // Get methods from parent classes
@@ -88,7 +88,7 @@ pub const ReflectionClass = struct {
                 const method_def = entry.value_ptr.*;
                 if (method_def.modifiers.visibility != .private) {
                     const method = ReflectionMethod.init(self.allocator, entry.value_ptr, parent);
-                    try methods.append(method);
+                    try methods.append(self.allocator, method);
                 }
             }
             current_class = parent.parent;
@@ -99,16 +99,16 @@ pub const ReflectionClass = struct {
             var trait_iterator = trait.methods.iterator();
             while (trait_iterator.next()) |entry| {
                 const method = ReflectionMethod.init(self.allocator, entry.value_ptr, self.class);
-                try methods.append(method);
+                try methods.append(self.allocator, method);
             }
         }
         
-        return methods.toOwnedSlice();
+        return methods.toOwnedSlice(self.allocator);
     }
     
     pub fn getMethod(self: *const ReflectionClass, name: []const u8) !ReflectionMethod {
         if (self.class.getMethod(name)) |method_def| {
-            return ReflectionMethod.init(self.allocator, @constCast(&method_def), self.class);
+            return ReflectionMethod.init(self.allocator, method_def, self.class);
         }
         return error.MethodNotFound;
     }
@@ -118,14 +118,14 @@ pub const ReflectionClass = struct {
     }
     
     pub fn getProperties(self: *ReflectionClass) ![]ReflectionProperty {
-        var properties = std.ArrayList(ReflectionProperty).init(self.allocator);
-        defer properties.deinit();
+        var properties = std.ArrayList(ReflectionProperty){};
+        defer properties.deinit(self.allocator);
         
         // Get properties from this class
         var iterator = self.class.properties.iterator();
         while (iterator.next()) |entry| {
             const property = ReflectionProperty.init(self.allocator, entry.value_ptr, self.class);
-            try properties.append(property);
+            try properties.append(self.allocator, property);
         }
         
         // Get properties from parent classes
@@ -137,7 +137,7 @@ pub const ReflectionClass = struct {
                 const property_def = entry.value_ptr.*;
                 if (property_def.modifiers.visibility != .private) {
                     const property = ReflectionProperty.init(self.allocator, entry.value_ptr, parent);
-                    try properties.append(property);
+                    try properties.append(self.allocator, property);
                 }
             }
             current_class = parent.parent;
@@ -148,16 +148,16 @@ pub const ReflectionClass = struct {
             var trait_iterator = trait.properties.iterator();
             while (trait_iterator.next()) |entry| {
                 const property = ReflectionProperty.init(self.allocator, entry.value_ptr, self.class);
-                try properties.append(property);
+                try properties.append(self.allocator, property);
             }
         }
         
-        return properties.toOwnedSlice();
+        return properties.toOwnedSlice(self.allocator);
     }
     
     pub fn getProperty(self: *const ReflectionClass, name: []const u8) !ReflectionProperty {
         if (self.class.getProperty(name)) |property_def| {
-            return ReflectionProperty.init(self.allocator, @constCast(&property_def), self.class);
+            return ReflectionProperty.init(self.allocator, property_def, self.class);
         }
         return error.PropertyNotFound;
     }
@@ -345,16 +345,16 @@ pub const ReflectionClass = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value).init(self.allocator);
-        defer instances.deinit();
+        var instances = std.ArrayList(Value){};
+        defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
             const instance = try attr.instantiate(self.allocator);
             const object_value = try Value.initObject(self.allocator, instance.class);
-            try instances.append(object_value);
+            try instances.append(self.allocator, object_value);
         }
         
-        return instances.toOwnedSlice();
+        return instances.toOwnedSlice(self.allocator);
     }
     
     pub fn hasAttribute(self: *const ReflectionClass, attribute_name: []const u8) bool {
@@ -428,8 +428,8 @@ pub const ReflectionMethod = struct {
     pub fn getParameters(self: *const ReflectionMethod) ![]ReflectionParameter {
         var parameters = try self.allocator.alloc(ReflectionParameter, self.method.parameters.len);
         
-        for (self.method.parameters, 0..) |param, i| {
-            parameters[i] = ReflectionParameter.init(self.allocator, &param, self.method, @intCast(i));
+        for (self.method.parameters, 0..) |_, i| {
+            parameters[i] = ReflectionParameter.init(self.allocator, &self.method.parameters[i], self.method, @intCast(i));
         }
         
         return parameters;
@@ -439,7 +439,7 @@ pub const ReflectionMethod = struct {
         return self.method.parameters.len;
     }
     
-    pub fn getNumberOfRequiredParameters(self: *ReflectionMethod) usize {
+    pub fn getNumberOfRequiredParameters(self: *const ReflectionMethod) usize {
         var count: usize = 0;
         for (self.method.parameters) |param| {
             if (param.default_value == null and !param.is_variadic) {
@@ -526,16 +526,16 @@ pub const ReflectionMethod = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value).init(self.allocator);
-        defer instances.deinit();
+        var instances = std.ArrayList(Value){};
+        defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
             const instance = try attr.instantiate(self.allocator);
             const object_value = try Value.initObject(self.allocator, instance.class);
-            try instances.append(object_value);
+            try instances.append(self.allocator, object_value);
         }
         
-        return instances.toOwnedSlice();
+        return instances.toOwnedSlice(self.allocator);
     }
     
     pub fn hasAttribute(self: *const ReflectionMethod, attribute_name: []const u8) bool {
@@ -707,16 +707,16 @@ pub const ReflectionProperty = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value).init(self.allocator);
-        defer instances.deinit();
+        var instances = std.ArrayList(Value){};
+        defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
             const instance = try attr.instantiate(self.allocator);
             const object_value = try Value.initObject(self.allocator, instance.class);
-            try instances.append(object_value);
+            try instances.append(self.allocator, object_value);
         }
         
-        return instances.toOwnedSlice();
+        return instances.toOwnedSlice(self.allocator);
     }
     
     pub fn hasAttribute(self: *const ReflectionProperty, attribute_name: []const u8) bool {
@@ -845,16 +845,16 @@ pub const ReflectionParameter = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value).init(self.allocator);
-        defer instances.deinit();
+        var instances = std.ArrayList(Value){};
+        defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
             const instance = try attr.instantiate(self.allocator);
             const object_value = try Value.initObject(self.allocator, instance.class);
-            try instances.append(object_value);
+            try instances.append(self.allocator, object_value);
         }
         
-        return instances.toOwnedSlice();
+        return instances.toOwnedSlice(self.allocator);
     }
     
     pub fn hasAttribute(self: *const ReflectionParameter, attribute_name: []const u8) bool {
@@ -970,16 +970,16 @@ pub const ReflectionFunction = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value).init(self.allocator);
-        defer instances.deinit();
+        var instances = std.ArrayList(Value){};
+        defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
             const instance = try attr.instantiate(self.allocator);
             const object_value = try Value.initObject(self.allocator, instance.class);
-            try instances.append(object_value);
+            try instances.append(self.allocator, object_value);
         }
         
-        return instances.toOwnedSlice();
+        return instances.toOwnedSlice(self.allocator);
     }
     
     pub fn hasAttribute(self: *const ReflectionFunction, attribute_name: []const u8) bool {
@@ -1044,22 +1044,22 @@ pub const ReflectionType = struct {
     }
     
     pub fn toString(self: *const ReflectionType, allocator: std.mem.Allocator) !*PHPString {
-        var type_str = std.ArrayList(u8).init(allocator);
-        defer type_str.deinit();
+        var type_str = std.ArrayList(u8){};
+        defer type_str.deinit(allocator);
         
         if (self.type_info.is_nullable) {
-            try type_str.append('?');
+            try type_str.append(allocator, '?');
         }
         
         if (self.type_info.is_union) {
             for (self.type_info.union_types, 0..) |union_type, i| {
                 if (i > 0) {
-                    try type_str.appendSlice("|");
+                    try type_str.appendSlice(allocator, "|");
                 }
-                try type_str.appendSlice(union_type.name.data);
+                try type_str.appendSlice(allocator, union_type.name.data);
             }
         } else {
-            try type_str.appendSlice(self.type_info.name.data);
+            try type_str.appendSlice(allocator, self.type_info.name.data);
         }
         
         return PHPString.init(allocator, type_str.items);
@@ -1091,27 +1091,27 @@ pub const ReflectionObject = struct {
     }
     
     pub fn getProperties(self: *ReflectionObject) ![]Value {
-        var properties = std.ArrayList(Value).init(self.allocator);
-        defer properties.deinit();
+        var properties = std.ArrayList(Value){};
+        defer properties.deinit(self.allocator);
         
         var iterator = self.object.properties.iterator();
         while (iterator.next()) |entry| {
-            try properties.append(entry.value_ptr.*);
+            try properties.append(self.allocator, entry.value_ptr.*);
         }
         
-        return properties.toOwnedSlice();
+        return properties.toOwnedSlice(self.allocator);
     }
     
     pub fn getPropertyNames(self: *const ReflectionObject) ![][]const u8 {
-        var names = std.ArrayList([]const u8).init(self.allocator);
-        defer names.deinit();
+        var names = std.ArrayList([]const u8){};
+        defer names.deinit(self.allocator);
         
         var iterator = self.object.properties.iterator();
         while (iterator.next()) |entry| {
-            try names.append(entry.key_ptr.*);
+            try names.append(self.allocator, entry.key_ptr.*);
         }
         
-        return names.toOwnedSlice();
+        return names.toOwnedSlice(self.allocator);
     }
 };
 

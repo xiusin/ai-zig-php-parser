@@ -358,9 +358,9 @@ pub const PHPClass = struct {
         return false;
     }
     
-    pub fn getMethod(self: *PHPClass, name: []const u8) ?Method {
+    pub fn getMethod(self: *PHPClass, name: []const u8) ?*Method {
         // Check own methods first
-        if (self.methods.get(name)) |method| return method;
+        if (self.methods.getPtr(name)) |method| return method;
         
         // Check parent class
         if (self.parent) |parent| {
@@ -369,7 +369,7 @@ pub const PHPClass = struct {
         
         // Check traits
         for (self.traits) |trait| {
-            if (trait.methods.get(name)) |method| return method;
+            if (trait.methods.getPtr(name)) |method| return method;
         }
         
         return null;
@@ -392,9 +392,9 @@ pub const PHPClass = struct {
         return false;
     }
     
-    pub fn getProperty(self: *PHPClass, name: []const u8) ?Property {
+    pub fn getProperty(self: *PHPClass, name: []const u8) ?*Property {
         // Check own properties first
-        if (self.properties.get(name)) |property| return property;
+        if (self.properties.getPtr(name)) |property| return property;
         
         // Check parent class
         if (self.parent) |parent| {
@@ -403,7 +403,7 @@ pub const PHPClass = struct {
         
         // Check traits
         for (self.traits) |trait| {
-            if (trait.properties.get(name)) |property| return property;
+            if (trait.properties.getPtr(name)) |property| return property;
         }
         
         return null;
@@ -608,6 +608,12 @@ pub const PHPObject = struct {
     }
     
     pub fn deinit(self: *PHPObject) void {
+        // Release all property values
+        var iterator = self.properties.iterator();
+        while (iterator.next()) |_| {
+            // TODO: Properly release Value memory based on its type
+            // For now, we'll let the GC handle it
+        }
         self.properties.deinit();
     }
     

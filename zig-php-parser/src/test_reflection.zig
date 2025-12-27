@@ -187,7 +187,7 @@ test "ReflectionSystem integration" {
     const method_name = try PHPString.init(allocator, "testMethod");
     defer method_name.deinit(allocator);
     
-    var method = Method.init(method_name);
+    const method = Method.init(method_name);
     try test_class.methods.put("testMethod", method);
     
     // Register class with VM
@@ -374,7 +374,12 @@ test "Reflection builtin functions" {
     try testing.expect(property_exists_result.toBool());
     
     // Clean up string values
-    class_name_value.data.string.data.deinit(allocator);
+    class_name_value.data.string.release(allocator);
+    non_existent_class.data.string.release(allocator);
+    get_class_result.data.string.release(allocator);
+    method_name_value.data.string.release(allocator);
+    property_name_value.data.string.release(allocator);
+    object_value.data.object.release(allocator);
     non_existent_class.data.string.data.deinit(allocator);
     get_class_result.data.string.data.deinit(allocator);
     method_name_value.data.string.data.deinit(allocator);

@@ -24,7 +24,7 @@ test "Attribute creation and basic functionality" {
     defer attr_name.deinit(allocator);
     
     const string_value = try Value.initString(allocator, "test");
-    defer string_value.data.string.data.deinit(allocator);
+    defer string_value.data.string.release(allocator);
     
     const args = [_]Value{
         Value.initInt(42),
@@ -71,7 +71,7 @@ test "Class with attributes" {
     const route_args = [_]Value{
         try Value.initString(allocator, "/api/test"),
     };
-    defer route_args[0].data.string.data.deinit(allocator);
+    defer route_args[0].data.string.release(allocator);
     
     // Allocate attributes array
     var attributes = try allocator.alloc(Attribute, 2);
@@ -124,16 +124,13 @@ test "Method with attributes" {
     
     // Create attributes for the method
     const attr_name = try PHPString.init(allocator, "PostMapping");
-    defer attr_name.deinit(allocator);
     
     const args = [_]Value{
         try Value.initString(allocator, "/users"),
     };
-    defer args[0].data.string.data.deinit(allocator);
     
     // Allocate attributes array
     var attributes = try allocator.alloc(Attribute, 1);
-    defer allocator.free(attributes);
     attributes[0] = Attribute.init(attr_name, &args, .{ .method = true });
     
     method.attributes = attributes;
@@ -145,12 +142,17 @@ test "Method with attributes" {
     
     // Test method attributes
     const method_attrs = try reflection_method.getAttributes(null);
-    defer allocator.free(method_attrs);
     try testing.expect(method_attrs.len == 1);
     try testing.expect(std.mem.eql(u8, method_attrs[0].name.data, "PostMapping"));
     
     try testing.expect(reflection_method.hasAttribute("PostMapping"));
     try testing.expect(!reflection_method.hasAttribute("GetMapping"));
+    
+    // Clean up in correct order
+    allocator.free(method_attrs);
+    args[0].data.string.release(allocator);
+    allocator.free(attributes);
+    attr_name.deinit(allocator);
 }
 
 test "Property with attributes" {
@@ -170,14 +172,11 @@ test "Property with attributes" {
     
     // Create attributes for the property
     const attr_name = try PHPString.init(allocator, "Column");
-    defer attr_name.deinit(allocator);
     
     const args = [_]Value{
         try Value.initString(allocator, "user_name"),
         try Value.initString(allocator, "varchar(255)"),
     };
-    defer args[0].data.string.data.deinit(allocator);
-    defer args[1].data.string.data.deinit(allocator);
     
     var attributes = [_]Attribute{
         Attribute.init(attr_name, &args, .{ .property = true }),
@@ -192,13 +191,18 @@ test "Property with attributes" {
     
     // Test property attributes
     const property_attrs = try reflection_property.getAttributes(null);
-    defer allocator.free(property_attrs);
     try testing.expect(property_attrs.len == 1);
     try testing.expect(std.mem.eql(u8, property_attrs[0].name.data, "Column"));
     try testing.expect(property_attrs[0].arguments.len == 2);
     
     try testing.expect(reflection_property.hasAttribute("Column"));
     try testing.expect(!reflection_property.hasAttribute("Table"));
+    
+    // Clean up in correct order
+    allocator.free(property_attrs);
+    args[0].data.string.release(allocator);
+    args[1].data.string.release(allocator);
+    attr_name.deinit(allocator);
 }
 
 test "Parameter with attributes" {
@@ -212,12 +216,10 @@ test "Parameter with attributes" {
     
     // Create attributes for the parameter
     const attr_name = try PHPString.init(allocator, "PathVariable");
-    defer attr_name.deinit(allocator);
     
     const args = [_]Value{
         try Value.initString(allocator, "id"),
     };
-    defer args[0].data.string.data.deinit(allocator);
     
     var attributes = [_]Attribute{
         Attribute.init(attr_name, &args, .{ .parameter = true }),
@@ -245,12 +247,16 @@ test "Parameter with attributes" {
     
     // Test parameter attributes
     const param_attrs = try reflection_param.getAttributes(null);
-    defer allocator.free(param_attrs);
     try testing.expect(param_attrs.len == 1);
     try testing.expect(std.mem.eql(u8, param_attrs[0].name.data, "PathVariable"));
     
     try testing.expect(reflection_param.hasAttribute("PathVariable"));
     try testing.expect(!reflection_param.hasAttribute("RequestBody"));
+    
+    // Clean up in correct order
+    allocator.free(param_attrs);
+    args[0].data.string.release(allocator);
+    attr_name.deinit(allocator);
 }
 
 test "ReflectionAttribute functionality" {
@@ -264,7 +270,7 @@ test "ReflectionAttribute functionality" {
         Value.initInt(42),
         try Value.initString(allocator, "test"),
     };
-    defer args[1].data.string.data.deinit(allocator);
+    defer args[1].data.string.release(allocator);
     
     const target = Attribute.AttributeTarget{
         .class = true,
@@ -372,25 +378,17 @@ test "Multiple attributes on same element" {
     
     // Create multiple attributes
     const attr1_name = try PHPString.init(allocator, "Deprecated");
-    defer attr1_name.deinit(allocator);
-    
     const attr2_name = try PHPString.init(allocator, "Route");
-    defer attr2_name.deinit(allocator);
-    
     const attr3_name = try PHPString.init(allocator, "Middleware");
-    defer attr3_name.deinit(allocator);
     
     const route_args = [_]Value{
         try Value.initString(allocator, "/api/test"),
     };
-    defer route_args[0].data.string.data.deinit(allocator);
     
     const middleware_args = [_]Value{
         try Value.initString(allocator, "auth"),
         try Value.initString(allocator, "cors"),
     };
-    defer middleware_args[0].data.string.data.deinit(allocator);
-    defer middleware_args[1].data.string.data.deinit(allocator);
     
     var attributes = [_]Attribute{
         Attribute.init(attr1_name, &[_]Value{}, .{ .class = true }),
@@ -405,7 +403,6 @@ test "Multiple attributes on same element" {
     
     // Test getting all attributes
     const all_attrs = try reflection_class.getAttributes(null);
-    defer allocator.free(all_attrs);
     try testing.expect(all_attrs.len == 3);
     
     // Test that all attributes are present
@@ -415,11 +412,20 @@ test "Multiple attributes on same element" {
     
     // Test getting specific attribute with arguments
     const middleware_attrs = try reflection_class.getAttributes("Middleware");
-    defer allocator.free(middleware_attrs);
     try testing.expect(middleware_attrs.len == 1);
     try testing.expect(middleware_attrs[0].arguments.len == 2);
     try testing.expect(std.mem.eql(u8, middleware_attrs[0].arguments[0].data.string.data.data, "auth"));
     try testing.expect(std.mem.eql(u8, middleware_attrs[0].arguments[1].data.string.data.data, "cors"));
+    
+    // Clean up in correct order
+    allocator.free(middleware_attrs);
+    allocator.free(all_attrs);
+    middleware_args[0].data.string.release(allocator);
+    middleware_args[1].data.string.release(allocator);
+    route_args[0].data.string.release(allocator);
+    attr3_name.deinit(allocator);
+    attr2_name.deinit(allocator);
+    attr1_name.deinit(allocator);
 }
 
 test "Attribute target validation" {

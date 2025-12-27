@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="GoORMHelperCache">
+    <option name="schemaMapping">
+      <map>
+        <entry key="PersonalWechat">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/model/personalWechat.go" />
+            </set>
+          </value>
+        </entry>
+      </map>
+    </option>
+    <option name="scannedPathMapping">
+      <map>
+        <entry key="file://$USER_HOME$/products/fansnewgo/internal/model/personalWechat.go">
+          <value>
+            <ScannedPath>
+              <option name="lastModified" value="1766801646674" />
+              <option name="schema">
+                <list>
+                  <option value="PersonalWechat" />
+                </list>
+              </option>
+            </ScannedPath>
+          </value>
+        </entry>
+      </map>
+    </option>
+    <option name="tableStructMapping">
+      <map>
+        <entry key="personal_wechat" value="PersonalWechat" />
+      </map>
+    </option>
+    <option name="lastTimeChecked" value="1766800952200" />
+  </component>
+</project>
