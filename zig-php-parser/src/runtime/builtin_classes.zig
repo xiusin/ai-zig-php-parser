@@ -36,6 +36,22 @@ pub const BuiltinClassManager = struct {
         self.classes.deinit();
     }
 
+    fn addProperty(self: *BuiltinClassManager, class: *PHPClass, name: []const u8, visibility: Property.Visibility, default_value: ?Value) !void {
+        const property = Property{
+            .name = try PHPString.init(self.allocator, name),
+            .type = null,
+            .modifiers = .{
+                .visibility = visibility,
+                .is_static = false,
+                .is_readonly = false,
+            },
+            .default_value = default_value,
+            .attributes = &[_]types.Attribute{},
+            .hooks = &[_]types.PropertyHook{},
+        };
+        try class.properties.put(name, property);
+    }
+
     fn registerBuiltinClasses(self: *BuiltinClassManager) !void {
         // stdClass - PHP的基础动态对象类
         try self.registerStdClass();
@@ -54,6 +70,53 @@ pub const BuiltinClassManager = struct {
 
         // DateTime类
         try self.registerDateTimeClasses();
+
+        // PDO类
+        try self.registerPDOClass();
+    }
+
+    /// 注册PDO类
+    fn registerPDOClass(self: *BuiltinClassManager) !void {
+        const pdo_name = try PHPString.init(self.allocator, "PDO");
+        const pdo_class = try self.allocator.create(PHPClass);
+        pdo_class.* = PHPClass.init(self.allocator, pdo_name);
+
+        // PDO属性
+        try self.addProperty(pdo_class, "connection", .private, null);
+        try self.addProperty(pdo_class, "driver", .private, null);
+        try self.addProperty(pdo_class, "in_transaction", .private, null);
+        try self.addProperty(pdo_class, "error_mode", .private, null);
+        try self.addProperty(pdo_class, "last_error", .private, null);
+
+        // 添加构造函数方法
+        try self.addConstructorMethod(pdo_class);
+
+        // Add PDO methods
+        try self.addPDOMethod(pdo_class, "exec", 1);
+        try self.addPDOMethod(pdo_class, "query", 1);
+        try self.addPDOMethod(pdo_class, "prepare", 1);
+        try self.addPDOMethod(pdo_class, "beginTransaction", 0);
+        try self.addPDOMethod(pdo_class, "commit", 0);
+        try self.addPDOMethod(pdo_class, "rollBack", 0);
+        try self.addPDOMethod(pdo_class, "lastInsertId", 0);
+        try self.addPDOMethod(pdo_class, "quote", 1);
+
+        try self.classes.put("PDO", pdo_class);
+
+        // PDOStatement类
+        const pdo_stmt_name = try PHPString.init(self.allocator, "PDOStatement");
+        const pdo_stmt_class = try self.allocator.create(PHPClass);
+        pdo_stmt_class.* = PHPClass.init(self.allocator, pdo_stmt_name);
+
+        try self.addProperty(pdo_stmt_class, "connection", .private, null);
+        try self.addProperty(pdo_stmt_class, "sql", .private, null);
+        try self.addProperty(pdo_stmt_class, "bound_params", .private, null);
+        try self.addProperty(pdo_stmt_class, "result_set", .private, null);
+        try self.addProperty(pdo_stmt_class, "fetch_mode", .private, null);
+        try self.addProperty(pdo_stmt_class, "column_count", .private, null);
+        try self.addProperty(pdo_stmt_class, "row_count", .private, null);
+
+        try self.classes.put("PDOStatement", pdo_stmt_class);
     }
 
     /// 注册stdClass
@@ -242,13 +305,48 @@ pub const BuiltinClassManager = struct {
         try self.classes.put("DateTimeZone", datetime_zone_class);
     }
 
-    /// 辅助函数：添加属性
-    fn addProperty(self: *BuiltinClassManager, class: *PHPClass, name: []const u8, visibility: Property.Visibility, default_value: ?Value) !void {
-        const prop_name = try PHPString.init(self.allocator, name);
-        var property = Property.init(prop_name);
-        property.modifiers.visibility = visibility;
-        property.default_value = default_value;
-        try class.properties.put(name, property);
+    /// 辅助函数：添加PDO方法
+    fn addPDOMethod(self: *BuiltinClassManager, class: *PHPClass, method_name: []const u8, _: u32) !void {
+        const method_name_str = try PHPString.init(self.allocator, method_name);
+        var method = types.Method.init(method_name_str);
+
+        // 设置方法为公共的
+        method.modifiers = .{
+            .is_static = false,
+            .is_final = false,
+            .is_abstract = false,
+            .visibility = .public,
+        };
+
+        // 方法参数
+        method.parameters = &[_]types.Method.Parameter{};
+
+        // 方法体为null（由解释器处理）
+        method.body = null;
+
+        try class.methods.put(method_name, method);
+    }
+
+    /// 辅助函数：添加构造函数方法
+    fn addConstructorMethod(self: *BuiltinClassManager, class: *PHPClass) !void {
+        const method_name = try PHPString.init(self.allocator, "__construct");
+        var method = types.Method.init(method_name);
+
+        // 构造函数是公共的
+        method.modifiers = .{
+            .is_static = false,
+            .is_final = false,
+            .is_abstract = false,
+            .visibility = .public,
+        };
+
+        // 构造函数接受可变参数
+        method.parameters = &[_]types.Method.Parameter{};
+
+        // 构造函数体为null（由解释器处理）
+        method.body = null;
+
+        try class.methods.put("__construct", method);
     }
 
     /// 获取内置类

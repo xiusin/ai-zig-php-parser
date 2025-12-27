@@ -14,6 +14,8 @@ const ExceptionFactory = exceptions.ExceptionFactory;
 const stdlib = @import("stdlib.zig");
 const StandardLibrary = stdlib.StandardLibrary;
 const reflection = @import("reflection.zig");
+const builtin_classes = @import("builtin_classes.zig");
+const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
 
 const CapturedVar = struct { name: []const u8, value: Value };
@@ -218,6 +220,75 @@ fn callUserFuncArrayFn(vm: *VM, args: []const Value) !Value {
         },
     };
 }
+
+fn pdoRollbackFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    return Value.initBool(false); // Not implemented yet
+}
+
+fn pdoCommitFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    return Value.initBool(false); // Not implemented yet
+}
+
+fn pdoBeginTransactionFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    return Value.initBool(false); // Not implemented yet
+}
+
+fn pdoPrepareFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    return Value.initNull(); // Not implemented yet
+}
+
+fn pdoQueryFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    return Value.initNull(); // Not implemented yet
+}
+
+fn pdoExecFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 2) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "pdo_exec() expects exactly 2 parameters", vm.current_file, vm.current_line);
+        return vm.throwException(exception);
+    }
+
+    const pdo_value = args[0];
+    const sql_value = args[1];
+
+    if (pdo_value.tag != .object or sql_value.tag != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "pdo_exec() expects PDO object and string", vm.current_file, vm.current_line);
+        return vm.throwException(exception);
+    }
+
+    if (!std.mem.eql(u8, pdo_value.data.object.data.class.name.data, "PDO")) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "pdo_exec() expects PDO object as first parameter", vm.current_file, vm.current_line);
+        return vm.throwException(exception);
+    }
+
+    const sql = sql_value.data.string.data.data;
+
+    // Get the stored PDO connection
+    const connection_prop = pdo_value.data.object.data.getProperty("_pdo_connection") catch {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "PDO connection not initialized", vm.current_file, vm.current_line);
+        return vm.throwException(exception);
+    };
+
+    if (connection_prop.tag != .integer) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "Invalid PDO connection", vm.current_file, vm.current_line);
+        return vm.throwException(exception);
+    }
+
+    const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.data.integer))));
+    const result = try pdo_ptr.exec(sql);
+    return Value.initInt(result);
+}
+
+// Existing function implementations...
 
 fn isCallableFn(vm: *VM, args: []const Value) !Value {
     if (args.len != 1) {
@@ -609,6 +680,178 @@ fn isNullFn(vm: *VM, args: []const Value) !Value {
     return Value.initBool(arg.tag == .null);
 }
 
+// Reflection functions
+fn getDeclaredClassesFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 0) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 0, @intCast(args.len), "get_declared_classes", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.data.array.data;
+
+    var iterator = vm.classes.iterator();
+    while (iterator.next()) |entry| {
+        const class_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
+        try php_array.push(vm.allocator, class_name_value);
+        vm.releaseValue(class_name_value);
+    }
+
+    return php_array_value;
+}
+
+fn getDeclaredInterfacesFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 0) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 0, @intCast(args.len), "get_declared_interfaces", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.data.array.data;
+
+    var iterator = vm.classes.iterator();
+    while (iterator.next()) |entry| {
+        const class = entry.value_ptr.*;
+        if (class.modifiers.is_interface) {
+            const class_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
+            try php_array.push(vm.allocator, class_name_value);
+            vm.releaseValue(class_name_value);
+        }
+    }
+
+    return php_array_value;
+}
+
+fn getDeclaredTraitsFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 0) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 0, @intCast(args.len), "get_declared_traits", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.data.array.data;
+
+    var iterator = vm.classes.iterator();
+    while (iterator.next()) |entry| {
+        const class = entry.value_ptr.*;
+        if (class.modifiers.is_trait) {
+            const class_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
+            try php_array.push(vm.allocator, class_name_value);
+            vm.releaseValue(class_name_value);
+        }
+    }
+
+    return php_array_value;
+}
+
+fn getParentClassFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "get_parent_class", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const arg = args[0];
+    const class = switch (arg.tag) {
+        .object => arg.data.object.data.class,
+        .string => vm.getClass(arg.data.string.data.data) orelse return Value.initBool(false),
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_parent_class() expects parameter 1 to be object or string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    if (class.parent) |parent| {
+        return Value.initStringWithManager(&vm.memory_manager, parent.name.data);
+    }
+
+    return Value.initBool(false);
+}
+
+fn interfaceExistsFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "interface_exists", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const interface_name_val = args[0];
+    if (interface_name_val.tag != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "interface_exists() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const interface_name = interface_name_val.data.string.data.data;
+    if (vm.getClass(interface_name)) |class| {
+        return Value.initBool(class.modifiers.is_interface);
+    }
+
+    return Value.initBool(false);
+}
+
+fn traitExistsFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "trait_exists", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const trait_name_val = args[0];
+    if (trait_name_val.tag != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "trait_exists() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const trait_name = trait_name_val.data.string.data.data;
+    if (vm.getClass(trait_name)) |_| {
+        // Note: Current implementation doesn't distinguish traits from classes
+        // Would need is_trait field in ClassModifiers
+        return Value.initBool(false);
+    }
+
+    return Value.initBool(false);
+}
+
+fn getClassConstantsFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "get_class_constants", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const class_name_val = args[0];
+    const class_name = switch (class_name_val.tag) {
+        .string => class_name_val.data.string.data.data,
+        .object => class_name_val.data.object.data.class.name.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_class_constants() expects parameter 1 to be string or object", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    const class = vm.getClass(class_name) orelse {
+        return Value.initNull();
+    };
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.data.array.data;
+
+    var iterator = class.constants.iterator();
+    while (iterator.next()) |entry| {
+        const key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, entry.key_ptr.*) };
+        try php_array.set(vm.allocator, key, entry.value_ptr.*);
+    }
+
+    return php_array_value;
+}
+
 pub const VM = struct {
     allocator: std.mem.Allocator,
     global: *Environment,
@@ -658,6 +901,14 @@ pub const VM = struct {
 
         vm.global.* = Environment.init(allocator);
         vm.reflection_system = ReflectionSystem.init(allocator, vm);
+
+        // Initialize builtin classes
+        var builtin_class_manager = try builtin_classes.BuiltinClassManager.init(allocator);
+        defer builtin_class_manager.deinit();
+        var class_iter = builtin_class_manager.classes.iterator();
+        while (class_iter.next()) |entry| {
+            try vm.classes.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
 
         // Register built-in functions with optimized registration
         try vm.registerBuiltinFunctions();
@@ -832,10 +1083,27 @@ pub const VM = struct {
         try self.defineBuiltin("is_a", isAFn);
         try self.defineBuiltin("is_subclass_of", isSubclassOfFn);
 
+        // PDO functions
+        try self.defineBuiltin("pdo_exec", pdoExecFn);
+        try self.defineBuiltin("pdo_query", pdoQueryFn);
+        try self.defineBuiltin("pdo_prepare", pdoPrepareFn);
+        try self.defineBuiltin("pdo_begin_transaction", pdoBeginTransactionFn);
+        try self.defineBuiltin("pdo_commit", pdoCommitFn);
+        try self.defineBuiltin("pdo_rollback", pdoRollbackFn);
+
         // Variable handling functions
         try self.defineBuiltin("unset", unsetFn);
         try self.defineBuiltin("empty", emptyFn);
         try self.defineBuiltin("is_null", isNullFn);
+
+        // Reflection functions
+        try self.defineBuiltin("get_declared_classes", getDeclaredClassesFn);
+        try self.defineBuiltin("get_declared_interfaces", getDeclaredInterfacesFn);
+        try self.defineBuiltin("get_declared_traits", getDeclaredTraitsFn);
+        try self.defineBuiltin("get_parent_class", getParentClassFn);
+        try self.defineBuiltin("interface_exists", interfaceExistsFn);
+        try self.defineBuiltin("trait_exists", traitExistsFn);
+        try self.defineBuiltin("get_class_constants", getClassConstantsFn);
     }
 
     pub fn registerStandardLibraryFunctions(self: *VM) !void {
@@ -1256,6 +1524,11 @@ pub const VM = struct {
 
         const object = object_value.data.object.data;
 
+        // Special handling for PDO objects
+        if (std.mem.eql(u8, object.class.name.data, "PDO")) {
+            return self.callPDOMethod(object_value, method_name, args);
+        }
+
         // Don't push call frame here - it's done in PHPObject.callMethod
         const result = try object.callMethod(self, object_value, method_name, args);
 
@@ -1263,6 +1536,128 @@ pub const VM = struct {
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return result;
+    }
+
+    pub fn callPDOMethod(self: *VM, pdo_value: Value, method_name: []const u8, args: []const Value) !Value {
+
+        // Get the underlying PDO struct from the object's properties or data
+        // For now, we'll assume the PDO object has the database connection stored
+        // This is a simplified implementation
+
+        if (std.mem.eql(u8, method_name, "exec")) {
+            return self.callPDOExec(pdo_value, args);
+        } else if (std.mem.eql(u8, method_name, "query")) {
+            return self.callPDOQuery(pdo_value, args);
+        } else if (std.mem.eql(u8, method_name, "prepare")) {
+            return self.callPDOPrepare(pdo_value, args);
+        } else if (std.mem.eql(u8, method_name, "beginTransaction")) {
+            return self.callPDOBeginTransaction(pdo_value, args);
+        } else if (std.mem.eql(u8, method_name, "commit")) {
+            return self.callPDOCommit(pdo_value, args);
+        } else if (std.mem.eql(u8, method_name, "rollBack")) {
+            return self.callPDORollBack(pdo_value, args);
+        } else if (std.mem.eql(u8, method_name, "lastInsertId")) {
+            return self.callPDOLastInsertId(pdo_value, args);
+        } else if (std.mem.eql(u8, method_name, "quote")) {
+            return self.callPDOQuote(pdo_value, args);
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method PDO::{s}", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn callPDOExec(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        if (args.len != 1 or args[0].tag != .string) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::exec() expects exactly 1 parameter, string given", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const sql = args[0].data.string.data.data;
+        const pdo_object = pdo_value.data.object.data;
+
+        // Get the stored PDO connection
+        const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+
+        if (connection_prop.tag != .integer) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.data.integer))));
+        const result = try pdo_ptr.exec(sql);
+        return Value.initInt(result);
+    }
+
+    fn callPDOQuery(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        _ = pdo_value;
+        if (args.len != 1 or args[0].tag != .string) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::query() expects exactly 1 parameter, string given", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        // Similar to exec, but returns a PDOStatement
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::query() not implemented yet", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn callPDOPrepare(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        _ = pdo_value;
+        if (args.len != 1 or args[0].tag != .string) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::prepare() expects exactly 1 parameter, string given", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        // Return a PDOStatement object
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::prepare() not implemented yet", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn callPDOBeginTransaction(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        _ = pdo_value;
+        _ = args;
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::beginTransaction() not implemented yet", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn callPDOCommit(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        _ = pdo_value;
+        _ = args;
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::commit() not implemented yet", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn callPDORollBack(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        _ = pdo_value;
+        _ = args;
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::rollBack() not implemented yet", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn callPDOLastInsertId(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        _ = pdo_value;
+        _ = args;
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::lastInsertId() not implemented yet", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn callPDOQuote(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        _ = pdo_value;
+        if (args.len != 1 or args[0].tag != .string) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::quote() expects exactly 1 parameter, string given", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const str = args[0].data.string.data.data;
+        // Simple quoting - in real PDO this would escape properly based on driver
+        const quoted = try std.fmt.allocPrint(self.allocator, "'{s}'", .{str});
+        defer self.allocator.free(quoted);
+
+        return try Value.initString(self.allocator, quoted);
     }
 
     pub fn callStructMethod(self: *VM, struct_value: Value, method_name: []const u8, args: []const Value) !Value {
@@ -1949,6 +2344,49 @@ pub const VM = struct {
         // Otherwise assume it's a class
         const value = try self.createObject(name);
 
+        // Special handling for PDO objects
+        if (std.mem.eql(u8, name, "PDO")) {
+            const pdo_object = value.data.object.data;
+
+            // Create and store the PDO database connection
+            var pdo_connection = try self.allocator.create(database.PDO);
+            pdo_connection.* = database.PDO{
+                .allocator = self.allocator,
+                .driver = .sqlite,
+                .connection = null,
+                .in_transaction = false,
+                .error_mode = .exception,
+                .last_error = null,
+                .attributes = std.StringHashMap(Value).init(self.allocator),
+            };
+
+            // Parse DSN from constructor arguments (simplified)
+            var dsn: []const u8 = "sqlite::memory:";
+            if (instantiation_data.args.len > 0) {
+                const dsn_arg = instantiation_data.args[0];
+                const dsn_node = self.context.nodes.items[dsn_arg];
+                if (dsn_node.tag == .literal_string) {
+                    const dsn_id = dsn_node.data.literal_string.value;
+                    dsn = self.context.string_pool.keys()[dsn_id];
+                }
+            }
+
+            const parsed_dsn = try database.parseDSN(self.allocator, dsn);
+            defer {
+                if (parsed_dsn.host.len > 0 and !std.mem.eql(u8, parsed_dsn.host, "localhost")) self.allocator.free(parsed_dsn.host);
+                if (parsed_dsn.database.len > 0) self.allocator.free(parsed_dsn.database);
+                self.allocator.free(parsed_dsn.charset);
+            }
+
+            try pdo_connection.connect(parsed_dsn, null, null);
+
+            // Store the PDO connection in the object (simplified - using a property)
+            const connection_value = Value.initInt(@intCast(@intFromPtr(pdo_connection))); // Store pointer as int
+            try pdo_object.setProperty(self.allocator, "_pdo_connection", connection_value);
+
+            return value;
+        }
+
         // Call constructor if it exists
         const object = value.data.object.data;
         if (object.class.hasMethod("__construct")) {
@@ -1989,6 +2427,11 @@ pub const VM = struct {
 
         for (method_data.args) |arg_node_idx| {
             try args.append(self.allocator, try self.eval(arg_node_idx));
+        }
+
+        // Special handling for PDO objects
+        if (target_value.tag == .object and std.mem.eql(u8, target_value.data.object.data.class.name.data, "PDO")) {
+            return self.callPDOMethod(target_value, method_name, args.items);
         }
 
         if (target_value.tag == .struct_instance) {
@@ -2528,6 +2971,14 @@ pub const VM = struct {
 
         // Add method to class (simplified - just store in methods map)
         try class.methods.put(method_name, method);
+    }
+
+    fn addClassProperty(self: *VM, class: *types.PHPClass, name: []const u8, visibility: types.Property.Visibility, default_value: ?Value) !void {
+        const prop_name = try types.PHPString.init(self.allocator, name);
+        var property = types.Property.init(prop_name);
+        property.modifiers.visibility = visibility;
+        property.default_value = default_value;
+        try class.properties.put(name, property);
     }
 
     fn processPropertyDeclaration(self: *VM, class: *types.PHPClass, property_data: anytype) !void {
