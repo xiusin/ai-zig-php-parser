@@ -67,9 +67,9 @@ test "enhanced type system - array operations" {
     try testing.expect(array_val.isArray());
     
     // Add elements
-    try array_val.data.array.data.push(Value.initInt(1));
-    try array_val.data.array.data.push(Value.initInt(2));
-    try array_val.data.array.data.push(Value.initInt(3));
+    try array_val.data.array.data.push(allocator, Value.initInt(1));
+    try array_val.data.array.data.push(allocator, Value.initInt(2));
+    try array_val.data.array.data.push(allocator, Value.initInt(3));
     
     try testing.expectEqual(@as(usize, 3), array_val.data.array.data.count());
     
@@ -80,7 +80,7 @@ test "enhanced type system - array operations" {
     const value = try Value.initString(allocator, "John");
     defer value.data.string.release(allocator);
     
-    try array_val.data.array.data.set(key, value);
+    try array_val.data.array.data.set(allocator, key, value);
     
     if (array_val.data.array.data.get(key)) |retrieved| {
         try testing.expect(retrieved.isString());

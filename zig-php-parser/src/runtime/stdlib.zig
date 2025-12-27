@@ -251,7 +251,8 @@ fn arrayMapFn(vm: *VM, args: []const Value) !Value {
             },
         };
         
-        try result_array.set(key, result_value);
+        try result_array.set(vm.allocator, key, result_value);
+        vm.releaseValue(result_value);
     }
     
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -309,7 +310,7 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
         }
         
         if (should_include) {
-            try result_array.set(key, value);
+            try result_array.set(vm.allocator, key, value);
         }
     }
     
@@ -379,8 +380,8 @@ fn arrayMergeFn(vm: *VM, args: []const Value) !Value {
             
             // For numeric keys, reindex; for string keys, preserve
             switch (key) {
-                .integer => try result_array.push(value),
-                .string => try result_array.set(key, value),
+                .integer => try result_array.push(vm.allocator, value),
+                .string => try result_array.set(vm.allocator, key, value),
             }
         }
     }
@@ -424,7 +425,8 @@ fn arrayKeysFn(vm: *VM, args: []const Value) !Value {
             },
         };
         
-        try result_array.push(key_value);
+        try result_array.push(vm.allocator, key_value);
+        vm.releaseValue(key_value);
     }
     
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -452,7 +454,7 @@ fn arrayValuesFn(vm: *VM, args: []const Value) !Value {
     var iterator = array.data.array.data.elements.iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
-        try result_array.push(value);
+        try result_array.push(vm.allocator, value);
     }
     
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -478,7 +480,7 @@ fn arrayPushFn(vm: *VM, args: []const Value) !Value {
     
     // Push all additional arguments
     for (args[1..]) |value| {
-        try php_array.push(value);
+        try php_array.push(vm.allocator, value);
     }
     
     return Value.initInt(@intCast(php_array.count()));
@@ -568,14 +570,14 @@ fn arrayUnshiftFn(vm: *VM, args: []const Value) !Value {
     
     // Add new elements first
     for (args[1..]) |value| {
-        try new_array.push(value);
+        try new_array.push(vm.allocator, value);
     }
     
     // Add existing elements
     var iterator = php_array.elements.iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
-        try new_array.push(value);
+        try new_array.push(vm.allocator, value);
     }
     
     // Replace the original array's contents
@@ -1028,7 +1030,9 @@ fn explodeFn(vm: *VM, args: []const Value) !Value {
                 .data = part,
             };
             
-            try result_array.push(Value{ .tag = .string, .data = .{ .string = box } });
+            const value = Value{ .tag = .string, .data = .{ .string = box } };
+            try result_array.push(vm.allocator, value);
+            vm.releaseValue(value);
             start = actual_pos + delim.length;
             count += 1;
         } else {
@@ -1047,7 +1051,9 @@ fn explodeFn(vm: *VM, args: []const Value) !Value {
             .data = part,
         };
         
-        try result_array.push(Value{ .tag = .string, .data = .{ .string = box } });
+        const value = Value{ .tag = .string, .data = .{ .string = box } };
+        try result_array.push(vm.allocator, value);
+        vm.releaseValue(value);
     }
     
     const array_box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -1975,7 +1981,8 @@ fn hashAlgosFn(vm: *VM, args: []const Value) !Value {
     
     for (algorithms) |algo| {
         const algo_str = try Value.initString(vm.allocator, algo);
-        try result_array.push(algo_str);
+        try result_array.push(vm.allocator, algo_str);
+        vm.releaseValue(algo_str);
     }
     
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));

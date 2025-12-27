@@ -298,7 +298,10 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .gc_info = .{},
             .data = scheme,
         };
-        try result_array.set(scheme_key, Value{ .tag = .string, .data = .{ .string = scheme_box } });
+        
+        const scheme_val = Value{ .tag = .string, .data = .{ .string = scheme_box } };
+        try result_array.set(vm.allocator, scheme_key, scheme_val);
+        vm.releaseValue(scheme_val);
     }
     
     if (uri.host) |host| {
@@ -309,12 +312,15 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .gc_info = .{},
             .data = host,
         };
-        try result_array.set(host_key, Value{ .tag = .string, .data = .{ .string = host_box } });
+        
+        const host_val = Value{ .tag = .string, .data = .{ .string = host_box } };
+        try result_array.set(vm.allocator, host_key, host_val);
+        vm.releaseValue(host_val);
     }
     
     if (uri.port) |port| {
         const port_key = types.ArrayKey{ .string = try PHPString.init(vm.allocator, "port") };
-        try result_array.set(port_key, Value.initInt(@intCast(port)));
+        try result_array.set(vm.allocator, port_key, Value.initInt(@intCast(port)));
     }
     
     if (uri.path) |path| {
@@ -325,7 +331,10 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .gc_info = .{},
             .data = path,
         };
-        try result_array.set(path_key, Value{ .tag = .string, .data = .{ .string = path_box } });
+        
+        const path_val = Value{ .tag = .string, .data = .{ .string = path_box } };
+        try result_array.set(vm.allocator, path_key, path_val);
+        vm.releaseValue(path_val);
     }
     
     if (uri.query) |query| {
@@ -336,7 +345,10 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .gc_info = .{},
             .data = query,
         };
-        try result_array.set(query_key, Value{ .tag = .string, .data = .{ .string = query_box } });
+        
+        const query_val = Value{ .tag = .string, .data = .{ .string = query_box } };
+        try result_array.set(vm.allocator, query_key, query_val);
+        vm.releaseValue(query_val);
     }
     
     if (uri.fragment) |fragment| {
@@ -347,7 +359,10 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .gc_info = .{},
             .data = fragment,
         };
-        try result_array.set(fragment_key, Value{ .tag = .string, .data = .{ .string = fragment_box } });
+        
+        const fragment_val = Value{ .tag = .string, .data = .{ .string = fragment_box } };
+        try result_array.set(vm.allocator, fragment_key, fragment_val);
+        vm.releaseValue(fragment_val);
     }
     
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));

@@ -374,7 +374,8 @@ fn getClassMethodsFn(vm: *VM, args: []const Value) !Value {
     var iterator = class.methods.iterator();
     while (iterator.next()) |entry| {
         const method_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
-        try php_array.push(method_name_value);
+        try php_array.push(vm.allocator, method_name_value);
+        vm.releaseValue(method_name_value);
     }
     
     return php_array_value;
@@ -414,7 +415,7 @@ fn getClassVarsFn(vm: *VM, args: []const Value) !Value {
         if (property.modifiers.visibility == .public) {
             const key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, property_name) };
             const value = property.default_value orelse Value.initNull();
-            try php_array.set(key, value);
+            try php_array.set(vm.allocator, key, value);
         }
     }
     
@@ -447,7 +448,7 @@ fn getObjectVarsFn(vm: *VM, args: []const Value) !Value {
         // Check if property is accessible (public or from same class context)
         // For now, include all properties (simplified)
         const key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, property_name) };
-        try php_array.set(key, property_value);
+        try php_array.set(vm.allocator, key, property_value);
     }
     
     return php_array_value;
@@ -718,6 +719,27 @@ pub const VM = struct {
             .arrow_function => _ = value.data.arrow_function.retain(),
             else => {},
         }
+    }
+
+    fn processParameters(self: *VM, params_indices: []const ast.Node.Index) ![]types.Method.Parameter {
+        const parameters = try self.allocator.alloc(types.Method.Parameter, params_indices.len);
+        for (params_indices, 0..) |param_idx, i| {
+            const param_node = self.context.nodes.items[param_idx];
+            if (param_node.tag == .parameter) {
+                const param_data = param_node.data.parameter;
+                const param_name = self.context.string_pool.keys()[param_data.name];
+                const php_param_name = try types.PHPString.init(self.allocator, param_name);
+                
+                parameters[i] = types.Method.Parameter.init(php_param_name);
+                parameters[i].is_variadic = param_data.is_variadic;
+                parameters[i].is_reference = param_data.is_reference;
+                
+                if (param_data.default_value) |dv_idx| {
+                    parameters[i].default_value = try self.eval(dv_idx);
+                }
+            }
+        }
+        return parameters;
     }
 
     pub fn defineBuiltin(self: *VM, name: []const u8, function: anytype) !void {
@@ -1078,6 +1100,8 @@ pub const VM = struct {
     
     pub fn popCallFrame(self: *VM) void {
         if (self.call_stack.items.len > 0) {
+            var frame = &self.call_stack.items[self.call_stack.items.len - 1];
+            frame.deinit(self.allocator);
             _ = self.call_stack.pop();
         }
     }
@@ -1154,18 +1178,16 @@ pub const VM = struct {
     }
     
     fn initializeObjectProperties(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
-        _ = self; // Unused in this simplified implementation
         var prop_iterator = class.properties.iterator();
         while (prop_iterator.next()) |entry| {
             const property = entry.value_ptr.*;
             if (property.default_value) |default_val| {
-                try object.setProperty(entry.key_ptr.*, default_val);
+                try object.setProperty(self.allocator, entry.key_ptr.*, default_val);
             }
         }
     }
     
     fn initializeObjectPropertiesOptimized(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
-        _ = self; // Unused in this simplified implementation
         // Pre-allocate property map with expected size
         const expected_size = class.properties.count();
         try object.properties.ensureTotalCapacity(expected_size);
@@ -1174,8 +1196,7 @@ pub const VM = struct {
         while (prop_iterator.next()) |entry| {
             const property = entry.value_ptr.*;
             if (property.default_value) |default_val| {
-                // Use putAssumeCapacity for better performance
-                object.properties.putAssumeCapacity(entry.key_ptr.*, default_val);
+                try object.setProperty(self.allocator, entry.key_ptr.*, default_val);
             }
         }
     }
@@ -1232,13 +1253,15 @@ pub const VM = struct {
         }
         
         const object = object_value.data.object.data;
-        return object.getProperty(property_name) catch |err| switch (err) {
+        const value = object.getProperty(property_name) catch |err| switch (err) {
             error.UndefinedProperty => {
                 const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, object.class.name.data, property_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             },
             else => return err,
         };
+        self.retainValue(value);
+        return value;
     }
     
     pub fn setObjectProperty(self: *VM, object_value: Value, property_name: []const u8, value: Value) !void {
@@ -1249,7 +1272,7 @@ pub const VM = struct {
         }
         
         const object = object_value.data.object.data;
-        object.setProperty(property_name, value) catch |err| switch (err) {
+        object.setProperty(self.allocator, property_name, value) catch |err| switch (err) {
             error.ReadonlyPropertyModification => {
                 const exception = try ExceptionFactory.createReadonlyPropertyError(self.allocator, object.class.name.data, property_name, self.current_file, self.current_line);
                 _ = try self.throwException(exception);
@@ -1272,18 +1295,29 @@ pub const VM = struct {
         
         // Bind arguments to parameters
         var bound_args = try function.bindArguments(args, self.allocator);
-        defer bound_args.deinit();
-        
-        // Type check arguments
-        for (function.parameters, 0..) |param, i| {
-            if (i < args.len) {
-                try param.validateType(args[i]);
+        defer {
+            var it = bound_args.iterator();
+            while (it.next()) |entry| {
+                self.releaseValue(entry.value_ptr.*);
             }
+            bound_args.deinit();
         }
         
-        // Create new environment for function execution
-        // This would execute the function body in a real implementation
-        const result = Value.initNull();
+        // Populate local variables in the current frame
+        var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+        var it = bound_args.iterator();
+        while (it.next()) |entry| {
+            // Transfer ownership to locals
+            self.retainValue(entry.value_ptr.*);
+            try current_frame.locals.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        
+        // Execute body
+        var result = Value.initNull();
+        if (function.body) |body_ptr| {
+            const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+            result = try self.run(body_node);
+        }
         
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
@@ -1686,7 +1720,7 @@ pub const VM = struct {
                     
                     if (obj_val.tag == .struct_instance) {
                         const struct_inst = obj_val.data.struct_instance.data;
-                        try struct_inst.setField(prop_name, value);
+                        try struct_inst.setField(self.allocator, prop_name, value);
                     } else if (obj_val.tag == .object) {
                         try self.setObjectProperty(obj_val, prop_name, value);
                     } else {
@@ -1784,7 +1818,7 @@ pub const VM = struct {
         }
     }
     
-    fn releaseValue(self: *VM, value: Value) void {
+    pub fn releaseValue(self: *VM, value: Value) void {
         switch (value.tag) {
             .string => value.data.string.release(self.allocator),
             .array => value.data.array.release(self.allocator),
@@ -1908,7 +1942,8 @@ pub const VM = struct {
                 try args.append(self.allocator, try self.eval(arg_idx));
             }
             
-            _ = try self.callObjectMethod(value, "__construct", args.items);
+            const ctor_result = try self.callObjectMethod(value, "__construct", args.items);
+            self.releaseValue(ctor_result);
         }
         
         return value;
@@ -1952,7 +1987,8 @@ pub const VM = struct {
         for (array_data.elements, 0..) |item_node_idx, i| {
             const value = try self.eval(item_node_idx);
             const key = types.ArrayKey{ .integer = @intCast(i) };
-            try php_array.set(key, value);
+            try php_array.set(self.allocator, key, value);
+            self.releaseValue(value);
         }
         
         return php_array_value;
@@ -2082,7 +2118,7 @@ pub const VM = struct {
                 
                 switch (key) {
                     .string => |prop_name| {
-                        try cloned_object.setProperty(prop_name.data, value);
+                        try cloned_object.setProperty(self.allocator, prop_name.data, value);
                     },
                     else => {
                         const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid property key in clone with", self.current_file, self.current_line);
@@ -2099,21 +2135,26 @@ pub const VM = struct {
         const name_id = func_decl.name;
         const name = self.context.string_pool.keys()[name_id];
         
-        const user_func = try self.allocator.create(types.UserFunction);
-        user_func.* = types.UserFunction{
-            .name = try types.PHPString.init(self.allocator, name),
-            .parameters = &[_]types.Method.Parameter{}, // TODO: Convert func_decl.params
-            .return_type = null,
-            .attributes = &[_]types.Attribute{}, // TODO: Convert func_decl.attributes
-            .body = @constCast(@ptrCast(&func_decl.body)),
-            .is_variadic = false,
-            .min_args = 0,
-            .max_args = null,
-        };
+        var user_function = types.UserFunction.init(try types.PHPString.init(self.allocator, name));
+        user_function.parameters = try self.processParameters(func_decl.params);
+        user_function.return_type = null;
+        user_function.attributes = &[_]types.Attribute{}; // TODO: Convert func_decl.attributes
+        user_function.body = @ptrFromInt(func_decl.body);
+        user_function.is_variadic = false;
+        user_function.min_args = 0;
         
-        const func_box = try self.memory_manager.allocUserFunction(user_func.*);
+        // Count required parameters
+        for (user_function.parameters) |param| {
+            if (param.default_value == null and !param.is_variadic) {
+                user_function.min_args += 1;
+            }
+        }
+        user_function.max_args = if (user_function.is_variadic) null else @as(u32, @intCast(user_function.parameters.len));
+        
+        const func_box = try self.memory_manager.allocUserFunction(user_function);
         const func_value = Value{ .tag = .user_function, .data = .{ .user_function = func_box } };
         try self.global.set(name, func_value);
+        self.releaseValue(func_value);
         
         return Value.initNull();
     }
@@ -2182,7 +2223,8 @@ pub const VM = struct {
                         .integer => |i| Value.initInt(i),
                         .string => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
                     };
-                    try self.global.set(key_name, key_value);
+                    try self.setVariable(key_name, key_value);
+                    self.releaseValue(key_value);
                 }
             }
             
@@ -2191,7 +2233,7 @@ pub const VM = struct {
             if (value_node.tag == .variable) {
                 const value_name_id = value_node.data.variable.name;
                 const value_name = self.context.string_pool.keys()[value_name_id];
-                try self.global.set(value_name, value);
+                try self.setVariable(value_name, value);
             }
             
             // Execute body
@@ -2456,26 +2498,7 @@ pub const VM = struct {
         };
         
         // Process parameters
-        var parameters = try self.allocator.alloc(types.Method.Parameter, method_data.params.len);
-        for (method_data.params, 0..) |param_idx, i| {
-            const param_node = self.context.nodes.items[param_idx];
-            if (param_node.tag == .parameter) {
-                const param_data = param_node.data.parameter;
-                const param_name = self.context.string_pool.keys()[param_data.name];
-                const php_param_name = try types.PHPString.init(self.allocator, param_name);
-                
-                parameters[i] = types.Method.Parameter.init(php_param_name);
-                parameters[i].is_variadic = param_data.is_variadic;
-                parameters[i].is_reference = param_data.is_reference;
-                
-                // Process parameter type if present
-                if (param_data.type) |type_idx| {
-                    // Would process type information here
-                    _ = type_idx;
-                }
-            }
-        }
-        method.parameters = parameters;
+        method.parameters = try self.processParameters(method_data.params);
         
         // Set method body
         if (method_data.body) |body_idx| {
@@ -2627,7 +2650,8 @@ pub const VM = struct {
 
         // Call constructor if it exists
         if (struct_type.hasMethod("__construct")) {
-            _ = try struct_instance.callMethod(self, instance_value, "__construct", args.items);
+            const ctor_result = try struct_instance.callMethod(self, instance_value, "__construct", args.items);
+            self.releaseValue(ctor_result);
         }
         
         return instance_value;
@@ -2651,20 +2675,7 @@ pub const VM = struct {
         };
         
         // Process parameters
-        const parameters = try self.allocator.alloc(types.Method.Parameter, method_data.params.len);
-        for (method_data.params, 0..) |param_idx, i| {
-            const param_node = self.context.nodes.items[param_idx];
-            if (param_node.tag == .parameter) {
-                const param_data = param_node.data.parameter;
-                const param_name = self.context.string_pool.keys()[param_data.name];
-                const php_param_name = try types.PHPString.init(self.allocator, param_name);
-                
-                parameters[i] = types.Method.Parameter.init(php_param_name);
-                parameters[i].is_variadic = param_data.is_variadic;
-                parameters[i].is_reference = param_data.is_reference;
-            }
-        }
-        method.parameters = parameters;
+        method.parameters = try self.processParameters(method_data.params);
         
         // Set method body
         if (method_data.body) |body_idx| {
@@ -2703,17 +2714,16 @@ pub const VM = struct {
     }
     
     fn initializeStructFields(self: *VM, instance: *types.StructInstance, struct_type: *types.PHPStruct) !void {
-        _ = self; // Unused in this simplified implementation
         var field_iter = struct_type.fields.iterator();
         while (field_iter.next()) |entry| {
             const field = entry.value_ptr.*;
             const field_name = field.name.data;
             
             if (field.default_value) |default_val| {
-                try instance.setField(field_name, default_val);
+                try instance.setField(self.allocator, field_name, default_val);
             } else {
                 // Initialize with null if no default value
-                try instance.setField(field_name, Value.initNull());
+                try instance.setField(self.allocator, field_name, Value.initNull());
             }
         }
     }
@@ -2848,35 +2858,21 @@ pub const VM = struct {
         var user_function = types.UserFunction.init(closure_name);
         
         // Process parameters
-        var parameters = try self.allocator.alloc(types.Method.Parameter, closure_data.params.len);
+        user_function.parameters = try self.processParameters(closure_data.params);
         var min_args: u32 = 0;
         var max_args: ?u32 = @intCast(closure_data.params.len);
         var is_variadic = false;
         
-        for (closure_data.params, 0..) |param_idx, i| {
-            const param_node = self.context.nodes.items[param_idx];
-            if (param_node.tag == .parameter) {
-                const param_data = param_node.data.parameter;
-                const param_name = self.context.string_pool.keys()[param_data.name];
-                const php_param_name = try types.PHPString.init(self.allocator, param_name);
-                
-                parameters[i] = types.Method.Parameter.init(php_param_name);
-                parameters[i].is_variadic = param_data.is_variadic;
-                parameters[i].is_reference = param_data.is_reference;
-                
-                if (param_data.is_variadic) {
-                    is_variadic = true;
-                    max_args = null; // Unlimited for variadic functions
-                }
-                
-                // Count required parameters (those without default values)
-                if (parameters[i].default_value == null and !param_data.is_variadic) {
-                    min_args += 1;
-                }
+        for (user_function.parameters) |param| {
+            if (param.is_variadic) {
+                is_variadic = true;
+                max_args = null;
+            }
+            if (param.default_value == null and !param.is_variadic) {
+                min_args += 1;
             }
         }
         
-        user_function.parameters = parameters;
         user_function.body = @ptrFromInt(closure_data.body);
         user_function.is_variadic = is_variadic;
         user_function.min_args = min_args;

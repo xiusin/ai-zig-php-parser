@@ -138,7 +138,11 @@ pub const PHPArray = struct {
         };
     }
     
-    pub fn deinit(self: *PHPArray) void {
+    pub fn deinit(self: *PHPArray, allocator: std.mem.Allocator) void {
+        var iterator = self.elements.iterator();
+        while (iterator.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
         self.elements.deinit();
     }
     
@@ -146,13 +150,20 @@ pub const PHPArray = struct {
         return self.elements.get(key);
     }
     
-    pub fn set(self: *PHPArray, key: ArrayKey, value: Value) !void {
+    pub fn set(self: *PHPArray, allocator: std.mem.Allocator, key: ArrayKey, value: Value) !void {
+        // If key already exists, release old value
+        if (self.elements.get(key)) |old_value| {
+            old_value.release(allocator);
+        }
+        
+        // Retain new value
+        _ = value.retain();
         try self.elements.put(key, value);
     }
     
-    pub fn push(self: *PHPArray, value: Value) !void {
+    pub fn push(self: *PHPArray, allocator: std.mem.Allocator, value: Value) !void {
         const key = ArrayKey{ .integer = self.next_index };
-        try self.elements.put(key, value);
+        try self.set(allocator, key, value);
         self.next_index += 1;
     }
     
@@ -341,6 +352,9 @@ pub const PHPClass = struct {
         var prop_iter = self.properties.iterator();
         while (prop_iter.next()) |entry| {
             entry.value_ptr.name.deinit(allocator);
+            if (entry.value_ptr.default_value) |dv| {
+                dv.release(allocator);
+            }
         }
         self.properties.deinit();
         
@@ -350,6 +364,10 @@ pub const PHPClass = struct {
         }
         self.methods.deinit();
         
+        var const_iter = self.constants.iterator();
+        while (const_iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
         self.constants.deinit();
     }
     
@@ -499,6 +517,9 @@ pub const PHPStruct = struct {
         var field_iter = self.fields.iterator();
         while (field_iter.next()) |entry| {
             entry.value_ptr.name.deinit(allocator);
+            if (entry.value_ptr.default_value) |dv| {
+                dv.release(allocator);
+            }
         }
         self.fields.deinit();
         
@@ -507,6 +528,20 @@ pub const PHPStruct = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.methods.deinit();
+    }
+
+    fn releaseValueIfManaged(value: Value, allocator: std.mem.Allocator) void {
+        switch (value.tag) {
+            .string => value.data.string.release(allocator),
+            .array => value.data.array.release(allocator),
+            .object => value.data.object.release(allocator),
+            .struct_instance => value.data.struct_instance.release(allocator),
+            .resource => value.data.resource.release(allocator),
+            .user_function => value.data.user_function.release(allocator),
+            .closure => value.data.closure.release(allocator),
+            .arrow_function => value.data.arrow_function.release(allocator),
+            else => {},
+        }
     }
     
     pub fn addField(self: *PHPStruct, field: StructField) !void {
@@ -630,18 +665,7 @@ pub const StructInstance = struct {
     pub fn deinit(self: *StructInstance, allocator: std.mem.Allocator) void {
         var iterator = self.fields.iterator();
         while (iterator.next()) |entry| {
-            const value = entry.value_ptr.*;
-            switch (value.tag) {
-                .string => value.data.string.release(allocator),
-                .array => value.data.array.release(allocator),
-                .object => value.data.object.release(allocator),
-                .struct_instance => value.data.struct_instance.release(allocator),
-                .resource => value.data.resource.release(allocator),
-                .user_function => value.data.user_function.release(allocator),
-                .closure => value.data.closure.release(allocator),
-                .arrow_function => value.data.arrow_function.release(allocator),
-                else => {},
-            }
+            entry.value_ptr.release(allocator);
         }
         self.fields.deinit();
     }
@@ -662,7 +686,11 @@ pub const StructInstance = struct {
         return error.FieldNotFound;
     }
     
-    pub fn setField(self: *StructInstance, name: []const u8, value: Value) !void {
+    pub fn setField(self: *StructInstance, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        if (self.fields.get(name)) |old_value| {
+            old_value.release(allocator);
+        }
+        _ = value.retain();
         try self.fields.put(name, value);
     }
     
@@ -814,7 +842,9 @@ pub const Method = struct {
 
         pub fn deinit(self: *Parameter, allocator: std.mem.Allocator) void {
             self.name.deinit(allocator);
-            // Default value is a Value, but we assume it's managed by GC or released elsewhere if it's a definition
+            if (self.default_value) |dv| {
+                dv.release(allocator);
+            }
         }
         
         pub fn validateType(self: *const Parameter, value: Value) !void {
@@ -942,7 +972,7 @@ pub const PHPObject = struct {
         return error.UndefinedProperty;
     }
     
-    pub fn setProperty(self: *PHPObject, name: []const u8, value: Value) !void {
+    pub fn setProperty(self: *PHPObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
         // Check if property exists in class definition
         const prop_def = self.class.getProperty(name);
         if (prop_def == null) {
@@ -952,6 +982,10 @@ pub const PHPObject = struct {
                 return;
             }
             // For dynamic properties, just set it
+            if (self.properties.get(name)) |old_value| {
+                old_value.release(allocator);
+            }
+            _ = value.retain();
             try self.properties.put(name, value);
             return;
         }
@@ -969,10 +1003,18 @@ pub const PHPObject = struct {
         // Check if property has set hook
         if (property.hasSetHook()) {
             // Would execute set hook here
+            if (self.properties.get(name)) |old_value| {
+                old_value.release(allocator);
+            }
+            _ = value.retain();
             try self.properties.put(name, value);
             return;
         }
         
+        if (self.properties.get(name)) |old_value| {
+            old_value.release(allocator);
+        }
+        _ = value.retain();
         try self.properties.put(name, value);
     }
     
@@ -1343,6 +1385,35 @@ pub const Value = struct {
         };
     }
 
+    pub fn retain(self: Self) Self {
+        switch (self.tag) {
+            .string => _ = self.data.string.retain(),
+            .array => _ = self.data.array.retain(),
+            .object => _ = self.data.object.retain(),
+            .struct_instance => _ = self.data.struct_instance.retain(),
+            .resource => _ = self.data.resource.retain(),
+            .user_function => _ = self.data.user_function.retain(),
+            .closure => _ = self.data.closure.retain(),
+            .arrow_function => _ = self.data.arrow_function.retain(),
+            else => {},
+        }
+        return self;
+    }
+
+    pub fn release(self: Self, allocator: std.mem.Allocator) void {
+        switch (self.tag) {
+            .string => self.data.string.release(allocator),
+            .array => self.data.array.release(allocator),
+            .object => self.data.object.release(allocator),
+            .struct_instance => self.data.struct_instance.release(allocator),
+            .resource => self.data.resource.release(allocator),
+            .user_function => self.data.user_function.release(allocator),
+            .closure => self.data.closure.release(allocator),
+            .arrow_function => self.data.arrow_function.release(allocator),
+            else => {},
+        }
+    }
+
     pub const Tag = enum {
         // Basic types
         null,
@@ -1403,6 +1474,16 @@ pub const UserFunction = struct {
             .max_args = 0,
         };
     }
+
+    pub fn deinit(self: *UserFunction, allocator: std.mem.Allocator) void {
+        self.name.deinit(allocator);
+        for (0..self.parameters.len) |i| {
+            var param = self.parameters[i];
+            param.deinit(allocator);
+        }
+        allocator.free(self.parameters);
+        // Attributes cleanup...
+    }
     
     pub fn validateArguments(self: *const UserFunction, args: []const Value) !void {
         const arg_count = @as(u32, @intCast(args.len));
@@ -1423,15 +1504,16 @@ pub const UserFunction = struct {
     pub fn bindArguments(self: *const UserFunction, args: []const Value, allocator: std.mem.Allocator) !std.StringHashMap(Value) {
         var bound_args = std.StringHashMap(Value).init(allocator);
         
-        for (self.parameters, 0..) |param, i| {
-            if (i < args.len) {
-                // Bind provided argument
-                try bound_args.put(param.name.data, args[i]);
-            } else if (param.default_value) |default| {
-                // Use default value
-                try bound_args.put(param.name.data, default);
-            } else if (!param.is_variadic) {
-                // Required parameter missing
+                for (self.parameters, 0..) |param, i| {
+                    if (i < args.len) {
+                        // Bind provided argument
+                        _ = args[i].retain();
+                        try bound_args.put(param.name.data, args[i]);
+                    } else if (param.default_value) |default| {
+                        // Use default value
+                        _ = default.retain();
+                        try bound_args.put(param.name.data, default);
+                    } else if (!param.is_variadic) {                // Required parameter missing
                 return error.MissingRequiredParameter;
             }
         }
@@ -1442,7 +1524,7 @@ pub const UserFunction = struct {
             var variadic_array = PHPArray.init(allocator);
             
             for (args[self.parameters.len - 1..]) |arg| {
-                try variadic_array.push(arg);
+                try variadic_array.push(allocator, arg);
             }
             
             const array_box = try allocator.create(gc.Box(*PHPArray));
@@ -1484,8 +1566,15 @@ pub const Closure = struct {
         
         // Bind arguments to parameters
         const VM = @import("vm.zig").VM;
-        var bound_args = try self.function.bindArguments(args, @as(*VM, @ptrCast(@alignCast(vm))).allocator);
-        defer bound_args.deinit();
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+        var bound_args = try self.function.bindArguments(args, vm_instance.allocator);
+        defer {
+            var it = bound_args.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.release(vm_instance.allocator);
+            }
+            bound_args.deinit();
+        }
         
         // Create new environment with captured variables and arguments
         // This would execute the function body in a real implementation

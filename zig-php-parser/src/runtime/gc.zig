@@ -60,11 +60,7 @@ pub fn Box(comptime T: type) type {
                 },
                 *PHPArray => {
                     // Decrease reference count for all contained values
-                    var iterator = self.data.elements.iterator();
-                    while (iterator.next()) |entry| {
-                        decrementValueRefCount(entry.value_ptr.*, allocator);
-                    }
-                    self.data.deinit();
+                    self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },
                 *PHPObject => {
@@ -90,6 +86,7 @@ pub fn Box(comptime T: type) type {
                     allocator.destroy(self.data);
                 },
                 *UserFunction => {
+                    self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },
                 *Closure => {
