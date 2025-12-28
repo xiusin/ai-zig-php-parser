@@ -1143,7 +1143,7 @@ pub const VM = struct {
 
     // Performance monitoring and optimization methods
     pub fn logPerformanceStats(self: *VM) void {
-        std.debug.print("=== PHP Interpreter Performance Statistics ===\n", .{});
+        std.debug.print("\n=== PHP Interpreter Performance Statistics ===\n", .{});
         std.debug.print("Function calls: {d}\n", .{self.execution_stats.function_calls});
         std.debug.print("Memory allocations: {d}\n", .{self.execution_stats.memory_allocations});
         std.debug.print("GC collections: {d}\n", .{self.execution_stats.gc_collections});
