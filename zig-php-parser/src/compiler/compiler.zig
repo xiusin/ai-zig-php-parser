@@ -251,7 +251,9 @@ pub const Compiler = struct {
 
         const function = try function_compiler.compileFunction(func_data, func_name);
 
-        const func_const_idx = try self.chunk.addConstant(Value{.user_function = function});
+        const func_val = Value{ .user_function = function };
+        const func_const_idx = try self.chunk.addConstant(func_val);
+
         try self.emitBytes(@intFromEnum(OpCode.OpConstant), func_const_idx, line);
         try self.emitBytes(@intFromEnum(OpCode.OpDefineGlobal), func_name_const_idx, line);
     }

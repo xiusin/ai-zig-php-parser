@@ -3,12 +3,20 @@ const bytecode = @import("../compiler/bytecode.zig");
 const Chunk = bytecode.Chunk;
 const OpCode = bytecode.OpCode;
 const Value = @import("types.zig").Value;
+const Function = @import("types.zig").UserFunction;
 
-const STACK_MAX = 256;
+const FRAMES_MAX = 64;
+const STACK_MAX = FRAMES_MAX * 256;
+
+const CallFrame = struct {
+    function: *Function,
+    ip: usize,
+    slots: [*]Value,
+};
 
 pub const VM = struct {
-    chunk: *Chunk,
-    ip: usize,
+    frames: [FRAMES_MAX]CallFrame,
+    frame_count: usize,
     stack: [STACK_MAX]Value,
     stack_top: *Value,
     globals: std.StringHashMap(Value),
@@ -16,8 +24,8 @@ pub const VM = struct {
 
     pub fn init(allocator: std.mem.Allocator) VM {
         var vm = VM{
-            .chunk = undefined,
-            .ip = 0,
+            .frames = undefined,
+            .frame_count = 0,
             .stack = undefined,
             .stack_top = undefined,
             .globals = std.StringHashMap(Value).init(allocator),
@@ -31,22 +39,24 @@ pub const VM = struct {
         self.globals.deinit();
     }
 
-    pub fn interpret(self: *VM, chunk: *Chunk) !Value {
-        self.chunk = chunk;
-        self.ip = 0;
+    pub fn interpret(self: *VM, function: *Function) !Value {
+        try self.push(Value{ .user_function = function });
+        try self.call(function, 0);
         return self.run();
     }
 
     fn run(self: *VM) !Value {
-        while (self.ip < self.chunk.code.items.len) {
-            const instruction = self.chunk.code.items[self.ip];
-            self.ip += 1;
+        var frame = &self.frames[self.frame_count - 1];
+
+        while (frame.ip < frame.function.chunk.code.items.len) {
+            const instruction = frame.function.chunk.code.items[frame.ip];
+            frame.ip += 1;
 
             switch (@as(OpCode, @enumFromInt(instruction))) {
                 .OpConstant => {
-                    const constant_index = self.chunk.code.items[self.ip];
-                    self.ip += 1;
-                    const constant = self.chunk.constants.items[constant_index];
+                    const constant_index = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+                    const constant = frame.function.chunk.constants.items[constant_index];
                     try self.push(constant);
                 },
                 .OpNull => try self.push(Value.initNull()),
@@ -65,21 +75,41 @@ pub const VM = struct {
                 .OpMultiply => try self.binaryOp(.Multiply),
                 .OpDivide => try self.binaryOp(.Divide),
                 .OpJumpIfFalse => {
-                    const offset = self.readShort();
+                    const offset = self.readShort(frame);
                     if (!self.peek(0).toBool()) {
-                        self.ip += offset;
+                        frame.ip += offset;
                     }
                 },
                 .OpJump => {
-                    const offset = self.readShort();
-                    self.ip += offset;
+                    const offset = self.readShort(frame);
+                    frame.ip += offset;
                 },
                 .OpLoop => {
-                    const offset = self.readShort();
-                    self.ip -= offset;
+                    const offset = self.readShort(frame);
+                    frame.ip -= offset;
+                },
+                .OpCall => {
+                    const arg_count = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+
+                    const callee = self.peek(@intCast(arg_count));
+                    if (callee.tag != .user_function) {
+                        return error.InvalidCallee;
+                    }
+                    try self.call(callee.data.user_function, arg_count);
+                    frame = &self.frames[self.frame_count - 1];
                 },
                 .OpReturn => {
-                    return self.pop();
+                    const result = self.pop();
+                    self.frame_count -= 1;
+                    if (self.frame_count == 0) {
+                        _ = self.pop();
+                        return result;
+                    }
+
+                    self.stack_top = frame.slots;
+                    try self.push(result);
+                    frame = &self.frames[self.frame_count - 1];
                 },
                 else => {
                     std.debug.print("Unknown opcode: {}\n", .{instruction});
@@ -88,6 +118,23 @@ pub const VM = struct {
             }
         }
         return error.ExecutionFinishedUnexpectedly;
+    }
+
+    fn call(self: *VM, function: *Function, arg_count: u8) !void {
+        if (arg_count != function.arity) {
+            return error.ArgumentMismatch;
+        }
+
+        if (self.frame_count == FRAMES_MAX) {
+            return error.StackOverflow;
+        }
+
+        var frame = &self.frames[self.frame_count];
+        self.frame_count += 1;
+
+        frame.function = function;
+        frame.ip = 0;
+        frame.slots = self.stack_top - arg_count - 1;
     }
 
     fn push(self: *VM, value: Value) !void {
@@ -108,9 +155,9 @@ pub const VM = struct {
         return self.stack[index];
     }
 
-    fn readShort(self: *VM) u16 {
-        self.ip += 2;
-        return (@as(u16, self.chunk.code.items[self.ip - 2]) << 8) | @as(u16, self.chunk.code.items[self.ip - 1]);
+    fn readShort(_: *VM, frame: *CallFrame) u16 {
+        frame.ip += 2;
+        return (@as(u16, frame.function.chunk.code.items[frame.ip - 2]) << 8) | @as(u16, frame.function.chunk.code.items[frame.ip - 1]);
     }
 
     const BinaryOpType = enum { Add, Subtract, Multiply, Divide, Greater, Less };

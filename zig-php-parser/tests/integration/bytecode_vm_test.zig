@@ -61,3 +61,18 @@ test "end-to-end execution: while loop" {
     const source = "<?php $a = 0; while ($a < 5) { $a = $a + 1; } return $a;";
     try testE2E(source, Value.initInt(5));
 }
+
+test "end-to-end execution: function declaration and call" {
+    const source = "<?php function my_func() { return 10; } return my_func();";
+    try testE2E(source, Value.initInt(10));
+}
+
+test "end-to-end execution: function with parameters" {
+    const source = "<?php function add($a, $b) { return $a + $b; } return add(3, 4);";
+    try testE2E(source, Value.initInt(7));
+}
+
+test "end-to-end execution: recursive function (fibonacci)" {
+    const source = "<?php function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); } return fib(10);";
+    try testE2E(source, Value.initInt(55));
+}
