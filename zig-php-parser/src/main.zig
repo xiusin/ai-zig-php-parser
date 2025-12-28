@@ -22,9 +22,9 @@ pub fn main() !void {
     // Get command line arguments
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
-    
+
     var php_code: [:0]const u8 = undefined;
-    
+
     if (args.len > 1) {
         // Read PHP file from command line argument
         const filename = args[1];
@@ -33,10 +33,10 @@ pub fn main() !void {
             return;
         };
         defer file.close();
-        
+
         const file_size = try file.getEndPos();
         const contents = try arena_allocator.allocSentinel(u8, file_size, 0);
-        
+
         _ = try file.readAll(contents);
         php_code = contents;
     } else {
@@ -59,8 +59,15 @@ pub fn main() !void {
     vm_instance.context = &context;
     defer vm_instance.deinit();
 
-    const result = try vm_instance.run(program);
-    
+    const result = vm_instance.run(program) catch |err| {
+        // If it's a runtime exception (handled within VM but returned as error here), we just exit
+        // If it's a Zig error, we print it
+        std.debug.print("Runtime error: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    // vm_instance.deinit(); // Moved to defer
+
     // Release the final result to prevent memory leak
     result.release(allocator);
 }

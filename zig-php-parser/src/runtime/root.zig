@@ -16,6 +16,14 @@ pub const PHPResource = types.PHPResource;
 // 垃圾回收
 pub const gc = @import("gc.zig");
 
+// 高性能内存管理系统
+pub const memory = @import("memory.zig");
+pub const MemoryManager = memory.MemoryManager;
+pub const ArenaAllocator = memory.ArenaAllocator;
+pub const StringInterner = memory.StringInterner;
+pub const GenerationalGC = memory.GenerationalGC;
+pub const LeakDetector = memory.LeakDetector;
+
 // 虚拟机
 pub const vm = @import("vm.zig");
 pub const VM = vm.VM;

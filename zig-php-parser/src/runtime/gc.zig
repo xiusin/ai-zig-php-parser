@@ -14,11 +14,11 @@ pub fn Box(comptime T: type) type {
         ref_count: u32,
         gc_info: GCInfo,
         data: T,
-        
+
         pub const GCInfo = packed struct {
             color: Color = .white,
             buffered: bool = false,
-            
+
             pub const Color = enum(u2) {
                 white = 0,
                 gray = 1,
@@ -26,18 +26,18 @@ pub fn Box(comptime T: type) type {
                 purple = 3,
             };
         };
-        
+
         pub fn retain(self: *@This()) *@This() {
             self.ref_count += 1;
             return self;
         }
-        
+
         pub fn release(self: *@This(), allocator: std.mem.Allocator) void {
             // Safety check to prevent double-free
             if (self.ref_count == 0) {
                 return; // Already freed
             }
-            
+
             self.ref_count -= 1;
             if (self.ref_count == 0) {
                 self.destroy(allocator);
@@ -46,17 +46,17 @@ pub fn Box(comptime T: type) type {
                 self.gc_info.color = .purple;
             }
         }
-        
+
         fn destroy(self: *@This(), allocator: std.mem.Allocator) void {
             // Additional safety check - if already destroyed, don't destroy again
             if (self.gc_info.color == .black) {
                 return; // Already destroyed
             }
-            
+
             // Call destructor if this is an object with __destruct method
             switch (T) {
                 *PHPString => {
-                    self.data.deinit(allocator);
+                    self.data.release(allocator);
                 },
                 *PHPArray => {
                     // Decrease reference count for all contained values
@@ -68,7 +68,7 @@ pub fn Box(comptime T: type) type {
                     if (self.data.class.methods.get("__destruct")) |_| {
                         // TODO: Call __destruct method
                     }
-                    
+
                     self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },
@@ -95,7 +95,7 @@ pub fn Box(comptime T: type) type {
                     while (iterator.next()) |entry| {
                         decrementValueRefCount(entry.value_ptr.*, allocator);
                     }
-                    self.data.deinit();
+                    self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },
                 *ArrowFunction => {
@@ -104,18 +104,18 @@ pub fn Box(comptime T: type) type {
                     while (iterator.next()) |entry| {
                         decrementValueRefCount(entry.value_ptr.*, allocator);
                     }
-                    self.data.deinit();
+                    self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },
                 else => {},
             }
-            
+
             // Mark as destroyed
             self.gc_info.color = .black;
             self.ref_count = 0;
             allocator.destroy(self);
         }
-        
+
         pub fn markGray(self: *@This()) void {
             if (self.gc_info.color != .gray) {
                 self.gc_info.color = .gray;
@@ -123,7 +123,7 @@ pub fn Box(comptime T: type) type {
                 self.markChildrenGray();
             }
         }
-        
+
         pub fn markChildrenGray(self: *@This()) void {
             switch (T) {
                 *PHPArray => {
@@ -159,7 +159,7 @@ pub fn Box(comptime T: type) type {
                 else => {},
             }
         }
-        
+
         pub fn scan(self: *@This()) void {
             if (self.gc_info.color == .gray) {
                 if (self.ref_count > 0) {
@@ -170,7 +170,7 @@ pub fn Box(comptime T: type) type {
                 }
             }
         }
-        
+
         pub fn scanChildren(self: *@This()) void {
             switch (T) {
                 *PHPArray => {
@@ -206,12 +206,12 @@ pub fn Box(comptime T: type) type {
                 else => {},
             }
         }
-        
+
         pub fn markBlack(self: *@This()) void {
             self.gc_info.color = .black;
             self.markChildrenBlack();
         }
-        
+
         pub fn markChildrenBlack(self: *@This()) void {
             switch (T) {
                 *PHPArray => {
@@ -247,7 +247,7 @@ pub fn Box(comptime T: type) type {
                 else => {},
             }
         }
-        
+
         pub fn collectWhite(self: *@This(), allocator: std.mem.Allocator) void {
             if (self.gc_info.color == .white and !self.gc_info.buffered) {
                 self.gc_info.color = .black; // Prevent double collection
@@ -255,7 +255,7 @@ pub fn Box(comptime T: type) type {
                 self.destroy(allocator);
             }
         }
-        
+
         pub fn collectChildrenWhite(self: *@This(), allocator: std.mem.Allocator) void {
             switch (T) {
                 *PHPArray => {
@@ -369,7 +369,7 @@ pub const GarbageCollector = struct {
     allocator: std.mem.Allocator,
     memory_threshold: usize,
     allocated_memory: usize,
-    
+
     pub fn init(allocator: std.mem.Allocator, memory_threshold: usize) !GarbageCollector {
         return GarbageCollector{
             .allocator = allocator,
@@ -377,35 +377,35 @@ pub const GarbageCollector = struct {
             .allocated_memory = 0,
         };
     }
-    
+
     pub fn deinit(self: *GarbageCollector) void {
         _ = self;
     }
-    
+
     pub fn collect(self: *GarbageCollector) u32 {
         // Simplified collection for now
         _ = self;
         return 0;
     }
-    
+
     pub fn addRoot(self: *GarbageCollector, root: *anyopaque) !void {
         _ = self;
         _ = root;
     }
-    
+
     pub fn removeRoot(self: *GarbageCollector, root: *anyopaque) void {
         _ = self;
         _ = root;
     }
-    
+
     pub fn shouldCollect(self: *GarbageCollector) bool {
         return self.allocated_memory >= self.memory_threshold;
     }
-    
+
     pub fn trackAllocation(self: *GarbageCollector, size: usize) void {
         self.allocated_memory += size;
     }
-    
+
     pub fn trackDeallocation(self: *GarbageCollector, size: usize) void {
         if (self.allocated_memory >= size) {
             self.allocated_memory -= size;
@@ -460,7 +460,7 @@ pub fn decRef(mm: *MemoryManager, val: Value) void {
 pub const MemoryManager = struct {
     allocator: std.mem.Allocator,
     gc: GarbageCollector,
-    
+
     pub fn init(allocator: std.mem.Allocator) !MemoryManager {
         const default_threshold = 1024 * 1024; // 1MB default threshold
         return MemoryManager{
@@ -468,7 +468,7 @@ pub const MemoryManager = struct {
             .gc = try GarbageCollector.init(allocator, default_threshold),
         };
     }
-    
+
     pub fn initWithThreshold(allocator: std.mem.Allocator, memory_threshold: usize) !MemoryManager {
         return MemoryManager{
             .allocator = allocator,
@@ -488,13 +488,13 @@ pub const MemoryManager = struct {
             .gc_info = .{},
             .data = php_string,
         };
-        
+
         // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*PHPString)) + data.len);
         if (self.gc.shouldCollect()) {
             _ = self.gc.collect();
         }
-        
+
         return box;
     }
 
@@ -507,16 +507,16 @@ pub const MemoryManager = struct {
             .gc_info = .{},
             .data = php_array,
         };
-        
+
         // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*PHPArray)) + @sizeOf(PHPArray));
         if (self.gc.shouldCollect()) {
             _ = self.gc.collect();
         }
-        
+
         return box;
     }
-    
+
     pub fn allocObject(self: *MemoryManager, class: *@import("types.zig").PHPClass) !*Box(*PHPObject) {
         const php_object = try self.allocator.create(PHPObject);
         php_object.* = PHPObject.init(self.allocator, class);
@@ -526,16 +526,16 @@ pub const MemoryManager = struct {
             .gc_info = .{},
             .data = php_object,
         };
-        
+
         // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*PHPObject)) + @sizeOf(PHPObject));
         if (self.gc.shouldCollect()) {
             _ = self.gc.collect();
         }
-        
+
         return box;
     }
-    
+
     pub fn allocResource(self: *MemoryManager, resource: PHPResource) !*Box(*PHPResource) {
         const php_resource = try self.allocator.create(PHPResource);
         php_resource.* = resource;
@@ -545,16 +545,16 @@ pub const MemoryManager = struct {
             .gc_info = .{},
             .data = php_resource,
         };
-        
+
         // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*PHPResource)) + @sizeOf(PHPResource));
         if (self.gc.shouldCollect()) {
             _ = self.gc.collect();
         }
-        
+
         return box;
     }
-    
+
     pub fn allocUserFunction(self: *MemoryManager, function: UserFunction) !*Box(*UserFunction) {
         const user_function = try self.allocator.create(UserFunction);
         user_function.* = function;
@@ -564,16 +564,16 @@ pub const MemoryManager = struct {
             .gc_info = .{},
             .data = user_function,
         };
-        
+
         // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*UserFunction)) + @sizeOf(UserFunction));
         if (self.gc.shouldCollect()) {
             _ = self.gc.collect();
         }
-        
+
         return box;
     }
-    
+
     pub fn allocClosure(self: *MemoryManager, closure: Closure) !*Box(*Closure) {
         const closure_ptr = try self.allocator.create(Closure);
         closure_ptr.* = closure;
@@ -583,16 +583,16 @@ pub const MemoryManager = struct {
             .gc_info = .{},
             .data = closure_ptr,
         };
-        
+
         // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*Closure)) + @sizeOf(Closure));
         if (self.gc.shouldCollect()) {
             _ = self.gc.collect();
         }
-        
+
         return box;
     }
-    
+
     pub fn allocArrowFunction(self: *MemoryManager, arrow_function: ArrowFunction) !*Box(*ArrowFunction) {
         const arrow_function_ptr = try self.allocator.create(ArrowFunction);
         arrow_function_ptr.* = arrow_function;
@@ -602,36 +602,36 @@ pub const MemoryManager = struct {
             .gc_info = .{},
             .data = arrow_function_ptr,
         };
-        
+
         // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*ArrowFunction)) + @sizeOf(ArrowFunction));
         if (self.gc.shouldCollect()) {
             _ = self.gc.collect();
         }
-        
+
         return box;
     }
-    
+
     pub fn collect(self: *MemoryManager) u32 {
         return self.gc.collect();
     }
-    
+
     pub fn addRoot(self: *MemoryManager, root: *anyopaque) !void {
         try self.gc.addRoot(root);
     }
-    
+
     pub fn removeRoot(self: *MemoryManager, root: *anyopaque) void {
         self.gc.removeRoot(root);
     }
-    
+
     pub fn forceCollect(self: *MemoryManager) u32 {
         return self.gc.collect();
     }
-    
+
     pub fn getMemoryUsage(self: *MemoryManager) usize {
         return self.gc.allocated_memory;
     }
-    
+
     pub fn setMemoryThreshold(self: *MemoryManager, threshold: usize) void {
         self.gc.memory_threshold = threshold;
     }

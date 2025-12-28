@@ -664,15 +664,15 @@ pub const Table = struct {
             self.allocator.free(col.name);
             self.allocator.free(col.type_name);
         }
-        self.columns.deinit();
+        self.columns.deinit(self.allocator);
 
         for (self.rows.items) |*row| {
             for (row.values.items) |*val| {
                 val.release(self.allocator);
             }
-            row.values.deinit();
+            row.values.deinit(self.allocator);
         }
-        self.rows.deinit();
+        self.rows.deinit(self.allocator);
     }
 
     pub fn addColumn(self: *Table, name: []const u8, type_name: []const u8, nullable: bool, primary_key: bool, auto_increment: bool) !void {

@@ -115,6 +115,7 @@ pub const StandardLibrary = struct {
     // String Functions
     pub fn registerStringFunctions(self: *StandardLibrary) !void {
         const string_functions = [_]*const BuiltinFunction{
+            &.{ .name = "echo", .min_args = 1, .max_args = 255, .handler = echoFn },
             &.{ .name = "strlen", .min_args = 1, .max_args = 1, .handler = strlenFn },
             &.{ .name = "substr", .min_args = 2, .max_args = 3, .handler = substrFn },
             &.{ .name = "str_replace", .min_args = 3, .max_args = 4, .handler = strReplaceFn },
@@ -856,6 +857,7 @@ fn strtolowerFn(vm: *VM, args: []const Value) !Value {
         .data = lower_data,
         .length = original.length,
         .encoding = original.encoding,
+        .ref_count = 1,
     };
 
     const box = try vm.allocator.create(types.gc.Box(*PHPString));
@@ -889,6 +891,7 @@ fn strtoupperFn(vm: *VM, args: []const Value) !Value {
         .data = upper_data,
         .length = original.length,
         .encoding = original.encoding,
+        .ref_count = 1,
     };
 
     const box = try vm.allocator.create(types.gc.Box(*PHPString));
@@ -1200,6 +1203,7 @@ fn strRepeatFn(vm: *VM, args: []const Value) !Value {
         .data = result_data,
         .length = total_length,
         .encoding = input_str.encoding,
+        .ref_count = 1,
     };
 
     const box = try vm.allocator.create(types.gc.Box(*PHPString));
@@ -1481,6 +1485,7 @@ fn fileGetContentsFn(vm: *VM, args: []const Value) !Value {
         .data = contents,
         .length = file_size,
         .encoding = .utf8,
+        .ref_count = 1,
     };
 
     const box = try vm.allocator.create(types.gc.Box(*PHPString));
@@ -3188,4 +3193,14 @@ fn unserializeValue(vm: *VM, data: []const u8, pos: *usize) !Value {
         },
         else => Value.initNull(),
     };
+}
+
+// echo function implementation - supports multiple arguments like echo("a", "b", "c")
+fn echoFn(vm: *VM, args: []const Value) !Value {
+    _ = vm; // Mark vm parameter as intentionally unused
+    // Echo all arguments sequentially without adding newline between them
+    for (args) |arg| {
+        try arg.print();
+    }
+    return Value.initNull();
 }

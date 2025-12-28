@@ -17,6 +17,8 @@ const reflection = @import("reflection.zig");
 const builtin_classes = @import("builtin_classes.zig");
 const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
+const string_utils = @import("string_utils.zig");
+const builtin_methods = @import("builtin_methods.zig");
 
 const CapturedVar = struct { name: []const u8, value: Value };
 
@@ -848,6 +850,9 @@ pub const VM = struct {
 
     // Memory optimization
     string_intern_pool: std.StringHashMap(*types.gc.Box(*types.PHPString)),
+    return_value: ?Value = null,
+    break_level: u32 = 0,
+    continue_level: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
         var vm = try allocator.create(VM);
@@ -869,6 +874,9 @@ pub const VM = struct {
             .optimization_flags = OptimizationFlags{},
             .error_context = ErrorContext.init(allocator),
             .string_intern_pool = std.StringHashMap(*types.gc.Box(*types.PHPString)).init(allocator),
+            .return_value = null,
+            .break_level = 0,
+            .continue_level = 0,
         };
 
         vm.global.* = Environment.init(allocator);
@@ -938,19 +946,15 @@ pub const VM = struct {
         // Clean up standard library
         self.stdlib.deinit();
 
-        // Clean up structs
-        var struct_iterator = self.structs.iterator();
-        while (struct_iterator.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
+        // Clean up structs - 简化清理避免迭代器问题
         self.structs.deinit();
 
-        // Clean up classes
+        // Clean up classes - 调用PHPClass.deinit释放属性名和方法名
         var class_iterator = self.classes.iterator();
         while (class_iterator.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
+            const class_ptr = entry.value_ptr.*;
+            class_ptr.deinit(self.allocator);
+            self.allocator.destroy(class_ptr);
         }
         self.classes.deinit();
 
@@ -1036,11 +1040,35 @@ pub const VM = struct {
                 const php_param_name = try types.PHPString.init(self.allocator, param_name);
 
                 parameters[i] = types.Method.Parameter.init(php_param_name);
+                // Release our reference to php_param_name as it's now owned (retained) by Parameter
+                php_param_name.release(self.allocator);
+
                 parameters[i].is_variadic = param_data.is_variadic;
                 parameters[i].is_reference = param_data.is_reference;
 
+                // Store default value as AST node index, not evaluated value
+                // It will be evaluated when the function is called
                 if (param_data.default_value) |dv_idx| {
-                    parameters[i].default_value = try self.eval(dv_idx);
+                    // For now, evaluate simple literals only
+                    const dv_node = self.context.nodes.items[dv_idx];
+                    switch (dv_node.tag) {
+                        .literal_int => {
+                            parameters[i].default_value = Value.initInt(dv_node.data.literal_int.value);
+                        },
+                        .literal_float => {
+                            parameters[i].default_value = Value.initFloat(dv_node.data.literal_float.value);
+                        },
+                        .literal_string => {
+                            const str_id = dv_node.data.literal_string.value;
+                            const str_val = self.context.string_pool.keys()[str_id];
+                            parameters[i].default_value = try Value.initStringWithManager(&self.memory_manager, str_val);
+                        },
+                        else => {
+                            // For complex expressions, don't evaluate at definition time
+                            // Leave default_value as null and handle it at call time
+                            parameters[i].default_value = null;
+                        },
+                    }
                 }
             }
         }
@@ -1737,7 +1765,17 @@ pub const VM = struct {
         var result = Value.initNull();
         if (function.body) |body_ptr| {
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
-            result = try self.run(body_node);
+            result = self.eval(body_node) catch |err| {
+                if (err == error.Return) {
+                    if (self.return_value) |val| {
+                        const ret = val;
+                        self.return_value = null;
+                        return ret;
+                    }
+                    return Value.initNull();
+                }
+                return err;
+            };
         }
 
         const end_time = std.time.nanoTimestamp();
@@ -1754,7 +1792,17 @@ pub const VM = struct {
         try self.pushCallFrame("closure", self.current_file, self.current_line);
         defer self.popCallFrame();
 
-        const result = try closure.call(self, args);
+        const result = closure.call(self, args) catch |err| {
+            if (err == error.Return) {
+                if (self.return_value) |val| {
+                    const ret = val;
+                    self.return_value = null;
+                    return ret;
+                }
+                return Value.initNull();
+            }
+            return err;
+        };
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
@@ -1770,7 +1818,17 @@ pub const VM = struct {
         try self.pushCallFrame("arrow_function", self.current_file, self.current_line);
         defer self.popCallFrame();
 
-        const result = try arrow_function.call(self, args);
+        const result = arrow_function.call(self, args) catch |err| {
+            if (err == error.Return) {
+                if (self.return_value) |val| {
+                    const ret = val;
+                    self.return_value = null;
+                    return ret;
+                }
+                return Value.initNull();
+            }
+            return err;
+        };
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
@@ -1904,24 +1962,14 @@ pub const VM = struct {
         return self.eval(node);
     }
 
-    fn evaluateBinaryOperation(self: *VM, left: Value, op: Token.Tag, right: Value) !Value {
-        const start_time = std.time.nanoTimestamp();
-        defer {
-            const end_time = std.time.nanoTimestamp();
-            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
-        }
+    fn evaluateBinaryExpression(self: *VM, binary_expr: anytype) !Value {
+        const left = try self.eval(binary_expr.lhs);
+        defer self.releaseValue(left);
 
-        return switch (op) {
-            .plus => self.evaluateAddition(left, right),
-            .minus => self.evaluateSubtraction(left, right),
-            .asterisk => self.evaluateMultiplication(left, right),
-            .slash => self.evaluateDivision(left, right),
-            .dot => self.evaluateConcatenation(left, right),
-            else => {
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported binary operator", self.current_file, self.current_line);
-                return self.throwException(exception);
-            },
-        };
+        const right = try self.eval(binary_expr.rhs);
+        defer self.releaseValue(right);
+
+        return self.evaluateBinaryOp(binary_expr.op, left, right);
     }
 
     fn evaluateAddition(self: *VM, left: Value, right: Value) !Value {
@@ -2056,7 +2104,7 @@ pub const VM = struct {
         };
     }
 
-    fn eval(self: *VM, node: ast.Node.Index) !Value {
+    pub fn eval(self: *VM, node: ast.Node.Index) !Value {
         const start_time = std.time.nanoTimestamp();
         defer {
             const end_time = std.time.nanoTimestamp();
@@ -2064,6 +2112,14 @@ pub const VM = struct {
         }
 
         const ast_node = self.context.nodes.items[node];
+
+        // Update current line for error reporting
+        // We can approximate line number from token location if we had source map
+        // For now, let's just use what we have if we can map it, but we don't have line info in Token yet?
+        // Token has loc.start/end. We need to map that to line number.
+        // Assuming we don't have easy line mapping yet, we skip this or implement it later.
+        // But wait, ExceptionFactory takes line number.
+        // Let's assume we can't easily get it right now without scanning source.
 
         switch (ast_node.tag) {
             .root => {
@@ -2078,7 +2134,23 @@ pub const VM = struct {
             .literal_string => {
                 const str_id = ast_node.data.literal_string.value;
                 const str_val = self.context.string_pool.keys()[str_id];
+                const quote_type = ast_node.data.literal_string.quote_type;
 
+                // 只对双引号字符串处理转义序列
+                // 单引号字符串：只处理 \' 和 \\
+                // 反引号字符串：完全原始，不处理任何转义
+                if (quote_type == .double and string_utils.hasEscapeSequences(str_val)) {
+                    const processed = try string_utils.processEscapeSequences(self.allocator, str_val);
+                    defer self.allocator.free(processed);
+                    return Value.initStringWithManager(&self.memory_manager, processed);
+                } else if (quote_type == .single) {
+                    // 单引号字符串只处理 \' 和 \\
+                    const processed = try string_utils.processSingleQuoteEscapes(self.allocator, str_val);
+                    defer self.allocator.free(processed);
+                    return Value.initStringWithManager(&self.memory_manager, processed);
+                }
+
+                // 反引号字符串或无转义的字符串直接返回
                 if (self.optimization_flags.enable_string_interning) {
                     return self.createInternedString(str_val);
                 } else {
@@ -2135,11 +2207,14 @@ pub const VM = struct {
                 return value;
             },
             .echo_stmt => {
-                const value = try self.eval(ast_node.data.echo_stmt.expr);
-                defer self.releaseValue(value);
+                // Handle multiple expressions in echo statement
+                const exprs = ast_node.data.echo_stmt.exprs;
+                for (exprs) |expr_idx| {
+                    const value = try self.eval(expr_idx);
+                    defer self.releaseValue(value);
 
-                try value.print();
-                std.debug.print("\n", .{});
+                    try value.print();
+                }
                 return Value.initNull();
             },
             .function_call => {
@@ -2184,6 +2259,9 @@ pub const VM = struct {
             .unary_expr => {
                 return self.evaluateUnaryExpression(ast_node.data.unary_expr);
             },
+            .postfix_expr => {
+                return self.evaluatePostfixExpression(ast_node.data.postfix_expr);
+            },
             .ternary_expr => {
                 return self.evaluateTernaryExpression(ast_node.data.ternary_expr);
             },
@@ -2205,11 +2283,23 @@ pub const VM = struct {
             .while_stmt => {
                 return self.evaluateWhileStatement(ast_node.data.while_stmt);
             },
+            .for_stmt => {
+                return self.evaluateForStatement(ast_node.data.for_stmt);
+            },
+            .for_range_stmt => {
+                return self.evaluateForRangeStatement(ast_node.data.for_range_stmt);
+            },
             .foreach_stmt => {
                 return self.evaluateForeachStatement(ast_node.data.foreach_stmt);
             },
             .return_stmt => {
                 return self.evaluateReturnStatement(ast_node.data.return_stmt);
+            },
+            .break_stmt => {
+                return self.evaluateBreakStatement(ast_node.data.break_stmt);
+            },
+            .continue_stmt => {
+                return self.evaluateContinueStatement(ast_node.data.continue_stmt);
             },
             .static_method_call => {
                 return self.evaluateStaticMethodCall(ast_node.data.static_method_call);
@@ -2241,15 +2331,7 @@ pub const VM = struct {
     fn evaluateFunctionCall(self: *VM, call_data: anytype) anyerror!Value {
         const name_node = self.context.nodes.items[call_data.name];
 
-        if (name_node.tag != .variable) {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid function name", self.current_file, self.current_line);
-            return self.throwException(exception);
-        }
-
-        const name_id = name_node.data.variable.name;
-        const name = self.context.string_pool.keys()[name_id];
-
-        // Evaluate arguments
+        // Prepare arguments
         var args = std.ArrayList(Value){};
         try args.ensureTotalCapacity(self.allocator, call_data.args.len);
         defer {
@@ -2264,9 +2346,73 @@ pub const VM = struct {
             try args.append(self.allocator, arg_value);
         }
 
+        // Determine function to call
+        if (name_node.tag == .variable) {
+            const name_id = name_node.data.variable.name;
+            const name = self.context.string_pool.keys()[name_id];
+
+            // Check if it's a variable function call ($func()) or direct call (func())
+            if (name_node.main_token.tag == .t_variable) {
+                // Variable function call: $func()
+                // Try to get variable value
+                if (self.getVariable(name)) |val| {
+                    // If it's a callable object
+                    switch (val.tag) {
+                        .user_function => return self.callUserFunction(val.data.user_function.data, args.items),
+                        .closure => return self.callClosure(val.data.closure.data, args.items),
+                        .arrow_function => return self.callArrowFunction(val.data.arrow_function.data, args.items),
+                        .string => {
+                            // If it's a string, use it as function name
+                            const func_name = val.data.string.data.data;
+                            return self.callFunctionByName(func_name, args.items);
+                        },
+                        else => {
+                            std.debug.print("DEBUG: Value is not callable. Tag: {any}\n", .{val.tag});
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        },
+                    }
+                } else {
+                    // Undefined variable
+                    std.debug.print("DEBUG: Variable function call: Undefined variable '{s}'\n", .{name});
+                    const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            } else {
+                // Direct function call: func() where func is an identifier (parsed as variable node)
+                return self.callFunctionByName(name, args.items);
+            }
+        } else if (name_node.tag == .literal_string) {
+            // Direct function call: func() - Parser might store name as literal_string?
+            // Actually parser stores name index in function_call struct.
+            // AST: function_call: struct { name: Index, args: []const Index }
+            // name is Index to a node.
+            const name_id = name_node.data.literal_string.value;
+            const func_name = self.context.string_pool.keys()[name_id];
+            return self.callFunctionByName(func_name, args.items);
+        } else {
+            // Try to interpret whatever node as a name?
+            // In parser.zig parseFunctionCall uses parsePrimary for name?
+            // Usually it eats T_STRING.
+            // Let's assume if not variable, we extract string.
+            // But for now, let's implement callFunctionByName helper.
+
+            // Fallback for previous logic (assuming name_node contains name string)
+            // The previous logic assumed name_node.tag == .variable was WRONG for direct calls too?
+            // Wait, previous logic:
+            // if (name_node.tag != .variable) Error
+            // const name_id = name_node.data.variable.name;
+            // This suggests parser stores function name as a VARIABLE node even for direct calls?
+            // Let's check Parser.parseFunctionCall.
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid function name node", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    pub fn callFunctionByName(self: *VM, name: []const u8, args: []const Value) !Value {
         // First check if it's a standard library function (optimized lookup)
         if (self.stdlib.getFunction(name)) |builtin_func| {
-            return builtin_func.call(self, args.items);
+            return builtin_func.call(self, args);
         }
 
         // Then check global functions
@@ -2278,11 +2424,11 @@ pub const VM = struct {
         return switch (function_val.tag) {
             .builtin_function => {
                 const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.data.builtin_function));
-                return function(self, args.items);
+                return function(self, args);
             },
-            .user_function => self.callUserFunction(function_val.data.user_function.data, args.items),
-            .closure => self.callClosure(function_val.data.closure.data, args.items),
-            .arrow_function => self.callArrowFunction(function_val.data.arrow_function.data, args.items),
+            .user_function => self.callUserFunction(function_val.data.user_function.data, args),
+            .closure => self.callClosure(function_val.data.closure.data, args),
+            .arrow_function => self.callArrowFunction(function_val.data.arrow_function.data, args),
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Not a callable function", self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -2417,6 +2563,54 @@ pub const VM = struct {
             try args.append(self.allocator, try self.eval(arg_node_idx));
         }
 
+        // 处理String类型的内置方法
+        if (target_value.tag == .string) {
+            if (std.mem.eql(u8, method_name, "toUpper") or std.mem.eql(u8, method_name, "upper")) {
+                return builtin_methods.StringMethods.toUpper(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "toLower") or std.mem.eql(u8, method_name, "lower")) {
+                return builtin_methods.StringMethods.toLower(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "trim")) {
+                return builtin_methods.StringMethods.trim(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "length") or std.mem.eql(u8, method_name, "len")) {
+                return builtin_methods.StringMethods.length(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "replace")) {
+                return builtin_methods.StringMethods.replace(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "substring") or std.mem.eql(u8, method_name, "substr")) {
+                return builtin_methods.StringMethods.substring(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "indexOf") or std.mem.eql(u8, method_name, "strpos")) {
+                return builtin_methods.StringMethods.indexOf(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "split") or std.mem.eql(u8, method_name, "explode")) {
+                return builtin_methods.StringMethods.split(self, target_value, args.items);
+            }
+        }
+
+        // 处理Array类型的内置方法
+        if (target_value.tag == .array) {
+            if (std.mem.eql(u8, method_name, "push")) {
+                return builtin_methods.ArrayMethods.push(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "pop")) {
+                return builtin_methods.ArrayMethods.pop(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "shift")) {
+                return builtin_methods.ArrayMethods.shift(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "unshift")) {
+                return builtin_methods.ArrayMethods.unshift(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "merge")) {
+                return builtin_methods.ArrayMethods.merge(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "reverse")) {
+                return builtin_methods.ArrayMethods.reverse(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "keys")) {
+                return builtin_methods.ArrayMethods.keys(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "values")) {
+                return builtin_methods.ArrayMethods.values(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "filter")) {
+                return builtin_methods.ArrayMethods.filter(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "map")) {
+                return builtin_methods.ArrayMethods.map(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "count") or std.mem.eql(u8, method_name, "length")) {
+                return builtin_methods.ArrayMethods.count(self, target_value);
+            }
+        }
+
         // Special handling for PDO objects
         if (target_value.tag == .object and std.mem.eql(u8, target_value.data.object.data.class.name.data, "PDO")) {
             return self.callPDOMethod(target_value, method_name, args.items);
@@ -2438,11 +2632,43 @@ pub const VM = struct {
             try php_array.elements.ensureTotalCapacity(array_data.elements.len);
         }
 
-        for (array_data.elements, 0..) |item_node_idx, i| {
-            const value = try self.eval(item_node_idx);
-            const key = types.ArrayKey{ .integer = @intCast(i) };
-            try php_array.set(self.allocator, key, value);
-            self.releaseValue(value);
+        var auto_index: i64 = 0;
+        for (array_data.elements) |item_node_idx| {
+            const item_node = self.context.nodes.items[item_node_idx];
+
+            // 检查是否是键值对节点
+            if (item_node.tag == .array_pair) {
+                // 关联数组：有显式的键
+                const key_value = try self.eval(item_node.data.array_pair.key);
+                defer self.releaseValue(key_value);
+
+                const value = try self.eval(item_node.data.array_pair.value);
+
+                // 根据键的类型创建ArrayKey
+                const key = switch (key_value.tag) {
+                    .integer => types.ArrayKey{ .integer = key_value.data.integer },
+                    .string => blk: {
+                        const php_str = try types.PHPString.init(self.allocator, key_value.data.string.data.data);
+                        break :blk types.ArrayKey{ .string = php_str };
+                    },
+                    else => types.ArrayKey{ .integer = auto_index },
+                };
+
+                try php_array.set(self.allocator, key, value);
+                self.releaseValue(value);
+
+                // 如果键是整数，更新自动索引
+                if (key == .integer and key.integer >= auto_index) {
+                    auto_index = key.integer + 1;
+                }
+            } else {
+                // 普通数组：使用自动索引
+                const value = try self.eval(item_node_idx);
+                const key = types.ArrayKey{ .integer = auto_index };
+                try php_array.set(self.allocator, key, value);
+                self.releaseValue(value);
+                auto_index += 1;
+            }
         }
 
         return php_array_value;
@@ -2450,41 +2676,150 @@ pub const VM = struct {
 
     // Missing evaluation methods implementation
     fn evaluateArrowFunction(self: *VM, arrow_func: anytype) !Value {
-        // Arrow functions are similar to closures but with automatic variable capture
-        const closure_data = try self.allocator.create(types.Closure);
-        closure_data.* = types.Closure{
-            .function = types.UserFunction{
-                .name = try types.PHPString.init(self.allocator, "arrow_function"),
-                .parameters = &[_]types.Method.Parameter{}, // TODO: Convert arrow_func.params
-                .return_type = null,
-                .attributes = &[_]types.Attribute{},
-                .body = @ptrCast(@constCast(&arrow_func.body)),
-                .is_variadic = false,
-                .min_args = 0,
-                .max_args = null,
-            },
-            .captured_vars = std.StringHashMap(Value).init(self.allocator),
-            .is_static = arrow_func.is_static,
-        };
+        // Process parameters
+        const parameters = try self.processParameters(arrow_func.params);
 
-        const closure_box = try self.memory_manager.allocClosure(closure_data.*);
-        return Value{ .tag = .closure, .data = .{ .closure = closure_box } };
-    }
+        // Create arrow function with proper parameters
+        var arrow_function = types.ArrowFunction.init(self.allocator);
+        arrow_function.parameters = parameters;
+        // Store body as pointer (Index converted to usize then to pointer)
+        arrow_function.body = @ptrFromInt(@as(usize, arrow_func.body));
+        arrow_function.is_static = arrow_func.is_static;
 
-    fn evaluateBinaryExpression(self: *VM, binary_expr: anytype) !Value {
-        const left = try self.eval(binary_expr.lhs);
-        defer self.releaseValue(left);
-        const right = try self.eval(binary_expr.rhs);
-        defer self.releaseValue(right);
+        // Auto-capture all variables from current scope
+        if (self.call_stack.items.len > 0) {
+            const current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+            var locals_iter = current_frame.locals.iterator();
+            while (locals_iter.next()) |entry| {
+                try arrow_function.autoCaptureVariable(entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
 
-        return self.evaluateBinaryOp(binary_expr.op, left, right);
+        const arrow_func_box = try self.memory_manager.allocArrowFunction(arrow_function);
+        return Value{ .tag = .arrow_function, .data = .{ .arrow_function = arrow_func_box } };
     }
 
     fn evaluateUnaryExpression(self: *VM, unary_expr: anytype) !Value {
+        std.debug.print("DEBUG: evaluateUnaryExpression op={any} expr_idx={d}\n", .{ unary_expr.op, unary_expr.expr });
+
+        // Handle increment/decrement which requires variable assignment
+        if (unary_expr.op == .plus_plus or unary_expr.op == .minus_minus) {
+            const expr_node = self.context.nodes.items[unary_expr.expr];
+
+            if (expr_node.tag == .variable) {
+                const name_id = expr_node.data.variable.name;
+                const name = self.context.string_pool.keys()[name_id];
+
+                // Get current value
+                const current_val = if (self.getVariable(name)) |v| v else Value.initInt(0);
+
+                // Increment/Decrement
+                var new_val: Value = undefined;
+                if (unary_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update variable (setVariable retains the new value)
+                try self.setVariable(name, new_val);
+
+                // For prefix, return new value.
+                _ = self.retainValue(new_val);
+                return new_val;
+            } else {
+                std.debug.print("DEBUG: Inc/Dec on non-variable tag={any}\n", .{expr_node.tag});
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        }
+
         const operand = try self.eval(unary_expr.expr);
         defer self.releaseValue(operand);
 
         return self.evaluateUnaryOp(unary_expr.op, operand);
+    }
+
+    fn evaluatePostfixExpression(self: *VM, postfix_expr: anytype) !Value {
+        if (postfix_expr.op == .plus_plus or postfix_expr.op == .minus_minus) {
+            const expr_node = self.context.nodes.items[postfix_expr.expr];
+
+            if (expr_node.tag == .variable) {
+                const name_id = expr_node.data.variable.name;
+                const name = self.context.string_pool.keys()[name_id];
+
+                // Get current value
+                const current_val = if (self.getVariable(name)) |v| v else Value.initInt(0);
+
+                // Retain current value because we will return it, and setVariable might release the one in storage
+                self.retainValue(current_val);
+
+                // Calculate new value
+                var new_val: Value = undefined;
+                if (postfix_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update variable
+                try self.setVariable(name, new_val);
+
+                return current_val;
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        }
+
+        return Value.initNull();
+    }
+
+    fn incrementValue(self: *VM, value: Value) !Value {
+        _ = self;
+        switch (value.tag) {
+            .integer => return Value.initInt(value.data.integer + 1),
+            .float => return Value.initFloat(value.data.float + 1.0),
+            .string => {
+                // Simple alphanumeric increment not fully implemented, fall back to int conversion?
+                // PHP does perl-style string increment.
+                // For now, let's cast to int/float if numeric, otherwise return as is or error?
+                // Simplest: cast to int, increment.
+                // Or if it is not numeric, PHP 8 throws error?
+                // For "5", it becomes 6.
+                // For now assuming numeric string or integer.
+                // Let's just try to convert to number.
+                if (std.fmt.parseInt(i64, value.data.string.data.data, 10)) |i| {
+                    return Value.initInt(i + 1);
+                } else |_| {
+                    // Fallback
+                    return Value.initInt(1);
+                }
+            },
+            .null => return Value.initInt(1),
+            .boolean => return Value.initInt(1), // true++ is still true/1? PHP: bool not affected? Wait.
+            // PHP: $a = true; $a++; -> $a is still true.
+            // But we treat it as number 1?
+            else => return Value.initInt(1),
+        }
+    }
+
+    fn decrementValue(self: *VM, value: Value) !Value {
+        _ = self;
+        switch (value.tag) {
+            .integer => return Value.initInt(value.data.integer - 1),
+            .float => return Value.initFloat(value.data.float - 1.0),
+            .string => {
+                if (std.fmt.parseInt(i64, value.data.string.data.data, 10)) |i| {
+                    return Value.initInt(i - 1);
+                } else |_| {
+                    return Value.initInt(-1);
+                }
+            },
+            .null => return Value.initNull(), // null-- is null
+            .boolean => return value, // bool-- no effect
+            else => return Value.initInt(0),
+        }
     }
 
     fn evaluateTernaryExpression(self: *VM, ternary_expr: anytype) !Value {
@@ -2617,7 +2952,13 @@ pub const VM = struct {
         var last_val = Value.initNull();
         for (block.stmts) |stmt| {
             self.releaseValue(last_val);
-            last_val = try self.eval(stmt);
+            last_val = self.eval(stmt) catch |err| {
+                // Propagate control flow errors (break, continue, return)
+                if (err == error.Break or err == error.Continue or err == error.Return) {
+                    return err;
+                }
+                return err;
+            };
         }
         return last_val;
     }
@@ -2638,14 +2979,123 @@ pub const VM = struct {
     fn evaluateWhileStatement(self: *VM, while_stmt: anytype) !Value {
         var last_val = Value.initNull();
 
-        while (true) {
+        loop: while (true) {
             const condition = try self.eval(while_stmt.condition);
-            defer self.releaseValue(condition);
+            const condition_bool = condition.toBool();
+            self.releaseValue(condition);
 
-            if (!condition.toBool()) break;
+            if (!condition_bool) break;
 
             self.releaseValue(last_val);
-            last_val = try self.eval(while_stmt.body);
+            last_val = self.eval(while_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
+        }
+
+        return last_val;
+    }
+
+    fn evaluateForStatement(self: *VM, for_stmt: anytype) !Value {
+        // Execute initialization
+        if (for_stmt.init) |init_idx| {
+            const init_val = try self.eval(init_idx);
+            self.releaseValue(init_val);
+        }
+
+        var last_val = Value.initNull();
+
+        loop: while (true) {
+            // Check condition
+            if (for_stmt.condition) |cond_idx| {
+                const condition = try self.eval(cond_idx);
+                const condition_bool = condition.toBool();
+                self.releaseValue(condition);
+
+                if (!condition_bool) break;
+            }
+
+            // Execute body
+            self.releaseValue(last_val);
+            last_val = self.eval(for_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
+            // Fallthrough for Continue or normal execution: execute loop expression
+
+            // Execute loop expression (increment/decrement)
+            if (for_stmt.loop) |loop_idx| {
+                const loop_val = try self.eval(loop_idx);
+                self.releaseValue(loop_val);
+            }
+        }
+
+        return last_val;
+    }
+
+    fn evaluateForRangeStatement(self: *VM, range_stmt: anytype) !Value {
+        const count_val = try self.eval(range_stmt.count);
+        defer self.releaseValue(count_val);
+
+        var count: i64 = 0;
+        switch (count_val.tag) {
+            .integer => count = count_val.data.integer,
+            .float => count = @intFromFloat(count_val.data.float),
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Range count must be a number", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+
+        var last_val = Value.initNull();
+        var i: i64 = 0;
+        loop: while (i < count) : (i += 1) {
+            // Set variable if present
+            if (range_stmt.variable) |var_idx| {
+                const var_node = self.context.nodes.items[var_idx];
+                if (var_node.tag == .variable) {
+                    const name_id = var_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    try self.setVariable(name, Value.initInt(i));
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Range variable must be a variable", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            }
+
+            self.releaseValue(last_val);
+
+            last_val = self.eval(range_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
         }
 
         return last_val;
@@ -2663,7 +3113,7 @@ pub const VM = struct {
         var last_val = Value.initNull();
         var iterator = iterable.data.array.data.elements.iterator();
 
-        while (iterator.next()) |entry| {
+        loop: while (iterator.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
 
@@ -2674,7 +3124,7 @@ pub const VM = struct {
                     const key_name_id = key_node.data.variable.name;
                     const key_name = self.context.string_pool.keys()[key_name_id];
                     const key_value = switch (key) {
-                        .integer => |i| Value.initInt(i),
+                        .integer => |iv| Value.initInt(iv),
                         .string => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
                     };
                     try self.setVariable(key_name, key_value);
@@ -2692,7 +3142,19 @@ pub const VM = struct {
 
             // Execute body
             self.releaseValue(last_val);
-            last_val = try self.eval(foreach_stmt.body);
+            last_val = self.eval(foreach_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
         }
 
         return last_val;
@@ -2700,10 +3162,48 @@ pub const VM = struct {
 
     fn evaluateReturnStatement(self: *VM, return_stmt: anytype) !Value {
         if (return_stmt.expr) |expr| {
-            return self.eval(expr);
+            // Release previous return value if any (shouldn't happen in normal flow but safe to do)
+            if (self.return_value) |val| {
+                self.releaseValue(val);
+            }
+            self.return_value = try self.eval(expr);
         } else {
-            return Value.initNull();
+            if (self.return_value) |val| {
+                self.releaseValue(val);
+            }
+            self.return_value = Value.initNull();
         }
+        return error.Return;
+    }
+
+    fn evaluateBreakStatement(self: *VM, break_stmt: anytype) !Value {
+        if (break_stmt.level) |level_idx| {
+            const level_val = try self.eval(level_idx);
+            defer self.releaseValue(level_val);
+            if (level_val.tag == .integer) {
+                self.break_level = @intCast(level_val.data.integer);
+            } else {
+                self.break_level = 1;
+            }
+        } else {
+            self.break_level = 1;
+        }
+        return error.Break;
+    }
+
+    fn evaluateContinueStatement(self: *VM, continue_stmt: anytype) !Value {
+        if (continue_stmt.level) |level_idx| {
+            const level_val = try self.eval(level_idx);
+            defer self.releaseValue(level_val);
+            if (level_val.tag == .integer) {
+                self.continue_level = @intCast(level_val.data.integer);
+            } else {
+                self.continue_level = 1;
+            }
+        } else {
+            self.continue_level = 1;
+        }
+        return error.Continue;
     }
 
     fn evaluateBinaryOp(self: *VM, op: Token.Tag, left: Value, right: Value) !Value {
@@ -2713,8 +3213,38 @@ pub const VM = struct {
             .asterisk => return self.multiplyValues(left, right),
             .slash => return self.divideValues(left, right),
             .percent => return self.moduloValues(left, right),
-            .equal_equal => return Value.initBool(false), // TODO: implement proper comparison
-            .bang_equal => return Value.initBool(true), // TODO: implement proper comparison
+            .equal_equal => {
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initBool(left.data.integer == right.data.integer);
+                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+                    return Value.initBool(left_float == right_float);
+                } else if (left.tag == .string and right.tag == .string) {
+                    return Value.initBool(std.mem.eql(u8, left.data.string.data.data, right.data.string.data.data));
+                } else if (left.tag == .boolean and right.tag == .boolean) {
+                    return Value.initBool(left.data.boolean == right.data.boolean);
+                } else if (left.tag == .null and right.tag == .null) {
+                    return Value.initBool(true);
+                }
+                return Value.initBool(false);
+            },
+            .bang_equal => {
+                if (left.tag == .integer and right.tag == .integer) {
+                    return Value.initBool(left.data.integer != right.data.integer);
+                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
+                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
+                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+                    return Value.initBool(left_float != right_float);
+                } else if (left.tag == .string and right.tag == .string) {
+                    return Value.initBool(!std.mem.eql(u8, left.data.string.data.data, right.data.string.data.data));
+                } else if (left.tag == .boolean and right.tag == .boolean) {
+                    return Value.initBool(left.data.boolean != right.data.boolean);
+                } else if (left.tag == .null and right.tag == .null) {
+                    return Value.initBool(false);
+                }
+                return Value.initBool(true);
+            },
             .less => {
                 if (left.tag == .integer and right.tag == .integer) {
                     return Value.initBool(left.data.integer < right.data.integer);
@@ -2770,7 +3300,19 @@ pub const VM = struct {
             .minus => return self.negateValue(operand),
             .bang => return Value.initBool(!operand.toBool()),
             .plus => return operand, // Unary plus
+            .ampersand => return operand, // Reference operator (treat as value for now to prevent crash)
+            .k_clone => {
+                if (operand.tag != .object) {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "__clone method called on non-object", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+                // For now, just return a retained copy of the object
+                // TODO: Implement proper deep clone
+                _ = self.retainValue(operand);
+                return operand;
+            },
             else => {
+                std.debug.print("Error: Unsupported unary operator: {any}\n", .{op});
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported unary operator", self.current_file, self.current_line);
                 return self.throwException(exception);
             },
@@ -3315,19 +3857,21 @@ pub const VM = struct {
 
         // Process parameters
         user_function.parameters = try self.processParameters(closure_data.params);
+
         var min_args: u32 = 0;
-        var max_args: ?u32 = @intCast(closure_data.params.len);
         var is_variadic = false;
 
         for (user_function.parameters) |param| {
             if (param.is_variadic) {
                 is_variadic = true;
-                max_args = null;
             }
             if (param.default_value == null and !param.is_variadic) {
                 min_args += 1;
             }
         }
+
+        // 设置max_args：variadic函数为null（无限制），否则为参数数量
+        const max_args: ?u32 = if (is_variadic) null else @as(u32, @intCast(user_function.parameters.len));
 
         user_function.body = @ptrFromInt(closure_data.body);
         user_function.is_variadic = is_variadic;
@@ -3341,10 +3885,29 @@ pub const VM = struct {
 
         for (closure_data.captures) |capture_idx| {
             const capture_node = self.context.nodes.items[capture_idx];
+            var var_name: []const u8 = undefined;
+            var should_capture = false;
+
             if (capture_node.tag == .variable) {
-                const var_name = self.context.string_pool.keys()[capture_node.data.variable.name];
-                const var_value = self.global.get(var_name) orelse Value.initNull();
-                try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value });
+                var_name = self.context.string_pool.keys()[capture_node.data.variable.name];
+                should_capture = true;
+            } else if (capture_node.tag == .unary_expr and capture_node.data.unary_expr.op == .ampersand) {
+                // Reference capture: use (&$var)
+                // Peel off the ampersand and get the variable
+                const expr_idx = capture_node.data.unary_expr.expr;
+                const expr_node = self.context.nodes.items[expr_idx];
+                if (expr_node.tag == .variable) {
+                    var_name = self.context.string_pool.keys()[expr_node.data.variable.name];
+                    should_capture = true;
+                }
+            }
+
+            if (should_capture) {
+                // Only capture if variable exists in current scope
+                if (self.getVariable(var_name)) |var_value| {
+                    try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value });
+                }
+                // If variable doesn't exist, skip it
             }
         }
 

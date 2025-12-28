@@ -6,6 +6,7 @@ pub const PHPString = struct {
     data: []u8,
     length: usize,
     encoding: Encoding,
+    ref_count: usize,
 
     pub const Encoding = enum {
         utf8,
@@ -18,7 +19,19 @@ pub const PHPString = struct {
         php_string.data = try allocator.dupe(u8, str);
         php_string.length = str.len;
         php_string.encoding = .utf8; // Default to UTF-8
+        php_string.ref_count = 1;
         return php_string;
+    }
+
+    pub fn retain(self: *PHPString) void {
+        self.ref_count += 1;
+    }
+
+    pub fn release(self: *PHPString, allocator: std.mem.Allocator) void {
+        self.ref_count -= 1;
+        if (self.ref_count == 0) {
+            self.deinit(allocator);
+        }
     }
 
     pub fn deinit(self: *PHPString, allocator: std.mem.Allocator) void {
@@ -143,6 +156,10 @@ pub const PHPArray = struct {
         var iterator = self.elements.iterator();
         while (iterator.next()) |entry| {
             entry.value_ptr.release(allocator);
+            // 释放字符串类型的键
+            if (entry.key_ptr.* == .string) {
+                entry.key_ptr.string.release(allocator);
+            }
         }
         self.elements.deinit();
     }
@@ -334,6 +351,7 @@ pub const PHPClass = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, name: *PHPString) PHPClass {
+        name.retain();
         return PHPClass{
             .name = name,
             .parent = null,
@@ -348,27 +366,24 @@ pub const PHPClass = struct {
     }
 
     pub fn deinit(self: *PHPClass, allocator: std.mem.Allocator) void {
-        self.name.deinit(allocator);
+        // 释放类名
+        self.name.release(allocator);
 
+        // 释放所有属性的名称
         var prop_iter = self.properties.iterator();
         while (prop_iter.next()) |entry| {
-            entry.value_ptr.name.deinit(allocator);
-            if (entry.value_ptr.default_value) |dv| {
-                dv.release(allocator);
-            }
+            entry.value_ptr.name.release(allocator);
         }
         self.properties.deinit();
 
+        // 释放所有方法的名称
         var method_iter = self.methods.iterator();
         while (method_iter.next()) |entry| {
-            entry.value_ptr.deinit(allocator);
+            entry.value_ptr.name.release(allocator);
         }
         self.methods.deinit();
 
-        var const_iter = self.constants.iterator();
-        while (const_iter.next()) |entry| {
-            entry.value_ptr.release(allocator);
-        }
+        // 释放常量HashMap
         self.constants.deinit();
     }
 
@@ -497,6 +512,7 @@ pub const PHPStruct = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, name: *PHPString) PHPStruct {
+        name.retain();
         return PHPStruct{
             .name = name,
             .fields = std.StringHashMap(StructField).init(allocator),
@@ -513,11 +529,11 @@ pub const PHPStruct = struct {
     }
 
     pub fn deinit(self: *PHPStruct, allocator: std.mem.Allocator) void {
-        self.name.deinit(allocator);
+        self.name.release(allocator);
 
         var field_iter = self.fields.iterator();
         while (field_iter.next()) |entry| {
-            entry.value_ptr.name.deinit(allocator);
+            entry.value_ptr.name.release(allocator);
             if (entry.value_ptr.default_value) |dv| {
                 dv.release(allocator);
             }
@@ -764,6 +780,7 @@ pub const Property = struct {
     pub const Visibility = enum { public, protected, private };
 
     pub fn init(name: *PHPString) Property {
+        name.retain();
         return Property{
             .name = name,
             .type = null,
@@ -829,6 +846,7 @@ pub const Method = struct {
         attributes: []const Attribute,
 
         pub fn init(name: *PHPString) Parameter {
+            name.retain();
             return Parameter{
                 .name = name,
                 .type = null,
@@ -842,7 +860,7 @@ pub const Method = struct {
         }
 
         pub fn deinit(self: *Parameter, allocator: std.mem.Allocator) void {
-            self.name.deinit(allocator);
+            self.name.release(allocator);
             if (self.default_value) |dv| {
                 dv.release(allocator);
             }
@@ -877,6 +895,7 @@ pub const Method = struct {
     };
 
     pub fn init(name: *PHPString) Method {
+        name.retain();
         return Method{
             .name = name,
             .parameters = &[_]Parameter{},
@@ -888,7 +907,7 @@ pub const Method = struct {
     }
 
     pub fn deinit(self: *Method, allocator: std.mem.Allocator) void {
-        self.name.deinit(allocator);
+        self.name.release(allocator);
         // Parameters is []const Parameter, but we need to deinit each one
         // We'll create a mutable slice to iterate and deinit
         for (0..self.parameters.len) |i| {
@@ -1487,7 +1506,7 @@ pub const UserFunction = struct {
     }
 
     pub fn deinit(self: *UserFunction, allocator: std.mem.Allocator) void {
-        self.name.deinit(allocator);
+        self.name.release(allocator);
         for (0..self.parameters.len) |i| {
             var param = self.parameters[i];
             param.deinit(allocator);
@@ -1567,28 +1586,40 @@ pub const Closure = struct {
         };
     }
 
-    pub fn deinit(self: *Closure) void {
+    pub fn deinit(self: *Closure, allocator: std.mem.Allocator) void {
+        self.function.deinit(allocator);
         self.captured_vars.deinit();
     }
 
     pub fn call(self: *Closure, vm: *anyopaque, args: []const Value) !Value {
+        const VM = @import("vm.zig").VM;
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+
         // Validate arguments
         try self.function.validateArguments(args);
 
-        // Bind arguments to parameters
-        const VM = @import("vm.zig").VM;
-        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
-        var bound_args = try self.function.bindArguments(args, vm_instance.allocator);
-        defer {
-            var it = bound_args.iterator();
-            while (it.next()) |entry| {
-                entry.value_ptr.release(vm_instance.allocator);
+        // Set parameters in current call frame
+        for (self.function.parameters, 0..) |param, i| {
+            if (i < args.len) {
+                try vm_instance.setVariable(param.name.data, args[i]);
+            } else if (param.default_value) |default| {
+                try vm_instance.setVariable(param.name.data, default);
             }
-            bound_args.deinit();
         }
 
-        // Create new environment with captured variables and arguments
-        // This would execute the function body in a real implementation
+        // Set captured variables in current call frame
+        var captured_iter = self.captured_vars.iterator();
+        while (captured_iter.next()) |entry| {
+            try vm_instance.setVariable(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        // Execute closure body
+        if (self.function.body) |body_ptr| {
+            const ast = @import("../compiler/ast.zig");
+            const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+            return try vm_instance.eval(body_node);
+        }
+
         return Value.initNull();
     }
 
@@ -1639,11 +1670,21 @@ pub const ArrowFunction = struct {
         };
     }
 
-    pub fn deinit(self: *ArrowFunction) void {
+    pub fn deinit(self: *ArrowFunction, allocator: std.mem.Allocator) void {
+        // 释放参数名
+        for (self.parameters) |param| {
+            param.name.release(allocator);
+        }
+        if (self.parameters.len > 0) {
+            allocator.free(self.parameters);
+        }
         self.captured_vars.deinit();
     }
 
     pub fn call(self: *ArrowFunction, vm: *anyopaque, args: []const Value) !Value {
+        const VM = @import("vm.zig").VM;
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+
         // Validate arguments
         if (args.len != self.parameters.len) {
             return error.ArgumentCountMismatch;
@@ -1654,8 +1695,24 @@ pub const ArrowFunction = struct {
             try param.validateType(arg);
         }
 
-        // Execute arrow function body (simplified)
-        _ = vm;
+        // Set parameters in current call frame
+        for (self.parameters, args) |param, arg| {
+            try vm_instance.setVariable(param.name.data, arg);
+        }
+
+        // Set captured variables in current call frame
+        var captured_iter = self.captured_vars.iterator();
+        while (captured_iter.next()) |entry| {
+            try vm_instance.setVariable(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        // Execute arrow function body
+        if (self.body) |body_ptr| {
+            const ast = @import("../compiler/ast.zig");
+            const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+            return try vm_instance.eval(body_node);
+        }
+
         return Value.initNull();
     }
 
