@@ -258,3 +258,57 @@ test "end-to-end execution: function with parameters via compiler" {
     try testing.expectEqual(result.tag, .integer);
     try testing.expectEqual(@as(i64, 99), result.data.integer);
 }
+
+test "end-to-end: if statement (true condition)" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const source = "<?php if (1) { return 3; } else { return 4; }";
+
+    var context = PHPContext.init(arena_allocator);
+    var parser = try Parser.init(arena_allocator, &context, source);
+    const root_node_index = try parser.parse();
+
+    var compiler = Compiler.init(allocator, &context, null);
+    const main_func = try compiler.compile(root_node_index);
+    defer main_func.deinit(allocator);
+
+    var vm = VM.init(allocator);
+    defer vm.deinit();
+    const result = try vm.interpret(main_func);
+
+    try testing.expectEqual(result.tag, .integer);
+    try testing.expectEqual(@as(i64, 3), result.data.integer);
+}
+
+test "end-to-end: if statement (false condition)" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const source = "<?php if (0) { return 3; } else { return 4; }";
+
+    var context = PHPContext.init(arena_allocator);
+    var parser = try Parser.init(arena_allocator, &context, source);
+    const root_node_index = try parser.parse();
+
+    var compiler = Compiler.init(allocator, &context, null);
+    const main_func = try compiler.compile(root_node_index);
+    defer main_func.deinit(allocator);
+
+    var vm = VM.init(allocator);
+    defer vm.deinit();
+    const result = try vm.interpret(main_func);
+
+    try testing.expectEqual(result.tag, .integer);
+    try testing.expectEqual(@as(i64, 4), result.data.integer);
+}

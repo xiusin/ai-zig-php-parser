@@ -117,6 +117,31 @@ pub const Compiler = struct {
                     try self.emitReturn();
                 }
             },
+            .if_stmt => {
+                const line = node.main_token.loc.start;
+
+                try self.compileNode(node.data.if_stmt.condition);
+
+                // If condition is false, jump to the else branch logic.
+                const then_jump = try self.emitJump(@intFromEnum(OpCode.OpJumpIfFalse), line);
+
+                // This is the "then" path.
+                try self.emitByte(@intFromEnum(OpCode.OpPop), line); // Pop the condition value.
+                try self.compileNode(node.data.if_stmt.then_branch);
+
+                // Jump over the else branch.
+                const else_jump = try self.emitJump(@intFromEnum(OpCode.OpJump), line);
+
+                // This is the start of the "else" path.
+                try self.patchJump(then_jump);
+                try self.emitByte(@intFromEnum(OpCode.OpPop), line); // Pop the condition value.
+
+                if (node.data.if_stmt.else_branch) |else_branch| {
+                    try self.compileNode(else_branch);
+                }
+
+                try self.patchJump(else_jump);
+            },
             .literal_int => {
                 const value = Value.initInt(node.data.literal_int.value);
                 try self.emitConstant(value, node.main_token.loc.start);
@@ -151,6 +176,28 @@ pub const Compiler = struct {
     fn emitConstant(self: *Compiler, value: Value, line: usize) !void {
         const constant_index = try self.chunk.addConstant(value);
         try self.emitBytes(@intFromEnum(OpCode.OpConstant), constant_index, line);
+    }
+
+    fn emitJump(self: *Compiler, instruction: u8, line: usize) !usize {
+        try self.emitByte(instruction, line);
+        try self.emitByte(0xff, line);
+        try self.emitByte(0xff, line);
+        return self.chunk.code.items.len - 2;
+    }
+
+    fn patchJump(self: *Compiler, offset: usize) !void {
+        // -2 to adjust for the size of the jump offset itself.
+        const jump = self.chunk.code.items.len - offset - 2;
+
+        if (jump > std.math.maxInt(u16)) {
+            // In a real compiler, we might have a more graceful way to handle this,
+            // like using wider jump instructions. For now, we'll consider it an error.
+            std.debug.print("Jump offset of {} exceeds 16-bit limit.\n", .{jump});
+            return error.JumpTooLarge;
+        }
+
+        self.chunk.code.items[offset] = @intCast((jump >> 8) & 0xff);
+        self.chunk.code.items[offset + 1] = @intCast(jump & 0xff);
     }
 
     fn emitReturn(self: *Compiler) !void {

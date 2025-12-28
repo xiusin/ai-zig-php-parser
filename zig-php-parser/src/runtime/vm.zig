@@ -80,14 +80,28 @@ pub const VM = struct {
     fn run(self: *VM) !Value {
         var frame = &self.frames[self.frame_count - 1];
 
+        const readByte = struct {
+            fn f(frame_ptr: *CallFrame) u8 {
+                const byte = frame_ptr.function.chunk.code.items[frame_ptr.ip];
+                frame_ptr.ip += 1;
+                return byte;
+            }
+        }.f;
+
+        const readShort = struct {
+            fn f(frame_ptr: *CallFrame) u16 {
+                const high = readByte(frame_ptr);
+                const low = readByte(frame_ptr);
+                return (@as(u16, @intCast(high)) << 8) | @as(u16, @intCast(low));
+            }
+        }.f;
+
         while (frame.ip < frame.function.chunk.code.items.len) {
-            const instruction = frame.function.chunk.code.items[frame.ip];
-            frame.ip += 1;
+            const instruction = readByte(frame);
 
             switch (@as(OpCode, @enumFromInt(instruction))) {
                 .OpConstant => {
-                    const constant_index = frame.function.chunk.code.items[frame.ip];
-                    frame.ip += 1;
+                    const constant_index = readByte(frame);
                     const constant = frame.function.chunk.constants.items[constant_index];
                     try self.push(constant);
                 },
@@ -100,14 +114,12 @@ pub const VM = struct {
                 .OpMultiply => try self.binaryOp(.Multiply),
                 .OpDivide => try self.binaryOp(.Divide),
                 .OpSetGlobal => {
-                    const constant_index = frame.function.chunk.code.items[frame.ip];
-                    frame.ip += 1;
+                    const constant_index = readByte(frame);
                     const var_name = frame.function.chunk.constants.items[constant_index].data.string.data.data;
                     try self.globals.put(var_name, self.peek(0));
                 },
                 .OpGetGlobal => {
-                    const constant_index = frame.function.chunk.code.items[frame.ip];
-                    frame.ip += 1;
+                    const constant_index = readByte(frame);
                     const var_name = frame.function.chunk.constants.items[constant_index].data.string.data.data;
                     if (self.globals.get(var_name)) |value| {
                         try self.push(value);
@@ -116,18 +128,25 @@ pub const VM = struct {
                     }
                 },
                 .OpGetLocal => {
-                    const slot = frame.function.chunk.code.items[frame.ip];
-                    frame.ip += 1;
+                    const slot = readByte(frame);
                     try self.push(self.stack[frame.slots + slot]);
                 },
                 .OpSetLocal => {
-                    const slot = frame.function.chunk.code.items[frame.ip];
-                    frame.ip += 1;
+                    const slot = readByte(frame);
                     self.stack[frame.slots + slot] = self.peek(0);
                 },
+                .OpJumpIfFalse => {
+                    const offset = readShort(frame);
+                    if (self.isFalsy(self.peek(0))) {
+                        frame.ip += offset;
+                    }
+                },
+                .OpJump => {
+                    const offset = readShort(frame);
+                    frame.ip += offset;
+                },
                 .OpCall => {
-                    const arg_count = frame.function.chunk.code.items[frame.ip];
-                    frame.ip += 1;
+                    const arg_count = readByte(frame);
 
                     const callee_value = self.peek(arg_count);
                     if (callee_value.tag != .user_function) {
@@ -136,7 +155,6 @@ pub const VM = struct {
                     const function: *main.runtime.types.UserFunction = @ptrCast(callee_value.data.user_function);
 
                     if (arg_count != function.arity) {
-                        // TODO: more specific error
                         return error.ArgumentCountMismatch;
                     }
 
@@ -157,21 +175,19 @@ pub const VM = struct {
                     self.frame_count -= 1;
 
                     if (self.frame_count == 0) {
-                        _ = self.pop(); // Pop the main script function
+                        _ = self.pop();
                         return result;
                     }
 
-                    // Discard the function's stack frame
                     self.stack_top = frame.slots;
                     try self.push(result);
 
-                    // Update the local `frame` variable to the new top frame
                     frame = &self.frames[self.frame_count - 1];
                 },
                 else => {
                     std.debug.print("Unknown opcode: {any}\n", .{instruction});
                     return error.UnknownOpCode;
-                },
+                }
             }
         }
         return error.ExecutionFinishedUnexpectedly;
@@ -192,6 +208,20 @@ pub const VM = struct {
 
     fn peek(self: *VM, distance: usize) Value {
         return self.stack[self.stack_top - 1 - distance];
+    }
+
+    fn isFalsy(self: *VM, value: Value) bool {
+        _ = self;
+        return switch (value.tag) {
+            .null => true,
+            .boolean => !value.data.boolean,
+            .integer => value.data.integer == 0,
+            .float => value.data.float == 0.0,
+            // In PHP, empty string and "0" are falsy.
+            .string => value.data.string.data.data.len == 0 or (value.data.string.data.data.len == 1 and value.data.string.data.data[0] == '0'),
+            // TODO: Handle arrays, objects etc.
+            else => false,
+        };
     }
 
     const BinaryOpType = enum { Add, Subtract, Multiply, Divide };
