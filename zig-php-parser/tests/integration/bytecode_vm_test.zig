@@ -56,3 +56,8 @@ test "end-to-end execution: if-else statement (false)" {
 test "end-to-end execution: if statement without else" {
     try testE2E("<?php if (1 > 2) { return 10; } return 5;", Value.initInt(5));
 }
+
+test "end-to-end execution: while loop" {
+    const source = "<?php $a = 0; while ($a < 5) { $a = $a + 1; } return $a;";
+    try testE2E(source, Value.initInt(5));
+}

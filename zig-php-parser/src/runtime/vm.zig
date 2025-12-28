@@ -74,6 +74,10 @@ pub const VM = struct {
                     const offset = self.readShort();
                     self.ip += offset;
                 },
+                .OpLoop => {
+                    const offset = self.readShort();
+                    self.ip -= offset;
+                },
                 .OpReturn => {
                     return self.pop();
                 },

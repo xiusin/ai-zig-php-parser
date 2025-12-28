@@ -42,16 +42,15 @@ pub fn main() !void {
     };
 
     // 2. Compiling
-    var comp = compiler.Compiler.init(allocator, &context);
-    defer comp.deinit();
-    const chunk = try comp.compile(root_node_index);
-    defer chunk.deinit();
+    var comp = compiler.Compiler.init(allocator, &context, null);
+    const main_func = try comp.compile(root_node_index);
+    defer main_func.deinit(allocator);
 
     // 3. Execution
     var vm_instance = vm.VM.init(allocator);
     defer vm_instance.deinit();
     
-    const result = try vm_instance.interpret(chunk);
+    const result = try vm_instance.interpret(main_func.chunk);
     try result.print();
     std.debug.print("\n", .{});
 }
