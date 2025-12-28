@@ -1457,7 +1457,7 @@ pub const Value = struct {
         struct_instance: *gc.Box(*StructInstance),
         resource: *gc.Box(*PHPResource),
         builtin_function: *const anyopaque,
-        user_function: *gc.Box(*UserFunction),
+        user_function: *UserFunction, // Not boxed for now, owned by compiler/vm
         closure: *gc.Box(*Closure),
         arrow_function: *gc.Box(*ArrowFunction),
     };

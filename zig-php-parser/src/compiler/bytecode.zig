@@ -11,6 +11,9 @@ pub const OpCode = enum(u8) {
     OpDivide,
     OpSetGlobal,
     OpGetGlobal,
+    OpGetLocal,
+    OpSetLocal,
+    OpCall,
     OpReturn,
 };
 

@@ -6,10 +6,18 @@ const OpCode = bytecode.OpCode;
 const Value = main.runtime.types.Value;
 
 const STACK_MAX = 256;
+const FRAMES_MAX = 64;
+
+const CallFrame = struct {
+    function: *main.runtime.types.UserFunction,
+    ip: usize,
+    slots: usize,
+};
 
 pub const VM = struct {
-    chunk: *Chunk,
-    ip: usize, // instruction pointer
+    frames: [FRAMES_MAX]CallFrame,
+    frame_count: usize,
+
     stack: [STACK_MAX]Value,
     stack_top: usize,
     globals: std.StringHashMap(Value),
@@ -17,8 +25,8 @@ pub const VM = struct {
 
     pub fn init(allocator: std.mem.Allocator) VM {
         return VM{
-            .chunk = undefined,
-            .ip = 0,
+            .frames = undefined,
+            .frame_count = 0,
             .stack = undefined,
             .stack_top = 0,
             .globals = std.StringHashMap(Value).init(allocator),
@@ -41,31 +49,46 @@ pub const VM = struct {
     }
 
     fn releaseValue(self: *VM, value: Value) void {
-        if (value.tag == .string) {
-            // In a real ref-counted system, we'd decrement.
-            // For now, as we're owning them in the VM, we free directly.
-            self.allocator.destroy(value.data.string.data);
-            self.allocator.destroy(value.data.string);
+        switch (value.tag) {
+            .string => {
+                // This is simplistic. With a proper GC or RC, this would be a decrement.
+                self.allocator.destroy(value.data.string.data);
+                self.allocator.destroy(value.data.string);
+            },
+            .user_function => {
+                // Also simplistic. Assumes function is heap allocated.
+                value.data.user_function.deinit(self.allocator);
+                self.allocator.destroy(value.data.user_function);
+            },
+            else => {},
         }
     }
 
-    pub fn interpret(self: *VM, chunk: *Chunk) !Value {
-        self.chunk = chunk;
-        self.ip = 0;
-        self.stack_top = 0;
+    pub fn interpret(self: *VM, main_function: *main.runtime.types.UserFunction) !Value {
+        if (self.frame_count >= FRAMES_MAX) return error.StackOverflow;
+
+        self.frames[self.frame_count] = CallFrame{
+            .function = main_function,
+            .ip = 0,
+            .slots = 0,
+        };
+        self.frame_count += 1;
+
         return self.run();
     }
 
     fn run(self: *VM) !Value {
-        while (self.ip < self.chunk.code.items.len) {
-            const instruction = self.chunk.code.items[self.ip];
-            self.ip += 1;
+        var frame = &self.frames[self.frame_count - 1];
+
+        while (frame.ip < frame.function.chunk.code.items.len) {
+            const instruction = frame.function.chunk.code.items[frame.ip];
+            frame.ip += 1;
 
             switch (@as(OpCode, @enumFromInt(instruction))) {
                 .OpConstant => {
-                    const constant_index = self.chunk.code.items[self.ip];
-                    self.ip += 1;
-                    const constant = self.chunk.constants.items[constant_index];
+                    const constant_index = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+                    const constant = frame.function.chunk.constants.items[constant_index];
                     try self.push(constant);
                 },
                 .OpNull => try self.push(Value.initNull()),
@@ -77,24 +100,68 @@ pub const VM = struct {
                 .OpMultiply => try self.binaryOp(.Multiply),
                 .OpDivide => try self.binaryOp(.Divide),
                 .OpSetGlobal => {
-                    const constant_index = self.chunk.code.items[self.ip];
-                    self.ip += 1;
-                    const var_name = self.chunk.constants.items[constant_index].data.string.data.data;
+                    const constant_index = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+                    const var_name = frame.function.chunk.constants.items[constant_index].data.string.data.data;
                     try self.globals.put(var_name, self.peek(0));
                 },
                 .OpGetGlobal => {
-                    const constant_index = self.chunk.code.items[self.ip];
-                    self.ip += 1;
-                    const var_name = self.chunk.constants.items[constant_index].data.string.data.data;
+                    const constant_index = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+                    const var_name = frame.function.chunk.constants.items[constant_index].data.string.data.data;
                     if (self.globals.get(var_name)) |value| {
                         try self.push(value);
                     } else {
                         return error.UndefinedVariable;
                     }
                 },
+                .OpGetLocal => {
+                    const slot = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+                    try self.push(self.stack[frame.slots + slot]);
+                },
+                .OpSetLocal => {
+                    const slot = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+                    self.stack[frame.slots + slot] = self.peek(0);
+                },
+                .OpCall => {
+                    const arg_count = frame.function.chunk.code.items[frame.ip];
+                    frame.ip += 1;
+
+                    const callee_value = self.peek(arg_count);
+                    if (callee_value.tag != .user_function) {
+                        return error.NotAFunction;
+                    }
+                    const function: *main.runtime.types.UserFunction = @ptrCast(callee_value.data.user_function);
+
+                    if (self.frame_count == FRAMES_MAX) {
+                        return error.StackOverflow;
+                    }
+
+                    self.frame_count += 1;
+                    frame = &self.frames[self.frame_count - 1];
+                    frame.* = CallFrame {
+                        .function = function,
+                        .ip = 0,
+                        .slots = self.stack_top - arg_count - 1,
+                    };
+                },
                 .OpReturn => {
                     const result = self.pop();
-                    return result;
+                    self.frame_count -= 1;
+
+                    if (self.frame_count == 0) {
+                        _ = self.pop(); // Pop the main script function
+                        return result;
+                    }
+
+                    // Discard the function's stack frame
+                    self.stack_top = frame.slots;
+                    try self.push(result);
+
+                    // Update the local `frame` variable to the new top frame
+                    frame = &self.frames[self.frame_count - 1];
                 },
                 else => {
                     std.debug.print("Unknown opcode: {any}\n", .{instruction});
