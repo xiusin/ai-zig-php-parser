@@ -26,7 +26,7 @@ pub const Compiler = struct {
     parent: ?*Compiler,
 
     pub fn init(allocator: std.mem.Allocator, context: *PHPContext, parent_compiler: ?*Compiler) Compiler {
-        var new_scope = allocator.create(CompilerScope) catch @panic("oom");
+        const new_scope = allocator.create(CompilerScope) catch @panic("oom");
         new_scope.* = .{
             .locals = std.ArrayList(Local).init(allocator),
             .scope_depth = if (parent_compiler) |p| p.scope.scope_depth + 1 else 0,
@@ -41,12 +41,17 @@ pub const Compiler = struct {
         };
     }
 
+    pub fn deinit(self: *Compiler) void {
+        self.scope.locals.deinit();
+        self.allocator.destroy(self.scope);
+    }
+
     pub fn compile(self: *Compiler, root_node_index: ast.Node.Index) !*Function {
-        var func_name = try PHPString.init(self.allocator, "<script>");
+        const func_name = try PHPString.init(self.allocator, "<script>");
         var main_function = self.allocator.create(Function) catch return error.OutOfMemory;
         main_function.* = Function.init(func_name);
 
-        var new_chunk = self.allocator.create(Chunk) catch return error.OutOfMemory;
+        const new_chunk = self.allocator.create(Chunk) catch return error.OutOfMemory;
         new_chunk.* = Chunk.init(self.allocator);
         self.chunk = new_chunk;
         main_function.chunk = self.chunk;
@@ -142,6 +147,22 @@ pub const Compiler = struct {
 
                 try self.patchJump(else_jump);
             },
+            .while_stmt => {
+                const line = node.main_token.loc.start;
+                const loop_start = self.chunk.code.items.len;
+
+                try self.compileNode(node.data.while_stmt.condition);
+
+                const exit_jump = try self.emitJump(@intFromEnum(OpCode.OpJumpIfFalse), line);
+
+                try self.emitByte(@intFromEnum(OpCode.OpPop), line); // Pop condition value
+                try self.compileNode(node.data.while_stmt.body);
+
+                try self.emitLoop(loop_start, line);
+
+                try self.patchJump(exit_jump);
+                try self.emitByte(@intFromEnum(OpCode.OpPop), line); // Pop condition value when loop terminates
+            },
             .literal_int => {
                 const value = Value.initInt(node.data.literal_int.value);
                 try self.emitConstant(value, node.main_token.loc.start);
@@ -200,6 +221,18 @@ pub const Compiler = struct {
         self.chunk.code.items[offset + 1] = @intCast(jump & 0xff);
     }
 
+    fn emitLoop(self: *Compiler, loop_start: usize, line: usize) !void {
+        try self.emitByte(@intFromEnum(OpCode.OpLoop), line);
+
+        const offset = self.chunk.code.items.len - loop_start + 2;
+        if (offset > std.math.maxInt(u16)) {
+            return error.LoopTooLarge;
+        }
+
+        try self.emitByte(@intCast((offset >> 8) & 0xff), line);
+        try self.emitByte(@intCast(offset & 0xff), line);
+    }
+
     fn emitReturn(self: *Compiler) !void {
         try self.emitByte(@intFromEnum(OpCode.OpNull), 0);
         try self.emitByte(@intFromEnum(OpCode.OpReturn), 0);
@@ -224,7 +257,7 @@ pub const Compiler = struct {
     }
 
     fn compileFunction(self: *Compiler, func_data: ast.Node.Data.function_decl, name: []const u8) !*Function {
-        var func_name = try PHPString.init(self.allocator, name);
+        const func_name = try PHPString.init(self.allocator, name);
         var function = self.allocator.create(Function) catch return error.OutOfMemory;
         function.* = Function.init(func_name);
         function.arity = @intCast(func_data.params.len);
@@ -236,7 +269,7 @@ pub const Compiler = struct {
             try self.addLocal(param_name);
         }
 
-        var new_chunk = self.allocator.create(Chunk) catch return error.OutOfMemory;
+        const new_chunk = self.allocator.create(Chunk) catch return error.OutOfMemory;
         new_chunk.* = Chunk.init(self.allocator);
         self.chunk = new_chunk;
         function.chunk = self.chunk;

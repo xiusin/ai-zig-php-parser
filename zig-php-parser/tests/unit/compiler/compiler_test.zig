@@ -21,6 +21,7 @@ test "compile return 1 + 2" {
     const root_node_index = try parser.parse();
 
     var compiler = Compiler.init(allocator, &context);
+    defer compiler.deinit();
     const chunk = try compiler.compile(root_node_index);
     defer chunk.deinit();
 
@@ -209,4 +210,51 @@ test "compile if-else statement" {
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpConstant)), chunk.code.items[13]);
     try testing.expectEqual(@as(i64, 3), chunk.constants.items[chunk.code.items[14]].data.integer);
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpPop)), chunk.code.items[15]);
+}
+
+test "compile while statement" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const source = "<?php while (1) { 2; }";
+    var context = PHPContext.init(arena_allocator);
+    var parser = try Parser.init(arena_allocator, &context, source);
+    const root_node_index = try parser.parse();
+
+    var compiler = Compiler.init(allocator, &context, null);
+    const main_func = try compiler.compile(root_node_index);
+    defer main_func.deinit(allocator);
+    const chunk = main_func.chunk;
+
+    // Expected bytecode:
+    // 0  OpConstant (1) -- loop start
+    // 2  OpJumpIfFalse (offset to instruction 11)
+    // 5  OpPop
+    // 6  OpConstant (2)
+    // 8  OpPop
+    // 9  OpLoop (offset back to instruction 0)
+    // 12 OpPop
+
+    // Condition
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpConstant)), chunk.code.items[0]);
+
+    // OpJumpIfFalse
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpJumpIfFalse)), chunk.code.items[2]);
+    const jump_if_false_offset = (@as(u16, @intCast(chunk.code.items[3])) << 8) | @as(u16, @intCast(chunk.code.items[4]));
+    try testing.expectEqual(@as(u16, 7), jump_if_false_offset); // Jumps from pos 5 over the 7 bytes of the loop body + OpLoop
+
+    // Loop Body
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpPop)), chunk.code.items[5]);
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpConstant)), chunk.code.items[6]);
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpPop)), chunk.code.items[8]);
+
+    // OpLoop
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpLoop)), chunk.code.items[9]);
+    const loop_offset = (@as(u16, @intCast(chunk.code.items[10])) << 8) | @as(u16, @intCast(chunk.code.items[11]));
+    try testing.expectEqual(@as(u16, 12), loop_offset); // Jumps from pos 12 back 12 bytes to pos 0
 }

@@ -1,14 +1,12 @@
 const std = @import("std");
 
-pub const compiler = @import("compiler/root.zig");
-pub const runtime = @import("runtime/root.zig");
+pub const compiler = @import("compiler/compiler.zig");
+pub const bytecode = @import("compiler/bytecode.zig");
+pub const parser = @import("compiler/parser.zig");
 
-const ast = @import("compiler/ast.zig");
-const parser = @import("compiler/parser.zig");
 const vm = @import("runtime/vm.zig");
 const types = @import("runtime/types.zig");
 const Value = types.Value;
-const Environment = @import("runtime/environment.zig");
 const PHPContext = @import("compiler/parser.zig").PHPContext;
 
 pub fn main() !void {
@@ -21,50 +19,39 @@ pub fn main() !void {
     const arena_allocator = arena.allocator();
 
     var context = PHPContext.init(arena_allocator);
-    // defer context.deinit();
 
-    // Get command line arguments
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
     
-    var php_code: [:0]const u8 = undefined;
-    
+    var php_code: [:0]const u8 = "<?php 1 + 2;";
     if (args.len > 1) {
-        // Read PHP file from command line argument
         const filename = args[1];
-        const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+        const file_contents = std.fs.cwd().readFileAlloc(allocator, filename, 1024 * 1024) catch |err| {
             std.debug.print("Error opening file '{s}': {s}\n", .{ filename, @errorName(err) });
             return;
         };
-        defer file.close();
-        
-        const file_size = try file.getEndPos();
-        const contents = try arena_allocator.allocSentinel(u8, file_size, 0);
-        
-        _ = try file.readAll(contents);
-        php_code = contents;
-    } else {
-        // Default code if no file specified
-        php_code = "<?php echo 42;";
+        defer allocator.free(file_contents);
+        php_code = file_contents;
     }
 
+    // 1. Parsing
     var p = try parser.Parser.init(arena_allocator, &context, php_code);
-    const program = p.parse() catch |err| {
+    const root_node_index = p.parse() catch |err| {
         std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});
-        if (context.errors.items.len > 0) {
-            for (context.errors.items) |error_item| {
-                std.debug.print("Parse error: {s}\n", .{error_item.msg});
-            }
-        }
         return;
     };
 
-    var vm_instance = try vm.VM.init(allocator);
-    vm_instance.context = &context;
-    defer vm_instance.deinit();
+    // 2. Compiling
+    var comp = compiler.Compiler.init(allocator, &context);
+    defer comp.deinit();
+    const chunk = try comp.compile(root_node_index);
+    defer chunk.deinit();
 
-    const result = try vm_instance.run(program);
+    // 3. Execution
+    var vm_instance = vm.VM.init(allocator);
+    defer vm_instance.deinit();
     
-    // Release the final result to prevent memory leak
-    result.release(allocator);
+    const result = try vm_instance.interpret(chunk);
+    try result.print();
+    std.debug.print("\n", .{});
 }

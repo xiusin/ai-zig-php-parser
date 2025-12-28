@@ -18,6 +18,7 @@ pub const OpCode = enum(u8) {
     OpReturn,
     OpJumpIfFalse,
     OpJump,
+    OpLoop,
 };
 
 pub const Chunk = struct {
