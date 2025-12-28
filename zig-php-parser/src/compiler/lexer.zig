@@ -135,6 +135,11 @@ pub const Lexer = struct {
         while (self.pos < self.buffer.len) {
             const c = self.buffer[self.pos];
             if (c == end_char and end_char != 0) break;
+            // 处理转义字符：跳过 \$ 等转义序列
+            if (c == '\\' and self.pos + 1 < self.buffer.len) {
+                self.pos += 2; // 跳过反斜杠和下一个字符
+                continue;
+            }
             if (c == '$' or (c == '{' and self.pos + 1 < self.buffer.len and self.buffer[self.pos + 1] == '$')) break;
             if (self.heredoc_label) |label| {
                 if (std.mem.startsWith(u8, self.buffer[self.pos..], label)) break;
