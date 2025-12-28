@@ -5,8 +5,9 @@ const Parser = main.compiler.parser.Parser;
 const PHPContext = main.compiler.parser.PHPContext;
 const Compiler = main.compiler.compiler.Compiler;
 const VM = main.runtime.vm.VM;
+const Value = main.runtime.types.Value;
 
-test "end-to-end execution: return 1 + 2" {
+fn testE2E(source: []const u8, expected_value: Value) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -15,25 +16,43 @@ test "end-to-end execution: return 1 + 2" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    const source = "<?php return 1 + 2;";
-
     // 1. Parsing
     var context = PHPContext.init(arena_allocator);
     var parser = try Parser.init(arena_allocator, &context, source);
     const root_node_index = try parser.parse();
 
     // 2. Compiling
-    var compiler = Compiler.init(allocator, &context);
-    defer compiler.deinit();
-    const chunk = try compiler.compile(root_node_index);
-    defer chunk.deinit();
+    var compiler = Compiler.init(allocator, &context, null);
+    const main_func = try compiler.compile(root_node_index);
+    defer main_func.deinit(allocator);
 
     // 3. Execution
     var vm = VM.init(allocator);
     defer vm.deinit();
-    const result = try vm.interpret(chunk);
+    const result = try vm.interpret(main_func.chunk);
 
     // 4. Verification
-    try testing.expectEqual(result.tag, .integer);
-    try testing.expectEqual(@as(i64, 3), result.data.integer);
+    try testing.expectEqual(expected_value.tag, result.tag);
+    switch (expected_value.tag) {
+        .integer => try testing.expectEqual(expected_value.data.integer, result.data.integer),
+        .boolean => try testing.expectEqual(expected_value.data.boolean, result.data.boolean),
+        .null => {},
+        else => return error.UnsupportedVerificationType,
+    }
+}
+
+test "end-to-end execution: return 1 + 2" {
+    try testE2E("<?php return 1 + 2;", Value.initInt(3));
+}
+
+test "end-to-end execution: if-else statement (true)" {
+    try testE2E("<?php if (2 > 1) { return 10; } else { return 20; }", Value.initInt(10));
+}
+
+test "end-to-end execution: if-else statement (false)" {
+    try testE2E("<?php if (1 > 2) { return 10; } else { return 20; }", Value.initInt(20));
+}
+
+test "end-to-end execution: if statement without else" {
+    try testE2E("<?php if (1 > 2) { return 10; } return 5;", Value.initInt(5));
 }
