@@ -9,6 +9,7 @@ pub const OpCode = enum(u8) {
     OpSubtract,
     OpMultiply,
     OpDivide,
+    OpDefineGlobal,
     OpSetGlobal,
     OpGetGlobal,
     OpGetLocal,

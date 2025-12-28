@@ -117,3 +117,38 @@ test "compile function call" {
     try testing.expectEqual(@as(u8, 2), chunk.code.items[7]); // Arg count
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpPop)), chunk.code.items[8]);
 }
+
+test "compile function declaration" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const source = "<?php function my_func() {}";
+    var context = PHPContext.init(arena_allocator);
+    var parser = try Parser.init(arena_allocator, &context, source);
+    const root_node_index = try parser.parse();
+
+    var compiler = Compiler.init(allocator, &context, null);
+    const main_func = try compiler.compile(root_node_index);
+    defer main_func.deinit(allocator);
+    const chunk = main_func.chunk;
+
+    // Expected bytecode:
+    // OpConstant (function object)
+    // OpDefineGlobal ("my_func")
+
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpConstant)), chunk.code.items[0]);
+    const func_const_idx = chunk.code.items[1];
+    const func_val = chunk.constants.items[func_const_idx];
+    try testing.expectEqual(func_val.tag, .user_function);
+    const compiled_func = func_val.data.user_function;
+    try testing.expectEqual(@as(u8, 0), compiled_func.arity);
+
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.OpDefineGlobal)), chunk.code.items[2]);
+    const name_const_idx = chunk.code.items[3];
+    try testing.expectEqualStrings("my_func", chunk.constants.items[name_const_idx].data.string.data.data);
+}

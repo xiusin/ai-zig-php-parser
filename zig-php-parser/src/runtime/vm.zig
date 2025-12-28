@@ -135,6 +135,11 @@ pub const VM = struct {
                     }
                     const function: *main.runtime.types.UserFunction = @ptrCast(callee_value.data.user_function);
 
+                    if (arg_count != function.arity) {
+                        // TODO: more specific error
+                        return error.ArgumentCountMismatch;
+                    }
+
                     if (self.frame_count == FRAMES_MAX) {
                         return error.StackOverflow;
                     }

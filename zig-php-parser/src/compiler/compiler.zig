@@ -22,17 +22,22 @@ pub const Compiler = struct {
     context: *PHPContext,
     chunk: *Chunk,
     allocator: std.mem.Allocator,
-    scope: CompilerScope,
+    scope: *CompilerScope,
+    parent: ?*Compiler,
 
-    pub fn init(allocator: std.mem.Allocator, context: *PHPContext) Compiler {
+    pub fn init(allocator: std.mem.Allocator, context: *PHPContext, parent_compiler: ?*Compiler) Compiler {
+        var new_scope = allocator.create(CompilerScope) catch @panic("oom");
+        new_scope.* = .{
+            .locals = std.ArrayList(Local).init(allocator),
+            .scope_depth = if (parent_compiler) |p| p.scope.scope_depth + 1 else 0,
+        };
+
         return Compiler{
             .allocator = allocator,
             .context = context,
-            .chunk = undefined, // Will be set before compilation
-            .scope = .{
-                .locals = std.ArrayList(Local).init(allocator),
-                .scope_depth = 0,
-            },
+            .chunk = undefined,
+            .scope = new_scope,
+            .parent = parent_compiler,
         };
     }
 
@@ -48,7 +53,6 @@ pub const Compiler = struct {
 
         try self.compileNode(root_node_index);
 
-        // Always end with a return
         try self.emitReturn();
 
         return main_function;
@@ -74,12 +78,11 @@ pub const Compiler = struct {
 
                     try self.compileNode(node.data.assignment.value);
 
-                    // If in a local scope, it's a local variable. Otherwise global.
                     if (self.scope.scope_depth > 0) {
                         if (self.resolveLocal(var_name)) |local_index| {
                             try self.emitBytes(@intFromEnum(OpCode.OpSetLocal), @intCast(local_index), node.main_token.loc.start);
                         } else {
-                            return error.VariableNotFound; // Should be declared
+                            return error.VariableNotFound;
                         }
                     } else {
                         const name_const_idx = try self.identifierConstant(var_name);
@@ -97,8 +100,6 @@ pub const Compiler = struct {
                      if (self.resolveLocal(var_name)) |local_index| {
                         try self.emitBytes(@intFromEnum(OpCode.OpGetLocal), @intCast(local_index), node.main_token.loc.start);
                     } else {
-                        // For now, assume undeclared locals are an error.
-                        // PHP would issue a notice and treat as null.
                         return error.VariableNotFound;
                     }
                 } else {
@@ -106,7 +107,7 @@ pub const Compiler = struct {
                     try self.emitBytes(@intFromEnum(OpCode.OpGetGlobal), name_const_idx, node.main_token.loc.start);
                 }
             },
-            .function_decl => try self.compileFunction(node.data.function_decl, node.main_token.loc.start),
+            .function_decl => try self.functionDeclaration(node.data.function_decl, node.main_token.loc.start),
             .function_call => try self.compileFunctionCall(node.data.function_call, node.main_token.loc.start),
             .return_stmt => {
                 if (node.data.return_stmt.expr) |expr| {
@@ -133,7 +134,6 @@ pub const Compiler = struct {
                 }
             },
             else => {
-                // For now, ignore unsupported nodes
                 std.debug.print("Unsupported AST node type in compiler: {s}\n", .{@tagName(node.tag)});
             },
         }
@@ -159,34 +159,62 @@ pub const Compiler = struct {
     }
 
     fn identifierConstant(self: *Compiler, name: []const u8) !u8 {
-        // Create a string value for the variable name
         const string_val = Value.initString(self.allocator, name) catch return error.OutOfMemory;
         return self.chunk.addConstant(string_val);
     }
 
-    fn compileFunction(self: *Compiler, func_data: ast.Node.Data.function_decl, line: usize) !void {
-        _ = self;
-        _ = func_data;
-        _ = line;
-        // This is a placeholder. A real implementation would:
-        // 1. Create a new Compiler instance for the function body.
-        // 2. Compile the function body into a new Function object.
-        // 3. Add the Function object to the constant pool of the current chunk.
-        // 4. Emit an OpConstant instruction to load the function.
-        // 5. Emit an OpDefineGlobal to make the function available globally.
-        return error.UnsupportedFeature;
+    fn functionDeclaration(self: *Compiler, func_data: ast.Node.Data.function_decl, line: usize) !void {
+        const func_name = self.context.string_pool.keys()[func_data.name];
+        const func_name_const_idx = try self.identifierConstant(func_name);
+
+        var function_compiler = Compiler.init(self.allocator, self.context, self);
+
+        const function = try function_compiler.compileFunction(func_data, func_name);
+
+        const func_const_idx = try self.chunk.addConstant(Value{.user_function = function});
+        try self.emitBytes(@intFromEnum(OpCode.OpConstant), func_const_idx, line);
+        try self.emitBytes(@intFromEnum(OpCode.OpDefineGlobal), func_name_const_idx, line);
+    }
+
+    fn compileFunction(self: *Compiler, func_data: ast.Node.Data.function_decl, name: []const u8) !*Function {
+        var func_name = try PHPString.init(self.allocator, name);
+        var function = self.allocator.create(Function) catch return error.OutOfMemory;
+        function.* = Function.init(func_name);
+        function.arity = @intCast(func_data.params.len);
+
+        // Handle parameters
+        for (func_data.params) |param_index| {
+            const param_node = self.context.nodes.items[param_index];
+            const param_name = self.context.string_pool.keys()[param_node.data.parameter.name];
+            try self.addLocal(param_name);
+        }
+
+        var new_chunk = self.allocator.create(Chunk) catch return error.OutOfMemory;
+        new_chunk.* = Chunk.init(self.allocator);
+        self.chunk = new_chunk;
+        function.chunk = self.chunk;
+
+        try self.compileNode(func_data.body);
+        try self.emitReturn();
+
+        return function;
+    }
+
+    fn addLocal(self: *Compiler, name: []const u8) !void {
+        const local = Local {
+            .name = name,
+            .depth = self.scope.scope_depth,
+        };
+        try self.scope.locals.append(local);
     }
 
     fn compileFunctionCall(self: *Compiler, call_data: ast.Node.Data.function_call, line: usize) !void {
-        // Compile the function name (which is treated as a variable)
         try self.compileNode(call_data.name);
 
-        // Compile arguments
         for (call_data.args) |arg| {
             try self.compileNode(arg);
         }
 
-        // Emit call instruction with argument count
         try self.emitBytes(@intFromEnum(OpCode.OpCall), @intCast(call_data.args.len), line);
     }
 
