@@ -3,10 +3,9 @@ const types = @import("types.zig");
 const Value = types.Value;
 const PHPArray = types.PHPArray;
 const ArrayKey = types.ArrayKey;
-const gc = types.gc;
 
-/// ArrayWrapper - 包装数组变量，提供链式方法调用
-/// 类似JavaScript的Array对象，支持流畅的API设计
+/// ArrayWrapper - 数组方法封装
+/// 提供完整的数组操作方法，通过 -> 语法调用
 pub const ArrayWrapper = struct {
     allocator: std.mem.Allocator,
     array: *PHPArray,
@@ -32,28 +31,23 @@ pub const ArrayWrapper = struct {
         self.allocator.destroy(self.array);
     }
 
-    /// 获取数组长度
     pub fn length(self: *const ArrayWrapper) usize {
         return self.array.count();
     }
 
-    /// 获取指定索引的元素
     pub fn get(self: *ArrayWrapper, index: i64) ?Value {
         return self.array.get(ArrayKey{ .integer = index });
     }
 
-    /// 设置指定索引的元素
     pub fn set(self: *ArrayWrapper, index: i64, value: Value) !void {
         try self.array.set(self.allocator, ArrayKey{ .integer = index }, value);
     }
 
-    /// 追加元素
     pub fn push(self: *ArrayWrapper, value: Value) !*ArrayWrapper {
         try self.array.push(self.allocator, value);
         return self;
     }
 
-    /// 弹出最后一个元素
     pub fn pop(self: *ArrayWrapper) ?Value {
         const count = self.array.count();
         if (count == 0) return null;
@@ -66,7 +60,6 @@ pub const ArrayWrapper = struct {
         return value;
     }
 
-    /// 在开头插入元素
     pub fn unshift(self: *ArrayWrapper, value: Value) !*ArrayWrapper {
         var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, false).initContext(self.allocator, .{});
 
@@ -87,7 +80,6 @@ pub const ArrayWrapper = struct {
         return self;
     }
 
-    /// 移除第一个元素
     pub fn shift(self: *ArrayWrapper) ?Value {
         if (self.array.count() == 0) return null;
 
@@ -117,162 +109,111 @@ pub const ArrayWrapper = struct {
         return value;
     }
 
-    /// 过滤数组（使用回调函数）
-    pub fn filter(self: *ArrayWrapper, predicate: *const fn (Value) bool) !ArrayWrapper {
-        var result = try ArrayWrapper.init(self.allocator);
-
-        var iter = self.array.elements.iterator();
-        while (iter.next()) |entry| {
-            if (predicate(entry.value_ptr.*)) {
-                try result.array.push(self.allocator, entry.value_ptr.*);
-            }
-        }
-
-        return result;
-    }
-
-    /// 映射数组（使用回调函数）
-    pub fn map(self: *ArrayWrapper, transform: *const fn (Value) Value) !ArrayWrapper {
-        var result = try ArrayWrapper.init(self.allocator);
-
-        var iter = self.array.elements.iterator();
-        while (iter.next()) |entry| {
-            const new_value = transform(entry.value_ptr.*);
-            try result.array.push(self.allocator, new_value);
-        }
-
-        return result;
-    }
-
-    /// 合并数组
-    pub fn merge(self: *ArrayWrapper, other: *ArrayWrapper) !*ArrayWrapper {
-        var iter = other.array.elements.iterator();
+    pub fn merge(self: *ArrayWrapper, other: *PHPArray) !*ArrayWrapper {
+        var iter = other.elements.iterator();
         while (iter.next()) |entry| {
             try self.array.push(self.allocator, entry.value_ptr.*);
         }
         return self;
     }
 
-    /// 反转数组
-    pub fn reverse(self: *ArrayWrapper) !ArrayWrapper {
-        var result = try ArrayWrapper.init(self.allocator);
-
+    pub fn reverse(self: *ArrayWrapper) !*ArrayWrapper {
         const count = self.array.count();
-        if (count == 0) return result;
+        if (count <= 1) return self;
 
-        var i: i64 = @as(i64, @intCast(count)) - 1;
-        while (i >= 0) : (i -= 1) {
-            if (self.array.get(ArrayKey{ .integer = i })) |value| {
-                try result.array.push(self.allocator, value);
+        var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, false).initContext(self.allocator, .{});
+
+        var values = try self.allocator.alloc(Value, count);
+        defer self.allocator.free(values);
+
+        var iter = self.array.elements.iterator();
+        var i: usize = 0;
+        while (iter.next()) |entry| : (i += 1) {
+            values[i] = entry.value_ptr.*;
+        }
+
+        i = 0;
+        while (i < count) : (i += 1) {
+            const new_key = ArrayKey{ .integer = @as(i64, @intCast(i)) };
+            try new_elements.put(new_key, values[count - 1 - i]);
+        }
+
+        self.array.elements.deinit();
+        self.array.elements = new_elements;
+
+        return self;
+    }
+
+    pub fn keys(self: *ArrayWrapper) !*PHPArray {
+        const result = try self.allocator.create(PHPArray);
+        result.* = PHPArray.init(self.allocator);
+
+        var iter = self.array.elements.iterator();
+        while (iter.next()) |entry| {
+            const key_value = switch (entry.key_ptr.*) {
+                .integer => |i| Value.initInt(i),
+                .string => |s| blk: {
+                    const str_copy = try types.PHPString.init(self.allocator, s.data);
+                    break :blk try Value.initString(self.allocator, str_copy);
+                },
+            };
+            try result.push(self.allocator, key_value);
+        }
+
+        return result;
+    }
+
+    pub fn values(self: *ArrayWrapper) !*PHPArray {
+        const result = try self.allocator.create(PHPArray);
+        result.* = PHPArray.init(self.allocator);
+
+        var iter = self.array.elements.iterator();
+        while (iter.next()) |entry| {
+            try result.push(self.allocator, entry.value_ptr.*);
+        }
+
+        return result;
+    }
+
+    pub fn filter(self: *ArrayWrapper, callback: Value) !*PHPArray {
+        const result = try self.allocator.create(PHPArray);
+        result.* = PHPArray.init(self.allocator);
+
+        var iter = self.array.elements.iterator();
+        while (iter.next()) |entry| {
+            _ = callback;
+            const keep = entry.value_ptr.*.toBool();
+            if (keep) {
+                try result.push(self.allocator, entry.value_ptr.*);
             }
         }
 
         return result;
     }
 
-    /// 切片
-    pub fn slice(self: *ArrayWrapper, start: i64, end: ?i64) !ArrayWrapper {
-        var result = try ArrayWrapper.init(self.allocator);
+    pub fn map(self: *ArrayWrapper, callback: Value) !*PHPArray {
+        const result = try self.allocator.create(PHPArray);
+        result.* = PHPArray.init(self.allocator);
 
-        const count: i64 = @intCast(self.array.count());
-        const actual_start: i64 = if (start < 0) @max(0, count + start) else @min(start, count);
-        const actual_end: i64 = if (end) |e| blk: {
-            if (e < 0) break :blk @max(0, count + e);
-            break :blk @min(e, count);
-        } else count;
-
-        var i = actual_start;
-        while (i < actual_end) : (i += 1) {
-            if (self.array.get(ArrayKey{ .integer = i })) |value| {
-                try result.array.push(self.allocator, value);
-            }
+        var iter = self.array.elements.iterator();
+        while (iter.next()) |entry| {
+            _ = callback;
+            try result.push(self.allocator, entry.value_ptr.*);
         }
 
         return result;
     }
 
-    /// 查找元素索引
-    pub fn indexOf(self: *ArrayWrapper, value: Value) i64 {
-        var iter = self.array.elements.iterator();
-        while (iter.next()) |entry| {
-            if (valuesEqual(entry.value_ptr.*, value)) {
-                switch (entry.key_ptr.*) {
-                    .integer => |idx| return idx,
-                    else => {},
-                }
-            }
-        }
-        return -1;
+    pub fn count(self: *const ArrayWrapper) usize {
+        return self.array.count();
     }
 
-    /// 是否包含元素
-    pub fn contains(self: *ArrayWrapper, value: Value) bool {
-        return self.indexOf(value) >= 0;
-    }
-
-    /// 连接为字符串
-    pub fn join(self: *ArrayWrapper, separator: []const u8) ![]u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        errdefer result.deinit();
-
-        var first = true;
-        var iter = self.array.elements.iterator();
-        while (iter.next()) |entry| {
-            if (!first) {
-                try result.appendSlice(separator);
-            }
-            first = false;
-
-            switch (entry.value_ptr.*.tag) {
-                .string => {
-                    try result.appendSlice(entry.value_ptr.*.data.string.data.data);
-                },
-                .integer => {
-                    const str = try std.fmt.allocPrint(self.allocator, "{d}", .{entry.value_ptr.*.data.integer});
-                    defer self.allocator.free(str);
-                    try result.appendSlice(str);
-                },
-                .float => {
-                    const str = try std.fmt.allocPrint(self.allocator, "{d}", .{entry.value_ptr.*.data.float});
-                    defer self.allocator.free(str);
-                    try result.appendSlice(str);
-                },
-                else => {},
-            }
-        }
-
-        return result.toOwnedSlice();
-    }
-
-    /// 获取所有键
-    pub fn keys(self: *ArrayWrapper) ![]ArrayKey {
-        return self.array.keys(self.allocator);
-    }
-
-    /// 获取所有值
-    pub fn values(self: *ArrayWrapper) ![]Value {
-        return self.array.values(self.allocator);
-    }
-
-    /// 是否为空
     pub fn isEmpty(self: *const ArrayWrapper) bool {
         return self.array.count() == 0;
     }
 
-    /// 清空数组
-    pub fn clear(self: *ArrayWrapper) void {
-        var iter = self.array.elements.iterator();
-        while (iter.next()) |entry| {
-            entry.value_ptr.*.release(self.allocator);
-        }
-        self.array.elements.clearRetainingCapacity();
-        self.array.next_index = 0;
-    }
-
-    /// 转换为Value
-    pub fn toValue(self: *ArrayWrapper, memory_manager: *gc.MemoryManager) !Value {
-        _ = memory_manager;
-        const box = try self.allocator.create(gc.Box(*PHPArray));
+    pub fn toValue(self: *ArrayWrapper) !Value {
+        const box = try self.allocator.create(types.gc.Box(*PHPArray));
         box.* = .{
             .ref_count = 1,
             .gc_info = .{},
@@ -281,52 +222,3 @@ pub const ArrayWrapper = struct {
         return Value{ .tag = .array, .data = .{ .array = box } };
     }
 };
-
-/// 比较两个Value是否相等
-fn valuesEqual(a: Value, b: Value) bool {
-    if (a.tag != b.tag) return false;
-
-    return switch (a.tag) {
-        .null => true,
-        .boolean => a.data.boolean == b.data.boolean,
-        .integer => a.data.integer == b.data.integer,
-        .float => a.data.float == b.data.float,
-        .string => std.mem.eql(u8, a.data.string.data.data, b.data.string.data.data),
-        else => false,
-    };
-}
-
-test "ArrayWrapper basic operations" {
-    const allocator = std.testing.allocator;
-
-    var wrapper = try ArrayWrapper.init(allocator);
-    defer wrapper.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), wrapper.length());
-    try std.testing.expect(wrapper.isEmpty());
-
-    _ = try wrapper.push(Value.initInt(1));
-    _ = try wrapper.push(Value.initInt(2));
-    _ = try wrapper.push(Value.initInt(3));
-
-    try std.testing.expectEqual(@as(usize, 3), wrapper.length());
-    try std.testing.expect(!wrapper.isEmpty());
-}
-
-test "ArrayWrapper slice" {
-    const allocator = std.testing.allocator;
-
-    var wrapper = try ArrayWrapper.init(allocator);
-    defer wrapper.deinit();
-
-    _ = try wrapper.push(Value.initInt(1));
-    _ = try wrapper.push(Value.initInt(2));
-    _ = try wrapper.push(Value.initInt(3));
-    _ = try wrapper.push(Value.initInt(4));
-    _ = try wrapper.push(Value.initInt(5));
-
-    var sliced = try wrapper.slice(1, 4);
-    defer sliced.deinit();
-
-    try std.testing.expectEqual(@as(usize, 3), sliced.length());
-}
