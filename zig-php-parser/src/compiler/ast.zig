@@ -66,6 +66,8 @@ pub const Node = struct {
         literal_int,
         literal_float,
         literal_string,
+        literal_bool,
+        literal_null,
         array_init,
         array_pair,
         binary_expr,

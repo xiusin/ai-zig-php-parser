@@ -343,6 +343,7 @@ pub const PHPClass = struct {
     constants: std.StringHashMap(Value),
     modifiers: ClassModifiers,
     attributes: []const Attribute,
+    native_destructor: ?*const fn (*anyopaque, std.mem.Allocator) void,
 
     pub const ClassModifiers = packed struct {
         is_abstract: bool = false,
@@ -362,6 +363,7 @@ pub const PHPClass = struct {
             .constants = std.StringHashMap(Value).init(allocator),
             .modifiers = .{},
             .attributes = &[_]Attribute{},
+            .native_destructor = null,
         };
     }
 
@@ -948,6 +950,13 @@ pub const PHPObject = struct {
     }
 
     pub fn deinit(self: *PHPObject, allocator: std.mem.Allocator) void {
+        // Release native data if destructor exists
+        if (self.native_data) |data| {
+            if (self.class.native_destructor) |destructor| {
+                destructor(data, allocator);
+            }
+        }
+
         // Release all property values
         var iterator = self.properties.iterator();
         while (iterator.next()) |entry| {
@@ -1061,8 +1070,15 @@ pub const PHPObject = struct {
         // Special handling for built-in classes with null method bodies
         if (method.?.body == null) {
             // Check if this is a built-in class method that should be handled specially
-            if (std.mem.eql(u8, self.class.name.data, "PDO")) {
+            const class_name = self.class.name.data;
+            if (std.mem.eql(u8, class_name, "PDO")) {
                 return vm_instance.callPDOMethod(instance_value, name, args);
+            }
+            if (std.mem.eql(u8, class_name, "Mutex") or std.mem.eql(u8, class_name, "Atomic") or
+                std.mem.eql(u8, class_name, "RWLock") or std.mem.eql(u8, class_name, "SharedData") or
+                std.mem.eql(u8, class_name, "Channel"))
+            {
+                return vm_instance.callConcurrencyMethod(instance_value, name, args);
             }
             // For other built-in classes, return not implemented for now
             return error.UndefinedMethod; // Built-in method not implemented

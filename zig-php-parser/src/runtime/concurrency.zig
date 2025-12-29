@@ -195,6 +195,7 @@ pub const PHPSharedData = struct {
         var iter = self.data.iterator();
         while (iter.next()) |entry| {
             entry.value_ptr.release(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
         }
         self.data.deinit();
     }
@@ -206,8 +207,10 @@ pub const PHPSharedData = struct {
 
         _ = self.access_count.fetchAdd(1, .seq_cst);
 
-        if (self.data.get(key)) |old_value| {
-            old_value.release(self.allocator);
+        if (self.data.getEntry(key)) |entry| {
+            entry.value_ptr.release(self.allocator);
+            entry.value_ptr.* = value.retain();
+            return;
         }
 
         const key_copy = try self.allocator.dupe(u8, key);

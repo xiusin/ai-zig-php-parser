@@ -15,11 +15,19 @@ pub fn registerConcurrencyClasses(vm: anytype) !void {
 /// 注册 Mutex 类
 fn registerMutexClass(vm: anytype) !void {
     const name_str = try types.PHPString.init(vm.allocator, "Mutex");
+    defer name_str.release(vm.allocator);
     const mutex_class = try vm.allocator.create(types.PHPClass);
     mutex_class.* = types.PHPClass.init(vm.allocator, name_str);
+    mutex_class.native_destructor = mutexDestructor;
 
     try vm.classes.put("Mutex", mutex_class);
     try vm.defineBuiltin("Mutex", mutexConstructor);
+}
+
+fn mutexDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const mutex = @as(*concurrency.PHPMutex, @ptrCast(@alignCast(ptr)));
+    mutex.deinit();
+    allocator.destroy(mutex);
 }
 
 pub fn mutexConstructor(vm: anytype, args: []Value) !Value {
@@ -42,11 +50,19 @@ pub fn mutexConstructor(vm: anytype, args: []Value) !Value {
 /// 注册 Atomic 类
 fn registerAtomicClass(vm: anytype) !void {
     const name_str = try types.PHPString.init(vm.allocator, "Atomic");
+    defer name_str.release(vm.allocator);
     const atomic_class = try vm.allocator.create(types.PHPClass);
     atomic_class.* = types.PHPClass.init(vm.allocator, name_str);
+    atomic_class.native_destructor = atomicDestructor;
 
     try vm.classes.put("Atomic", atomic_class);
     try vm.defineBuiltin("Atomic", atomicConstructor);
+}
+
+fn atomicDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const atomic = @as(*concurrency.PHPAtomic, @ptrCast(@alignCast(ptr)));
+    atomic.deinit();
+    allocator.destroy(atomic);
 }
 
 pub fn atomicConstructor(vm: anytype, args: []Value) !Value {
@@ -72,11 +88,19 @@ pub fn atomicConstructor(vm: anytype, args: []Value) !Value {
 /// 注册 RWLock 类
 fn registerRWLockClass(vm: anytype) !void {
     const name_str = try types.PHPString.init(vm.allocator, "RWLock");
+    defer name_str.release(vm.allocator);
     const rwlock_class = try vm.allocator.create(types.PHPClass);
     rwlock_class.* = types.PHPClass.init(vm.allocator, name_str);
+    rwlock_class.native_destructor = rwlockDestructor;
 
     try vm.classes.put("RWLock", rwlock_class);
     try vm.defineBuiltin("RWLock", rwlockConstructor);
+}
+
+fn rwlockDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const rwlock = @as(*concurrency.PHPRWLock, @ptrCast(@alignCast(ptr)));
+    rwlock.deinit();
+    allocator.destroy(rwlock);
 }
 
 pub fn rwlockConstructor(vm: anytype, args: []Value) !Value {
@@ -99,11 +123,19 @@ pub fn rwlockConstructor(vm: anytype, args: []Value) !Value {
 /// 注册 SharedData 类
 fn registerSharedDataClass(vm: anytype) !void {
     const name_str = try types.PHPString.init(vm.allocator, "SharedData");
+    defer name_str.release(vm.allocator);
     const shared_class = try vm.allocator.create(types.PHPClass);
     shared_class.* = types.PHPClass.init(vm.allocator, name_str);
+    shared_class.native_destructor = sharedDataDestructor;
 
     try vm.classes.put("SharedData", shared_class);
     try vm.defineBuiltin("SharedData", sharedDataConstructor);
+}
+
+fn sharedDataDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const shared = @as(*concurrency.PHPSharedData, @ptrCast(@alignCast(ptr)));
+    shared.deinit();
+    allocator.destroy(shared);
 }
 
 pub fn sharedDataConstructor(vm: anytype, args: []Value) !Value {
@@ -267,11 +299,19 @@ pub fn callSharedDataMethod(vm: anytype, obj: *types.PHPObject, method_name: []c
 
 fn registerChannelClass(vm: anytype) !void {
     const name_str = try types.PHPString.init(vm.allocator, "Channel");
+    defer name_str.release(vm.allocator);
     const channel_class = try vm.allocator.create(types.PHPClass);
     channel_class.* = types.PHPClass.init(vm.allocator, name_str);
+    channel_class.native_destructor = channelDestructor;
 
     try vm.classes.put("Channel", channel_class);
     try vm.defineBuiltin("Channel", channelConstructor);
+}
+
+fn channelDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const channel = @as(*concurrency.PHPChannel, @ptrCast(@alignCast(ptr)));
+    channel.deinit();
+    allocator.destroy(channel);
 }
 
 pub fn channelConstructor(vm: anytype, args: []Value) !Value {

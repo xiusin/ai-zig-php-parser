@@ -714,6 +714,14 @@ pub const Parser = struct {
             } else if (tag == .equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
+            } else if (tag == .question) {
+                var then_expr: ?ast.Node.Index = null;
+                if (self.curr.tag != .colon) {
+                    then_expr = try self.parseExpression(0);
+                }
+                _ = try self.eat(.colon);
+                const else_expr = try self.parseExpression(next_p);
+                left = try self.createNode(.{ .tag = .ternary_expr, .main_token = op, .data = .{ .ternary_expr = .{ .cond = left, .then_expr = then_expr, .else_expr = else_expr } } });
             } else if (tag == .plus_plus or tag == .minus_minus) {
                 left = try self.createNode(.{ .tag = .postfix_expr, .main_token = op, .data = .{ .postfix_expr = .{ .op = tag, .expr = left } } });
             } else {
@@ -759,15 +767,15 @@ pub const Parser = struct {
             .k_clone => self.parseCloneExpression(),
             .k_true => {
                 const t = try self.eat(.k_true);
-                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = 1 } } });
+                return self.createNode(.{ .tag = .literal_bool, .main_token = t, .data = .{ .literal_int = .{ .value = 1 } } });
             },
             .k_false => {
                 const t = try self.eat(.k_false);
-                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = 0 } } });
+                return self.createNode(.{ .tag = .literal_bool, .main_token = t, .data = .{ .literal_int = .{ .value = 0 } } });
             },
             .k_null => {
                 const t = try self.eat(.k_null);
-                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = 0 } } });
+                return self.createNode(.{ .tag = .literal_null, .main_token = t, .data = .{ .none = {} } });
             },
             .ellipsis => {
                 const token = self.curr;
@@ -1020,6 +1028,7 @@ pub const Parser = struct {
             .double_ampersand => 20, // Logical AND
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
+            .question => 7, // Ternary
             .equal => 5,
             else => 0,
         };

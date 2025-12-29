@@ -1588,6 +1588,31 @@ pub const VM = struct {
         return self.throwException(exception);
     }
 
+    pub fn callConcurrencyMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const obj = obj_value.data.object.data;
+        const class_name = obj.class.name.data;
+
+        // builtin_concurrency functions expect []Value (mutable)
+        // We'll create a temporary mutable slice
+        const mutable_args = try self.allocator.alloc(Value, args.len);
+        defer self.allocator.free(mutable_args);
+        @memcpy(mutable_args, args);
+
+        if (std.mem.eql(u8, class_name, "Mutex")) {
+            return try builtin_concurrency.callMutexMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "Atomic")) {
+            return try builtin_concurrency.callAtomicMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "RWLock")) {
+            return try builtin_concurrency.callRWLockMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "SharedData")) {
+            return try builtin_concurrency.callSharedDataMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "Channel")) {
+            return try builtin_concurrency.callChannelMethod(self, obj, method_name, mutable_args);
+        }
+
+        return error.MethodNotFound;
+    }
+
     fn callPDOExec(self: *VM, pdo_value: Value, args: []const Value) !Value {
         if (args.len != 1 or args[0].tag != .string) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::exec() expects exactly 1 parameter, string given", self.current_file, self.current_line);
@@ -2166,6 +2191,12 @@ pub const VM = struct {
             },
             .literal_float => {
                 return Value.initFloat(ast_node.data.literal_float.value);
+            },
+            .literal_bool => {
+                return Value.initBool(ast_node.data.literal_int.value != 0);
+            },
+            .literal_null => {
+                return Value.initNull();
             },
             .variable => {
                 const name_id = ast_node.data.variable.name;
@@ -3288,6 +3319,19 @@ pub const VM = struct {
                 }
                 return Value.initBool(false);
             },
+            .equal_equal_equal => {
+                if (left.tag != right.tag) return Value.initBool(false);
+                switch (left.tag) {
+                    .null => return Value.initBool(true),
+                    .boolean => return Value.initBool(left.data.boolean == right.data.boolean),
+                    .integer => return Value.initBool(left.data.integer == right.data.integer),
+                    .float => return Value.initBool(left.data.float == right.data.float),
+                    .string => return Value.initBool(std.mem.eql(u8, left.data.string.data.data, right.data.string.data.data)),
+                    .array => return Value.initBool(left.data.array == right.data.array),
+                    .object => return Value.initBool(left.data.object == right.data.object),
+                    else => return Value.initBool(false),
+                }
+            },
             .bang_equal => {
                 if (left.tag == .integer and right.tag == .integer) {
                     return Value.initBool(left.data.integer != right.data.integer);
@@ -3303,6 +3347,19 @@ pub const VM = struct {
                     return Value.initBool(false);
                 }
                 return Value.initBool(true);
+            },
+            .bang_equal_equal => {
+                if (left.tag != right.tag) return Value.initBool(true);
+                switch (left.tag) {
+                    .null => return Value.initBool(false),
+                    .boolean => return Value.initBool(left.data.boolean != right.data.boolean),
+                    .integer => return Value.initBool(left.data.integer != right.data.integer),
+                    .float => return Value.initBool(left.data.float != right.data.float),
+                    .string => return Value.initBool(!std.mem.eql(u8, left.data.string.data.data, right.data.string.data.data)),
+                    .array => return Value.initBool(left.data.array != right.data.array),
+                    .object => return Value.initBool(left.data.object != right.data.object),
+                    else => return Value.initBool(true),
+                }
             },
             .less => {
                 if (left.tag == .integer and right.tag == .integer) {
