@@ -172,6 +172,9 @@ pub const PHPArray = struct {
     }
 
     pub fn set(self: *PHPArray, allocator: std.mem.Allocator, key: ArrayKey, value: Value) !void {
+        // Check if key already exists
+        const key_exists = self.elements.get(key) != null;
+
         // If key already exists, release old value
         if (self.elements.get(key)) |old_value| {
             old_value.release(allocator);
@@ -180,8 +183,8 @@ pub const PHPArray = struct {
         // Retain new value
         _ = value.retain();
 
-        // Retain string key
-        if (key == .string) {
+        // Only retain string key if it's a new key
+        if (!key_exists and key == .string) {
             key.string.retain();
         }
 
