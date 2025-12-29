@@ -98,6 +98,10 @@ pub const Token = struct {
         k_go, // Coroutine
         k_get,
         k_set, // PHP 8.4 Property Hooks
+        // Class context keywords
+        k_self,
+        k_parent,
+        k_static_ref, // static:: 用于后期静态绑定
         // Literals
         k_true,
         k_false,

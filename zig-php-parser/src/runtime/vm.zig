@@ -3533,12 +3533,12 @@ pub const VM = struct {
                 }
                 const cloned_obj = try operand.data.object.data.clone(self.allocator);
                 const cloned_val = try Value.initObjectWithObject(&self.memory_manager, cloned_obj);
-                
+
                 if (cloned_obj.class.hasMethod("__clone")) {
                     const result = try self.callObjectMethod(cloned_val, "__clone", &.{});
                     defer self.releaseValue(result);
                 }
-                
+
                 return cloned_val;
             },
             else => {
@@ -3621,7 +3621,7 @@ pub const VM = struct {
     fn concatenateValues(self: *VM, left: Value, right: Value) !Value {
         const left_res = try self.valueToString(left);
         defer if (left_res.needs_free) self.allocator.free(left_res.str);
-        
+
         const right_res = try self.valueToString(right);
         defer if (right_res.needs_free) self.allocator.free(right_res.str);
 
@@ -4152,17 +4152,46 @@ pub const VM = struct {
         const class_name = self.context.string_pool.keys()[static_call_data.class_name];
         const method_name = self.context.string_pool.keys()[static_call_data.method_name];
 
-        // Get the class
-        const class = if (std.mem.eql(u8, class_name, "self"))
-            (self.current_class orelse {
+        // 解析类引用：self、parent、具体类名或变量（$obj::method()）
+        const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+            break :blk self.current_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
-            })
-        else
-            self.getClass(class_name) orelse {
+            };
+        } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+            const curr_class = self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            break :blk curr_class.parent orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (class_name.len > 0 and class_name[0] == '$') blk: {
+            // 变量形式的静态调用：$obj::method()
+            const var_value = self.getVariable(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            if (var_value.tag == .object) {
+                break :blk var_value.data.object.data.class;
+            } else if (var_value.tag == .string) {
+                // 字符串作为类名
+                const str_class_name = var_value.data.string.data.data;
+                break :blk self.getClass(str_class_name) orelse {
+                    const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, str_class_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                };
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use non-object as class in static method call", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        } else blk: {
+            break :blk self.getClass(class_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             };
+        };
 
         // Evaluate arguments
         var args = std.ArrayList(Value){};
@@ -4179,13 +4208,13 @@ pub const VM = struct {
             try args.append(self.allocator, arg_value);
         }
 
-        // Find and call the static method
-        if (class.methods.get(method_name)) |method| {
-            if (!method.modifiers.is_static) {
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot call non-static method statically", self.current_file, self.current_line);
-                return self.throwException(exception);
-            }
+        // 查找并调用静态方法（也支持调用非静态方法，与PHP兼容）
+        const method = class.getMethod(method_name) orelse blk: {
+            // Check for __callStatic magic method later
+            break :blk null;
+        };
 
+        if (method) |m| {
             // Push call frame
             const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
             defer self.allocator.free(full_method_name);
@@ -4193,7 +4222,7 @@ pub const VM = struct {
             defer self.popCallFrame();
 
             // Bind arguments to parameters
-            for (method.parameters, 0..) |param, i| {
+            for (m.parameters, 0..) |param, i| {
                 if (i < args.items.len) {
                     try self.setVariable(param.name.data, args.items[i]);
                 } else if (param.default_value) |default| {
@@ -4207,7 +4236,7 @@ pub const VM = struct {
             defer self.current_class = old_class;
 
             // Execute method body
-            if (method.body) |body_ptr| {
+            if (m.body) |body_ptr| {
                 const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
                 return self.eval(body_node) catch |err| {
                     if (err == error.Return) {
@@ -4239,7 +4268,7 @@ pub const VM = struct {
                 defer args_array_val.release(self.allocator);
 
                 const magic_args = [_]Value{ name_val, args_array_val };
-                
+
                 // Set current class for 'self' resolution
                 const old_class = self.current_class;
                 self.current_class = class;
@@ -4247,7 +4276,7 @@ pub const VM = struct {
 
                 // Call __callStatic
                 if (class.methods.get("__callStatic")) |inner_call_static| {
-                    const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::__callStatic", .{ class_name });
+                    const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::__callStatic", .{class_name});
                     defer self.allocator.free(full_method_name);
                     try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
                     defer self.popCallFrame();
@@ -4288,31 +4317,68 @@ pub const VM = struct {
         const class_name = self.context.string_pool.keys()[const_access_data.class_name];
         const constant_name = self.context.string_pool.keys()[const_access_data.constant_name];
 
-        // Get the class
-        const class = if (std.mem.eql(u8, class_name, "self"))
-            (self.current_class orelse {
+        // 解析类引用：self、parent、具体类名或变量（$obj::$prop）
+        const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+            break :blk self.current_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
-            })
-        else
-            self.getClass(class_name) orelse {
+            };
+        } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+            const curr_class = self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            break :blk curr_class.parent orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (class_name.len > 0 and class_name[0] == '$') blk: {
+            // 变量形式的静态访问：$obj::$prop
+            const var_value = self.getVariable(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            if (var_value.tag == .object) {
+                break :blk var_value.data.object.data.class;
+            } else if (var_value.tag == .string) {
+                const str_class_name = var_value.data.string.data.data;
+                break :blk self.getClass(str_class_name) orelse {
+                    const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, str_class_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                };
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use non-object as class in static property access", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        } else blk: {
+            break :blk self.getClass(class_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             };
+        };
 
-        // Look up constant in class
+        // Look up constant in class (包括继承链)
         if (class.constants.get(constant_name)) |value| {
             return value.retain();
         }
 
-        // Check if it's a static property
-        if (class.properties.get(constant_name)) |prop| {
+        // Check if it's a static property (包括继承链查找)
+        if (class.getProperty(constant_name)) |prop| {
             if (prop.modifiers.is_static) {
                 if (prop.default_value) |val| {
                     return val.retain();
                 }
                 return Value.initNull();
             }
+        }
+
+        // 检查父类常量
+        var current_class: ?*types.PHPClass = class.parent;
+        while (current_class) |parent_class| {
+            if (parent_class.constants.get(constant_name)) |value| {
+                return value.retain();
+            }
+            current_class = parent_class.parent;
         }
 
         const msg = try std.fmt.allocPrint(self.allocator, "Undefined class constant or static property {s}::{s}", .{ class_name, constant_name });

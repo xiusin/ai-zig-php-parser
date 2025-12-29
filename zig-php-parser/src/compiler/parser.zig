@@ -107,7 +107,7 @@ pub const Parser = struct {
                 continue;
             }
             const stmt = self.parseStatement() catch |err| {
-                std.debug.print("DEBUG: parseStatement failed with error: {any} at token: {any} ({s})\n", .{err, self.curr.tag, self.lexer.buffer[self.curr.loc.start..self.curr.loc.end]});
+                std.debug.print("DEBUG: parseStatement failed with error: {any} at token: {any} ({s})\n", .{ err, self.curr.tag, self.lexer.buffer[self.curr.loc.start..self.curr.loc.end] });
                 self.synchronize();
                 continue;
             };
@@ -151,7 +151,8 @@ pub const Parser = struct {
             .k_return => self.parseReturn(),
             .k_break => self.parseBreak(),
             .k_continue => self.parseContinue(),
-            .k_public, .k_protected, .k_private, .k_readonly, .k_final, .k_abstract => self.parseClassMember(attributes),
+            .k_abstract, .k_final => self.parseModifiedClassOrMember(attributes),
+            .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes),
             .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
@@ -159,6 +160,130 @@ pub const Parser = struct {
             },
             else => self.parseExpressionStatement(),
         };
+    }
+
+    /// 解析带修饰符的类定义或类成员（abstract class / final class / abstract method 等）
+    fn parseModifiedClassOrMember(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
+        var modifiers = ast.Node.Modifier{};
+
+        // 收集所有前置修饰符
+        while (true) {
+            switch (self.curr.tag) {
+                .k_abstract => modifiers.is_abstract = true,
+                .k_final => modifiers.is_final = true,
+                .k_public => modifiers.is_public = true,
+                .k_protected => modifiers.is_protected = true,
+                .k_private => modifiers.is_private = true,
+                .k_static => modifiers.is_static = true,
+                .k_readonly => modifiers.is_readonly = true,
+                else => break,
+            }
+            self.nextToken();
+        }
+
+        // 检查是否是类定义
+        if (self.curr.tag == .k_class) {
+            return self.parseContainerWithModifiers(.class_decl, attributes, modifiers);
+        }
+
+        // 否则是类成员（方法或属性）
+        return self.parseClassMemberWithModifiers(attributes, modifiers);
+    }
+
+    /// 解析带修饰符的容器（class/interface/trait等）
+    fn parseContainerWithModifiers(self: *Parser, tag: ast.Node.Tag, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {
+        const token = self.curr;
+        self.nextToken();
+        const name_tok = try self.eat(.t_string);
+        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        var extends: ?ast.Node.Index = null;
+        if (self.curr.tag == .k_extends) {
+            self.nextToken();
+            extends = try self.parseExpression(0);
+        }
+        var implements = std.ArrayListUnmanaged(ast.Node.Index){};
+        if (self.curr.tag == .k_implements) {
+            self.nextToken();
+            while (true) {
+                try implements.append(self.allocator, try self.parseExpression(0));
+                if (self.curr.tag != .comma) break;
+                self.nextToken();
+            }
+        }
+
+        _ = try self.eat(.l_brace);
+        var members = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+            var member_attributes: []const ast.Node.Index = &.{};
+            if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
+
+            if (self.curr.tag == .k_const) {
+                try members.append(self.allocator, try self.parseConst());
+            } else {
+                try members.append(self.allocator, try self.parseClassMember(member_attributes));
+            }
+        }
+        _ = try self.eat(.r_brace);
+
+        return self.createNode(.{ .tag = tag, .main_token = token, .data = .{ .container_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .extends = extends, .implements = try self.context.arena.allocator().dupe(ast.Node.Index, implements.items), .members = try self.context.arena.allocator().dupe(ast.Node.Index, members.items) } } });
+    }
+
+    /// 解析带预先收集好的修饰符的类成员
+    fn parseClassMemberWithModifiers(self: *Parser, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {
+        if (self.curr.tag == .k_function) {
+            const token = try self.eat(.k_function);
+            const name_tok = try self.eat(.t_string);
+            const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+            _ = try self.eat(.l_paren);
+            var params = std.ArrayListUnmanaged(ast.Node.Index){};
+            while (self.curr.tag != .r_paren) {
+                try params.append(self.allocator, try self.parseParameter());
+                if (self.curr.tag == .comma) self.nextToken();
+            }
+            _ = try self.eat(.r_paren);
+            var return_type: ?ast.Node.Index = null;
+            if (self.curr.tag == .colon) {
+                self.nextToken();
+                return_type = try self.parseType();
+            }
+            // abstract方法没有方法体，以分号结尾
+            const body = if (modifiers.is_abstract) blk: {
+                if (self.curr.tag == .semicolon) {
+                    self.nextToken();
+                }
+                break :blk null;
+            } else try self.parseBlock();
+            return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
+        } else {
+            const token = self.curr;
+            var type_node: ?ast.Node.Index = null;
+            if (self.curr.tag == .t_string or self.curr.tag == .question) {
+                type_node = try self.parseType();
+            }
+            const name_tok = try self.eat(.t_variable);
+            var name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            if (name_str.len > 0 and name_str[0] == '$') {
+                name_str = name_str[1..];
+            }
+            const name_id = try self.context.intern(name_str);
+
+            var default_value: ?ast.Node.Index = null;
+            if (self.curr.tag == .equal) {
+                self.nextToken();
+                default_value = try self.parseExpression(0);
+            }
+
+            var hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+            if (self.curr.tag == .l_brace) {
+                self.nextToken();
+                while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
+                _ = try self.eat(.r_brace);
+            } else if (self.curr.tag == .semicolon) {
+                self.nextToken();
+            }
+            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+        }
     }
 
     fn parseClassMember(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
@@ -208,7 +333,7 @@ pub const Parser = struct {
                 name_str = name_str[1..];
             }
             const name_id = try self.context.intern(name_str);
-            
+
             var default_value: ?ast.Node.Index = null;
             if (self.curr.tag == .equal) {
                 self.nextToken();
@@ -692,13 +817,19 @@ pub const Parser = struct {
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
                 }
             } else if (tag == .double_colon) {
-                // Static access: ClassName::member or ClassName::$prop
+                // Static access: ClassName::member, self::member, parent::member, $obj::member
                 const left_node = self.context.nodes.items[left];
-                if (left_node.tag != .variable) {
-                    self.reportError("Invalid static access target");
-                    return error.InvalidStaticAccess;
-                }
-                const class_name_id = left_node.data.variable.name;
+
+                // 获取类名ID，支持variable、self_expr、parent_expr节点
+                const class_name_id = switch (left_node.tag) {
+                    .variable => left_node.data.variable.name,
+                    .self_expr => left_node.data.variable.name,
+                    .parent_expr => left_node.data.variable.name,
+                    else => {
+                        self.reportError("Invalid static access target");
+                        return error.InvalidStaticAccess;
+                    },
+                };
 
                 if (self.curr.tag == .t_variable) {
                     const prop_tok = try self.eat(.t_variable);
@@ -797,6 +928,17 @@ pub const Parser = struct {
             .k_match => self.parseMatch(),
             .k_new => self.parseNewOrAnonymousClass(),
             .k_clone => self.parseCloneExpression(),
+            // self:: 和 parent:: 静态访问关键字
+            .k_self => {
+                const t = try self.eat(.k_self);
+                const name_id = try self.context.intern("self");
+                return self.createNode(.{ .tag = .self_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
+            .k_parent => {
+                const t = try self.eat(.k_parent);
+                const name_id = try self.context.intern("parent");
+                return self.createNode(.{ .tag = .parent_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
             .k_true => {
                 const t = try self.eat(.k_true);
                 return self.createNode(.{ .tag = .literal_bool, .main_token = t, .data = .{ .literal_int = .{ .value = 1 } } });
@@ -901,7 +1043,18 @@ pub const Parser = struct {
                 },
                 .t_dollar_open_curly_brace => {
                     self.nextToken(); // Consume ${
-                    part = try self.parseExpression(0);
+                    // ${name} 语法：name 应作为变量名处理，需加上 $ 前缀
+                    if (self.curr.tag == .t_string) {
+                        const t = try self.eat(.t_string);
+                        const raw_name = self.lexer.buffer[t.loc.start..t.loc.end];
+                        // 添加 $ 前缀作为变量名
+                        const var_name = try std.fmt.allocPrint(self.allocator, "${s}", .{raw_name});
+                        defer self.allocator.free(var_name);
+                        part = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_name) } } });
+                    } else {
+                        // 复杂表达式 ${expr}
+                        part = try self.parseExpression(0);
+                    }
                     _ = try self.eat(.r_brace);
                 },
                 else => {
