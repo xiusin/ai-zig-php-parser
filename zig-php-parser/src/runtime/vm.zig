@@ -3030,6 +3030,8 @@ pub const VM = struct {
                 return builtin_methods.ArrayMethods.map(self, target_value, args.items);
             } else if (std.mem.eql(u8, method_name, "count") or std.mem.eql(u8, method_name, "length")) {
                 return builtin_methods.ArrayMethods.count(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "isEmpty")) {
+                return builtin_methods.ArrayMethods.isEmpty(self, target_value);
             }
         }
 
