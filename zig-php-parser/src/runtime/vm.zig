@@ -3033,24 +3033,6 @@ pub const VM = struct {
             }
         }
 
-        // Special handling for concurrency classes
-        if (target_value.tag == .object) {
-            const obj = target_value.data.object.data;
-            const class_name = obj.class.name.data;
-
-            if (std.mem.eql(u8, class_name, "Mutex")) {
-                return builtin_concurrency.callMutexMethod(self, obj, method_name, args.items);
-            } else if (std.mem.eql(u8, class_name, "Atomic")) {
-                return builtin_concurrency.callAtomicMethod(self, obj, method_name, args.items);
-            } else if (std.mem.eql(u8, class_name, "RWLock")) {
-                return builtin_concurrency.callRWLockMethod(self, obj, method_name, args.items);
-            } else if (std.mem.eql(u8, class_name, "SharedData")) {
-                return builtin_concurrency.callSharedDataMethod(self, obj, method_name, args.items);
-            } else if (std.mem.eql(u8, class_name, "Channel")) {
-                return builtin_concurrency.callChannelMethod(self, obj, method_name, args.items);
-            }
-        }
-
         // Special handling for PDO objects
         if (target_value.tag == .object and std.mem.eql(u8, target_value.data.object.data.class.name.data, "PDO")) {
             return self.callPDOMethod(target_value, method_name, args.items);

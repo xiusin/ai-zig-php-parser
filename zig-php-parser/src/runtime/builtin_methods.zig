@@ -152,7 +152,21 @@ pub const ArrayMethods = struct {
 
     /// 数组长度
     pub fn count(vm: *VM, target: Value) !Value {
-        const args = [_]Value{target};
-        return vm.callFunctionByName("count", &args);
+        _ = vm; // 未使用 vm 参数
+        if (target.tag == .array) {
+            const array_count = target.data.array.data.count();
+            return Value.initInt(@intCast(array_count));
+        }
+        return Value.initInt(0);
+    }
+
+    /// 检查数组是否为空
+    pub fn isEmpty(vm: *VM, target: Value) !Value {
+        _ = vm; // 未使用 vm 参数
+        if (target.tag == .array) {
+            const array_count = target.data.array.data.count();
+            return Value.initBool(array_count == 0);
+        }
+        return Value.initBool(false);
     }
 };
