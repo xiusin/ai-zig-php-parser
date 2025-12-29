@@ -152,7 +152,7 @@ pub const Parser = struct {
             .k_break => self.parseBreak(),
             .k_continue => self.parseContinue(),
             .k_abstract, .k_final => self.parseModifiedClassOrMember(attributes),
-            .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes),
+            .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes, false),
             .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
@@ -187,10 +187,43 @@ pub const Parser = struct {
         }
 
         // 否则是类成员（方法或属性）
-        return self.parseClassMemberWithModifiers(attributes, modifiers);
+        return self.parseClassMemberWithModifiers(attributes, modifiers, false);
     }
 
     /// 解析带修饰符的容器（class/interface/trait等）
+    fn parseTraitUse(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_use);
+        var traits = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        while (true) {
+            try traits.append(self.allocator, try self.parseType());
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+            } else {
+                break;
+            }
+        }
+
+        // Handle adaptations block { ... } or semicolon
+        if (self.curr.tag == .l_brace) {
+            _ = try self.eat(.l_brace);
+            var balance: usize = 1;
+            while (balance > 0 and self.curr.tag != .eof) {
+                if (self.curr.tag == .l_brace) balance += 1;
+                if (self.curr.tag == .r_brace) balance -= 1;
+                if (balance > 0) self.nextToken();
+            }
+            if (self.curr.tag == .r_brace) self.nextToken();
+        } else {
+            _ = try self.eat(.semicolon);
+        }
+
+        const arena = self.context.arena.allocator();
+        const traits_slice = try arena.dupe(ast.Node.Index, traits.items);
+        traits.deinit(self.allocator);
+        return self.createNode(.{ .tag = .trait_use, .main_token = token, .data = .{ .trait_use = .{ .traits = traits_slice } } });
+    }
+
     fn parseContainerWithModifiers(self: *Parser, tag: ast.Node.Tag, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {
         const token = self.curr;
         self.nextToken();
@@ -214,14 +247,18 @@ pub const Parser = struct {
         _ = try self.eat(.l_brace);
         var members = std.ArrayListUnmanaged(ast.Node.Index){};
 
+        const is_interface = (tag == .interface_decl);
+
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             var member_attributes: []const ast.Node.Index = &.{};
             if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
 
             if (self.curr.tag == .k_const) {
                 try members.append(self.allocator, try self.parseConst());
+            } else if (self.curr.tag == .k_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
             } else {
-                try members.append(self.allocator, try self.parseClassMember(member_attributes));
+                try members.append(self.allocator, try self.parseClassMember(member_attributes, is_interface));
             }
         }
         _ = try self.eat(.r_brace);
@@ -230,7 +267,7 @@ pub const Parser = struct {
     }
 
     /// 解析带预先收集好的修饰符的类成员
-    fn parseClassMemberWithModifiers(self: *Parser, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {
+    fn parseClassMemberWithModifiers(self: *Parser, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier, is_interface: bool) anyerror!ast.Node.Index {
         if (self.curr.tag == .k_function) {
             const token = try self.eat(.k_function);
             const name_tok = try self.eat(.t_string);
@@ -247,10 +284,13 @@ pub const Parser = struct {
                 self.nextToken();
                 return_type = try self.parseType();
             }
-            // abstract方法没有方法体，以分号结尾
-            const body = if (modifiers.is_abstract) blk: {
+            // abstract方法和接口方法没有方法体，以分号结尾
+            const expects_body = !modifiers.is_abstract and !is_interface;
+            const body = if (!expects_body) blk: {
                 if (self.curr.tag == .semicolon) {
                     self.nextToken();
+                } else {
+                    return error.UnexpectedToken;
                 }
                 break :blk null;
             } else try self.parseBlock();
@@ -286,7 +326,7 @@ pub const Parser = struct {
         }
     }
 
-    fn parseClassMember(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
+    fn parseClassMember(self: *Parser, attributes: []const ast.Node.Index, is_interface: bool) anyerror!ast.Node.Index {
         var modifiers = ast.Node.Modifier{};
         while (true) {
             switch (self.curr.tag) {
@@ -318,7 +358,16 @@ pub const Parser = struct {
                 self.nextToken();
                 return_type = try self.parseType();
             }
-            const body = if (modifiers.is_abstract) null else try self.parseBlock();
+
+            const expects_body = !modifiers.is_abstract and !is_interface;
+            const body = if (!expects_body) blk: {
+                if (self.curr.tag == .semicolon) {
+                    self.nextToken();
+                } else {
+                    return error.UnexpectedToken;
+                }
+                break :blk null;
+            } else try self.parseBlock();
             return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
         } else {
             const token = self.curr;
@@ -441,14 +490,18 @@ pub const Parser = struct {
         _ = try self.eat(.l_brace);
         var members = std.ArrayListUnmanaged(ast.Node.Index){};
 
+        const is_interface = (tag == .interface_decl);
+
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             var member_attributes: []const ast.Node.Index = &.{};
             if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
 
             if (self.curr.tag == .k_const) {
                 try members.append(self.allocator, try self.parseConst());
+            } else if (self.curr.tag == .k_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
             } else {
-                try members.append(self.allocator, try self.parseClassMember(member_attributes));
+                try members.append(self.allocator, try self.parseClassMember(member_attributes, is_interface));
             }
         }
         _ = try self.eat(.r_brace);

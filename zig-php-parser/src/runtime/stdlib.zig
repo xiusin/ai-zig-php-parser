@@ -194,6 +194,19 @@ pub const StandardLibrary = struct {
             &.{ .name = "max", .min_args = 1, .max_args = 255, .handler = maxFn },
             &.{ .name = "rand", .min_args = 0, .max_args = 2, .handler = randFn },
             &.{ .name = "mt_rand", .min_args = 0, .max_args = 2, .handler = mtRandFn },
+            // 位运算函数
+            &.{ .name = "bit_and", .min_args = 2, .max_args = 2, .handler = bitAndFn },
+            &.{ .name = "bit_or", .min_args = 2, .max_args = 2, .handler = bitOrFn },
+            &.{ .name = "bit_xor", .min_args = 2, .max_args = 2, .handler = bitXorFn },
+            &.{ .name = "bit_not", .min_args = 1, .max_args = 1, .handler = bitNotFn },
+            &.{ .name = "bit_shift_left", .min_args = 2, .max_args = 2, .handler = bitShiftLeftFn },
+            &.{ .name = "bit_shift_right", .min_args = 2, .max_args = 2, .handler = bitShiftRightFn },
+            // 更多数学函数
+            &.{ .name = "sin", .min_args = 1, .max_args = 1, .handler = sinFn },
+            &.{ .name = "cos", .min_args = 1, .max_args = 1, .handler = cosFn },
+            &.{ .name = "tan", .min_args = 1, .max_args = 1, .handler = tanFn },
+            &.{ .name = "log", .min_args = 1, .max_args = 2, .handler = logFn },
+            &.{ .name = "exp", .min_args = 1, .max_args = 1, .handler = expFn },
         };
 
         for (math_functions) |func| {
@@ -3203,4 +3216,102 @@ fn echoFn(vm: *VM, args: []const Value) !Value {
         try arg.print();
     }
     return Value.initNull();
+}
+
+// 位运算函数实现
+fn bitAndFn(vm: *VM, args: []const Value) !Value {
+    const a = try toInteger(vm, args[0]);
+    const b = try toInteger(vm, args[1]);
+    return Value.initInt(a & b);
+}
+
+fn bitOrFn(vm: *VM, args: []const Value) !Value {
+    const a = try toInteger(vm, args[0]);
+    const b = try toInteger(vm, args[1]);
+    return Value.initInt(a | b);
+}
+
+fn bitXorFn(vm: *VM, args: []const Value) !Value {
+    const a = try toInteger(vm, args[0]);
+    const b = try toInteger(vm, args[1]);
+    return Value.initInt(a ^ b);
+}
+
+fn bitNotFn(vm: *VM, args: []const Value) !Value {
+    const a = try toInteger(vm, args[0]);
+    return Value.initInt(~a);
+}
+
+fn bitShiftLeftFn(vm: *VM, args: []const Value) !Value {
+    const a = try toInteger(vm, args[0]);
+    const b = try toInteger(vm, args[1]);
+    const shift: u6 = @intCast(@mod(b, 64));
+    return Value.initInt(a << shift);
+}
+
+fn bitShiftRightFn(vm: *VM, args: []const Value) !Value {
+    const a = try toInteger(vm, args[0]);
+    const b = try toInteger(vm, args[1]);
+    const shift: u6 = @intCast(@mod(b, 64));
+    return Value.initInt(a >> shift);
+}
+
+// 三角函数实现
+fn sinFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@sin(num));
+}
+
+fn cosFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@cos(num));
+}
+
+fn tanFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@tan(num));
+}
+
+fn logFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    if (args.len > 1) {
+        const base = try toFloat(vm, args[1]);
+        return Value.initFloat(@log(num) / @log(base));
+    }
+    return Value.initFloat(@log(num));
+}
+
+fn expFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@exp(num));
+}
+
+// 辅助函数：将 Value 转换为整数
+fn toInteger(vm: *VM, value: Value) !i64 {
+    return switch (value.tag) {
+        .integer => value.data.integer,
+        .float => @intFromFloat(value.data.float),
+        .boolean => if (value.data.boolean) @as(i64, 1) else @as(i64, 0),
+        .string => std.fmt.parseInt(i64, value.data.string.data.data, 10) catch 0,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "Cannot convert value to integer", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+}
+
+// 辅助函数：将 Value 转换为浮点数
+fn toFloat(vm: *VM, value: Value) !f64 {
+    return switch (value.tag) {
+        .float => value.data.float,
+        .integer => @floatFromInt(value.data.integer),
+        .boolean => if (value.data.boolean) @as(f64, 1.0) else @as(f64, 0.0),
+        .string => std.fmt.parseFloat(f64, value.data.string.data.data) catch 0.0,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "Cannot convert value to float", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
 }

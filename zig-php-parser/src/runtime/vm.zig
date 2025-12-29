@@ -832,6 +832,8 @@ pub const VM = struct {
     global: *Environment,
     context: *PHPContext,
     classes: std.StringHashMap(*types.PHPClass),
+    interfaces: std.StringHashMap(*types.PHPInterface),
+    traits: std.StringHashMap(*types.PHPTrait),
     structs: std.StringHashMap(*types.PHPStruct),
     error_handler: ErrorHandler,
     current_file: []const u8,
@@ -863,6 +865,8 @@ pub const VM = struct {
             .global = try allocator.create(Environment),
             .context = undefined,
             .classes = std.StringHashMap(*types.PHPClass).init(allocator),
+            .interfaces = std.StringHashMap(*types.PHPInterface).init(allocator),
+            .traits = std.StringHashMap(*types.PHPTrait).init(allocator),
             .structs = std.StringHashMap(*types.PHPStruct).init(allocator),
             .error_handler = ErrorHandler.init(allocator),
             .current_file = "unknown",
@@ -954,6 +958,24 @@ pub const VM = struct {
 
         // Clean up structs - 简化清理避免迭代器问题
         self.structs.deinit();
+
+        // Clean up traits
+        var trait_iterator = self.traits.iterator();
+        while (trait_iterator.next()) |entry| {
+            const trait_ptr = entry.value_ptr.*;
+            trait_ptr.deinit(self.allocator);
+            self.allocator.destroy(trait_ptr);
+        }
+        self.traits.deinit();
+
+        // Clean up interfaces
+        var interface_iterator = self.interfaces.iterator();
+        while (interface_iterator.next()) |entry| {
+            const interface_ptr = entry.value_ptr.*;
+            interface_ptr.deinit(self.allocator);
+            self.allocator.destroy(interface_ptr);
+        }
+        self.interfaces.deinit();
 
         // Clean up classes - 调用PHPClass.deinit释放属性名和方法名
         var class_iterator = self.classes.iterator();
@@ -1472,8 +1494,24 @@ pub const VM = struct {
         try self.classes.put(name, class);
     }
 
+    pub fn defineInterface(self: *VM, name: []const u8, interface_obj: *types.PHPInterface) !void {
+        try self.interfaces.put(name, interface_obj);
+    }
+
+    pub fn defineTrait(self: *VM, name: []const u8, trait_obj: *types.PHPTrait) !void {
+        try self.traits.put(name, trait_obj);
+    }
+
     pub fn getClass(self: *VM, name: []const u8) ?*types.PHPClass {
         return self.classes.get(name);
+    }
+
+    pub fn getInterface(self: *VM, name: []const u8) ?*types.PHPInterface {
+        return self.interfaces.get(name);
+    }
+
+    pub fn getTrait(self: *VM, name: []const u8) ?*types.PHPTrait {
+        return self.traits.get(name);
     }
 
     pub fn createObject(self: *VM, class_name: []const u8) !Value {
@@ -2287,7 +2325,95 @@ pub const VM = struct {
                         // Push operation: $a[] = $val
                         try php_array.push(self.allocator, value);
                     }
+                } else if (target_node.tag == .static_property_access) {
+                    // ... (keep existing implementation)
+                    const class_name = self.context.string_pool.keys()[target_node.data.static_property_access.class_name];
+                    const prop_name = self.context.string_pool.keys()[target_node.data.static_property_access.property_name];
+
+                    // Resolve class
+                    const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+                        break :blk self.current_class orelse {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                    } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+                        const curr_class = self.current_class orelse {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                        break :blk curr_class.parent orelse {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                    } else if (class_name.len > 0 and class_name[0] == '$') blk: {
+                        // Variable class name
+                        const var_value = self.getVariable(class_name) orelse {
+                            const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, class_name, self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                        if (var_value.tag == .object) {
+                            break :blk var_value.data.object.data.class;
+                        } else if (var_value.tag == .string) {
+                            const str_class_name = var_value.data.string.data.data;
+                            break :blk self.getClass(str_class_name) orelse {
+                                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, str_class_name, self.current_file, self.current_line);
+                                return self.throwException(exception);
+                            };
+                        } else {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use non-object as class in static property access", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        }
+                    } else blk: {
+                        break :blk self.getClass(class_name) orelse {
+                            const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                    };
+
+                    // Set static property
+                    var property_set = false;
+
+                    if (class.properties.getPtr(prop_name)) |prop| {
+                        if (prop.modifiers.is_static) {
+                            if (prop.default_value) |old_val| {
+                                self.releaseValue(old_val);
+                            }
+                            self.retainValue(value);
+                            prop.default_value = value;
+                            property_set = true;
+                        }
+                    }
+
+                    if (!property_set) {
+                        // Check parent classes
+                        var current = class.parent;
+                        while (current) |parent| {
+                            if (parent.properties.getPtr(prop_name)) |prop| {
+                                if (prop.modifiers.is_static) {
+                                    if (prop.default_value) |old_val| {
+                                        self.releaseValue(old_val);
+                                    }
+                                    self.retainValue(value);
+                                    prop.default_value = value;
+                                    property_set = true;
+                                    break;
+                                }
+                            }
+                            current = parent.parent;
+                        }
+                    }
+
+                    if (!property_set) {
+                        // 如果属性存在但不是静态的，或者属性不存在
+                        if (class.properties.contains(prop_name)) {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Accessing non-static property as static", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        }
+                        const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, class.name.data, prop_name, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
                 } else {
+                    std.debug.print("Invalid assignment target tag: {any}\n", .{target_node.tag});
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid assignment target", self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
@@ -2322,6 +2448,12 @@ pub const VM = struct {
             },
             .class_decl => {
                 return self.evaluateClassDeclaration(ast_node.data.container_decl);
+            },
+            .trait_decl => {
+                return self.evaluateTraitDeclaration(ast_node.data.container_decl);
+            },
+            .interface_decl => {
+                return self.evaluateInterfaceDeclaration(ast_node.data.container_decl);
             },
             .struct_decl => {
                 return self.evaluateStructDeclaration(ast_node.data.container_decl);
@@ -3640,6 +3772,202 @@ pub const VM = struct {
             },
         }
     }
+    fn evaluateInterfaceDeclaration(self: *VM, interface_data: anytype) !Value {
+        const interface_name = self.context.string_pool.keys()[interface_data.name];
+        const php_interface_name = try types.PHPString.init(self.allocator, interface_name);
+        defer php_interface_name.release(self.allocator);
+
+        // Create new interface
+        var php_interface = types.PHPInterface.init(self.allocator, php_interface_name);
+
+        // Process interface members
+        for (interface_data.members) |member_idx| {
+            const member_node = self.context.nodes.items[member_idx];
+
+            switch (member_node.tag) {
+                .method_decl => {
+                    try self.processInterfaceMethodDeclaration(&php_interface, member_node.data.method_decl);
+                },
+                .const_decl => {
+                    try self.processInterfaceConstantDeclaration(&php_interface, member_node.data.const_decl);
+                },
+                else => {
+                    // Skip unsupported member types
+                },
+            }
+        }
+
+        // Register the interface
+        const interface_ptr = try self.allocator.create(types.PHPInterface);
+        interface_ptr.* = php_interface;
+        try self.defineInterface(interface_name, interface_ptr);
+
+        return Value.initNull();
+    }
+
+    fn processInterfaceMethodDeclaration(self: *VM, interface_obj: *types.PHPInterface, method_data: anytype) !void {
+        const method_name = self.context.string_pool.keys()[method_data.name];
+        const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        defer php_method_name.release(self.allocator);
+
+        var method = types.Method.init(php_method_name);
+
+        // Interface methods are public and abstract
+        method.modifiers = .{
+            .visibility = .public,
+            .is_abstract = true,
+            .is_static = method_data.modifiers.is_static,
+        };
+
+        method.parameters = try self.processParameters(method_data.params);
+        try interface_obj.methods.put(method_name, method);
+    }
+
+    fn processInterfaceConstantDeclaration(self: *VM, interface_obj: *types.PHPInterface, const_data: anytype) !void {
+        const const_name = self.context.string_pool.keys()[const_data.name];
+        const const_value = try self.eval(const_data.value);
+        try interface_obj.constants.put(const_name, const_value);
+    }
+
+    fn checkInterfaceImplementation(self: *VM, class: *types.PHPClass, interface: *types.PHPInterface) !void {
+        var it = interface.methods.iterator();
+        while (it.next()) |entry| {
+            const method_name = entry.key_ptr.*;
+            // Check if class has this method (or inherits it)
+            if (!class.hasMethod(method_name)) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Class {s} contains 1 abstract method and must therefore be declared abstract or implement the remaining methods ({s}::{s})", .{ class.name.data, interface.name.data, method_name });
+                defer self.allocator.free(msg);
+                const exception = try ExceptionFactory.createTypeError(self.allocator, msg, self.current_file, self.current_line);
+                _ = try self.throwException(exception);
+                return error.UncaughtException;
+            }
+        }
+
+        for (interface.extends) |parent_interface| {
+            try self.checkInterfaceImplementation(class, parent_interface);
+        }
+    }
+
+    fn evaluateTraitDeclaration(self: *VM, trait_data: anytype) !Value {
+        const trait_name = self.context.string_pool.keys()[trait_data.name];
+        const php_trait_name = try types.PHPString.init(self.allocator, trait_name);
+        defer php_trait_name.release(self.allocator);
+
+        var php_trait = types.PHPTrait.init(self.allocator, php_trait_name);
+
+        // Process trait members
+        for (trait_data.members) |member_idx| {
+            const member_node = self.context.nodes.items[member_idx];
+
+            switch (member_node.tag) {
+                .method_decl => {
+                    try self.processTraitMethodDeclaration(&php_trait, member_node.data.method_decl);
+                },
+                .property_decl => {
+                    try self.processTraitPropertyDeclaration(&php_trait, member_node.data.property_decl);
+                },
+                else => {},
+            }
+        }
+
+        // Register the trait
+        const trait_ptr = try self.allocator.create(types.PHPTrait);
+        trait_ptr.* = php_trait;
+        try self.defineTrait(trait_name, trait_ptr);
+
+        return Value.initNull();
+    }
+
+    fn processTraitMethodDeclaration(self: *VM, trait_obj: *types.PHPTrait, method_data: anytype) !void {
+        const method_name = self.context.string_pool.keys()[method_data.name];
+        const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        defer php_method_name.release(self.allocator);
+
+        var method = types.Method.init(php_method_name);
+        method.modifiers = .{
+            .visibility = if (method_data.modifiers.is_public) .public else if (method_data.modifiers.is_protected) .protected else if (method_data.modifiers.is_private) .private else .public,
+            .is_static = method_data.modifiers.is_static,
+            .is_final = method_data.modifiers.is_final,
+            .is_abstract = method_data.modifiers.is_abstract,
+        };
+        method.parameters = try self.processParameters(method_data.params);
+        method.body = if (method_data.body) |body_idx| @ptrFromInt(@as(usize, body_idx)) else null;
+        try trait_obj.methods.put(method_name, method);
+    }
+
+    fn processTraitPropertyDeclaration(self: *VM, trait_obj: *types.PHPTrait, property_data: anytype) !void {
+        const prop_name = self.context.string_pool.keys()[property_data.name];
+        const php_prop_name = try types.PHPString.init(self.allocator, prop_name);
+        defer php_prop_name.release(self.allocator);
+
+        var property = types.Property.init(php_prop_name);
+        property.modifiers = .{
+            .visibility = if (property_data.modifiers.is_public) .public else if (property_data.modifiers.is_protected) .protected else if (property_data.modifiers.is_private) .private else .public,
+            .is_static = property_data.modifiers.is_static,
+            .is_readonly = property_data.modifiers.is_readonly,
+        };
+        if (property_data.default_value) |default_idx| {
+            property.default_value = try self.eval(default_idx);
+        }
+        try trait_obj.properties.put(prop_name, property);
+    }
+
+    fn processTraitUse(self: *VM, class: *types.PHPClass, trait_use_data: anytype) !void {
+        // Process each trait in the use statement
+        for (trait_use_data.traits) |trait_idx| {
+            const trait_node = self.context.nodes.items[trait_idx];
+            if (trait_node.tag == .named_type) {
+                const trait_name = self.context.string_pool.keys()[trait_node.data.named_type.name];
+                if (self.getTrait(trait_name)) |trait_obj| {
+                    // Mix in trait methods (class methods take precedence)
+                    var method_iter = trait_obj.methods.iterator();
+                    while (method_iter.next()) |entry| {
+                        const method_name = entry.key_ptr.*;
+                        // Only add if class doesn't already have this method
+                        if (!class.methods.contains(method_name)) {
+                            var method_copy = entry.value_ptr.*;
+                            // Retain the method name reference
+                            method_copy.name.retain();
+
+                            // Allocate new parameter array and retain parameter names
+                            if (method_copy.parameters.len > 0) {
+                                const new_params = try self.allocator.alloc(types.Method.Parameter, method_copy.parameters.len);
+                                for (method_copy.parameters, 0..) |param, i| {
+                                    new_params[i] = param;
+                                    new_params[i].name.retain();
+                                }
+                                method_copy.parameters = new_params;
+                            }
+
+                            try class.methods.put(method_name, method_copy);
+                        }
+                    }
+
+                    // Mix in trait properties
+                    var prop_iter = trait_obj.properties.iterator();
+                    while (prop_iter.next()) |entry| {
+                        const prop_name = entry.key_ptr.*;
+                        if (!class.properties.contains(prop_name)) {
+                            var prop_copy = entry.value_ptr.*;
+                            // Retain the property name reference
+                            prop_copy.name.retain();
+                            // Retain default value if present
+                            if (prop_copy.default_value) |val| {
+                                switch (val.tag) {
+                                    .string => _ = val.data.string.retain(),
+                                    .array => _ = val.data.array.retain(),
+                                    .object => _ = val.data.object.retain(),
+                                    else => {},
+                                }
+                            }
+                            try class.properties.put(prop_name, prop_copy);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn evaluateClassDeclaration(self: *VM, class_data: anytype) !Value {
         const start_time = std.time.nanoTimestamp();
         defer {
@@ -3675,9 +4003,30 @@ pub const VM = struct {
             }
         }
 
-        // Process implements clause (simplified - just skip for now)
-        for (class_data.implements) |interface_idx| {
-            _ = interface_idx; // Skip interface processing for now
+        // Process implements clause
+        if (class_data.implements.len > 0) {
+            const interfaces = try self.allocator.alloc(*types.PHPInterface, class_data.implements.len);
+            php_class.interfaces = interfaces;
+
+            for (class_data.implements, 0..) |interface_idx, i| {
+                const interface_node = self.context.nodes.items[interface_idx];
+                if (interface_node.tag == .variable) {
+                    const interface_name = self.context.string_pool.keys()[interface_node.data.variable.name];
+                    if (self.getInterface(interface_name)) |interface_obj| {
+                        interfaces[i] = interface_obj;
+                    } else {
+                        php_class.deinit(self.allocator);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Interface '{s}' not found", .{interface_name});
+                        defer self.allocator.free(msg);
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, msg, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                } else {
+                    php_class.deinit(self.allocator);
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid interface name", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            }
         }
 
         // Process class members
@@ -3685,6 +4034,9 @@ pub const VM = struct {
             const member_node = self.context.nodes.items[member_idx];
 
             switch (member_node.tag) {
+                .trait_use => {
+                    try self.processTraitUse(&php_class, member_node.data.trait_use);
+                },
                 .method_decl => {
                     try self.processMethodDeclaration(&php_class, member_node.data.method_decl);
                 },
@@ -3700,16 +4052,69 @@ pub const VM = struct {
             }
         }
 
+        // Abstract method check - performed on &php_class before allocation/registration
+        if (!php_class.modifiers.is_abstract) {
+            // Check interface methods
+            for (php_class.interfaces) |interface_obj| {
+                self.checkInterfaceImplementation(&php_class, interface_obj) catch |err| {
+                    php_class.deinit(self.allocator);
+                    return err;
+                };
+            }
+
+            var curr = php_class.parent;
+            while (curr) |parent| {
+                var it = parent.methods.iterator();
+                while (it.next()) |entry| {
+                    const method = entry.value_ptr;
+                    if (method.modifiers.is_abstract) {
+                        if (php_class.getMethod(entry.key_ptr.*)) |resolved_method| {
+                            if (resolved_method.modifiers.is_abstract) {
+                                // Error found: Clean up php_class before throwing
+                                php_class.deinit(self.allocator);
+                                const exception = try ExceptionFactory.createTypeError(self.allocator, "Class must implement abstract method", self.current_file, self.current_line);
+                                return self.throwException(exception);
+                            }
+                        } else {
+                            // Abstract method not implemented (not found)
+                            php_class.deinit(self.allocator);
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Class must implement abstract method", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        }
+                    }
+                }
+                curr = parent.parent;
+            }
+        }
+
         // Register the class
         const class_ptr = try self.allocator.create(types.PHPClass);
         class_ptr.* = php_class;
-        try self.defineClass(class_name, class_ptr);
+
+        // Define class (takes ownership of class_ptr, but if it fails we must handle it)
+        self.defineClass(class_name, class_ptr) catch |err| {
+            class_ptr.deinit(self.allocator);
+            self.allocator.destroy(class_ptr);
+            return err;
+        };
 
         return Value.initNull();
     }
 
     fn processMethodDeclaration(self: *VM, class: *types.PHPClass, method_data: anytype) !void {
         const method_name = self.context.string_pool.keys()[method_data.name];
+
+        // Check if parent has final method with same name
+        if (class.parent) |parent| {
+            if (parent.getMethod(method_name)) |parent_method| {
+                if (parent_method.modifiers.is_final) {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot override final method", self.current_file, self.current_line);
+                    _ = try self.throwException(exception);
+                    return;
+                }
+            }
+        }
+
         const php_method_name = try types.PHPString.init(self.allocator, method_name);
         defer php_method_name.release(self.allocator);
 

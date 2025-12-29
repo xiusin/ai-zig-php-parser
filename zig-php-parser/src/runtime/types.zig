@@ -225,6 +225,7 @@ pub const PHPInterface = struct {
     extends: []const *PHPInterface,
 
     pub fn init(allocator: std.mem.Allocator, name: *PHPString) PHPInterface {
+        name.retain();
         return PHPInterface{
             .name = name,
             .methods = std.StringHashMap(Method).init(allocator),
@@ -233,7 +234,12 @@ pub const PHPInterface = struct {
         };
     }
 
-    pub fn deinit(self: *PHPInterface) void {
+    pub fn deinit(self: *PHPInterface, allocator: std.mem.Allocator) void {
+        self.name.release(allocator);
+        var method_iter = self.methods.iterator();
+        while (method_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
         self.methods.deinit();
         self.constants.deinit();
     }
@@ -245,6 +251,7 @@ pub const PHPTrait = struct {
     methods: std.StringHashMap(Method),
 
     pub fn init(allocator: std.mem.Allocator, name: *PHPString) PHPTrait {
+        name.retain();
         return PHPTrait{
             .name = name,
             .properties = std.StringHashMap(Property).init(allocator),
@@ -252,8 +259,20 @@ pub const PHPTrait = struct {
         };
     }
 
-    pub fn deinit(self: *PHPTrait) void {
+    pub fn deinit(self: *PHPTrait, allocator: std.mem.Allocator) void {
+        self.name.release(allocator);
+        var prop_iter = self.properties.iterator();
+        while (prop_iter.next()) |entry| {
+            entry.value_ptr.name.release(allocator);
+            if (entry.value_ptr.default_value) |val| {
+                val.release(allocator);
+            }
+        }
         self.properties.deinit();
+        var method_iter = self.methods.iterator();
+        while (method_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
         self.methods.deinit();
     }
 };
@@ -375,6 +394,9 @@ pub const PHPClass = struct {
 
     pub fn deinit(self: *PHPClass, allocator: std.mem.Allocator) void {
         self.name.release(allocator);
+        if (self.interfaces.len > 0) {
+            allocator.free(self.interfaces);
+        }
 
         // 释放所有属性
         var prop_iter = self.properties.iterator();
