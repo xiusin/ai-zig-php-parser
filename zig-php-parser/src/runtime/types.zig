@@ -176,6 +176,12 @@ pub const PHPArray = struct {
 
         // Retain new value
         _ = value.retain();
+
+        // Retain string key
+        if (key == .string) {
+            key.string.retain();
+        }
+
         try self.elements.put(key, value);
     }
 
@@ -368,20 +374,25 @@ pub const PHPClass = struct {
     }
 
     pub fn deinit(self: *PHPClass, allocator: std.mem.Allocator) void {
-        // 释放类名
         self.name.release(allocator);
 
-        // 释放所有属性的名称
+        // 释放所有属性
         var prop_iter = self.properties.iterator();
         while (prop_iter.next()) |entry| {
             entry.value_ptr.name.release(allocator);
+            if (entry.value_ptr.default_value) |val| {
+                // Here we need to release the value using the same logic as Environment.releaseValue
+                // But types.zig doesn't have access to VM's releaseValue.
+                // However, Value has a release(allocator) method!
+                val.release(allocator);
+            }
         }
         self.properties.deinit();
 
         // 释放所有方法的名称
         var method_iter = self.methods.iterator();
         while (method_iter.next()) |entry| {
-            entry.value_ptr.name.release(allocator);
+            entry.value_ptr.deinit(allocator);
         }
         self.methods.deinit();
 
@@ -996,8 +1007,7 @@ pub const PHPObject = struct {
 
         // Try magic __get method
         if (self.class.hasMethod("__get")) {
-            // Would call __get magic method here
-            return error.UndefinedProperty;
+            return error.MagicMethodCall;
         }
 
         return error.UndefinedProperty;
@@ -1009,8 +1019,7 @@ pub const PHPObject = struct {
         if (prop_def == null) {
             // Try magic __set method
             if (self.class.hasMethod("__set")) {
-                // Would call __set magic method here
-                return;
+                return error.MagicMethodCall;
             }
             // For dynamic properties, just set it
             if (self.properties.get(name)) |old_value| {
@@ -1058,8 +1067,7 @@ pub const PHPObject = struct {
         if (method == null) {
             // Try magic __call method
             if (self.class.hasMethod("__call")) {
-                // Would call __call magic method here
-                return error.UndefinedMethod;
+                return error.MagicMethodCall;
             }
             return error.UndefinedMethod;
         }
@@ -1100,11 +1108,26 @@ pub const PHPObject = struct {
             }
         }
 
+        // Set current class for 'self' resolution
+        const old_class = vm_instance.current_class;
+        vm_instance.current_class = self.class;
+        defer vm_instance.current_class = old_class;
+
         // Execute body
         if (method.?.body) |body_ptr| {
             const ast = @import("../compiler/ast.zig");
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
-            return try vm_instance.run(body_node);
+            return @as(anyerror!Value, vm_instance.run(body_node)) catch |err| switch (err) {
+                error.Return => {
+                    if (vm_instance.return_value) |val| {
+                        const ret = val;
+                        vm_instance.return_value = null;
+                        return ret;
+                    }
+                    return Value.initNull();
+                },
+                else => return err,
+            };
         }
 
         return Value.initNull();
@@ -1131,8 +1154,7 @@ pub const PHPObject = struct {
     pub fn toString(self: *PHPObject, allocator: std.mem.Allocator) !*PHPString {
         // Try __toString magic method
         if (self.class.hasMethod("__toString")) {
-            // Would call __toString magic method here
-            return PHPString.init(allocator, "Object");
+            return error.MagicMethodCall;
         }
 
         // Default object string representation
@@ -1273,6 +1295,11 @@ pub const Value = struct {
         return .{ .tag = .object, .data = .{ .object = box } };
     }
 
+    pub fn initObjectWithObject(memory_manager: *gc.MemoryManager, php_object: *PHPObject) !Self {
+        const box = try memory_manager.wrapObject(php_object);
+        return .{ .tag = .object, .data = .{ .object = box } };
+    }
+
     pub fn initStruct(allocator: std.mem.Allocator, struct_type: *PHPStruct) !Self {
         const struct_instance = try allocator.create(StructInstance);
         struct_instance.* = StructInstance.init(allocator, struct_type);
@@ -1381,7 +1408,7 @@ pub const Value = struct {
             },
             .string => PHPString.init(allocator, self.data.string.data.data),
             .array => PHPString.init(allocator, "Array"),
-            .object => PHPString.init(allocator, "Object"),
+            .object => self.data.object.data.toString(allocator),
             .struct_instance => {
                 const struct_name = self.data.struct_instance.data.struct_type.name.data;
                 const str = try std.fmt.allocPrint(allocator, "Struct({s})", .{struct_name});

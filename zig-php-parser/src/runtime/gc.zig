@@ -520,19 +520,17 @@ pub const MemoryManager = struct {
     pub fn allocObject(self: *MemoryManager, class: *@import("types.zig").PHPClass) !*Box(*PHPObject) {
         const php_object = try self.allocator.create(PHPObject);
         php_object.* = PHPObject.init(self.allocator, class);
+        return self.wrapObject(php_object);
+    }
+
+    pub fn wrapObject(self: *MemoryManager, php_object: *PHPObject) !*Box(*PHPObject) {
         const box = try self.allocator.create(Box(*PHPObject));
         box.* = .{
             .ref_count = 1,
             .gc_info = .{},
             .data = php_object,
         };
-
-        // Track allocation and trigger GC if needed
         self.gc.trackAllocation(@sizeOf(Box(*PHPObject)) + @sizeOf(PHPObject));
-        if (self.gc.shouldCollect()) {
-            _ = self.gc.collect();
-        }
-
         return box;
     }
 

@@ -106,7 +106,8 @@ pub const Parser = struct {
                 self.nextToken();
                 continue;
             }
-            const stmt = self.parseStatement() catch {
+            const stmt = self.parseStatement() catch |err| {
+                std.debug.print("DEBUG: parseStatement failed with error: {any} at token: {any} ({s})\n", .{err, self.curr.tag, self.lexer.buffer[self.curr.loc.start..self.curr.loc.end]});
                 self.synchronize();
                 continue;
             };
@@ -201,7 +202,19 @@ pub const Parser = struct {
                 type_node = try self.parseType();
             }
             const name_tok = try self.eat(.t_variable);
-            const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+            var name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            // Strip leading '$'
+            if (name_str.len > 0 and name_str[0] == '$') {
+                name_str = name_str[1..];
+            }
+            const name_id = try self.context.intern(name_str);
+            
+            var default_value: ?ast.Node.Index = null;
+            if (self.curr.tag == .equal) {
+                self.nextToken();
+                default_value = try self.parseExpression(0);
+            }
+
             var hooks = std.ArrayListUnmanaged(ast.Node.Index){};
             if (self.curr.tag == .l_brace) {
                 self.nextToken();
@@ -210,7 +223,7 @@ pub const Parser = struct {
             } else if (self.curr.tag == .semicolon) {
                 self.nextToken();
             }
-            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = null, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
         }
     }
 
@@ -679,26 +692,38 @@ pub const Parser = struct {
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
                 }
             } else if (tag == .double_colon) {
-                // Static access: ClassName::member
+                // Static access: ClassName::member or ClassName::$prop
                 const left_node = self.context.nodes.items[left];
                 if (left_node.tag != .variable) {
                     self.reportError("Invalid static access target");
                     return error.InvalidStaticAccess;
                 }
                 const class_name_id = left_node.data.variable.name;
-                const member_name_tok = try self.eat(.t_string);
-                const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
-                if (self.curr.tag == .l_paren) {
-                    self.nextToken();
-                    var args = std.ArrayListUnmanaged(ast.Node.Index){};
-                    while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        try args.append(self.allocator, try self.parseExpression(0));
-                        if (self.curr.tag == .comma) self.nextToken();
+
+                if (self.curr.tag == .t_variable) {
+                    const prop_tok = try self.eat(.t_variable);
+                    var prop_str = self.lexer.buffer[prop_tok.loc.start..prop_tok.loc.end];
+                    // Strip leading '$'
+                    if (prop_str.len > 0 and prop_str[0] == '$') {
+                        prop_str = prop_str[1..];
                     }
-                    _ = try self.eat(.r_paren);
-                    left = try self.createNode(.{ .tag = .static_method_call, .main_token = op, .data = .{ .static_method_call = .{ .class_name = class_name_id, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+                    const prop_id = try self.context.intern(prop_str);
+                    left = try self.createNode(.{ .tag = .static_property_access, .main_token = op, .data = .{ .static_property_access = .{ .class_name = class_name_id, .property_name = prop_id } } });
                 } else {
-                    left = try self.createNode(.{ .tag = .class_constant_access, .main_token = op, .data = .{ .class_constant_access = .{ .class_name = class_name_id, .constant_name = member_id } } });
+                    const member_name_tok = try self.eat(.t_string);
+                    const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
+                    if (self.curr.tag == .l_paren) {
+                        self.nextToken();
+                        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                        while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                            try args.append(self.allocator, try self.parseExpression(0));
+                            if (self.curr.tag == .comma) self.nextToken();
+                        }
+                        _ = try self.eat(.r_paren);
+                        left = try self.createNode(.{ .tag = .static_method_call, .main_token = op, .data = .{ .static_method_call = .{ .class_name = class_name_id, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+                    } else {
+                        left = try self.createNode(.{ .tag = .class_constant_access, .main_token = op, .data = .{ .class_constant_access = .{ .class_name = class_name_id, .constant_name = member_id } } });
+                    }
                 }
             } else if (tag == .l_paren) {
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -708,6 +733,13 @@ pub const Parser = struct {
                 }
                 _ = try self.eat(.r_paren);
                 left = try self.createNode(.{ .tag = .function_call, .main_token = op, .data = .{ .function_call = .{ .name = left, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+            } else if (tag == .l_bracket) {
+                var index: ?ast.Node.Index = null;
+                if (self.curr.tag != .r_bracket) {
+                    index = try self.parseExpression(0);
+                }
+                _ = try self.eat(.r_bracket);
+                left = try self.createNode(.{ .tag = .array_access, .main_token = op, .data = .{ .array_access = .{ .target = left, .index = index } } });
             } else if (tag == .pipe_greater) {
                 const right = try self.parseExpression(next_p);
                 left = try self.createNode(.{ .tag = .pipe_expr, .main_token = op, .data = .{ .pipe_expr = .{ .left = left, .right = right } } });
@@ -1016,6 +1048,7 @@ pub const Parser = struct {
         return switch (tag) {
             .plus_plus, .minus_minus => 120, // Postfix increment/decrement (highest precedence)
             .l_paren => 110,
+            .l_bracket => 110, // Array access
             .arrow => 100,
             .double_colon => 100, // Static access has same precedence as instance access
             .pipe_greater => 90, // Pipe operator has high precedence

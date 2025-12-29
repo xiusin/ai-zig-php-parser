@@ -60,6 +60,11 @@ pub fn main() !void {
     defer vm_instance.deinit();
 
     const result = vm_instance.run(program) catch |err| {
+        if (err == error.Return) {
+            const ret = vm_instance.return_value orelse Value.initNull();
+            vm_instance.return_value = null;
+            return ret.release(allocator);
+        }
         // If it's a runtime exception (handled within VM but returned as error here), we just exit
         // If it's a Zig error, we print it
         std.debug.print("Runtime error: {s}\n", .{@errorName(err)});
