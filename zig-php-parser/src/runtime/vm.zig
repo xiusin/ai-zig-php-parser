@@ -666,6 +666,10 @@ fn emptyFn(vm: *VM, args: []const Value) !Value {
         },
         .array => arg.data.array.data.count() == 0,
         .object, .struct_instance, .resource => false, // Objects are never empty
+        .number_wrapper => switch (arg.data.number_wrapper.value) {
+            .integer => |v| v == 0,
+            .float => |v| v == 0.0,
+        },
         .builtin_function, .user_function, .closure, .arrow_function => false, // Functions are never empty
     };
 
@@ -2881,6 +2885,104 @@ pub const VM = struct {
 
         for (method_data.args) |arg_node_idx| {
             try args.append(self.allocator, try self.eval(arg_node_idx));
+        }
+
+        // 处理数字类型的内置方法（NumberWrapper）
+        if (target_value.tag == .integer or target_value.tag == .float) {
+            const number_wrapper = if (target_value.tag == .integer)
+                types.number_wrapper.NumberWrapper.initInt(target_value.data.integer)
+            else
+                types.number_wrapper.NumberWrapper.initFloat(target_value.data.float);
+
+            if (std.mem.eql(u8, method_name, "abs")) {
+                return Value.initFloat(number_wrapper.abs());
+            } else if (std.mem.eql(u8, method_name, "ceil")) {
+                return Value.initFloat(number_wrapper.ceil());
+            } else if (std.mem.eql(u8, method_name, "floor")) {
+                return Value.initFloat(number_wrapper.floor());
+            } else if (std.mem.eql(u8, method_name, "round")) {
+                return Value.initFloat(number_wrapper.round());
+            } else if (std.mem.eql(u8, method_name, "sqrt")) {
+                return Value.initFloat(number_wrapper.sqrt());
+            } else if (std.mem.eql(u8, method_name, "sin")) {
+                return Value.initFloat(number_wrapper.sin());
+            } else if (std.mem.eql(u8, method_name, "cos")) {
+                return Value.initFloat(number_wrapper.cos());
+            } else if (std.mem.eql(u8, method_name, "tan")) {
+                return Value.initFloat(number_wrapper.tan());
+            } else if (std.mem.eql(u8, method_name, "log")) {
+                return Value.initFloat(number_wrapper.log());
+            } else if (std.mem.eql(u8, method_name, "exp")) {
+                return Value.initFloat(number_wrapper.exp());
+            } else if (std.mem.eql(u8, method_name, "pow")) {
+                if (args.items.len == 1) {
+                    const exponent_val = args.items[0];
+                    const exponent_wrapper = if (exponent_val.tag == .integer)
+                        types.number_wrapper.NumberWrapper.initInt(exponent_val.data.integer)
+                    else if (exponent_val.tag == .float)
+                        types.number_wrapper.NumberWrapper.initFloat(exponent_val.data.float)
+                    else
+                        return Value.initFloat(std.math.nan(f64));
+                    return Value.initFloat(number_wrapper.pow(exponent_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitAnd") or std.mem.eql(u8, method_name, "bit_and")) {
+                if (args.items.len == 1) {
+                    const other_val = args.items[0];
+                    const other_wrapper = if (other_val.tag == .integer)
+                        types.number_wrapper.NumberWrapper.initInt(other_val.data.integer)
+                    else if (other_val.tag == .float)
+                        types.number_wrapper.NumberWrapper.initFloat(other_val.data.float)
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitAnd(other_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitOr") or std.mem.eql(u8, method_name, "bit_or")) {
+                if (args.items.len == 1) {
+                    const other_val = args.items[0];
+                    const other_wrapper = if (other_val.tag == .integer)
+                        types.number_wrapper.NumberWrapper.initInt(other_val.data.integer)
+                    else if (other_val.tag == .float)
+                        types.number_wrapper.NumberWrapper.initFloat(other_val.data.float)
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitOr(other_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitXor") or std.mem.eql(u8, method_name, "bit_xor")) {
+                if (args.items.len == 1) {
+                    const other_val = args.items[0];
+                    const other_wrapper = if (other_val.tag == .integer)
+                        types.number_wrapper.NumberWrapper.initInt(other_val.data.integer)
+                    else if (other_val.tag == .float)
+                        types.number_wrapper.NumberWrapper.initFloat(other_val.data.float)
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitXor(other_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitNot") or std.mem.eql(u8, method_name, "bit_not")) {
+                return Value.initInt(number_wrapper.bitNot());
+            } else if (std.mem.eql(u8, method_name, "bitShiftLeft") or std.mem.eql(u8, method_name, "bit_shift_left")) {
+                if (args.items.len == 1) {
+                    const shift_val = args.items[0];
+                    const shift_wrapper = if (shift_val.tag == .integer)
+                        types.number_wrapper.NumberWrapper.initInt(shift_val.data.integer)
+                    else if (shift_val.tag == .float)
+                        types.number_wrapper.NumberWrapper.initFloat(shift_val.data.float)
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitShiftLeft(shift_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitShiftRight") or std.mem.eql(u8, method_name, "bit_shift_right")) {
+                if (args.items.len == 1) {
+                    const shift_val = args.items[0];
+                    const shift_wrapper = if (shift_val.tag == .integer)
+                        types.number_wrapper.NumberWrapper.initInt(shift_val.data.integer)
+                    else if (shift_val.tag == .float)
+                        types.number_wrapper.NumberWrapper.initFloat(shift_val.data.float)
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitShiftRight(shift_wrapper));
+                }
+            }
         }
 
         // 处理String类型的内置方法

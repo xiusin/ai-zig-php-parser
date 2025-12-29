@@ -1,6 +1,9 @@
 const std = @import("std");
 pub const gc = @import("gc.zig");
 
+// Import NumberWrapper from separate module
+pub const number_wrapper = @import("number_wrapper.zig");
+
 // Forward declarations
 pub const PHPString = struct {
     data: []u8,
@@ -920,6 +923,7 @@ pub const Method = struct {
                 .struct_instance => std.mem.eql(u8, type_name, "struct") or
                     std.mem.eql(u8, type_name, value.data.struct_instance.data.struct_type.name.data),
                 .resource => std.mem.eql(u8, type_name, "resource"),
+                .number_wrapper => std.mem.eql(u8, type_name, "number") or std.mem.eql(u8, type_name, "NumberWrapper"),
                 .builtin_function, .user_function, .closure, .arrow_function => std.mem.eql(u8, type_name, "callable"),
             };
 
@@ -1322,6 +1326,10 @@ pub const Value = struct {
         return .{ .tag = .object, .data = .{ .object = box } };
     }
 
+    pub fn initNumberWrapper(number: number_wrapper.NumberWrapper) Self {
+        return .{ .tag = .number_wrapper, .data = .{ .number_wrapper = number } };
+    }
+
     pub fn initStruct(allocator: std.mem.Allocator, struct_type: *PHPStruct) !Self {
         const struct_instance = try allocator.create(StructInstance);
         struct_instance.* = StructInstance.init(allocator, struct_type);
@@ -1373,6 +1381,10 @@ pub const Value = struct {
             .user_function => std.debug.print("user_function", .{}),
             .closure => std.debug.print("closure", .{}),
             .arrow_function => std.debug.print("arrow_function", .{}),
+            .number_wrapper => switch (self.data.number_wrapper.value) {
+                .integer => |v| std.debug.print("NumberWrapper({d})", .{v}),
+                .float => |v| std.debug.print("NumberWrapper({d})", .{v}),
+            },
         }
     }
 
@@ -1524,6 +1536,7 @@ pub const Value = struct {
         object,
         struct_instance,
         resource,
+        number_wrapper,
 
         // Callable types
         builtin_function,
@@ -1542,6 +1555,7 @@ pub const Value = struct {
         object: *gc.Box(*PHPObject),
         struct_instance: *gc.Box(*StructInstance),
         resource: *gc.Box(*PHPResource),
+        number_wrapper: number_wrapper.NumberWrapper,
         builtin_function: *const anyopaque,
         user_function: *gc.Box(*UserFunction),
         closure: *gc.Box(*Closure),
