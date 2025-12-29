@@ -97,7 +97,7 @@ pub const ArrayWrapper = struct {
                     skip_first = false;
                     continue;
                 }
-                new_elements.put(ArrayKey{ .integer = new_index }, entry.value_ptr.*) catch {};
+                try new_elements.put(ArrayKey{ .integer = new_index }, entry.value_ptr.*);
                 new_index += 1;
             }
 
@@ -118,24 +118,24 @@ pub const ArrayWrapper = struct {
     }
 
     pub fn reverse(self: *ArrayWrapper) !*ArrayWrapper {
-        const count = self.array.count();
-        if (count <= 1) return self;
+        const element_count = self.array.count();
+        if (element_count <= 1) return self;
 
         var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, false).initContext(self.allocator, .{});
 
-        var values = try self.allocator.alloc(Value, count);
-        defer self.allocator.free(values);
+        var temp_values = try self.allocator.alloc(Value, element_count);
+        defer self.allocator.free(temp_values);
 
         var iter = self.array.elements.iterator();
         var i: usize = 0;
         while (iter.next()) |entry| : (i += 1) {
-            values[i] = entry.value_ptr.*;
+            temp_values[i] = entry.value_ptr.*;
         }
 
         i = 0;
-        while (i < count) : (i += 1) {
+        while (i < element_count) : (i += 1) {
             const new_key = ArrayKey{ .integer = @as(i64, @intCast(i)) };
-            try new_elements.put(new_key, values[count - 1 - i]);
+            try new_elements.put(new_key, temp_values[element_count - 1 - i]);
         }
 
         self.array.elements.deinit();
