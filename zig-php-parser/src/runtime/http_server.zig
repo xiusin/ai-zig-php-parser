@@ -143,7 +143,7 @@ pub const HttpServer = struct {
 
     pub fn deinit(self: *HttpServer) void {
         self.stop();
-        self.worker_threads.deinit();
+        self.worker_threads.deinit(self.allocator);
         if (self.handler) |h| {
             h.release(self.allocator);
         }
@@ -159,7 +159,7 @@ pub const HttpServer = struct {
             ctx.deinit();
             self.allocator.destroy(ctx);
         }
-        self.request_context_pool.deinit();
+        self.request_context_pool.deinit(self.allocator);
     }
 
     /// 设置请求处理器
@@ -295,17 +295,140 @@ pub const HttpServer = struct {
 
     /// 调用PHP处理器
     fn invokeHandler(self: *HttpServer, handler: Value, request: *const HttpRequest, response: *HttpResponse) !void {
-        _ = self;
-        _ = handler;
-        _ = request;
-        _ = response;
-        // TODO: 在VM中实现实际的回调调用
-        // 需要将 request 和 response 转换为 PHP 对象并传递给处理器
-        // const vm = @ptrCast(*VM, @alignCast(@alignOf(VM), self.vm));
-        // const req_obj = try createRequestObject(vm, request);
-        // const res_obj = try createResponseObject(vm, response);
-        // try vm.callFunction(handler, &[_]Value{req_obj, res_obj});
+        const VM = @import("vm.zig").VM;
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(self.vm)));
+
+        // 创建Request对象
+        const req_value = try self.createRequestValue(vm_instance, request);
+        defer req_value.release(self.allocator);
+
+        // 创建Response对象
+        const res_value = try self.createResponseValue(vm_instance, response);
+        defer res_value.release(self.allocator);
+
+        // 调用处理器
+        const args = [_]Value{ req_value, res_value };
+        _ = try self.callHandler(vm_instance, handler, &args);
     }
+
+    /// 创建Request Value对象
+    fn createRequestValue(self: *HttpServer, vm_instance: anytype, request: *const HttpRequest) !Value {
+        const result = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const arr = result.data.array.data;
+
+        // method
+        const method_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "method") };
+        const method_str = switch (request.method) {
+            .GET => "GET",
+            .POST => "POST",
+            .PUT => "PUT",
+            .DELETE => "DELETE",
+            .PATCH => "PATCH",
+            .HEAD => "HEAD",
+            .OPTIONS => "OPTIONS",
+            .TRACE => "TRACE",
+            .CONNECT => "CONNECT",
+        };
+        const method_val = try Value.initStringWithManager(&vm_instance.memory_manager, method_str);
+        try arr.set(self.allocator, method_key, method_val);
+
+        // path
+        const path_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "path") };
+        const path_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.path);
+        try arr.set(self.allocator, path_key, path_val);
+
+        // body
+        const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
+        const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.body);
+        try arr.set(self.allocator, body_key, body_val);
+
+        // headers
+        const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
+        const headers_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const headers_arr = headers_val.data.array.data;
+
+        var header_iter = request.headers.iterator();
+        while (header_iter.next()) |entry| {
+            const h_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
+            const h_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
+            try headers_arr.set(self.allocator, h_key, h_val);
+        }
+        try arr.set(self.allocator, headers_key, headers_val);
+
+        // query
+        const query_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "query") };
+        const query_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const query_arr = query_val.data.array.data;
+
+        var query_iter = request.query_params.iterator();
+        while (query_iter.next()) |entry| {
+            const q_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
+            const q_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
+            try query_arr.set(self.allocator, q_key, q_val);
+        }
+        try arr.set(self.allocator, query_key, query_val);
+
+        return result;
+    }
+
+    /// 创建Response Value对象
+    fn createResponseValue(self: *HttpServer, vm_instance: anytype, response: *HttpResponse) !Value {
+        _ = response;
+        const result = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const arr = result.data.array.data;
+
+        // status
+        const status_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "status") };
+        try arr.set(self.allocator, status_key, Value.initInt(200));
+
+        // headers
+        const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
+        const headers_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        try arr.set(self.allocator, headers_key, headers_val);
+
+        // body
+        const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
+        const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, "");
+        try arr.set(self.allocator, body_key, body_val);
+
+        return result;
+    }
+
+    /// 调用处理器回调
+    fn callHandler(self: *HttpServer, vm_instance: anytype, handler: Value, args: []const Value) !Value {
+        _ = self;
+        return switch (handler.tag) {
+            .builtin_function => {
+                const function: *const fn (anytype, []const Value) anyerror!Value = @ptrCast(@alignCast(handler.data.builtin_function));
+                return function(vm_instance, args);
+            },
+            .user_function => {
+                return vm_instance.callUserFunction(handler.data.user_function.data, args);
+            },
+            .closure => {
+                return vm_instance.callClosure(handler.data.closure.data, args);
+            },
+            .arrow_function => {
+                return vm_instance.callArrowFunction(handler.data.arrow_function.data, args);
+            },
+            else => Value.initNull(),
+        };
+    }
+
+    /// 获取服务器状态信息
+    pub fn getStats(self: *HttpServer) ServerStats {
+        return ServerStats{
+            .active_requests = self.active_requests.load(.seq_cst),
+            .context_pool_size = @intCast(self.request_context_pool.items.len),
+            .is_running = self.running.load(.seq_cst),
+        };
+    }
+
+    pub const ServerStats = struct {
+        active_requests: u32,
+        context_pool_size: u32,
+        is_running: bool,
+    };
 };
 
 /// HTTP请求
@@ -589,12 +712,12 @@ pub const Router = struct {
             route.handler.release(self.allocator);
             route.params.deinit();
         }
-        self.routes.deinit();
+        self.routes.deinit(self.allocator);
 
         for (self.middleware.items) |*mw| {
             mw.release(self.allocator);
         }
-        self.middleware.deinit();
+        self.middleware.deinit(self.allocator);
     }
 
     /// 添加GET路由

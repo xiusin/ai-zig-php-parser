@@ -49,15 +49,15 @@ pub const CoroutineManager = struct {
         self.coroutines.deinit();
 
         // 清理队列
-        self.ready_queue.deinit();
-        self.sleeping_queue.deinit();
+        self.ready_queue.deinit(self.allocator);
+        self.sleeping_queue.deinit(self.allocator);
 
         // 清理池
         for (self.pool.items) |co| {
             co.deinit();
             self.allocator.destroy(co);
         }
-        self.pool.deinit();
+        self.pool.deinit(self.allocator);
     }
 
     /// 创建新协程
@@ -395,7 +395,7 @@ pub const CoroutineStack = struct {
         for (self.frames.items) |*frame| {
             frame.deinit(self.allocator);
         }
-        self.frames.deinit();
+        self.frames.deinit(self.allocator);
     }
 
     pub fn reset(self: *CoroutineStack) void {

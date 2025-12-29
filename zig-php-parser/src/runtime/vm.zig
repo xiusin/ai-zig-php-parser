@@ -20,6 +20,7 @@ const ReflectionSystem = reflection.ReflectionSystem;
 const string_utils = @import("string_utils.zig");
 const builtin_methods = @import("builtin_methods.zig");
 const builtin_concurrency = @import("builtin_concurrency.zig");
+const builtin_http = @import("builtin_http.zig");
 
 const CapturedVar = struct { name: []const u8, value: Value };
 
@@ -909,6 +910,9 @@ pub const VM = struct {
 
         // Register concurrency classes (Mutex, Atomic, RWLock, SharedData)
         try builtin_concurrency.registerConcurrencyClasses(vm);
+
+        // Register HTTP classes (HttpServer, HttpClient, Router)
+        try builtin_http.registerHttpClasses(vm);
 
         // Initialize performance monitoring
         vm.execution_stats.reset();
