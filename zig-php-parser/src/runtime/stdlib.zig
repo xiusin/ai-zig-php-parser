@@ -1231,17 +1231,8 @@ fn strRepeatFn(vm: *VM, args: []const Value) !Value {
 
 // Math Function Implementations
 fn absFn(vm: *VM, args: []const Value) !Value {
-    const number = args[0];
-
-    return switch (number.tag) {
-        .integer => Value.initInt(@intCast(@abs(number.data.integer))),
-        .float => Value.initFloat(@abs(number.data.float)),
-        else => {
-            const exception = try ExceptionFactory.createTypeError(vm.allocator, "abs() expects parameter 1 to be numeric", "builtin", 0);
-            _ = try vm.throwException(exception);
-            return error.InvalidArgumentType;
-        },
-    };
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@abs(num));
 }
 
 fn roundFn(vm: *VM, args: []const Value) !Value {
