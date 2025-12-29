@@ -298,10 +298,13 @@ pub const HttpServer = struct {
         _ = self;
         _ = handler;
         _ = request;
-        // 这里需要调用VM来执行PHP回调
-        // 将request转换为PHP对象，将response作为引用传入
-        response.setStatus(200);
-        try response.setBody("Hello from Zig-PHP!");
+        _ = response;
+        // TODO: 在VM中实现实际的回调调用
+        // 需要将 request 和 response 转换为 PHP 对象并传递给处理器
+        // const vm = @ptrCast(*VM, @alignCast(@alignOf(VM), self.vm));
+        // const req_obj = try createRequestObject(vm, request);
+        // const res_obj = try createResponseObject(vm, response);
+        // try vm.callFunction(handler, &[_]Value{req_obj, res_obj});
     }
 };
 
@@ -681,10 +684,122 @@ pub const Router = struct {
     }
 };
 
+/// PHP 内置 Request 类
+pub const PHPRequest = struct {
+    request: *const HttpRequest,
+    allocator: std.mem.Allocator,
+    params: std.StringHashMap([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator, request: *const HttpRequest) PHPRequest {
+        return PHPRequest{
+            .request = request,
+            .allocator = allocator,
+            .params = std.StringHashMap([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *PHPRequest) void {
+        self.params.deinit();
+    }
+
+    /// 获取请求方法
+    pub fn getMethod(self: *const PHPRequest) []const u8 {
+        return switch (self.request.method) {
+            .GET => "GET",
+            .POST => "POST",
+            .PUT => "PUT",
+            .DELETE => "DELETE",
+            .PATCH => "PATCH",
+            .HEAD => "HEAD",
+            .OPTIONS => "OPTIONS",
+            .TRACE => "TRACE",
+            .CONNECT => "CONNECT",
+        };
+    }
+
+    /// 获取请求路径
+    pub fn getPath(self: *const PHPRequest) []const u8 {
+        return self.request.path;
+    }
+
+    /// 获取请求体
+    pub fn getBody(self: *const PHPRequest) []const u8 {
+        return self.request.body;
+    }
+
+    /// 获取请求头
+    pub fn getHeader(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.request.getHeader(name);
+    }
+
+    /// 获取查询参数
+    pub fn getQuery(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.request.getQueryParam(name);
+    }
+
+    /// 获取路由参数
+    pub fn getParam(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.params.get(name);
+    }
+
+    /// 设置路由参数
+    pub fn setParam(self: *PHPRequest, name: []const u8, value: []const u8) !void {
+        try self.params.put(name, value);
+    }
+};
+
+/// PHP 内置 Response 类
+pub const PHPResponse = struct {
+    response: *HttpResponse,
+
+    pub fn init(response: *HttpResponse) PHPResponse {
+        return PHPResponse{
+            .response = response,
+        };
+    }
+
+    /// 设置状态码
+    pub fn setStatus(self: *PHPResponse, code: u16) void {
+        self.response.setStatus(code);
+    }
+
+    /// 设置响应头
+    pub fn setHeader(self: *PHPResponse, name: []const u8, value: []const u8) !void {
+        try self.response.setHeader(name, value);
+    }
+
+    /// 设置响应体
+    pub fn setBody(self: *PHPResponse, content: []const u8) !void {
+        try self.response.setBody(content);
+    }
+
+    /// 发送 JSON 响应
+    pub fn json(self: *PHPResponse, data: []const u8) !void {
+        try self.response.json(data);
+    }
+
+    /// 发送 HTML 响应
+    pub fn html(self: *PHPResponse, content: []const u8) !void {
+        try self.response.html(content);
+    }
+
+    /// 发送重定向
+    pub fn redirect(self: *PHPResponse, url: []const u8, code: u16) !void {
+        try self.response.redirect(url, code);
+    }
+
+    /// 发送文本响应
+    pub fn text(self: *PHPResponse, content: []const u8) !void {
+        try self.response.setHeader("Content-Type", "text/plain; charset=utf-8");
+        try self.response.setBody(content);
+    }
+};
+
 /// PHP HTTP服务器函数绑定
 pub fn registerHttpFunctions(stdlib: anytype) !void {
     _ = stdlib;
     // 注册 http_server_create, http_server_start 等函数
+    // 注册 Request, Response, Router 类
 }
 
 test "http request parsing" {

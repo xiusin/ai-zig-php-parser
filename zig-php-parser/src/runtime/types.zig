@@ -937,11 +937,13 @@ pub const Method = struct {
 pub const PHPObject = struct {
     class: *PHPClass,
     properties: std.StringHashMap(Value),
+    native_data: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator, class: *PHPClass) PHPObject {
         return PHPObject{
             .class = class,
             .properties = std.StringHashMap(Value).init(allocator),
+            .native_data = null,
         };
     }
 

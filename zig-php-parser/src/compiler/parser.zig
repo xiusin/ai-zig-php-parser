@@ -132,7 +132,7 @@ pub const Parser = struct {
             .k_trait => self.parseContainer(.trait_decl, attributes),
             .k_enum => self.parseContainer(.enum_decl, attributes),
             .k_struct => self.parseContainer(.struct_decl, attributes),
-            .k_function => {
+            .k_function, .k_fn => {
                 if (self.peek.tag == .l_paren) return self.parseExpressionStatement();
                 return self.parseFunction(attributes);
             },
@@ -319,7 +319,11 @@ pub const Parser = struct {
     }
 
     fn parseFunction(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_function);
+        // 支持 function 和 fn 两个关键字
+        const token = if (self.curr.tag == .k_fn)
+            try self.eat(.k_fn)
+        else
+            try self.eat(.k_function);
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         _ = try self.eat(.l_paren);
@@ -650,7 +654,17 @@ pub const Parser = struct {
             const op = self.curr;
             self.nextToken();
             if (tag == .arrow) {
-                const member_name_tok = try self.eat(.t_string);
+                // 方法名可以是标识符，也可以是某些关键字（如 set, get）
+                const member_name_tok = if (self.curr.tag == .t_string)
+                    try self.eat(.t_string)
+                else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
+                    self.curr.tag == .k_unset or self.curr.tag == .k_clone or
+                    self.curr.tag == .k_list or self.curr.tag == .k_print)
+                blk: {
+                    const tok = self.curr;
+                    self.nextToken();
+                    break :blk tok;
+                } else try self.eat(.t_string);
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();

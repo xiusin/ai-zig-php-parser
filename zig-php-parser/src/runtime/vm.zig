@@ -19,6 +19,7 @@ const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
 const string_utils = @import("string_utils.zig");
 const builtin_methods = @import("builtin_methods.zig");
+const builtin_concurrency = @import("builtin_concurrency.zig");
 
 const CapturedVar = struct { name: []const u8, value: Value };
 
@@ -895,6 +896,9 @@ pub const VM = struct {
 
         // Register all standard library functions
         try vm.registerStandardLibraryFunctions();
+
+        // Register concurrency classes (Mutex, Atomic, RWLock, SharedData)
+        try builtin_concurrency.registerConcurrencyClasses(vm);
 
         // Initialize performance monitoring
         vm.execution_stats.reset();
@@ -2475,6 +2479,43 @@ pub const VM = struct {
             return self.evaluateStructInstantiation(struct_data);
         }
 
+        // Check if there's a builtin constructor (for concurrency classes)
+        if (std.mem.eql(u8, name, "Mutex") or std.mem.eql(u8, name, "Atomic") or
+            std.mem.eql(u8, name, "RWLock") or std.mem.eql(u8, name, "SharedData") or
+            std.mem.eql(u8, name, "Channel"))
+        {
+            if (self.global.get(name)) |constructor_value| {
+                if (constructor_value.tag == .builtin_function) {
+                    // Call the builtin constructor
+                    var args = std.ArrayList(Value){};
+                    defer {
+                        for (args.items) |arg| {
+                            self.releaseValue(arg);
+                        }
+                        args.deinit(self.allocator);
+                    }
+
+                    try args.ensureTotalCapacity(self.allocator, instantiation_data.args.len);
+                    for (instantiation_data.args) |arg_idx| {
+                        try args.append(self.allocator, try self.eval(arg_idx));
+                    }
+
+                    // Call the constructor directly based on the class name
+                    if (std.mem.eql(u8, name, "Mutex")) {
+                        return builtin_concurrency.mutexConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "Atomic")) {
+                        return builtin_concurrency.atomicConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "RWLock")) {
+                        return builtin_concurrency.rwlockConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "SharedData")) {
+                        return builtin_concurrency.sharedDataConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "Channel")) {
+                        return builtin_concurrency.channelConstructor(self, args.items);
+                    }
+                }
+            }
+        }
+
         // Otherwise assume it's a class
         const value = try self.createObject(name);
 
@@ -2608,6 +2649,24 @@ pub const VM = struct {
                 return builtin_methods.ArrayMethods.map(self, target_value, args.items);
             } else if (std.mem.eql(u8, method_name, "count") or std.mem.eql(u8, method_name, "length")) {
                 return builtin_methods.ArrayMethods.count(self, target_value);
+            }
+        }
+
+        // Special handling for concurrency classes
+        if (target_value.tag == .object) {
+            const obj = target_value.data.object.data;
+            const class_name = obj.class.name.data;
+
+            if (std.mem.eql(u8, class_name, "Mutex")) {
+                return builtin_concurrency.callMutexMethod(self, obj, method_name, args.items);
+            } else if (std.mem.eql(u8, class_name, "Atomic")) {
+                return builtin_concurrency.callAtomicMethod(self, obj, method_name, args.items);
+            } else if (std.mem.eql(u8, class_name, "RWLock")) {
+                return builtin_concurrency.callRWLockMethod(self, obj, method_name, args.items);
+            } else if (std.mem.eql(u8, class_name, "SharedData")) {
+                return builtin_concurrency.callSharedDataMethod(self, obj, method_name, args.items);
+            } else if (std.mem.eql(u8, class_name, "Channel")) {
+                return builtin_concurrency.callChannelMethod(self, obj, method_name, args.items);
             }
         }
 
