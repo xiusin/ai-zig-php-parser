@@ -1,0 +1,144 @@
+{
+  "version": "1.0.0",
+  "date": "2025-12-30",
+  "platform": "macOS darwin",
+  "zig_version": "0.15",
+  "description": "Baseline performance results for regression testing",
+  
+  "zig_benchmarks": {
+    "arena_allocator_64bytes": {
+      "iterations": 10000,
+      "avg_time_ns": 50,
+      "threshold_ns": 100,
+      "description": "Arena allocator 64-byte allocation"
+    },
+    "object_pool_acquire_release": {
+      "iterations": 10000,
+      "avg_time_ns": 30,
+      "threshold_ns": 60,
+      "description": "Object pool acquire and release cycle"
+    },
+    "string_interner": {
+      "iterations": 10000,
+      "avg_time_ns": 100,
+      "threshold_ns": 200,
+      "description": "String interning operation"
+    },
+    "generational_gc_create": {
+      "iterations": 5000,
+      "avg_time_ns": 200,
+      "threshold_ns": 400,
+      "description": "Generational GC object creation"
+    },
+    "generational_gc_collect": {
+      "iterations": 100,
+      "avg_time_ns": 10000,
+      "threshold_ns": 20000,
+      "description": "Generational GC young collection"
+    },
+    "incremental_gc_step": {
+      "iterations": 1000,
+      "avg_time_ns": 500,
+      "threshold_ns": 1000,
+      "description": "Incremental GC step"
+    }
+  },
+  
+  "php_benchmarks": {
+    "arithmetic": {
+      "integer_addition_100k": {
+        "baseline_ms": 5.0,
+        "threshold_ms": 10.0,
+        "description": "100k integer additions"
+      },
+      "float_operations_100k": {
+        "baseline_ms": 8.0,
+        "threshold_ms": 16.0,
+        "description": "100k float operations"
+      },
+      "mixed_operations_100k": {
+        "baseline_ms": 10.0,
+        "threshold_ms": 20.0,
+        "description": "100k mixed arithmetic operations"
+      }
+    },
+    "strings": {
+      "concatenation_10k": {
+        "baseline_ms": 2.0,
+        "threshold_ms": 4.0,
+        "description": "10k string concatenations"
+      },
+      "interpolation_10k": {
+        "baseline_ms": 5.0,
+        "threshold_ms": 10.0,
+        "description": "10k string interpolations"
+      },
+      "strlen_10k": {
+        "baseline_ms": 1.0,
+        "threshold_ms": 2.0,
+        "description": "10k strlen calls"
+      }
+    },
+    "arrays": {
+      "append_50k": {
+        "baseline_ms": 5.0,
+        "threshold_ms": 10.0,
+        "description": "50k array appends"
+      },
+      "index_access_50k": {
+        "baseline_ms": 3.0,
+        "threshold_ms": 6.0,
+        "description": "50k array index accesses"
+      },
+      "assoc_set_10k": {
+        "baseline_ms": 10.0,
+        "threshold_ms": 20.0,
+        "description": "10k associative array sets"
+      },
+      "foreach_50k": {
+        "baseline_ms": 2.0,
+        "threshold_ms": 4.0,
+        "description": "foreach over 50k elements"
+      }
+    },
+    "functions": {
+      "simple_call_100k": {
+        "baseline_ms": 10.0,
+        "threshold_ms": 20.0,
+        "description": "100k simple function calls"
+      },
+      "closure_call_100k": {
+        "baseline_ms": 15.0,
+        "threshold_ms": 30.0,
+        "description": "100k closure calls"
+      },
+      "recursive_fib15_1k": {
+        "baseline_ms": 50.0,
+        "threshold_ms": 100.0,
+        "description": "1k recursive fibonacci(15) calls"
+      }
+    },
+    "objects": {
+      "creation_50k": {
+        "baseline_ms": 20.0,
+        "threshold_ms": 40.0,
+        "description": "50k object creations"
+      },
+      "property_access_50k": {
+        "baseline_ms": 5.0,
+        "threshold_ms": 10.0,
+        "description": "50k property accesses"
+      },
+      "method_call_50k": {
+        "baseline_ms": 10.0,
+        "threshold_ms": 20.0,
+        "description": "50k method calls"
+      }
+    }
+  },
+  
+  "regression_policy": {
+    "threshold_percent": 10,
+    "description": "A benchmark is considered a regression if it's more than 10% slower than baseline"
+  }
+}
