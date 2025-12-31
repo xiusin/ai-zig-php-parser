@@ -73,8 +73,10 @@ test "enhanced type system - array operations" {
     
     // Test associative array
     const key_str = try PHPString.init(allocator, "name");
+    defer key_str.deinit(allocator);
     const key = ArrayKey{ .string = key_str };
     const value = try Value.initString(allocator, "John");
+    defer value.release(allocator);
     
     try array.set(allocator, key, value);
     

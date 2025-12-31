@@ -500,6 +500,14 @@ pub const Connection = struct {
 
     pub fn close(self: *Connection) void {
         self.memory_db.deinit();
+        // Free the DSN strings that were allocated by parseDSN
+        // Only free if they're not the default values (which are string literals)
+        if (self.host.len > 0 and !std.mem.eql(u8, self.host, "localhost")) {
+            self.allocator.free(self.host);
+        }
+        if (self.database.len > 0) {
+            self.allocator.free(self.database);
+        }
         self.connected = false;
     }
 
