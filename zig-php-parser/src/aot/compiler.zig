@@ -39,6 +39,9 @@ const CodeGenerator = CodeGen.CodeGenerator;
 const LinkerMod = @import("linker.zig");
 const StaticLinker = LinkerMod.StaticLinker;
 const LinkerConfig = LinkerMod.LinkerConfig;
+const OptimizerMod = @import("optimizer.zig");
+const IROptimizer = OptimizerMod.IROptimizer;
+const IROptimizeLevel = OptimizerMod.OptimizeLevel;
 
 // Root module for shared types
 const root = @import("root.zig");
@@ -130,6 +133,16 @@ pub const OptimizeLevel = enum {
             .release_safe => .release_safe,
             .release_fast => .release_fast,
             .release_small => .release_small,
+        };
+    }
+
+    /// Convert to IR optimizer level
+    pub fn toIROptimizeLevel(self: OptimizeLevel) IROptimizeLevel {
+        return switch (self) {
+            .debug => .none,
+            .release_safe => .basic,
+            .release_fast => .aggressive,
+            .release_small => .size,
         };
     }
 };
@@ -372,6 +385,7 @@ pub const AOTCompiler = struct {
     ir_generator: ?*IRGenerator,
     codegen: ?*CodeGenerator,
     linker: ?*StaticLinker,
+    optimizer: ?*IROptimizer,
 
     /// Source code (loaded from file)
     source: ?[]const u8,
@@ -402,6 +416,7 @@ pub const AOTCompiler = struct {
             .ir_generator = null,
             .codegen = null,
             .linker = null,
+            .optimizer = null,
             .source = null,
             .ast_nodes = null,
             .string_table = null,
@@ -422,6 +437,12 @@ pub const AOTCompiler = struct {
         // Free IR generator
         if (self.ir_generator) |gen| {
             gen.deinit();
+        }
+
+        // Free optimizer
+        if (self.optimizer) |opt| {
+            opt.deinit();
+            self.allocator.destroy(opt);
         }
 
         // Free type inferencer (no deinit needed, it's stack-allocated style)
@@ -488,6 +509,15 @@ pub const AOTCompiler = struct {
             self.diagnostics,
         );
 
+        // Initialize optimizer
+        const optimizer = try self.allocator.create(IROptimizer);
+        optimizer.* = IROptimizer.init(
+            self.allocator,
+            self.options.optimize_level.toIROptimizeLevel(),
+            self.diagnostics,
+        );
+        self.optimizer = optimizer;
+
         // Initialize code generator
         self.codegen = try CodeGenerator.init(
             self.allocator,
@@ -544,18 +574,24 @@ pub const AOTCompiler = struct {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
-        // Dump IR if requested
+        // Step 4: Optimize IR
+        try self.optimizeIR();
+        if (self.diagnostics.hasErrors()) {
+            return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
+        }
+
+        // Dump IR if requested (after optimization)
         if (self.options.dump_ir) {
             self.dumpIR();
         }
 
-        // Step 4: Generate native code
+        // Step 5: Generate native code
         try self.generateCode();
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
-        // Step 5: Link executable
+        // Step 6: Link executable
         const output_path = try self.options.getOutputPath(self.allocator);
         try self.linkExecutable(output_path);
         if (self.diagnostics.hasErrors()) {
@@ -723,6 +759,53 @@ pub const AOTCompiler = struct {
         }
     }
 
+    /// Optimize IR using configured optimization passes
+    fn optimizeIR(self: *Self) !void {
+        if (self.ir_module == null) {
+            // No IR to optimize, skip silently
+            return;
+        }
+
+        const optimizer = self.optimizer orelse {
+            // No optimizer configured, skip optimization
+            return;
+        };
+
+        // Skip optimization in debug mode
+        if (self.options.optimize_level == .debug) {
+            if (self.options.verbose) {
+                std.debug.print("  Skipping IR optimization (debug mode)\n", .{});
+            }
+            return;
+        }
+
+        if (self.options.verbose) {
+            std.debug.print("  Optimizing IR ({s})...\n", .{self.options.optimize_level.toString()});
+        }
+
+        // Run optimization passes
+        optimizer.optimize(self.ir_module.?) catch |err| {
+            self.diagnostics.reportError(
+                .{ .file = self.options.input_file },
+                "IR optimization failed: {s}",
+                .{@errorName(err)},
+            );
+            return;
+        };
+
+        // Print optimization statistics in verbose mode
+        if (self.options.verbose) {
+            const stats = optimizer.getStats();
+            std.debug.print("  Optimization completed:\n", .{});
+            std.debug.print("    - Dead instructions removed: {d}\n", .{stats.dead_instructions_removed});
+            std.debug.print("    - Dead blocks removed: {d}\n", .{stats.dead_blocks_removed});
+            std.debug.print("    - Constants propagated: {d}\n", .{stats.constants_propagated});
+            std.debug.print("    - Functions inlined: {d}\n", .{stats.functions_inlined});
+            std.debug.print("    - CSE eliminations: {d}\n", .{stats.cse_eliminations});
+            std.debug.print("    - Passes run: {d}\n", .{stats.passes_run});
+        }
+    }
+
     /// Generate native code from IR
     fn generateCode(self: *Self) !void {
         if (self.ir_module == null) {
@@ -870,6 +953,10 @@ pub const AOTCompiler = struct {
         if (self.diagnostics.hasErrors()) return null;
 
         try self.generateIR();
+        if (self.diagnostics.hasErrors()) return null;
+
+        // Optionally optimize IR
+        try self.optimizeIR();
         if (self.diagnostics.hasErrors()) return null;
 
         return self.ir_module;
