@@ -464,7 +464,7 @@ pub const DateTimeFunctions = struct {
             else => return Value.initInt(0),
         };
 
-        std.time.sleep(seconds * 1_000_000_000);
+        std.Thread.sleep(seconds * 1_000_000_000);
         return Value.initInt(0);
     }
 
@@ -480,7 +480,7 @@ pub const DateTimeFunctions = struct {
             else => return Value.initNull(),
         };
 
-        std.time.sleep(microseconds * 1_000);
+        std.Thread.sleep(microseconds * 1_000);
         return Value.initNull();
     }
 };

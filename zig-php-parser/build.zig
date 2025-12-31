@@ -42,6 +42,8 @@ pub fn build(b: *std.Build) void {
         "src/test_object_system.zig",
         "src/test_reflection.zig",
         "src/test_attribute_system.zig",
+        "src/test_bytecode_vm.zig",
+        "src/test_gc_stress.zig",
     };
     
     // Add all test files

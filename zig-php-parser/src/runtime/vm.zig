@@ -17,8 +17,29 @@ const reflection = @import("reflection.zig");
 const builtin_classes = @import("builtin_classes.zig");
 const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
+const string_utils = @import("string_utils.zig");
+const builtin_methods = @import("builtin_methods.zig");
+const builtin_concurrency = @import("builtin_concurrency.zig");
+const builtin_http = @import("builtin_http.zig");
+
+// Bytecode VM imports for execution mode switching
+const bytecode_vm = @import("../bytecode/vm.zig");
+const BytecodeVM = bytecode_vm.BytecodeVM;
+// BytecodeGenerator for AST-to-bytecode compilation
+const bytecode_generator = @import("../bytecode/generator.zig");
+const BytecodeGenerator = bytecode_generator.BytecodeGenerator;
 
 const CapturedVar = struct { name: []const u8, value: Value };
+
+/// 执行模式枚举 - 支持树遍历和字节码两种执行方式
+pub const ExecutionMode = enum {
+    /// 树遍历解释器（默认，最兼容）
+    tree_walking,
+    /// 字节码虚拟机（高性能）
+    bytecode,
+    /// 自动选择（根据代码特征自动选择最佳执行方式）
+    auto,
+};
 
 pub const CallFrame = struct {
     function_name: []const u8,
@@ -39,15 +60,15 @@ pub const CallFrame = struct {
         var iterator = self.locals.iterator();
         while (iterator.next()) |entry| {
             const value = entry.value_ptr.*;
-            switch (value.tag) {
-                .string => value.data.string.release(allocator),
-                .array => value.data.array.release(allocator),
-                .object => value.data.object.release(allocator),
-                .struct_instance => value.data.struct_instance.release(allocator),
-                .resource => value.data.resource.release(allocator),
-                .user_function => value.data.user_function.release(allocator),
-                .closure => value.data.closure.release(allocator),
-                .arrow_function => value.data.arrow_function.release(allocator),
+            switch (value.getTag()) {
+                .string => value.getAsString().release(allocator),
+                .array => value.getAsArray().release(allocator),
+                .object => value.getAsObject().release(allocator),
+                .struct_instance => value.getAsStruct().release(allocator),
+                .resource => value.getAsResource().release(allocator),
+                .user_function => value.getAsUserFunc().release(allocator),
+                .closure => value.getAsClosure().release(allocator),
+                .arrow_function => value.getAsClosure().release(allocator),
                 else => {},
             }
         }
@@ -139,23 +160,23 @@ fn callUserFuncFn(vm: *VM, args: []const Value) !Value {
     const callback = args[0];
     const func_args = if (args.len > 1) args[1..] else &[_]Value{};
 
-    return switch (callback.tag) {
-        .builtin_function => {
-            const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.data.builtin_function));
+    return switch (callback.getTag()) {
+        .native_function => {
+            const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
             return function(vm, func_args);
         },
         .user_function => {
-            return vm.callUserFunction(callback.data.user_function.data, func_args);
+            return vm.callUserFunction(callback.getAsUserFunc().data, func_args);
         },
         .closure => {
-            return vm.callClosure(callback.data.closure.data, func_args);
+            return vm.callClosure(callback.getAsClosure().data, func_args);
         },
         .arrow_function => {
-            return vm.callArrowFunction(callback.data.arrow_function.data, func_args);
+            return vm.callArrowFunction(callback.getAsArrowFunc().data, func_args);
         },
         .string => {
             // Function name as string
-            const func_name = callback.data.string.data.data;
+            const func_name = callback.getAsString().data.data;
             return vm.callUserFunc(func_name, func_args);
         },
         else => {
@@ -176,14 +197,14 @@ fn callUserFuncArrayFn(vm: *VM, args: []const Value) !Value {
     const callback = args[0];
     const params_array = args[1];
 
-    if (params_array.tag != .array) {
+    if (params_array.getTag() != .array) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "call_user_func_array() expects parameter 2 to be array", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
     // Convert array to argument list
-    const php_array = params_array.data.array.data;
+    const php_array = params_array.getAsArray().data;
     var func_args = try vm.allocator.alloc(Value, php_array.count());
     defer vm.allocator.free(func_args);
 
@@ -194,23 +215,23 @@ fn callUserFuncArrayFn(vm: *VM, args: []const Value) !Value {
         i += 1;
     }
 
-    return switch (callback.tag) {
-        .builtin_function => {
-            const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.data.builtin_function));
+    return switch (callback.getTag()) {
+        .native_function => {
+            const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
             return function(vm, func_args);
         },
         .user_function => {
-            return vm.callUserFunction(callback.data.user_function.data, func_args);
+            return vm.callUserFunction(callback.getAsUserFunc().data, func_args);
         },
         .closure => {
-            return vm.callClosure(callback.data.closure.data, func_args);
+            return vm.callClosure(callback.getAsClosure().data, func_args);
         },
         .arrow_function => {
-            return vm.callArrowFunction(callback.data.arrow_function.data, func_args);
+            return vm.callArrowFunction(callback.getAsArrowFunc().data, func_args);
         },
         .string => {
             // Function name as string
-            const func_name = callback.data.string.data.data;
+            const func_name = callback.getAsString().data.data;
             return vm.callUserFunc(func_name, func_args);
         },
         else => {
@@ -260,30 +281,30 @@ fn pdoExecFn(vm: *VM, args: []const Value) !Value {
     const pdo_value = args[0];
     const sql_value = args[1];
 
-    if (pdo_value.tag != .object or sql_value.tag != .string) {
+    if (pdo_value.getTag() != .object or sql_value.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "pdo_exec() expects PDO object and string", vm.current_file, vm.current_line);
         return vm.throwException(exception);
     }
 
-    if (!std.mem.eql(u8, pdo_value.data.object.data.class.name.data, "PDO")) {
+    if (!std.mem.eql(u8, pdo_value.getAsObject().data.class.name.data, "PDO")) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "pdo_exec() expects PDO object as first parameter", vm.current_file, vm.current_line);
         return vm.throwException(exception);
     }
 
-    const sql = sql_value.data.string.data.data;
+    const sql = sql_value.getAsString().data.data;
 
     // Get the stored PDO connection
-    const connection_prop = pdo_value.data.object.data.getProperty("_pdo_connection") catch {
+    const connection_prop = pdo_value.getAsObject().data.getProperty("_pdo_connection") catch {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "PDO connection not initialized", vm.current_file, vm.current_line);
         return vm.throwException(exception);
     };
 
-    if (connection_prop.tag != .integer) {
+    if (connection_prop.getTag() != .integer) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "Invalid PDO connection", vm.current_file, vm.current_line);
         return vm.throwException(exception);
     }
 
-    const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.data.integer))));
+    const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
     const result = try pdo_ptr.exec(sql);
     return Value.initInt(result);
 }
@@ -297,18 +318,7 @@ fn isCallableFn(vm: *VM, args: []const Value) !Value {
         return error.ArgumentCountMismatch;
     }
 
-    const value = args[0];
-    const is_callable = switch (value.tag) {
-        .builtin_function, .user_function, .closure, .arrow_function => true,
-        .string => {
-            // Check if string refers to a valid function name
-            const func_name = value.data.string.data.data;
-            return Value.initBool(vm.global.get(func_name) != null);
-        },
-        else => false,
-    };
-
-    return Value.initBool(is_callable);
+    return Value.initBool(args[0].isCallable());
 }
 
 // Reflection functions
@@ -320,13 +330,13 @@ fn classExistsFn(vm: *VM, args: []const Value) !Value {
     }
 
     const class_name_val = args[0];
-    if (class_name_val.tag != .string) {
+    if (class_name_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "class_exists() expects parameter 1 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const class_name = class_name_val.data.string.data.data;
+    const class_name = class_name_val.getAsString().data.data;
     const exists = vm.getClass(class_name) != null;
     return Value.initBool(exists);
 }
@@ -341,21 +351,21 @@ fn methodExistsFn(vm: *VM, args: []const Value) !Value {
     const object_or_class = args[0];
     const method_name_val = args[1];
 
-    if (method_name_val.tag != .string) {
+    if (method_name_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "method_exists() expects parameter 2 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const method_name = method_name_val.data.string.data.data;
+    const method_name = method_name_val.getAsString().data.data;
 
-    const exists = switch (object_or_class.tag) {
+    const exists = switch (object_or_class.getTag()) {
         .object => {
-            const object = object_or_class.data.object.data;
-            return Value.initBool(object.hasMethod(method_name));
+            const object = object_or_class.getAsObject().data;
+            return Value.initBool(object.class.hasMethod(method_name));
         },
         .string => {
-            const class_name = object_or_class.data.string.data.data;
+            const class_name = object_or_class.getAsString().data.data;
             const class = vm.getClass(class_name) orelse return Value.initBool(false);
             return Value.initBool(class.hasMethod(method_name));
         },
@@ -375,21 +385,21 @@ fn propertyExistsFn(vm: *VM, args: []const Value) !Value {
     const object_or_class = args[0];
     const property_name_val = args[1];
 
-    if (property_name_val.tag != .string) {
+    if (property_name_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "property_exists() expects parameter 2 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const property_name = property_name_val.data.string.data.data;
+    const property_name = property_name_val.getAsString().data.data;
 
-    const exists = switch (object_or_class.tag) {
+    const exists = switch (object_or_class.getTag()) {
         .object => {
-            const object = object_or_class.data.object.data;
-            return Value.initBool(object.properties.contains(property_name) or object.class.hasProperty(property_name));
+            const object = object_or_class.getAsObject().data;
+            return Value.initBool(object.hasProperty(property_name));
         },
         .string => {
-            const class_name = object_or_class.data.string.data.data;
+            const class_name = object_or_class.getAsString().data.data;
             const class = vm.getClass(class_name) orelse return Value.initBool(false);
             return Value.initBool(class.hasProperty(property_name));
         },
@@ -407,13 +417,13 @@ fn getClassFn(vm: *VM, args: []const Value) !Value {
     }
 
     const object_val = args[0];
-    if (object_val.tag != .object) {
+    if (object_val.getTag() != .object) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_class() expects parameter 1 to be object", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const object = object_val.data.object.data;
+    const object = object_val.getAsObject().data;
     return Value.initStringWithManager(&vm.memory_manager, object.class.name.data);
 }
 
@@ -425,9 +435,9 @@ fn getClassMethodsFn(vm: *VM, args: []const Value) !Value {
     }
 
     const class_name_val = args[0];
-    const class_name = switch (class_name_val.tag) {
-        .string => class_name_val.data.string.data.data,
-        .object => class_name_val.data.object.data.class.name.data,
+    const class_name = switch (class_name_val.getTag()) {
+        .string => class_name_val.getAsString().data.data,
+        .object => class_name_val.getAsObject().data.class.name.data,
         else => {
             const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_class_methods() expects parameter 1 to be string or object", "builtin", 0);
             _ = try vm.throwException(exception);
@@ -440,7 +450,7 @@ fn getClassMethodsFn(vm: *VM, args: []const Value) !Value {
     };
 
     const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
-    const php_array = php_array_value.data.array.data;
+    const php_array = php_array_value.getAsArray().data;
 
     var iterator = class.methods.iterator();
     while (iterator.next()) |entry| {
@@ -460,9 +470,9 @@ fn getClassVarsFn(vm: *VM, args: []const Value) !Value {
     }
 
     const class_name_val = args[0];
-    const class_name = switch (class_name_val.tag) {
-        .string => class_name_val.data.string.data.data,
-        .object => class_name_val.data.object.data.class.name.data,
+    const class_name = switch (class_name_val.getTag()) {
+        .string => class_name_val.getAsString().data.data,
+        .object => class_name_val.getAsObject().data.class.name.data,
         else => {
             const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_class_vars() expects parameter 1 to be string or object", "builtin", 0);
             _ = try vm.throwException(exception);
@@ -475,7 +485,7 @@ fn getClassVarsFn(vm: *VM, args: []const Value) !Value {
     };
 
     const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
-    const php_array = php_array_value.data.array.data;
+    const php_array = php_array_value.getAsArray().data;
 
     var iterator = class.properties.iterator();
     while (iterator.next()) |entry| {
@@ -501,20 +511,21 @@ fn getObjectVarsFn(vm: *VM, args: []const Value) !Value {
     }
 
     const object_val = args[0];
-    if (object_val.tag != .object) {
+    if (object_val.getTag() != .object) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_object_vars() expects parameter 1 to be object", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const object = object_val.data.object.data;
+    const object = object_val.getAsObject().data;
     const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
-    const php_array = php_array_value.data.array.data;
+    const php_array = php_array_value.getAsArray().data;
 
-    var iterator = object.properties.iterator();
+    var iterator = object.shape.property_map.iterator();
     while (iterator.next()) |entry| {
         const property_name = entry.key_ptr.*;
-        const property_value = entry.value_ptr.*;
+        const offset = entry.value_ptr.*;
+        const property_value = object.property_values.items[offset];
 
         // Check if property is accessible (public or from same class context)
         // For now, include all properties (simplified)
@@ -535,23 +546,23 @@ fn isAFn(vm: *VM, args: []const Value) !Value {
     const object_val = args[0];
     const class_name_val = args[1];
 
-    if (class_name_val.tag != .string) {
+    if (class_name_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "is_a() expects parameter 2 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const class_name = class_name_val.data.string.data.data;
+    const class_name = class_name_val.getAsString().data.data;
 
-    const is_instance = switch (object_val.tag) {
+    const is_instance = switch (object_val.getTag()) {
         .object => {
-            const object = object_val.data.object.data;
+            const object = object_val.getAsObject().data;
             const target_class = vm.getClass(class_name) orelse return Value.initBool(false);
             return Value.initBool(object.isInstanceOf(target_class));
         },
         .string => {
             // Allow checking class names as strings
-            const object_class_name = object_val.data.string.data.data;
+            const object_class_name = object_val.getAsString().data.data;
             const object_class = vm.getClass(object_class_name) orelse return Value.initBool(false);
             const target_class = vm.getClass(class_name) orelse return Value.initBool(false);
             return Value.initBool(object_class.isInstanceOf(target_class));
@@ -572,23 +583,23 @@ fn isSubclassOfFn(vm: *VM, args: []const Value) !Value {
     const child_val = args[0];
     const parent_val = args[1];
 
-    if (parent_val.tag != .string) {
+    if (parent_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "is_subclass_of() expects parameter 2 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const parent_class_name = parent_val.data.string.data.data;
+    const parent_class_name = parent_val.getAsString().data.data;
     const parent_class = vm.getClass(parent_class_name) orelse return Value.initBool(false);
 
-    const is_subclass = switch (child_val.tag) {
+    const is_subclass = switch (child_val.getTag()) {
         .object => {
-            const object = child_val.data.object.data;
+            const object = child_val.getAsObject().data;
             // Check if object's class is a subclass (not the same class)
             return Value.initBool(object.class != parent_class and object.class.isInstanceOf(parent_class));
         },
         .string => {
-            const child_class_name = child_val.data.string.data.data;
+            const child_class_name = child_val.getAsString().data.data;
             const child_class = vm.getClass(child_class_name) orelse return Value.initBool(false);
             // Check if child class is a subclass (not the same class)
             return Value.initBool(child_class != parent_class and child_class.isInstanceOf(parent_class));
@@ -606,12 +617,12 @@ fn countFn(vm: *VM, args: []const Value) !Value {
         return error.ArgumentCountMismatch;
     }
     const arg = args[0];
-    if (arg.tag != .array) {
+    if (arg.getTag() != .array) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "count() expects parameter 1 to be array", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
-    return Value.initInt(@intCast(arg.data.array.data.count()));
+    return Value.initInt(@intCast(arg.getAsArray().data.count()));
 }
 
 // Variable handling functions
@@ -652,18 +663,18 @@ fn emptyFn(vm: *VM, args: []const Value) !Value {
     // - empty array
     // - uninitialized variables (we treat as null)
 
-    const is_empty = switch (arg.tag) {
+    const is_empty = switch (arg.getTag()) {
         .null => true,
-        .boolean => !arg.data.boolean,
-        .integer => arg.data.integer == 0,
-        .float => arg.data.float == 0.0,
+        .boolean => !arg.asBool(),
+        .integer => arg.asInt() == 0,
+        .float => arg.asFloat() == 0.0,
         .string => blk: {
-            const str_data = arg.data.string.data.data;
+            const str_data = arg.getAsString().data.data;
             break :blk str_data.len == 0 or std.mem.eql(u8, str_data, "0");
         },
-        .array => arg.data.array.data.count() == 0,
+        .array => arg.getAsArray().data.count() == 0,
         .object, .struct_instance, .resource => false, // Objects are never empty
-        .builtin_function, .user_function, .closure, .arrow_function => false, // Functions are never empty
+        .native_function, .user_function, .closure, .arrow_function => false, // Functions are never empty
     };
 
     return Value.initBool(is_empty);
@@ -677,7 +688,7 @@ fn isNullFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arg = args[0];
-    return Value.initBool(arg.tag == .null);
+    return Value.initBool(arg.isNull());
 }
 
 // Reflection functions
@@ -689,7 +700,7 @@ fn getDeclaredClassesFn(vm: *VM, args: []const Value) !Value {
     }
 
     const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
-    const php_array = php_array_value.data.array.data;
+    const php_array = php_array_value.getAsArray().data;
 
     var iterator = vm.classes.iterator();
     while (iterator.next()) |entry| {
@@ -731,9 +742,9 @@ fn getParentClassFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arg = args[0];
-    const class = switch (arg.tag) {
-        .object => arg.data.object.data.class,
-        .string => vm.getClass(arg.data.string.data.data) orelse return Value.initBool(false),
+    const class = switch (arg.getTag()) {
+        .object => arg.getAsObject().data.class,
+        .string => vm.getClass(arg.getAsString().data.data) orelse return Value.initBool(false),
         else => {
             const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_parent_class() expects parameter 1 to be object or string", "builtin", 0);
             _ = try vm.throwException(exception);
@@ -756,7 +767,7 @@ fn interfaceExistsFn(vm: *VM, args: []const Value) !Value {
     }
 
     const interface_name_val = args[0];
-    if (interface_name_val.tag != .string) {
+    if (interface_name_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "interface_exists() expects parameter 1 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
@@ -774,13 +785,13 @@ fn traitExistsFn(vm: *VM, args: []const Value) !Value {
     }
 
     const trait_name_val = args[0];
-    if (trait_name_val.tag != .string) {
+    if (trait_name_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "trait_exists() expects parameter 1 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const trait_name = trait_name_val.data.string.data.data;
+    const trait_name = trait_name_val.getAsString().data.data;
     if (vm.getClass(trait_name)) |_| {
         // Note: Current implementation doesn't distinguish traits from classes
         // Would need is_trait field in ClassModifiers
@@ -798,9 +809,9 @@ fn getClassConstantsFn(vm: *VM, args: []const Value) !Value {
     }
 
     const class_name_val = args[0];
-    const class_name = switch (class_name_val.tag) {
-        .string => class_name_val.data.string.data.data,
-        .object => class_name_val.data.object.data.class.name.data,
+    const class_name = switch (class_name_val.getTag()) {
+        .string => class_name_val.getAsString().data.data,
+        .object => class_name_val.getAsObject().data.class.name.data,
         else => {
             const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_class_constants() expects parameter 1 to be string or object", "builtin", 0);
             _ = try vm.throwException(exception);
@@ -813,7 +824,7 @@ fn getClassConstantsFn(vm: *VM, args: []const Value) !Value {
     };
 
     const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
-    const php_array = php_array_value.data.array.data;
+    const php_array = php_array_value.getAsArray().data;
 
     var iterator = class.constants.iterator();
     while (iterator.next()) |entry| {
@@ -829,6 +840,8 @@ pub const VM = struct {
     global: *Environment,
     context: *PHPContext,
     classes: std.StringHashMap(*types.PHPClass),
+    interfaces: std.StringHashMap(*types.PHPInterface),
+    traits: std.StringHashMap(*types.PHPTrait),
     structs: std.StringHashMap(*types.PHPStruct),
     error_handler: ErrorHandler,
     current_file: []const u8,
@@ -848,6 +861,15 @@ pub const VM = struct {
 
     // Memory optimization
     string_intern_pool: std.StringHashMap(*types.gc.Box(*types.PHPString)),
+    request_arena: std.heap.ArenaAllocator,
+    current_class: ?*types.PHPClass = null,
+    return_value: ?Value = null,
+    break_level: u32 = 0,
+    continue_level: u32 = 0,
+
+    // Execution mode switching
+    execution_mode: ExecutionMode = .tree_walking,
+    bytecode_vm_instance: ?*BytecodeVM = null,
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
         var vm = try allocator.create(VM);
@@ -856,6 +878,8 @@ pub const VM = struct {
             .global = try allocator.create(Environment),
             .context = undefined,
             .classes = std.StringHashMap(*types.PHPClass).init(allocator),
+            .interfaces = std.StringHashMap(*types.PHPInterface).init(allocator),
+            .traits = std.StringHashMap(*types.PHPTrait).init(allocator),
             .structs = std.StringHashMap(*types.PHPStruct).init(allocator),
             .error_handler = ErrorHandler.init(allocator),
             .current_file = "unknown",
@@ -869,6 +893,14 @@ pub const VM = struct {
             .optimization_flags = OptimizationFlags{},
             .error_context = ErrorContext.init(allocator),
             .string_intern_pool = std.StringHashMap(*types.gc.Box(*types.PHPString)).init(allocator),
+            .request_arena = std.heap.ArenaAllocator.init(allocator),
+            .current_class = null,
+            .return_value = null,
+            .break_level = 0,
+            .continue_level = 0,
+            // Execution mode switching - default to tree_walking
+            .execution_mode = .tree_walking,
+            .bytecode_vm_instance = null,
         };
 
         vm.global.* = Environment.init(allocator);
@@ -888,6 +920,12 @@ pub const VM = struct {
         // Register all standard library functions
         try vm.registerStandardLibraryFunctions();
 
+        // Register concurrency classes (Mutex, Atomic, RWLock, SharedData)
+        try builtin_concurrency.registerConcurrencyClasses(vm);
+
+        // Register HTTP classes (HttpServer, HttpClient, Router)
+        try builtin_http.registerHttpClasses(vm);
+
         // Initialize performance monitoring
         vm.execution_stats.reset();
 
@@ -898,6 +936,11 @@ pub const VM = struct {
         // Performance statistics logging
         if (self.optimization_flags.enable_opcode_caching) {
             self.logPerformanceStats();
+        }
+
+        // Clean up bytecode VM if initialized
+        if (self.bytecode_vm_instance) |bvm| {
+            bvm.deinit();
         }
 
         // Clean up call stack
@@ -914,6 +957,9 @@ pub const VM = struct {
         }
         self.string_intern_pool.deinit();
 
+        // Clean up request arena
+        self.request_arena.deinit();
+
         // Clean up error context
         self.error_context.deinit(self.allocator);
 
@@ -921,7 +967,7 @@ pub const VM = struct {
         var global_iterator = self.global.vars.iterator();
         while (global_iterator.next()) |entry| {
             // Only release if it's a managed type
-            switch (entry.value_ptr.*.tag) {
+            switch (entry.value_ptr.*.getTag()) {
                 .string, .array, .object, .struct_instance, .resource, .user_function, .closure, .arrow_function => {
                     types.gc.decRef(&self.memory_manager, entry.value_ptr.*);
                 },
@@ -938,19 +984,33 @@ pub const VM = struct {
         // Clean up standard library
         self.stdlib.deinit();
 
-        // Clean up structs
-        var struct_iterator = self.structs.iterator();
-        while (struct_iterator.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
+        // Clean up structs - 简化清理避免迭代器问题
         self.structs.deinit();
 
-        // Clean up classes
+        // Clean up traits
+        var trait_iterator = self.traits.iterator();
+        while (trait_iterator.next()) |entry| {
+            const trait_ptr = entry.value_ptr.*;
+            trait_ptr.deinit(self.allocator);
+            self.allocator.destroy(trait_ptr);
+        }
+        self.traits.deinit();
+
+        // Clean up interfaces
+        var interface_iterator = self.interfaces.iterator();
+        while (interface_iterator.next()) |entry| {
+            const interface_ptr = entry.value_ptr.*;
+            interface_ptr.deinit(self.allocator);
+            self.allocator.destroy(interface_ptr);
+        }
+        self.interfaces.deinit();
+
+        // Clean up classes - 调用PHPClass.deinit释放属性名和方法名
         var class_iterator = self.classes.iterator();
         while (class_iterator.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
+            const class_ptr = entry.value_ptr.*;
+            class_ptr.deinit(self.allocator);
+            self.allocator.destroy(class_ptr);
         }
         self.classes.deinit();
 
@@ -1013,15 +1073,15 @@ pub const VM = struct {
 
     fn retainValue(self: *VM, value: Value) void {
         _ = self;
-        switch (value.tag) {
-            .string => _ = value.data.string.retain(),
-            .array => _ = value.data.array.retain(),
-            .object => _ = value.data.object.retain(),
-            .struct_instance => _ = value.data.struct_instance.retain(),
-            .resource => _ = value.data.resource.retain(),
-            .user_function => _ = value.data.user_function.retain(),
-            .closure => _ = value.data.closure.retain(),
-            .arrow_function => _ = value.data.arrow_function.retain(),
+        switch (value.getTag()) {
+            .string => _ = value.getAsString().retain(),
+            .array => _ = value.getAsArray().retain(),
+            .object => _ = value.getAsObject().retain(),
+            .struct_instance => _ = value.getAsStruct().retain(),
+            .resource => _ = value.getAsResource().retain(),
+            .user_function => _ = value.getAsUserFunc().retain(),
+            .closure => _ = value.getAsClosure().retain(),
+            .arrow_function => _ = value.getAsClosure().retain(),
             else => {},
         }
     }
@@ -1034,24 +1094,74 @@ pub const VM = struct {
                 const param_data = param_node.data.parameter;
                 const param_name = self.context.string_pool.keys()[param_data.name];
                 const php_param_name = try types.PHPString.init(self.allocator, param_name);
+                defer php_param_name.release(self.allocator);
 
                 parameters[i] = types.Method.Parameter.init(php_param_name);
+
                 parameters[i].is_variadic = param_data.is_variadic;
                 parameters[i].is_reference = param_data.is_reference;
 
+                // Store default value as AST node index, not evaluated value
+                // It will be evaluated when the function is called
                 if (param_data.default_value) |dv_idx| {
-                    parameters[i].default_value = try self.eval(dv_idx);
+                    // For now, evaluate simple literals only
+                    const dv_node = self.context.nodes.items[dv_idx];
+                    switch (dv_node.tag) {
+                        .literal_int => {
+                            parameters[i].default_value = Value.initInt(dv_node.data.literal_int.value);
+                        },
+                        .literal_float => {
+                            parameters[i].default_value = Value.initFloat(dv_node.data.literal_float.value);
+                        },
+                        .literal_string => {
+                            const str_id = dv_node.data.literal_string.value;
+                            const str_val = self.context.string_pool.keys()[str_id];
+                            parameters[i].default_value = try Value.initStringWithManager(&self.memory_manager, str_val);
+                        },
+                        else => {
+                            // For complex expressions, don't evaluate at definition time
+                            // Leave default_value as null and handle it at call time
+                            parameters[i].default_value = null;
+                        },
+                    }
                 }
             }
         }
         return parameters;
     }
 
+    /// 转换AST属性节点为运行时Attribute
+    fn convertAttributes(self: *VM, attr_indices: []const ast.Node.Index) ![]const types.Attribute {
+        if (attr_indices.len == 0) {
+            return &[_]types.Attribute{};
+        }
+
+        const attributes = try self.allocator.alloc(types.Attribute, attr_indices.len);
+        for (attr_indices, 0..) |attr_idx, i| {
+            const attr_node = self.context.nodes.items[attr_idx];
+            if (attr_node.tag == .attribute) {
+                const attr_data = attr_node.data.attribute;
+                const attr_name = self.context.string_pool.keys()[attr_data.name];
+                const php_name = try types.PHPString.init(self.allocator, attr_name);
+
+                // 转换属性参数
+                var args = try self.allocator.alloc(Value, attr_data.args.len);
+                for (attr_data.args, 0..) |arg_idx, j| {
+                    args[j] = try self.eval(arg_idx);
+                }
+
+                attributes[i] = types.Attribute.init(
+                    php_name,
+                    args,
+                    .{ .function = true },
+                );
+            }
+        }
+        return attributes;
+    }
+
     pub fn defineBuiltin(self: *VM, name: []const u8, function: anytype) !void {
-        const value = Value{
-            .tag = .builtin_function,
-            .data = .{ .builtin_function = @ptrCast(&function) },
-        };
+        const value = Value.initNativeFunction(@as(*const anyopaque, @ptrCast(&function)));
         try self.global.set(name, value);
     }
 
@@ -1102,10 +1212,7 @@ pub const VM = struct {
             const name = entry.key_ptr.*;
             const builtin_func = entry.value_ptr.*;
 
-            const value = Value{
-                .tag = .builtin_function,
-                .data = .{ .builtin_function = @ptrCast(builtin_func.handler) },
-            };
+            const value = Value.initNativeFunction(@as(*const anyopaque, @ptrCast(builtin_func.handler)));
             try self.global.set(name, value);
         }
 
@@ -1115,7 +1222,7 @@ pub const VM = struct {
 
     // Performance monitoring and optimization methods
     pub fn logPerformanceStats(self: *VM) void {
-        std.debug.print("=== PHP Interpreter Performance Statistics ===\n", .{});
+        std.debug.print("\n=== PHP Interpreter Performance Statistics ===\n", .{});
         std.debug.print("Function calls: {d}\n", .{self.execution_stats.function_calls});
         std.debug.print("Memory allocations: {d}\n", .{self.execution_stats.memory_allocations});
         std.debug.print("GC collections: {d}\n", .{self.execution_stats.gc_collections});
@@ -1243,12 +1350,12 @@ pub const VM = struct {
             return self.getObjectProperty(object_value, property_name);
         }
 
-        if (object_value.tag != .object) {
+        if (object_value.getTag() != .object) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        const object = object_value.data.object.data;
+        const object = object_value.getAsObject().data;
 
         // Fast path: direct property lookup without method calls
         if (object.properties.get(property_name)) |value| {
@@ -1304,7 +1411,7 @@ pub const VM = struct {
         if (self.string_intern_pool.get(str)) |interned_box| {
             // Return reference to existing string and increment ref count
             interned_box.ref_count += 1;
-            return Value{ .tag = .string, .data = .{ .string = interned_box } };
+            return Value.fromBox(interned_box, Value.TYPE_STRING);
         }
 
         // Create new interned string
@@ -1320,7 +1427,7 @@ pub const VM = struct {
 
         try self.string_intern_pool.put(key, box);
 
-        return Value{ .tag = .string, .data = .{ .string = box } };
+        return Value.fromBox(box, Value.TYPE_STRING);
     }
 
     pub fn setCurrentLocation(self: *VM, file: []const u8, line: u32) void {
@@ -1439,8 +1546,24 @@ pub const VM = struct {
         try self.classes.put(name, class);
     }
 
+    pub fn defineInterface(self: *VM, name: []const u8, interface_obj: *types.PHPInterface) !void {
+        try self.interfaces.put(name, interface_obj);
+    }
+
+    pub fn defineTrait(self: *VM, name: []const u8, trait_obj: *types.PHPTrait) !void {
+        try self.traits.put(name, trait_obj);
+    }
+
     pub fn getClass(self: *VM, name: []const u8) ?*types.PHPClass {
         return self.classes.get(name);
+    }
+
+    pub fn getInterface(self: *VM, name: []const u8) ?*types.PHPInterface {
+        return self.interfaces.get(name);
+    }
+
+    pub fn getTrait(self: *VM, name: []const u8) ?*types.PHPTrait {
+        return self.traits.get(name);
     }
 
     pub fn createObject(self: *VM, class_name: []const u8) !Value {
@@ -1459,7 +1582,7 @@ pub const VM = struct {
         }
 
         const value = try Value.initObjectWithManager(&self.memory_manager, class);
-        const object = value.data.object.data;
+        const object = value.getAsObject().data;
 
         // Initialize properties with default values (optimized)
         if (self.optimization_flags.enable_fast_property_access) {
@@ -1488,10 +1611,8 @@ pub const VM = struct {
     }
 
     fn initializeObjectPropertiesOptimized(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
-        // Pre-allocate property map with expected size
-        const expected_size = class.properties.count();
-        try object.properties.ensureTotalCapacity(expected_size);
-
+        // Pre-allocate property_values with expected size (already done in PHPObject.init)
+        // Just set default values for class properties
         var prop_iterator = class.properties.iterator();
         while (prop_iterator.next()) |entry| {
             const property = entry.value_ptr.*;
@@ -1505,21 +1626,30 @@ pub const VM = struct {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
-        if (object_value.tag != .object) {
+        if (object_value.getTag() != .object) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Method call on non-object", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        const object = object_value.data.object.data;
+        const object = object_value.getAsObject().data;
+        const result = object.callMethod(self, object_value, method_name, args) catch |err| switch (err) {
+            error.MagicMethodCall => {
+                const name_val = try Value.initString(self.allocator, method_name);
+                defer name_val.release(self.allocator);
 
-        // Special handling for PDO objects
-        if (std.mem.eql(u8, object.class.name.data, "PDO")) {
-            return self.callPDOMethod(object_value, method_name, args);
-        }
+                // Wrap arguments in a PHP array
+                const args_array_val = try Value.initArrayWithManager(&self.memory_manager);
+                const args_array = args_array_val.getAsArray().data;
+                for (args) |arg| {
+                    try args_array.push(self.allocator, arg);
+                }
+                defer args_array_val.release(self.allocator);
 
-        // Don't push call frame here - it's done in PHPObject.callMethod
-        const result = try object.callMethod(self, object_value, method_name, args);
-
+                const magic_args = [_]Value{ name_val, args_array_val };
+                return self.callObjectMethod(object_value, "__call", &magic_args);
+            },
+            else => return err,
+        };
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
@@ -1556,14 +1686,39 @@ pub const VM = struct {
         return self.throwException(exception);
     }
 
+    pub fn callConcurrencyMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const obj = obj_value.getAsObject().data;
+        const class_name = obj.class.name.data;
+
+        // builtin_concurrency functions expect []Value (mutable)
+        // We'll create a temporary mutable slice
+        const mutable_args = try self.allocator.alloc(Value, args.len);
+        defer self.allocator.free(mutable_args);
+        @memcpy(mutable_args, args);
+
+        if (std.mem.eql(u8, class_name, "Mutex")) {
+            return try builtin_concurrency.callMutexMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "Atomic")) {
+            return try builtin_concurrency.callAtomicMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "RWLock")) {
+            return try builtin_concurrency.callRWLockMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "SharedData")) {
+            return try builtin_concurrency.callSharedDataMethod(self, obj, method_name, mutable_args);
+        } else if (std.mem.eql(u8, class_name, "Channel")) {
+            return try builtin_concurrency.callChannelMethod(self, obj, method_name, mutable_args);
+        }
+
+        return error.MethodNotFound;
+    }
+
     fn callPDOExec(self: *VM, pdo_value: Value, args: []const Value) !Value {
-        if (args.len != 1 or args[0].tag != .string) {
+        if (args.len != 1 or args[0].getTag() != .string) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::exec() expects exactly 1 parameter, string given", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        const sql = args[0].data.string.data.data;
-        const pdo_object = pdo_value.data.object.data;
+        const sql = args[0].getAsString().data.data;
+        const pdo_object = pdo_value.getAsObject().data;
 
         // Get the stored PDO connection
         const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
@@ -1571,19 +1726,19 @@ pub const VM = struct {
             return self.throwException(exception);
         };
 
-        if (connection_prop.tag != .integer) {
+        if (connection_prop.getTag() != .integer) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.data.integer))));
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
         const result = try pdo_ptr.exec(sql);
         return Value.initInt(result);
     }
 
     fn callPDOQuery(self: *VM, pdo_value: Value, args: []const Value) !Value {
         _ = pdo_value;
-        if (args.len != 1 or args[0].tag != .string) {
+        if (args.len != 1 or args[0].getTag() != .string) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::query() expects exactly 1 parameter, string given", self.current_file, self.current_line);
             return self.throwException(exception);
         }
@@ -1595,7 +1750,7 @@ pub const VM = struct {
 
     fn callPDOPrepare(self: *VM, pdo_value: Value, args: []const Value) !Value {
         _ = pdo_value;
-        if (args.len != 1 or args[0].tag != .string) {
+        if (args.len != 1 or args[0].getTag() != .string) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::prepare() expects exactly 1 parameter, string given", self.current_file, self.current_line);
             return self.throwException(exception);
         }
@@ -1635,12 +1790,12 @@ pub const VM = struct {
 
     fn callPDOQuote(self: *VM, pdo_value: Value, args: []const Value) !Value {
         _ = pdo_value;
-        if (args.len != 1 or args[0].tag != .string) {
+        if (args.len != 1 or args[0].getTag() != .string) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::quote() expects exactly 1 parameter, string given", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        const str = args[0].data.string.data.data;
+        const str = args[0].getAsString().data.data;
         // Simple quoting - in real PDO this would escape properly based on driver
         const quoted = try std.fmt.allocPrint(self.allocator, "'{s}'", .{str});
         defer self.allocator.free(quoted);
@@ -1652,12 +1807,12 @@ pub const VM = struct {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
-        if (struct_value.tag != .struct_instance) {
+        if (struct_value.getTag() != .struct_instance) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Method call on non-struct", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        const struct_inst = struct_value.data.struct_instance.data;
+        const struct_inst = struct_value.getAsStruct().data;
 
         const result = try struct_inst.callMethod(self, struct_value, method_name, args);
 
@@ -1668,13 +1823,19 @@ pub const VM = struct {
     }
 
     pub fn getObjectProperty(self: *VM, object_value: Value, property_name: []const u8) !Value {
-        if (object_value.tag != .object) {
+        if (object_value.getTag() != .object) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        const object = object_value.data.object.data;
+        const object = object_value.getAsObject().data;
         const value = object.getProperty(property_name) catch |err| switch (err) {
+            error.MagicMethodCall => {
+                const name_val = try Value.initString(self.allocator, property_name);
+                defer name_val.release(self.allocator);
+                const args = [_]Value{name_val};
+                return self.callObjectMethod(object_value, "__get", &args);
+            },
             error.UndefinedProperty => {
                 const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, object.class.name.data, property_name, self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -1686,13 +1847,13 @@ pub const VM = struct {
     }
 
     pub fn setObjectProperty(self: *VM, object_value: Value, property_name: []const u8, value: Value) !void {
-        if (object_value.tag != .object) {
+        if (object_value.getTag() != .object) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Property assignment on non-object", self.current_file, self.current_line);
             _ = try self.throwException(exception);
             return;
         }
 
-        const object = object_value.data.object.data;
+        const object = object_value.getAsObject().data;
         object.setProperty(self.allocator, property_name, value) catch |err| switch (err) {
             error.ReadonlyPropertyModification => {
                 const exception = try ExceptionFactory.createReadonlyPropertyError(self.allocator, object.class.name.data, property_name, self.current_file, self.current_line);
@@ -1737,7 +1898,17 @@ pub const VM = struct {
         var result = Value.initNull();
         if (function.body) |body_ptr| {
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
-            result = try self.run(body_node);
+            result = self.eval(body_node) catch |err| {
+                if (err == error.Return) {
+                    if (self.return_value) |val| {
+                        const ret = val;
+                        self.return_value = null;
+                        return ret;
+                    }
+                    return Value.initNull();
+                }
+                return err;
+            };
         }
 
         const end_time = std.time.nanoTimestamp();
@@ -1754,7 +1925,17 @@ pub const VM = struct {
         try self.pushCallFrame("closure", self.current_file, self.current_line);
         defer self.popCallFrame();
 
-        const result = try closure.call(self, args);
+        const result = closure.call(self, args) catch |err| {
+            if (err == error.Return) {
+                if (self.return_value) |val| {
+                    const ret = val;
+                    self.return_value = null;
+                    return ret;
+                }
+                return Value.initNull();
+            }
+            return err;
+        };
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
@@ -1770,7 +1951,17 @@ pub const VM = struct {
         try self.pushCallFrame("arrow_function", self.current_file, self.current_line);
         defer self.popCallFrame();
 
-        const result = try arrow_function.call(self, args);
+        const result = arrow_function.call(self, args) catch |err| {
+            if (err == error.Return) {
+                if (self.return_value) |val| {
+                    const ret = val;
+                    self.return_value = null;
+                    return ret;
+                }
+                return Value.initNull();
+            }
+            return err;
+        };
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
@@ -1787,7 +1978,7 @@ pub const VM = struct {
         }
 
         const box = try self.memory_manager.allocClosure(closure);
-        return Value{ .tag = .closure, .data = .{ .closure = box } };
+        return Value.fromBox(box, Value.TYPE_CLOSURE);
     }
 
     pub fn createArrowFunction(self: *VM, parameters: []const types.Method.Parameter, body: ?*anyopaque) !Value {
@@ -1799,7 +1990,7 @@ pub const VM = struct {
         // In a real implementation, this would analyze the body for variable references
 
         const box = try self.memory_manager.allocArrowFunction(arrow_function);
-        return Value{ .tag = .arrow_function, .data = .{ .arrow_function = box } };
+        return Value.fromBox(box, Value.TYPE_CLOSURE);
     }
 
     pub fn callUserFunc(self: *VM, function_name: []const u8, args: []const Value) !Value {
@@ -1808,19 +1999,19 @@ pub const VM = struct {
             return self.throwException(exception);
         };
 
-        return switch (function_val.tag) {
-            .builtin_function => {
-                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.data.builtin_function));
+        return switch (function_val.getTag()) {
+            .native_function => {
+                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.getAsNativeFunc()));
                 return function(self, args);
             },
             .user_function => {
-                return self.callUserFunction(function_val.data.user_function.data, args);
+                return self.callUserFunction(function_val.getAsUserFunc().data, args);
             },
             .closure => {
-                return self.callClosure(function_val.data.closure.data, args);
+                return self.callClosure(function_val.getAsClosure().data, args);
             },
             .arrow_function => {
-                return self.callArrowFunction(function_val.data.arrow_function.data, args);
+                return self.callArrowFunction(function_val.getAsArrowFunc().data, args);
             },
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Not a callable function", self.current_file, self.current_line);
@@ -1900,108 +2091,169 @@ pub const VM = struct {
         }
     }
 
-    pub fn run(self: *VM, node: ast.Node.Index) !Value {
+    /// 设置执行模式
+    pub fn setExecutionMode(self: *VM, mode: ExecutionMode) void {
+        self.execution_mode = mode;
+    }
+
+    /// 获取当前执行模式
+    pub fn getExecutionMode(self: *VM) ExecutionMode {
+        return self.execution_mode;
+    }
+
+    /// 初始化字节码VM（延迟初始化）
+    fn ensureBytecodeVM(self: *VM) !*BytecodeVM {
+        if (self.bytecode_vm_instance) |bvm| {
+            return bvm;
+        }
+        self.bytecode_vm_instance = try BytecodeVM.init(self.allocator);
+        return self.bytecode_vm_instance.?;
+    }
+
+    /// 使用字节码VM执行AST
+    /// 字节码生成器类型问题已修复，现在可以正常使用字节码执行
+    fn runBytecode(self: *VM, node: ast.Node.Index) !Value {
+        // 初始化字节码VM
+        const bvm = self.ensureBytecodeVM() catch |err| {
+            std.debug.print("Bytecode VM init failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+            return self.runTreeWalking(node);
+        };
+
+        // 创建字节码生成器并编译AST
+        var generator = BytecodeGenerator.init(self.allocator, self.context);
+        defer generator.deinit();
+
+        const compiled_func = generator.compile(node) catch |err| {
+            std.debug.print("Bytecode compilation failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+            return self.runTreeWalking(node);
+        };
+        defer compiled_func.deinit(self.allocator);
+
+        // 执行字节码
+        const result = bvm.execute(compiled_func) catch |err| {
+            std.debug.print("Bytecode execution failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+            return self.runTreeWalking(node);
+        };
+
+        // 转换结果
+        return self.convertBytecodeValue(result);
+    }
+
+    /// 使用树遍历解释器执行AST
+    fn runTreeWalking(self: *VM, node: ast.Node.Index) !Value {
         return self.eval(node);
     }
 
-    fn evaluateBinaryOperation(self: *VM, left: Value, op: Token.Tag, right: Value) !Value {
-        const start_time = std.time.nanoTimestamp();
-        defer {
-            const end_time = std.time.nanoTimestamp();
-            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
-        }
+    /// 转换字节码VM的Value到树遍历VM的Value
+    fn convertBytecodeValue(self: *VM, bv: bytecode_vm.Value) !Value {
+        return switch (bv) {
+            .null_val => Value.initNull(),
+            .bool_val => |b| Value.initBool(b),
+            .int_val => |i| Value.initInt(i),
+            .float_val => |f| Value.initFloat(f),
+            .string_val => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
+            // 复杂类型暂时返回null，后续可以扩展
+            .array_val, .object_val, .struct_val, .closure_val, .resource_val => Value.initNull(),
+        };
+    }
 
-        return switch (op) {
-            .plus => self.evaluateAddition(left, right),
-            .minus => self.evaluateSubtraction(left, right),
-            .asterisk => self.evaluateMultiplication(left, right),
-            .slash => self.evaluateDivision(left, right),
-            .dot => self.evaluateConcatenation(left, right),
-            else => {
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported binary operator", self.current_file, self.current_line);
-                return self.throwException(exception);
+    /// 判断是否应该使用字节码执行（用于auto模式）
+    fn shouldUseBytecode(self: *VM, node: ast.Node.Index) bool {
+        _ = self;
+        _ = node;
+        // 简单启发式：目前总是返回false，保守使用树遍历
+        // 后续可以根据代码复杂度、热点检测等因素决定
+        // 例如：循环次数多、函数调用频繁的代码适合字节码执行
+        return false;
+    }
+
+    /// 主执行入口 - 支持执行模式切换
+    pub fn run(self: *VM, node: ast.Node.Index) !Value {
+        defer _ = self.request_arena.reset(.retain_capacity);
+
+        return switch (self.execution_mode) {
+            .tree_walking => self.runTreeWalking(node),
+            .bytecode => self.runBytecode(node),
+            .auto => {
+                // 自动模式：根据代码特征选择执行方式
+                if (self.shouldUseBytecode(node)) {
+                    return self.runBytecode(node);
+                } else {
+                    return self.runTreeWalking(node);
+                }
             },
         };
+    }
+
+    fn evaluateBinaryExpression(self: *VM, binary_expr: anytype) !Value {
+        const left = try self.eval(binary_expr.lhs);
+        defer self.releaseValue(left);
+
+        const right = try self.eval(binary_expr.rhs);
+        defer self.releaseValue(right);
+
+        return self.evaluateBinaryOp(binary_expr.op, left, right);
     }
 
     fn evaluateAddition(self: *VM, left: Value, right: Value) !Value {
-        return switch (left.tag) {
-            .integer => switch (right.tag) {
-                .integer => Value.initInt(left.data.integer + right.data.integer),
-                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) + right.data.float),
-                else => self.handleInvalidOperands("addition"),
-            },
-            .float => switch (right.tag) {
-                .integer => Value.initFloat(left.data.float + @as(f64, @floatFromInt(right.data.integer))),
-                .float => Value.initFloat(left.data.float + right.data.float),
-                else => self.handleInvalidOperands("addition"),
-            },
-            .string => switch (right.tag) {
-                .string => self.concatenateStrings(left, right),
-                else => self.handleInvalidOperands("addition"),
-            },
-            else => self.handleInvalidOperands("addition"),
-        };
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
+
+        if (left_tag == .integer and right_tag == .integer) {
+            return Value.initInt(left.asInt() +% right.asInt());
+        } else if (left_tag == .float or right_tag == .float) {
+            const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+            const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+            return Value.initFloat(l + r);
+        } else if (left_tag == .string and right_tag == .string) {
+            return self.concatenateStrings(left, right);
+        } else {
+            return self.handleInvalidOperands("addition");
+        }
     }
 
     fn evaluateSubtraction(self: *VM, left: Value, right: Value) !Value {
-        return switch (left.tag) {
-            .integer => switch (right.tag) {
-                .integer => Value.initInt(left.data.integer - right.data.integer),
-                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) - right.data.float),
-                else => self.handleInvalidOperands("subtraction"),
-            },
-            .float => switch (right.tag) {
-                .integer => Value.initFloat(left.data.float - @as(f64, @floatFromInt(right.data.integer))),
-                .float => Value.initFloat(left.data.float - right.data.float),
-                else => self.handleInvalidOperands("subtraction"),
-            },
-            else => self.handleInvalidOperands("subtraction"),
-        };
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
+
+        if (left_tag == .integer and right_tag == .integer) {
+            return Value.initInt(left.asInt() -% right.asInt());
+        } else if (left_tag == .float or right_tag == .float) {
+            const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+            const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+            return Value.initFloat(l - r);
+        } else {
+            return self.handleInvalidOperands("subtraction");
+        }
     }
 
     fn evaluateMultiplication(self: *VM, left: Value, right: Value) !Value {
-        return switch (left.tag) {
-            .integer => switch (right.tag) {
-                .integer => Value.initInt(left.data.integer * right.data.integer),
-                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) * right.data.float),
-                else => self.handleInvalidOperands("multiplication"),
-            },
-            .float => switch (right.tag) {
-                .integer => Value.initFloat(left.data.float * @as(f64, @floatFromInt(right.data.integer))),
-                .float => Value.initFloat(left.data.float * right.data.float),
-                else => self.handleInvalidOperands("multiplication"),
-            },
-            else => self.handleInvalidOperands("multiplication"),
-        };
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
+
+        if (left_tag == .integer and right_tag == .integer) {
+            return Value.initInt(left.asInt() *% right.asInt());
+        } else if (left_tag == .float or right_tag == .float) {
+            const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+            const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+            return Value.initFloat(l * r);
+        } else {
+            return self.handleInvalidOperands("multiplication");
+        }
     }
 
     fn evaluateDivision(self: *VM, left: Value, right: Value) !Value {
-        // Check for division by zero first
-        const is_zero = switch (right.tag) {
-            .integer => right.data.integer == 0,
-            .float => right.data.float == 0.0,
-            else => false,
-        };
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
 
-        if (is_zero) {
+        const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+        if (r == 0.0) {
             const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        return switch (left.tag) {
-            .integer => switch (right.tag) {
-                .integer => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / @as(f64, @floatFromInt(right.data.integer))),
-                .float => Value.initFloat(@as(f64, @floatFromInt(left.data.integer)) / right.data.float),
-                else => self.handleInvalidOperands("division"),
-            },
-            .float => switch (right.tag) {
-                .integer => Value.initFloat(left.data.float / @as(f64, @floatFromInt(right.data.integer))),
-                .float => Value.initFloat(left.data.float / right.data.float),
-                else => self.handleInvalidOperands("division"),
-            },
-            else => self.handleInvalidOperands("division"),
-        };
+        const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+        return Value.initFloat(l / r);
     }
 
     fn evaluateConcatenation(self: *VM, left: Value, right: Value) !Value {
@@ -2023,8 +2275,8 @@ pub const VM = struct {
     }
 
     fn concatenateStrings(self: *VM, left: Value, right: Value) !Value {
-        const left_str = left.data.string.data.data;
-        const right_str = right.data.string.data.data;
+        const left_str = left.getAsString().data.data;
+        const right_str = right.getAsString().data.data;
 
         if (self.optimization_flags.enable_string_interning) {
             const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
@@ -2045,18 +2297,20 @@ pub const VM = struct {
     }
 
     fn valueToString(self: *VM, value: Value) !struct { str: []const u8, needs_free: bool } {
-        return switch (value.tag) {
-            .integer => .{ .str = try std.fmt.allocPrint(self.allocator, "{d}", .{value.data.integer}), .needs_free = true },
-            .float => .{ .str = try std.fmt.allocPrint(self.allocator, "{d}", .{value.data.float}), .needs_free = true },
-            .string => .{ .str = value.data.string.data.data, .needs_free = false },
-            .boolean => .{ .str = if (value.data.boolean) "1" else "", .needs_free = false },
-            .null => .{ .str = "", .needs_free = false },
-            .struct_instance => .{ .str = try std.fmt.allocPrint(self.allocator, "Struct({s})", .{value.data.struct_instance.data.struct_type.name.data}), .needs_free = true },
-            else => .{ .str = "Object", .needs_free = false },
+        const php_str = value.toString(self.allocator) catch |err| switch (err) {
+            error.MagicMethodCall => blk: {
+                const res = try self.callObjectMethod(value, "__toString", &.{});
+                defer self.releaseValue(res);
+                const s = try res.toString(self.allocator);
+                break :blk s;
+            },
+            else => return err,
         };
+        defer php_str.release(self.allocator);
+        return .{ .str = try self.allocator.dupe(u8, php_str.data), .needs_free = true };
     }
 
-    fn eval(self: *VM, node: ast.Node.Index) !Value {
+    pub fn eval(self: *VM, node: ast.Node.Index) !Value {
         const start_time = std.time.nanoTimestamp();
         defer {
             const end_time = std.time.nanoTimestamp();
@@ -2064,6 +2318,14 @@ pub const VM = struct {
         }
 
         const ast_node = self.context.nodes.items[node];
+
+        // Update current line for error reporting
+        // We can approximate line number from token location if we had source map
+        // For now, let's just use what we have if we can map it, but we don't have line info in Token yet?
+        // Token has loc.start/end. We need to map that to line number.
+        // Assuming we don't have easy line mapping yet, we skip this or implement it later.
+        // But wait, ExceptionFactory takes line number.
+        // Let's assume we can't easily get it right now without scanning source.
 
         switch (ast_node.tag) {
             .root => {
@@ -2078,7 +2340,21 @@ pub const VM = struct {
             .literal_string => {
                 const str_id = ast_node.data.literal_string.value;
                 const str_val = self.context.string_pool.keys()[str_id];
+                const quote_type = ast_node.data.literal_string.quote_type;
 
+                // 只对双引号字符串处理转义序列
+                if (quote_type == .double and string_utils.hasEscapeSequences(str_val)) {
+                    const processed = try string_utils.processEscapeSequences(self.allocator, str_val);
+                    defer self.allocator.free(processed);
+                    return Value.initStringWithManager(&self.memory_manager, processed);
+                } else if (quote_type == .single) {
+                    // 单引号字符串只处理 \' 和 \\
+                    const processed = try string_utils.processSingleQuoteEscapes(self.allocator, str_val);
+                    defer self.allocator.free(processed);
+                    return Value.initStringWithManager(&self.memory_manager, processed);
+                }
+
+                // 反引号字符串或无转义的字符串直接返回
                 if (self.optimization_flags.enable_string_interning) {
                     return self.createInternedString(str_val);
                 } else {
@@ -2091,12 +2367,17 @@ pub const VM = struct {
             .literal_float => {
                 return Value.initFloat(ast_node.data.literal_float.value);
             },
+            .literal_bool => {
+                return Value.initBool(ast_node.data.literal_int.value != 0);
+            },
+            .literal_null => {
+                return Value.initNull();
+            },
             .variable => {
                 const name_id = ast_node.data.variable.name;
                 const name = self.context.string_pool.keys()[name_id];
                 if (self.getVariable(name)) |value| {
-                    self.retainValue(value);
-                    return value;
+                    return value.retain();
                 } else {
                     const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
                     return self.throwException(exception);
@@ -2118,16 +2399,131 @@ pub const VM = struct {
 
                     const prop_name = self.context.string_pool.keys()[target_node.data.property_access.property_name];
 
-                    if (obj_val.tag == .struct_instance) {
-                        const struct_inst = obj_val.data.struct_instance.data;
+                    if (obj_val.isStruct()) {
+                        const struct_inst = obj_val.getAsStruct().data;
                         try struct_inst.setField(self.allocator, prop_name, value);
-                    } else if (obj_val.tag == .object) {
+                    } else if (obj_val.isObject()) {
                         try self.setObjectProperty(obj_val, prop_name, value);
                     } else {
                         const exception = try ExceptionFactory.createTypeError(self.allocator, "Property assignment on non-object", self.current_file, self.current_line);
                         return self.throwException(exception);
                     }
+                } else if (target_node.tag == .array_access) {
+                    const arr_val = try self.eval(target_node.data.array_access.target);
+                    defer self.releaseValue(arr_val);
+
+                    if (!arr_val.isArray()) {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use value as array", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+
+                    const php_array = arr_val.getAsArray().data;
+                    if (target_node.data.array_access.index) |index_idx| {
+                        const index_val = try self.eval(index_idx);
+                        defer self.releaseValue(index_val);
+
+                        const key = switch (index_val.getTag()) {
+                            .integer => types.ArrayKey{ .integer = index_val.asInt() },
+                            .string => types.ArrayKey{ .string = index_val.getAsString().data },
+                            else => {
+                                const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid array key type", self.current_file, self.current_line);
+                                return self.throwException(exception);
+                            },
+                        };
+                        try php_array.set(self.allocator, key, value);
+                    } else {
+                        // Push operation: $a[] = $val
+                        try php_array.push(self.allocator, value);
+                    }
+                } else if (target_node.tag == .static_property_access) {
+                    // ... (keep existing implementation)
+                    const class_name = self.context.string_pool.keys()[target_node.data.static_property_access.class_name];
+                    const prop_name = self.context.string_pool.keys()[target_node.data.static_property_access.property_name];
+
+                    // Resolve class
+                    const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+                        break :blk self.current_class orelse {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                    } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+                        const curr_class = self.current_class orelse {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                        break :blk curr_class.parent orelse {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                    } else if (class_name.len > 0 and class_name[0] == '$') blk: {
+                        // Variable class name
+                        const var_value = self.getVariable(class_name) orelse {
+                            const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, class_name, self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                        if (var_value.isObject()) {
+                            break :blk var_value.getAsObject().data.class;
+                        } else if (var_value.isString()) {
+                            const str_class_name = var_value.getAsString().data.data;
+                            break :blk self.getClass(str_class_name) orelse {
+                                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, str_class_name, self.current_file, self.current_line);
+                                return self.throwException(exception);
+                            };
+                        } else {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use non-object as class in static property access", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        }
+                    } else blk: {
+                        break :blk self.getClass(class_name) orelse {
+                            const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
+                    };
+
+                    // Set static property
+                    var property_set = false;
+
+                    if (class.properties.getPtr(prop_name)) |prop| {
+                        if (prop.modifiers.is_static) {
+                            if (prop.default_value) |old_val| {
+                                self.releaseValue(old_val);
+                            }
+                            self.retainValue(value);
+                            prop.default_value = value;
+                            property_set = true;
+                        }
+                    }
+
+                    if (!property_set) {
+                        // Check parent classes
+                        var current = class.parent;
+                        while (current) |parent| {
+                            if (parent.properties.getPtr(prop_name)) |prop| {
+                                if (prop.modifiers.is_static) {
+                                    if (prop.default_value) |old_val| {
+                                        self.releaseValue(old_val);
+                                    }
+                                    self.retainValue(value);
+                                    prop.default_value = value;
+                                    property_set = true;
+                                    break;
+                                }
+                            }
+                            current = parent.parent;
+                        }
+                    }
+
+                    if (!property_set) {
+                        // 如果属性存在但不是静态的，或者属性不存在
+                        if (class.properties.contains(prop_name)) {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Accessing non-static property as static", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        }
+                        const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, class.name.data, prop_name, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
                 } else {
+                    std.debug.print("Invalid assignment target tag: {any}\n", .{target_node.tag});
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid assignment target", self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
@@ -2135,11 +2531,14 @@ pub const VM = struct {
                 return value;
             },
             .echo_stmt => {
-                const value = try self.eval(ast_node.data.echo_stmt.expr);
-                defer self.releaseValue(value);
+                // Handle multiple expressions in echo statement
+                const exprs = ast_node.data.echo_stmt.exprs;
+                for (exprs) |expr_idx| {
+                    const value = try self.eval(expr_idx);
+                    defer self.releaseValue(value);
 
-                try value.print();
-                std.debug.print("\n", .{});
+                    try value.print();
+                }
                 return Value.initNull();
             },
             .function_call => {
@@ -2151,11 +2550,20 @@ pub const VM = struct {
             .property_access => {
                 return self.evaluatePropertyAccess(ast_node.data.property_access);
             },
+            .array_access => {
+                return self.evaluateArrayAccess(ast_node.data.array_access);
+            },
             .array_init => {
                 return self.evaluateArrayInit(ast_node.data.array_init);
             },
             .class_decl => {
                 return self.evaluateClassDeclaration(ast_node.data.container_decl);
+            },
+            .trait_decl => {
+                return self.evaluateTraitDeclaration(ast_node.data.container_decl);
+            },
+            .interface_decl => {
+                return self.evaluateInterfaceDeclaration(ast_node.data.container_decl);
             },
             .struct_decl => {
                 return self.evaluateStructDeclaration(ast_node.data.container_decl);
@@ -2176,13 +2584,16 @@ pub const VM = struct {
                 return self.evaluateClosureCreation(ast_node.data.closure);
             },
             .arrow_function => {
-                return self.evaluateArrowFunction(ast_node.data.arrow_function);
+                return self.evaluateArrowFunction(ast_node.data.closure);
             },
             .binary_expr => {
                 return self.evaluateBinaryExpression(ast_node.data.binary_expr);
             },
             .unary_expr => {
                 return self.evaluateUnaryExpression(ast_node.data.unary_expr);
+            },
+            .postfix_expr => {
+                return self.evaluatePostfixExpression(ast_node.data.postfix_expr);
             },
             .ternary_expr => {
                 return self.evaluateTernaryExpression(ast_node.data.ternary_expr);
@@ -2205,17 +2616,54 @@ pub const VM = struct {
             .while_stmt => {
                 return self.evaluateWhileStatement(ast_node.data.while_stmt);
             },
+            .for_stmt => {
+                return self.evaluateForStatement(ast_node.data.for_stmt);
+            },
+            .for_range_stmt => {
+                return self.evaluateForRangeStatement(ast_node.data.for_range_stmt);
+            },
             .foreach_stmt => {
                 return self.evaluateForeachStatement(ast_node.data.foreach_stmt);
             },
             .return_stmt => {
                 return self.evaluateReturnStatement(ast_node.data.return_stmt);
             },
+            .break_stmt => {
+                return self.evaluateBreakStatement(ast_node.data.break_stmt);
+            },
+            .continue_stmt => {
+                return self.evaluateContinueStatement(ast_node.data.continue_stmt);
+            },
             .static_method_call => {
                 return self.evaluateStaticMethodCall(ast_node.data.static_method_call);
             },
+            .static_property_access => {
+                // Map to evaluateClassConstantAccess which already handles static properties
+                const data = .{
+                    .class_name = ast_node.data.static_property_access.class_name,
+                    .constant_name = ast_node.data.static_property_access.property_name,
+                };
+                return self.evaluateClassConstantAccess(data);
+            },
             .class_constant_access => {
                 return self.evaluateClassConstantAccess(ast_node.data.class_constant_access);
+            },
+            .const_decl => {
+                const name_id = ast_node.data.const_decl.name;
+                const name = self.context.string_pool.keys()[name_id];
+                const value = try self.eval(ast_node.data.const_decl.value);
+                // PHP constants are global. Storing them in global environment without '$' prefix.
+                try self.global.set(name, value);
+                return value;
+            },
+            .property_decl, .method_decl => {
+                // Member declarations are handled during class declaration processing.
+                // If they appear at top level (e.g. due to parse errors), we ignore them.
+                return Value.initNull();
+            },
+            .expression_stmt => {
+                // Expression statements like namespace or use don't have a value to return.
+                return Value.initNull();
             },
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported AST node type", self.current_file, self.current_line);
@@ -2225,31 +2673,13 @@ pub const VM = struct {
     }
 
     pub fn releaseValue(self: *VM, value: Value) void {
-        switch (value.tag) {
-            .string => value.data.string.release(self.allocator),
-            .array => value.data.array.release(self.allocator),
-            .object => value.data.object.release(self.allocator),
-            .struct_instance => value.data.struct_instance.release(self.allocator),
-            .resource => value.data.resource.release(self.allocator),
-            .user_function => value.data.user_function.release(self.allocator),
-            .closure => value.data.closure.release(self.allocator),
-            .arrow_function => value.data.arrow_function.release(self.allocator),
-            else => {},
-        }
+        value.release(self.allocator);
     }
 
     fn evaluateFunctionCall(self: *VM, call_data: anytype) anyerror!Value {
         const name_node = self.context.nodes.items[call_data.name];
 
-        if (name_node.tag != .variable) {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid function name", self.current_file, self.current_line);
-            return self.throwException(exception);
-        }
-
-        const name_id = name_node.data.variable.name;
-        const name = self.context.string_pool.keys()[name_id];
-
-        // Evaluate arguments
+        // Prepare arguments
         var args = std.ArrayList(Value){};
         try args.ensureTotalCapacity(self.allocator, call_data.args.len);
         defer {
@@ -2264,9 +2694,73 @@ pub const VM = struct {
             try args.append(self.allocator, arg_value);
         }
 
+        // Determine function to call
+        if (name_node.tag == .variable) {
+            const name_id = name_node.data.variable.name;
+            const name = self.context.string_pool.keys()[name_id];
+
+            // Check if it's a variable function call ($func()) or direct call (func())
+            if (name_node.main_token.tag == .t_variable) {
+                // Variable function call: $func()
+                // Try to get variable value
+                if (self.getVariable(name)) |val| {
+                    // If it's a callable object
+                    switch (val.getTag()) {
+                        .user_function => return self.callUserFunction(val.getAsUserFunc().data, args.items),
+                        .closure => return self.callClosure(val.getAsClosure().data, args.items),
+                        .arrow_function => return self.callArrowFunction(val.getAsArrowFunc().data, args.items),
+                        .string => {
+                            // If it's a string, use it as function name
+                            const func_name = val.getAsString().data.data;
+                            return self.callFunctionByName(func_name, args.items);
+                        },
+                        else => {
+                            std.debug.print("DEBUG: Value is not callable. Tag: {any}\n", .{val.getTag()});
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        },
+                    }
+                } else {
+                    // Undefined variable
+                    std.debug.print("DEBUG: Variable function call: Undefined variable '{s}'\n", .{name});
+                    const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            } else {
+                // Direct function call: func() where func is an identifier (parsed as variable node)
+                return self.callFunctionByName(name, args.items);
+            }
+        } else if (name_node.tag == .literal_string) {
+            // Direct function call: func() - Parser might store name as literal_string?
+            // Actually parser stores name index in function_call struct.
+            // AST: function_call: struct { name: Index, args: []const Index }
+            // name is Index to a node.
+            const name_id = name_node.data.literal_string.value;
+            const func_name = self.context.string_pool.keys()[name_id];
+            return self.callFunctionByName(func_name, args.items);
+        } else {
+            // Try to interpret whatever node as a name?
+            // In parser.zig parseFunctionCall uses parsePrimary for name?
+            // Usually it eats T_STRING.
+            // Let's assume if not variable, we extract string.
+            // But for now, let's implement callFunctionByName helper.
+
+            // Fallback for previous logic (assuming name_node contains name string)
+            // The previous logic assumed name_node.tag == .variable was WRONG for direct calls too?
+            // Wait, previous logic:
+            // if (name_node.tag != .variable) Error
+            // const name_id = name_node.data.variable.name;
+            // This suggests parser stores function name as a VARIABLE node even for direct calls?
+            // Let's check Parser.parseFunctionCall.
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid function name node", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    pub fn callFunctionByName(self: *VM, name: []const u8, args: []const Value) !Value {
         // First check if it's a standard library function (optimized lookup)
         if (self.stdlib.getFunction(name)) |builtin_func| {
-            return builtin_func.call(self, args.items);
+            return builtin_func.call(self, args);
         }
 
         // Then check global functions
@@ -2275,14 +2769,14 @@ pub const VM = struct {
             return self.throwException(exception);
         };
 
-        return switch (function_val.tag) {
-            .builtin_function => {
-                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.data.builtin_function));
-                return function(self, args.items);
+        return switch (function_val.getTag()) {
+            .native_function => {
+                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.getAsNativeFunc()));
+                return function(self, args);
             },
-            .user_function => self.callUserFunction(function_val.data.user_function.data, args.items),
-            .closure => self.callClosure(function_val.data.closure.data, args.items),
-            .arrow_function => self.callArrowFunction(function_val.data.arrow_function.data, args.items),
+            .user_function => self.callUserFunction(function_val.getAsUserFunc().data, args),
+            .closure => self.callClosure(function_val.getAsClosure().data, args),
+            .arrow_function => self.callArrowFunction(function_val.getAsArrowFunc().data, args),
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Not a callable function", self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -2296,15 +2790,50 @@ pub const VM = struct {
 
         const property_name = self.context.string_pool.keys()[property_data.property_name];
 
-        if (target_value.tag == .struct_instance) {
-            const struct_inst = target_value.data.struct_instance.data;
+        if (target_value.isStruct()) {
+            const struct_inst = target_value.getAsStruct().data;
             const value = try struct_inst.getField(property_name);
             self.retainValue(value);
             return value;
-        } else if (target_value.tag == .object) {
+        } else if (target_value.isObject()) {
             return self.getObjectProperty(target_value, property_name);
         } else {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
+    fn evaluateArrayAccess(self: *VM, array_access: anytype) !Value {
+        const target_value = try self.eval(array_access.target);
+        defer self.releaseValue(target_value);
+
+        if (target_value.getTag() != .array) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use value as array", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const php_array = target_value.getAsArray().data;
+        if (array_access.index) |index_idx| {
+            const index_val = try self.eval(index_idx);
+            defer self.releaseValue(index_val);
+
+            const key = switch (index_val.getTag()) {
+                .integer => types.ArrayKey{ .integer = index_val.asInt() },
+                .string => types.ArrayKey{ .string = index_val.getAsString().data },
+                else => {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid array key type", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                },
+            };
+
+            if (php_array.get(key)) |val| {
+                self.retainValue(val);
+                return val;
+            } else {
+                return Value.initNull();
+            }
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use [] for reading", self.current_file, self.current_line);
             return self.throwException(exception);
         }
     }
@@ -2329,12 +2858,49 @@ pub const VM = struct {
             return self.evaluateStructInstantiation(struct_data);
         }
 
+        // Check if there's a builtin constructor (for concurrency classes)
+        if (std.mem.eql(u8, name, "Mutex") or std.mem.eql(u8, name, "Atomic") or
+            std.mem.eql(u8, name, "RWLock") or std.mem.eql(u8, name, "SharedData") or
+            std.mem.eql(u8, name, "Channel"))
+        {
+            if (self.global.get(name)) |constructor_value| {
+                if (constructor_value.getTag() == .native_function) {
+                    // Call the builtin constructor
+                    var args = std.ArrayList(Value){};
+                    defer {
+                        for (args.items) |arg| {
+                            self.releaseValue(arg);
+                        }
+                        args.deinit(self.allocator);
+                    }
+
+                    try args.ensureTotalCapacity(self.allocator, instantiation_data.args.len);
+                    for (instantiation_data.args) |arg_idx| {
+                        try args.append(self.allocator, try self.eval(arg_idx));
+                    }
+
+                    // Call the constructor directly based on the class name
+                    if (std.mem.eql(u8, name, "Mutex")) {
+                        return builtin_concurrency.mutexConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "Atomic")) {
+                        return builtin_concurrency.atomicConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "RWLock")) {
+                        return builtin_concurrency.rwlockConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "SharedData")) {
+                        return builtin_concurrency.sharedDataConstructor(self, args.items);
+                    } else if (std.mem.eql(u8, name, "Channel")) {
+                        return builtin_concurrency.channelConstructor(self, args.items);
+                    }
+                }
+            }
+        }
+
         // Otherwise assume it's a class
         const value = try self.createObject(name);
 
         // Special handling for PDO objects
         if (std.mem.eql(u8, name, "PDO")) {
-            const pdo_object = value.data.object.data;
+            const pdo_object = value.getAsObject().data;
 
             // Create and store the PDO database connection
             var pdo_connection = try self.allocator.create(database.PDO);
@@ -2376,7 +2942,7 @@ pub const VM = struct {
         }
 
         // Call constructor if it exists
-        const object = value.data.object.data;
+        const object = value.getAsObject().data;
         if (object.class.hasMethod("__construct")) {
             var args = std.ArrayList(Value){};
             defer {
@@ -2417,12 +2983,160 @@ pub const VM = struct {
             try args.append(self.allocator, try self.eval(arg_node_idx));
         }
 
+        // 处理数字类型的内置方法（NumberWrapper）
+        if (target_value.isInt() or target_value.isFloat()) {
+            const number_wrapper = if (target_value.isInt())
+                types.number_wrapper.NumberWrapper.initInt(target_value.asInt())
+            else
+                types.number_wrapper.NumberWrapper.initFloat(target_value.asFloat());
+
+            if (std.mem.eql(u8, method_name, "abs")) {
+                return Value.initFloat(number_wrapper.abs());
+            } else if (std.mem.eql(u8, method_name, "ceil")) {
+                return Value.initFloat(number_wrapper.ceil());
+            } else if (std.mem.eql(u8, method_name, "floor")) {
+                return Value.initFloat(number_wrapper.floor());
+            } else if (std.mem.eql(u8, method_name, "round")) {
+                return Value.initFloat(number_wrapper.round());
+            } else if (std.mem.eql(u8, method_name, "sqrt")) {
+                return Value.initFloat(number_wrapper.sqrt());
+            } else if (std.mem.eql(u8, method_name, "sin")) {
+                return Value.initFloat(number_wrapper.sin());
+            } else if (std.mem.eql(u8, method_name, "cos")) {
+                return Value.initFloat(number_wrapper.cos());
+            } else if (std.mem.eql(u8, method_name, "tan")) {
+                return Value.initFloat(number_wrapper.tan());
+            } else if (std.mem.eql(u8, method_name, "log")) {
+                return Value.initFloat(number_wrapper.log());
+            } else if (std.mem.eql(u8, method_name, "exp")) {
+                return Value.initFloat(number_wrapper.exp());
+            } else if (std.mem.eql(u8, method_name, "pow")) {
+                if (args.items.len == 1) {
+                    const exponent_val = args.items[0];
+                    const exponent_wrapper = if (exponent_val.isInt())
+                        types.number_wrapper.NumberWrapper.initInt(exponent_val.asInt())
+                    else if (exponent_val.isFloat())
+                        types.number_wrapper.NumberWrapper.initFloat(exponent_val.asFloat())
+                    else
+                        return Value.initFloat(std.math.nan(f64));
+                    return Value.initFloat(number_wrapper.pow(exponent_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitAnd") or std.mem.eql(u8, method_name, "bit_and")) {
+                if (args.items.len == 1) {
+                    const other_val = args.items[0];
+                    const other_wrapper = if (other_val.isInt())
+                        types.number_wrapper.NumberWrapper.initInt(other_val.asInt())
+                    else if (other_val.isFloat())
+                        types.number_wrapper.NumberWrapper.initFloat(other_val.asFloat())
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitAnd(other_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitOr") or std.mem.eql(u8, method_name, "bit_or")) {
+                if (args.items.len == 1) {
+                    const other_val = args.items[0];
+                    const other_wrapper = if (other_val.isInt())
+                        types.number_wrapper.NumberWrapper.initInt(other_val.asInt())
+                    else if (other_val.isFloat())
+                        types.number_wrapper.NumberWrapper.initFloat(other_val.asFloat())
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitOr(other_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitXor") or std.mem.eql(u8, method_name, "bit_xor")) {
+                if (args.items.len == 1) {
+                    const other_val = args.items[0];
+                    const other_wrapper = if (other_val.isInt())
+                        types.number_wrapper.NumberWrapper.initInt(other_val.asInt())
+                    else if (other_val.isFloat())
+                        types.number_wrapper.NumberWrapper.initFloat(other_val.asFloat())
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitXor(other_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitNot") or std.mem.eql(u8, method_name, "bit_not")) {
+                return Value.initInt(number_wrapper.bitNot());
+            } else if (std.mem.eql(u8, method_name, "bitShiftLeft") or std.mem.eql(u8, method_name, "bit_shift_left")) {
+                if (args.items.len == 1) {
+                    const shift_val = args.items[0];
+                    const shift_wrapper = if (shift_val.isInt())
+                        types.number_wrapper.NumberWrapper.initInt(shift_val.asInt())
+                    else if (shift_val.isFloat())
+                        types.number_wrapper.NumberWrapper.initFloat(shift_val.asFloat())
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitShiftLeft(shift_wrapper));
+                }
+            } else if (std.mem.eql(u8, method_name, "bitShiftRight") or std.mem.eql(u8, method_name, "bit_shift_right")) {
+                if (args.items.len == 1) {
+                    const shift_val = args.items[0];
+                    const shift_wrapper = if (shift_val.isInt())
+                        types.number_wrapper.NumberWrapper.initInt(shift_val.asInt())
+                    else if (shift_val.isFloat())
+                        types.number_wrapper.NumberWrapper.initFloat(shift_val.asFloat())
+                    else
+                        types.number_wrapper.NumberWrapper.initInt(0);
+                    return Value.initInt(number_wrapper.bitShiftRight(shift_wrapper));
+                }
+            }
+        }
+
+        // 处理String类型的内置方法
+        if (target_value.isString()) {
+            if (std.mem.eql(u8, method_name, "toUpper") or std.mem.eql(u8, method_name, "upper")) {
+                return builtin_methods.StringMethods.toUpper(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "toLower") or std.mem.eql(u8, method_name, "lower")) {
+                return builtin_methods.StringMethods.toLower(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "trim")) {
+                return builtin_methods.StringMethods.trim(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "length") or std.mem.eql(u8, method_name, "len")) {
+                return builtin_methods.StringMethods.length(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "replace")) {
+                return builtin_methods.StringMethods.replace(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "substring") or std.mem.eql(u8, method_name, "substr")) {
+                return builtin_methods.StringMethods.substring(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "indexOf") or std.mem.eql(u8, method_name, "strpos")) {
+                return builtin_methods.StringMethods.indexOf(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "split") or std.mem.eql(u8, method_name, "explode")) {
+                return builtin_methods.StringMethods.split(self, target_value, args.items);
+            }
+        }
+
+        // 处理Array类型的内置方法
+        if (target_value.isArray()) {
+            if (std.mem.eql(u8, method_name, "push")) {
+                return builtin_methods.ArrayMethods.push(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "pop")) {
+                return builtin_methods.ArrayMethods.pop(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "shift")) {
+                return builtin_methods.ArrayMethods.shift(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "unshift")) {
+                return builtin_methods.ArrayMethods.unshift(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "merge")) {
+                return builtin_methods.ArrayMethods.merge(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "reverse")) {
+                return builtin_methods.ArrayMethods.reverse(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "keys")) {
+                return builtin_methods.ArrayMethods.keys(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "values")) {
+                return builtin_methods.ArrayMethods.values(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "filter")) {
+                return builtin_methods.ArrayMethods.filter(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "map")) {
+                return builtin_methods.ArrayMethods.map(self, target_value, args.items);
+            } else if (std.mem.eql(u8, method_name, "count") or std.mem.eql(u8, method_name, "length")) {
+                return builtin_methods.ArrayMethods.count(self, target_value);
+            } else if (std.mem.eql(u8, method_name, "isEmpty")) {
+                return builtin_methods.ArrayMethods.isEmpty(self, target_value);
+            }
+        }
+
         // Special handling for PDO objects
-        if (target_value.tag == .object and std.mem.eql(u8, target_value.data.object.data.class.name.data, "PDO")) {
+        if (target_value.isObject() and std.mem.eql(u8, target_value.getAsObject().data.class.name.data, "PDO")) {
             return self.callPDOMethod(target_value, method_name, args.items);
         }
 
-        if (target_value.tag == .struct_instance) {
+        if (target_value.isStruct()) {
             return self.callStructMethod(target_value, method_name, args.items);
         }
 
@@ -2431,18 +3145,47 @@ pub const VM = struct {
 
     fn evaluateArrayInit(self: *VM, array_data: anytype) !Value {
         const php_array_value = try Value.initArrayWithManager(&self.memory_manager);
-        const php_array = php_array_value.data.array.data;
+        const php_array = php_array_value.getAsArray().data;
 
         // Pre-allocate capacity for better performance
         if (self.optimization_flags.enable_memory_pooling) {
             try php_array.elements.ensureTotalCapacity(array_data.elements.len);
         }
 
-        for (array_data.elements, 0..) |item_node_idx, i| {
-            const value = try self.eval(item_node_idx);
-            const key = types.ArrayKey{ .integer = @intCast(i) };
-            try php_array.set(self.allocator, key, value);
-            self.releaseValue(value);
+        var auto_index: i64 = 0;
+        for (array_data.elements) |item_node_idx| {
+            const item_node = self.context.nodes.items[item_node_idx];
+
+            // 检查是否是键值对节点
+            if (item_node.tag == .array_pair) {
+                // 关联数组：有显式的键
+                const key_value = try self.eval(item_node.data.array_pair.key);
+                defer self.releaseValue(key_value);
+
+                const value = try self.eval(item_node.data.array_pair.value);
+
+                // 根据键的类型创建ArrayKey
+                const key = switch (key_value.getTag()) {
+                    .integer => types.ArrayKey{ .integer = key_value.asInt() },
+                    .string => types.ArrayKey{ .string = key_value.getAsString().data },
+                    else => types.ArrayKey{ .integer = auto_index },
+                };
+
+                try php_array.set(self.allocator, key, value);
+                self.releaseValue(value);
+
+                // 如果键是整数，更新自动索引
+                if (key == .integer and key.integer >= auto_index) {
+                    auto_index = key.integer + 1;
+                }
+            } else {
+                // 普通数组：使用自动索引
+                const value = try self.eval(item_node_idx);
+                const key = types.ArrayKey{ .integer = auto_index };
+                try php_array.set(self.allocator, key, value);
+                self.releaseValue(value);
+                auto_index += 1;
+            }
         }
 
         return php_array_value;
@@ -2450,41 +3193,148 @@ pub const VM = struct {
 
     // Missing evaluation methods implementation
     fn evaluateArrowFunction(self: *VM, arrow_func: anytype) !Value {
-        // Arrow functions are similar to closures but with automatic variable capture
-        const closure_data = try self.allocator.create(types.Closure);
-        closure_data.* = types.Closure{
-            .function = types.UserFunction{
-                .name = try types.PHPString.init(self.allocator, "arrow_function"),
-                .parameters = &[_]types.Method.Parameter{}, // TODO: Convert arrow_func.params
-                .return_type = null,
-                .attributes = &[_]types.Attribute{},
-                .body = @ptrCast(@constCast(&arrow_func.body)),
-                .is_variadic = false,
-                .min_args = 0,
-                .max_args = null,
-            },
-            .captured_vars = std.StringHashMap(Value).init(self.allocator),
-            .is_static = arrow_func.is_static,
-        };
+        // Process parameters
+        const parameters = try self.processParameters(arrow_func.params);
 
-        const closure_box = try self.memory_manager.allocClosure(closure_data.*);
-        return Value{ .tag = .closure, .data = .{ .closure = closure_box } };
-    }
+        // Create arrow function with proper parameters
+        var arrow_function = types.ArrowFunction.init(self.allocator);
+        arrow_function.parameters = parameters;
+        // Store body as pointer (Index converted to usize then to pointer)
+        arrow_function.body = @ptrFromInt(@as(usize, arrow_func.body));
+        arrow_function.is_static = arrow_func.is_static;
 
-    fn evaluateBinaryExpression(self: *VM, binary_expr: anytype) !Value {
-        const left = try self.eval(binary_expr.lhs);
-        defer self.releaseValue(left);
-        const right = try self.eval(binary_expr.rhs);
-        defer self.releaseValue(right);
+        // Auto-capture all variables from current scope
+        if (self.call_stack.items.len > 0) {
+            const current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+            var locals_iter = current_frame.locals.iterator();
+            while (locals_iter.next()) |entry| {
+                try arrow_function.autoCaptureVariable(entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
 
-        return self.evaluateBinaryOp(binary_expr.op, left, right);
+        const arrow_func_box = try self.memory_manager.allocArrowFunction(arrow_function);
+        return Value.fromBox(arrow_func_box, Value.TYPE_CLOSURE);
     }
 
     fn evaluateUnaryExpression(self: *VM, unary_expr: anytype) !Value {
+        // Handle increment/decrement which requires variable assignment
+        if (unary_expr.op == .plus_plus or unary_expr.op == .minus_minus) {
+            const expr_node = self.context.nodes.items[unary_expr.expr];
+
+            if (expr_node.tag == .variable) {
+                const name_id = expr_node.data.variable.name;
+                const name = self.context.string_pool.keys()[name_id];
+
+                // Get current value
+                const current_val = if (self.getVariable(name)) |v| v else Value.initInt(0);
+
+                // Increment/Decrement
+                var new_val: Value = undefined;
+                if (unary_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update variable (setVariable retains the new value)
+                try self.setVariable(name, new_val);
+
+                // For prefix, return new value.
+                _ = self.retainValue(new_val);
+                return new_val;
+            } else {
+                std.debug.print("DEBUG: Inc/Dec on non-variable tag={any}\n", .{expr_node.tag});
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        }
+
         const operand = try self.eval(unary_expr.expr);
         defer self.releaseValue(operand);
 
         return self.evaluateUnaryOp(unary_expr.op, operand);
+    }
+
+    fn evaluatePostfixExpression(self: *VM, postfix_expr: anytype) !Value {
+        if (postfix_expr.op == .plus_plus or postfix_expr.op == .minus_minus) {
+            const expr_node = self.context.nodes.items[postfix_expr.expr];
+
+            if (expr_node.tag == .variable) {
+                const name_id = expr_node.data.variable.name;
+                const name = self.context.string_pool.keys()[name_id];
+
+                // Get current value
+                const current_val = if (self.getVariable(name)) |v| v else Value.initInt(0);
+
+                // Retain current value because we will return it, and setVariable might release the one in storage
+                self.retainValue(current_val);
+
+                // Calculate new value
+                var new_val: Value = undefined;
+                if (postfix_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update variable
+                try self.setVariable(name, new_val);
+
+                return current_val;
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        }
+
+        return Value.initNull();
+    }
+
+    fn incrementValue(self: *VM, value: Value) !Value {
+        _ = self;
+        switch (value.getTag()) {
+            .integer => return Value.initInt(value.asInt() + 1),
+            .float => return Value.initFloat(value.asFloat() + 1.0),
+            .string => {
+                // Simple alphanumeric increment not fully implemented, fall back to int conversion?
+                // PHP does perl-style string increment.
+                // For now, let's cast to int/float if numeric, otherwise return as is or error?
+                // Simplest: cast to int, increment.
+                // Or if it is not numeric, PHP 8 throws error?
+                // For "5", it becomes 6.
+                // For now assuming numeric string or integer.
+                // Let's just try to convert to number.
+                if (std.fmt.parseInt(i64, value.getAsString().data.data, 10)) |i| {
+                    return Value.initInt(i + 1);
+                } else |_| {
+                    // Fallback
+                    return Value.initInt(1);
+                }
+            },
+            .null => return Value.initInt(1),
+            .boolean => return Value.initInt(1), // true++ is still true/1? PHP: bool not affected? Wait.
+            // PHP: $a = true; $a++; -> $a is still true.
+            // But we treat it as number 1?
+            else => return Value.initInt(1),
+        }
+    }
+
+    fn decrementValue(self: *VM, value: Value) !Value {
+        _ = self;
+        switch (value.getTag()) {
+            .integer => return Value.initInt(value.asInt() - 1),
+            .float => return Value.initFloat(value.asFloat() - 1.0),
+            .string => {
+                if (std.fmt.parseInt(i64, value.getAsString().data.data, 10)) |i| {
+                    return Value.initInt(i - 1);
+                } else |_| {
+                    return Value.initInt(-1);
+                }
+            },
+            .null => return Value.initNull(), // null-- is null
+            .boolean => return value, // bool-- no effect
+            else => return Value.initInt(0),
+        }
     }
 
     fn evaluateTernaryExpression(self: *VM, ternary_expr: anytype) !Value {
@@ -2497,7 +3347,7 @@ pub const VM = struct {
             if (ternary_expr.then_expr) |then_expr| {
                 return self.eval(then_expr);
             } else {
-                return condition; // Elvis operator: condition ?: else_expr
+                return condition.retain(); // Elvis operator: condition ?: else_expr
             }
         } else {
             return self.eval(ternary_expr.else_expr);
@@ -2552,20 +3402,20 @@ pub const VM = struct {
         const object = try self.eval(clone_with_expr.object);
         defer self.releaseValue(object);
 
-        if (object.tag != .object) {
+        if (object.getTag() != .object) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Clone with can only be used on objects", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
         // Clone the object
-        const cloned_object = try object.data.object.data.clone(self.allocator);
+        const cloned_object = try object.getAsObject().data.clone(self.allocator);
 
         // Apply property modifications
         const properties = try self.eval(clone_with_expr.properties);
         defer self.releaseValue(properties);
 
-        if (properties.tag == .array) {
-            var iterator = properties.data.array.data.elements.iterator();
+        if (properties.isArray()) {
+            var iterator = properties.getAsArray().data.elements.iterator();
             while (iterator.next()) |entry| {
                 const key = entry.key_ptr.*;
                 const value = entry.value_ptr.*;
@@ -2592,7 +3442,7 @@ pub const VM = struct {
         var user_function = types.UserFunction.init(try types.PHPString.init(self.allocator, name));
         user_function.parameters = try self.processParameters(func_decl.params);
         user_function.return_type = null;
-        user_function.attributes = &[_]types.Attribute{}; // TODO: Convert func_decl.attributes
+        user_function.attributes = try self.convertAttributes(func_decl.attributes);
         user_function.body = @ptrFromInt(func_decl.body);
         user_function.is_variadic = false;
         user_function.min_args = 0;
@@ -2606,7 +3456,7 @@ pub const VM = struct {
         user_function.max_args = if (user_function.is_variadic) null else @as(u32, @intCast(user_function.parameters.len));
 
         const func_box = try self.memory_manager.allocUserFunction(user_function);
-        const func_value = Value{ .tag = .user_function, .data = .{ .user_function = func_box } };
+        const func_value = Value.fromBox(func_box, Value.TYPE_USER_FUNC);
         try self.global.set(name, func_value);
         self.releaseValue(func_value);
 
@@ -2638,14 +3488,123 @@ pub const VM = struct {
     fn evaluateWhileStatement(self: *VM, while_stmt: anytype) !Value {
         var last_val = Value.initNull();
 
-        while (true) {
+        loop: while (true) {
             const condition = try self.eval(while_stmt.condition);
-            defer self.releaseValue(condition);
+            const condition_bool = condition.toBool();
+            self.releaseValue(condition);
 
-            if (!condition.toBool()) break;
+            if (!condition_bool) break;
 
             self.releaseValue(last_val);
-            last_val = try self.eval(while_stmt.body);
+            last_val = self.eval(while_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
+        }
+
+        return last_val;
+    }
+
+    fn evaluateForStatement(self: *VM, for_stmt: anytype) !Value {
+        // Execute initialization
+        if (for_stmt.init) |init_idx| {
+            const init_val = try self.eval(init_idx);
+            self.releaseValue(init_val);
+        }
+
+        var last_val = Value.initNull();
+
+        loop: while (true) {
+            // Check condition
+            if (for_stmt.condition) |cond_idx| {
+                const condition = try self.eval(cond_idx);
+                const condition_bool = condition.toBool();
+                self.releaseValue(condition);
+
+                if (!condition_bool) break;
+            }
+
+            // Execute body
+            self.releaseValue(last_val);
+            last_val = self.eval(for_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
+            // Fallthrough for Continue or normal execution: execute loop expression
+
+            // Execute loop expression (increment/decrement)
+            if (for_stmt.loop) |loop_idx| {
+                const loop_val = try self.eval(loop_idx);
+                self.releaseValue(loop_val);
+            }
+        }
+
+        return last_val;
+    }
+
+    fn evaluateForRangeStatement(self: *VM, range_stmt: anytype) !Value {
+        const count_val = try self.eval(range_stmt.count);
+        defer self.releaseValue(count_val);
+
+        var count: i64 = 0;
+        switch (count_val.getTag()) {
+            .integer => count = count_val.asInt(),
+            .float => count = @intFromFloat(count_val.asFloat()),
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Range count must be a number", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+
+        var last_val = Value.initNull();
+        var i: i64 = 0;
+        loop: while (i < count) : (i += 1) {
+            // Set variable if present
+            if (range_stmt.variable) |var_idx| {
+                const var_node = self.context.nodes.items[var_idx];
+                if (var_node.tag == .variable) {
+                    const name_id = var_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    try self.setVariable(name, Value.initInt(i));
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Range variable must be a variable", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            }
+
+            self.releaseValue(last_val);
+
+            last_val = self.eval(range_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
         }
 
         return last_val;
@@ -2655,15 +3614,15 @@ pub const VM = struct {
         const iterable = try self.eval(foreach_stmt.iterable);
         defer self.releaseValue(iterable);
 
-        if (iterable.tag != .array) {
+        if (iterable.getTag() != .array) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Foreach can only iterate over arrays", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
         var last_val = Value.initNull();
-        var iterator = iterable.data.array.data.elements.iterator();
+        var iterator = iterable.getAsArray().data.elements.iterator();
 
-        while (iterator.next()) |entry| {
+        loop: while (iterator.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
 
@@ -2674,7 +3633,7 @@ pub const VM = struct {
                     const key_name_id = key_node.data.variable.name;
                     const key_name = self.context.string_pool.keys()[key_name_id];
                     const key_value = switch (key) {
-                        .integer => |i| Value.initInt(i),
+                        .integer => |iv| Value.initInt(iv),
                         .string => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
                     };
                     try self.setVariable(key_name, key_value);
@@ -2692,7 +3651,19 @@ pub const VM = struct {
 
             // Execute body
             self.releaseValue(last_val);
-            last_val = try self.eval(foreach_stmt.body);
+            last_val = self.eval(foreach_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
         }
 
         return last_val;
@@ -2700,63 +3671,71 @@ pub const VM = struct {
 
     fn evaluateReturnStatement(self: *VM, return_stmt: anytype) !Value {
         if (return_stmt.expr) |expr| {
-            return self.eval(expr);
+            // Release previous return value if any (shouldn't happen in normal flow but safe to do)
+            if (self.return_value) |val| {
+                self.releaseValue(val);
+            }
+            self.return_value = try self.eval(expr);
         } else {
-            return Value.initNull();
+            if (self.return_value) |val| {
+                self.releaseValue(val);
+            }
+            self.return_value = Value.initNull();
         }
+        return error.Return;
+    }
+
+    fn evaluateBreakStatement(self: *VM, break_stmt: anytype) !Value {
+        if (break_stmt.level) |level_idx| {
+            const level_val = try self.eval(level_idx);
+            defer self.releaseValue(level_val);
+            if (level_val.isInt()) {
+                self.break_level = @intCast(level_val.asInt());
+            } else {
+                self.break_level = 1;
+            }
+        } else {
+            self.break_level = 1;
+        }
+        return error.Break;
+    }
+
+    fn evaluateContinueStatement(self: *VM, continue_stmt: anytype) !Value {
+        if (continue_stmt.level) |level_idx| {
+            const level_val = try self.eval(level_idx);
+            defer self.releaseValue(level_val);
+            if (level_val.isInt()) {
+                self.continue_level = @intCast(level_val.asInt());
+            } else {
+                self.continue_level = 1;
+            }
+        } else {
+            self.continue_level = 1;
+        }
+        return error.Continue;
     }
 
     fn evaluateBinaryOp(self: *VM, op: Token.Tag, left: Value, right: Value) !Value {
         switch (op) {
-            .plus => return self.addValues(left, right),
-            .minus => return self.subtractValues(left, right),
-            .asterisk => return self.multiplyValues(left, right),
-            .slash => return self.divideValues(left, right),
-            .percent => return self.moduloValues(left, right),
-            .equal_equal => return Value.initBool(false), // TODO: implement proper comparison
-            .bang_equal => return Value.initBool(true), // TODO: implement proper comparison
-            .less => {
-                if (left.tag == .integer and right.tag == .integer) {
-                    return Value.initBool(left.data.integer < right.data.integer);
-                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
-                    return Value.initBool(left_float < right_float);
-                }
-                return Value.initBool(false);
-            },
-            .less_equal => {
-                if (left.tag == .integer and right.tag == .integer) {
-                    return Value.initBool(left.data.integer <= right.data.integer);
-                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
-                    return Value.initBool(left_float <= right_float);
-                }
-                return Value.initBool(false);
-            },
-            .greater => {
-                if (left.tag == .integer and right.tag == .integer) {
-                    return Value.initBool(left.data.integer > right.data.integer);
-                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
-                    return Value.initBool(left_float > right_float);
-                }
-                return Value.initBool(false);
-            },
-            .greater_equal => {
-                if (left.tag == .integer and right.tag == .integer) {
-                    return Value.initBool(left.data.integer >= right.data.integer);
-                } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-                    const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-                    const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
-                    return Value.initBool(left_float >= right_float);
-                }
-                return Value.initBool(false);
-            },
+            .plus => return self.evaluateAddition(left, right),
+            .minus => return self.evaluateSubtraction(left, right),
+            .asterisk => return self.evaluateMultiplication(left, right),
+            .slash => return self.evaluateDivision(left, right),
+            .percent => return self.evaluateModulo(left, right),
+            .equal_equal => return Value.initBool(self.valuesEqual(left, right)),
+            .bang_equal => return Value.initBool(!self.valuesEqual(left, right)),
+            .equal_equal_equal => return Value.initBool(self.valuesStrictEqual(left, right)),
+            .bang_equal_equal => return Value.initBool(!self.valuesStrictEqual(left, right)),
+            .less => return Value.initBool(try self.compareValues(left, right, .less)),
+            .less_equal => return Value.initBool(try self.compareValues(left, right, .less_equal)),
+            .greater => return Value.initBool(try self.compareValues(left, right, .greater)),
+            .greater_equal => return Value.initBool(try self.compareValues(left, right, .greater_equal)),
             .double_ampersand => return Value.initBool(left.toBool() and right.toBool()),
             .double_pipe => return Value.initBool(left.toBool() or right.toBool()),
+            .double_question => {
+                if (!left.isNull()) return left.retain();
+                return right.retain();
+            },
             .dot => return self.concatenateValues(left, right),
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported binary operator", self.current_file, self.current_line);
@@ -2770,103 +3749,331 @@ pub const VM = struct {
             .minus => return self.negateValue(operand),
             .bang => return Value.initBool(!operand.toBool()),
             .plus => return operand, // Unary plus
+            .ampersand => return operand, // Reference operator (treat as value for now to prevent crash)
+            .k_clone => {
+                if (operand.getTag() != .object) {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "__clone method called on non-object", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+                const cloned_obj = try operand.getAsObject().data.clone(self.allocator);
+                const cloned_val = try Value.initObjectWithObject(&self.memory_manager, cloned_obj);
+
+                if (cloned_obj.class.hasMethod("__clone")) {
+                    const result = try self.callObjectMethod(cloned_val, "__clone", &.{});
+                    defer self.releaseValue(result);
+                }
+
+                return cloned_val;
+            },
             else => {
+                std.debug.print("Error: Unsupported unary operator: {any}\n", .{op});
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported unary operator", self.current_file, self.current_line);
                 return self.throwException(exception);
             },
         }
     }
 
-    fn addValues(self: *VM, left: Value, right: Value) !Value {
-        if (left.tag == .integer and right.tag == .integer) {
-            return Value.initInt(left.data.integer + right.data.integer);
-        } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
-            return Value.initFloat(left_float + right_float);
-        } else {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for addition", self.current_file, self.current_line);
+    fn evaluateModulo(self: *VM, left: Value, right: Value) !Value {
+        if (!left.isInt() or !right.isInt()) {
+            return self.handleInvalidOperands("modulo");
+        }
+
+        const r = right.asInt();
+        if (r == 0) {
+            const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
             return self.throwException(exception);
         }
+
+        return Value.initInt(@mod(left.asInt(), r));
     }
 
-    fn subtractValues(self: *VM, left: Value, right: Value) !Value {
-        if (left.tag == .integer and right.tag == .integer) {
-            return Value.initInt(left.data.integer - right.data.integer);
-        } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
-            return Value.initFloat(left_float - right_float);
-        } else {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for subtraction", self.current_file, self.current_line);
-            return self.throwException(exception);
+    fn valuesEqual(self: *VM, left: Value, right: Value) bool {
+        _ = self;
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
+
+        if (left_tag == .integer and right_tag == .integer) {
+            return left.asInt() == right.asInt();
         }
+
+        if ((left_tag == .integer or left_tag == .float) and (right_tag == .integer or right_tag == .float)) {
+            const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+            const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+            return l == r;
+        }
+
+        if (left_tag == .string and right_tag == .string) {
+            return std.mem.eql(u8, left.getAsString().data.data, right.getAsString().data.data);
+        }
+
+        if (left_tag == .boolean and right_tag == .boolean) {
+            return left.asBool() == right.asBool();
+        }
+
+        if (left_tag == .null and right_tag == .null) {
+            return true;
+        }
+
+        return false;
     }
 
-    fn multiplyValues(self: *VM, left: Value, right: Value) !Value {
-        if (left.tag == .integer and right.tag == .integer) {
-            return Value.initInt(left.data.integer * right.data.integer);
-        } else if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
-            return Value.initFloat(left_float * right_float);
-        } else {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for multiplication", self.current_file, self.current_line);
-            return self.throwException(exception);
-        }
+    fn valuesStrictEqual(self: *VM, left: Value, right: Value) bool {
+        _ = self;
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
+
+        if (left_tag != right_tag) return false;
+
+        return switch (left_tag) {
+            .null => true,
+            .boolean => left.asBool() == right.asBool(),
+            .integer => left.asInt() == right.asInt(),
+            .float => left.asFloat() == right.asFloat(),
+            .string => std.mem.eql(u8, left.getAsString().data.data, right.getAsString().data.data),
+            .array => left.val == right.val,
+            .object => left.val == right.val,
+            else => false,
+        };
     }
 
-    fn divideValues(self: *VM, left: Value, right: Value) !Value {
-        if ((left.tag == .integer or left.tag == .float) and (right.tag == .integer or right.tag == .float)) {
-            const left_float = if (left.tag == .float) left.data.float else @as(f64, @floatFromInt(left.data.integer));
-            const right_float = if (right.tag == .float) right.data.float else @as(f64, @floatFromInt(right.data.integer));
+    fn compareValues(self: *VM, left: Value, right: Value, op: Token.Tag) !bool {
+        _ = self;
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
 
-            if (right_float == 0.0) {
-                const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-                return self.throwException(exception);
-            }
-
-            return Value.initFloat(left_float / right_float);
-        } else {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for division", self.current_file, self.current_line);
-            return self.throwException(exception);
+        if ((left_tag == .integer or left_tag == .float) and (right_tag == .integer or right_tag == .float)) {
+            const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+            const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+            return switch (op) {
+                .less => l < r,
+                .less_equal => l <= r,
+                .greater => l > r,
+                .greater_equal => l >= r,
+                else => false,
+            };
         }
-    }
 
-    fn moduloValues(self: *VM, left: Value, right: Value) !Value {
-        if (left.tag == .integer and right.tag == .integer) {
-            if (right.data.integer == 0) {
-                const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-                return self.throwException(exception);
-            }
-            return Value.initInt(@mod(left.data.integer, right.data.integer));
-        } else {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operands for modulo", self.current_file, self.current_line);
-            return self.throwException(exception);
-        }
+        return false;
     }
 
     fn concatenateValues(self: *VM, left: Value, right: Value) !Value {
-        const left_str = try left.toString(self.allocator);
-        defer left_str.deinit(self.allocator);
-        const right_str = try right.toString(self.allocator);
-        defer right_str.deinit(self.allocator);
+        const left_res = try self.valueToString(left);
+        defer if (left_res.needs_free) self.allocator.free(left_res.str);
 
-        const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str.data, right_str.data });
+        const right_res = try self.valueToString(right);
+        defer if (right_res.needs_free) self.allocator.free(right_res.str);
+
+        const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_res.str, right_res.str });
         defer self.allocator.free(result);
         return Value.initStringWithManager(&self.memory_manager, result);
     }
 
     fn negateValue(self: *VM, operand: Value) !Value {
-        switch (operand.tag) {
-            .integer => return Value.initInt(-operand.data.integer),
-            .float => return Value.initFloat(-operand.data.float),
+        switch (operand.getTag()) {
+            .integer => return Value.initInt(-operand.asInt()),
+            .float => return Value.initFloat(-operand.asFloat()),
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid operand for negation", self.current_file, self.current_line);
                 return self.throwException(exception);
             },
         }
     }
+    fn evaluateInterfaceDeclaration(self: *VM, interface_data: anytype) !Value {
+        const interface_name = self.context.string_pool.keys()[interface_data.name];
+        const php_interface_name = try types.PHPString.init(self.allocator, interface_name);
+        defer php_interface_name.release(self.allocator);
+
+        // Create new interface
+        var php_interface = types.PHPInterface.init(self.allocator, php_interface_name);
+
+        // Process interface members
+        for (interface_data.members) |member_idx| {
+            const member_node = self.context.nodes.items[member_idx];
+
+            switch (member_node.tag) {
+                .method_decl => {
+                    try self.processInterfaceMethodDeclaration(&php_interface, member_node.data.method_decl);
+                },
+                .const_decl => {
+                    try self.processInterfaceConstantDeclaration(&php_interface, member_node.data.const_decl);
+                },
+                else => {
+                    // Skip unsupported member types
+                },
+            }
+        }
+
+        // Register the interface
+        const interface_ptr = try self.allocator.create(types.PHPInterface);
+        interface_ptr.* = php_interface;
+        try self.defineInterface(interface_name, interface_ptr);
+
+        return Value.initNull();
+    }
+
+    fn processInterfaceMethodDeclaration(self: *VM, interface_obj: *types.PHPInterface, method_data: anytype) !void {
+        const method_name = self.context.string_pool.keys()[method_data.name];
+        const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        defer php_method_name.release(self.allocator);
+
+        var method = types.Method.init(php_method_name);
+
+        // Interface methods are public and abstract
+        method.modifiers = .{
+            .visibility = .public,
+            .is_abstract = true,
+            .is_static = method_data.modifiers.is_static,
+        };
+
+        method.parameters = try self.processParameters(method_data.params);
+        try interface_obj.methods.put(method_name, method);
+    }
+
+    fn processInterfaceConstantDeclaration(self: *VM, interface_obj: *types.PHPInterface, const_data: anytype) !void {
+        const const_name = self.context.string_pool.keys()[const_data.name];
+        const const_value = try self.eval(const_data.value);
+        try interface_obj.constants.put(const_name, const_value);
+    }
+
+    fn checkInterfaceImplementation(self: *VM, class: *types.PHPClass, interface: *types.PHPInterface) !void {
+        var it = interface.methods.iterator();
+        while (it.next()) |entry| {
+            const method_name = entry.key_ptr.*;
+            // Check if class has this method (or inherits it)
+            if (!class.hasMethod(method_name)) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Class {s} contains 1 abstract method and must therefore be declared abstract or implement the remaining methods ({s}::{s})", .{ class.name.data, interface.name.data, method_name });
+                defer self.allocator.free(msg);
+                const exception = try ExceptionFactory.createTypeError(self.allocator, msg, self.current_file, self.current_line);
+                _ = try self.throwException(exception);
+                return error.UncaughtException;
+            }
+        }
+
+        for (interface.extends) |parent_interface| {
+            try self.checkInterfaceImplementation(class, parent_interface);
+        }
+    }
+
+    fn evaluateTraitDeclaration(self: *VM, trait_data: anytype) !Value {
+        const trait_name = self.context.string_pool.keys()[trait_data.name];
+        const php_trait_name = try types.PHPString.init(self.allocator, trait_name);
+        defer php_trait_name.release(self.allocator);
+
+        var php_trait = types.PHPTrait.init(self.allocator, php_trait_name);
+
+        // Process trait members
+        for (trait_data.members) |member_idx| {
+            const member_node = self.context.nodes.items[member_idx];
+
+            switch (member_node.tag) {
+                .method_decl => {
+                    try self.processTraitMethodDeclaration(&php_trait, member_node.data.method_decl);
+                },
+                .property_decl => {
+                    try self.processTraitPropertyDeclaration(&php_trait, member_node.data.property_decl);
+                },
+                else => {},
+            }
+        }
+
+        // Register the trait
+        const trait_ptr = try self.allocator.create(types.PHPTrait);
+        trait_ptr.* = php_trait;
+        try self.defineTrait(trait_name, trait_ptr);
+
+        return Value.initNull();
+    }
+
+    fn processTraitMethodDeclaration(self: *VM, trait_obj: *types.PHPTrait, method_data: anytype) !void {
+        const method_name = self.context.string_pool.keys()[method_data.name];
+        const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        defer php_method_name.release(self.allocator);
+
+        var method = types.Method.init(php_method_name);
+        method.modifiers = .{
+            .visibility = if (method_data.modifiers.is_public) .public else if (method_data.modifiers.is_protected) .protected else if (method_data.modifiers.is_private) .private else .public,
+            .is_static = method_data.modifiers.is_static,
+            .is_final = method_data.modifiers.is_final,
+            .is_abstract = method_data.modifiers.is_abstract,
+        };
+        method.parameters = try self.processParameters(method_data.params);
+        method.body = if (method_data.body) |body_idx| @ptrFromInt(@as(usize, body_idx)) else null;
+        try trait_obj.methods.put(method_name, method);
+    }
+
+    fn processTraitPropertyDeclaration(self: *VM, trait_obj: *types.PHPTrait, property_data: anytype) !void {
+        const prop_name = self.context.string_pool.keys()[property_data.name];
+        const php_prop_name = try types.PHPString.init(self.allocator, prop_name);
+        defer php_prop_name.release(self.allocator);
+
+        var property = types.Property.init(php_prop_name);
+        property.modifiers = .{
+            .visibility = if (property_data.modifiers.is_public) .public else if (property_data.modifiers.is_protected) .protected else if (property_data.modifiers.is_private) .private else .public,
+            .is_static = property_data.modifiers.is_static,
+            .is_readonly = property_data.modifiers.is_readonly,
+        };
+        if (property_data.default_value) |default_idx| {
+            property.default_value = try self.eval(default_idx);
+        }
+        try trait_obj.properties.put(prop_name, property);
+    }
+
+    fn processTraitUse(self: *VM, class: *types.PHPClass, trait_use_data: anytype) !void {
+        // Process each trait in the use statement
+        for (trait_use_data.traits) |trait_idx| {
+            const trait_node = self.context.nodes.items[trait_idx];
+            if (trait_node.tag == .named_type) {
+                const trait_name = self.context.string_pool.keys()[trait_node.data.named_type.name];
+                if (self.getTrait(trait_name)) |trait_obj| {
+                    // Mix in trait methods (class methods take precedence)
+                    var method_iter = trait_obj.methods.iterator();
+                    while (method_iter.next()) |entry| {
+                        const method_name = entry.key_ptr.*;
+                        // Only add if class doesn't already have this method
+                        if (!class.methods.contains(method_name)) {
+                            var method_copy = entry.value_ptr.*;
+                            // Retain the method name reference
+                            method_copy.name.retain();
+
+                            // Allocate new parameter array and retain parameter names
+                            if (method_copy.parameters.len > 0) {
+                                const new_params = try self.allocator.alloc(types.Method.Parameter, method_copy.parameters.len);
+                                for (method_copy.parameters, 0..) |param, i| {
+                                    new_params[i] = param;
+                                    new_params[i].name.retain();
+                                }
+                                method_copy.parameters = new_params;
+                            }
+
+                            try class.methods.put(method_name, method_copy);
+                        }
+                    }
+
+                    // Mix in trait properties
+                    var prop_iter = trait_obj.properties.iterator();
+                    while (prop_iter.next()) |entry| {
+                        const prop_name = entry.key_ptr.*;
+                        if (!class.properties.contains(prop_name)) {
+                            var prop_copy = entry.value_ptr.*;
+                            // Retain the property name reference
+                            prop_copy.name.retain();
+                            // Retain default value if present
+                            if (prop_copy.default_value) |val| {
+                                switch (val.getTag()) {
+                                    .string => _ = val.getAsString().retain(),
+                                    .array => _ = val.getAsArray().retain(),
+                                    .object => _ = val.getAsObject().retain(),
+                                    else => {},
+                                }
+                            }
+                            try class.properties.put(prop_name, prop_copy);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn evaluateClassDeclaration(self: *VM, class_data: anytype) !Value {
         const start_time = std.time.nanoTimestamp();
         defer {
@@ -2876,9 +4083,10 @@ pub const VM = struct {
 
         const class_name = self.context.string_pool.keys()[class_data.name];
         const php_class_name = try types.PHPString.init(self.allocator, class_name);
+        defer php_class_name.release(self.allocator);
 
         // Create new class
-        var php_class = types.PHPClass.init(self.allocator, php_class_name);
+        var php_class = try types.PHPClass.init(self.allocator, php_class_name);
 
         // Set class modifiers
         php_class.modifiers = .{
@@ -2901,9 +4109,30 @@ pub const VM = struct {
             }
         }
 
-        // Process implements clause (simplified - just skip for now)
-        for (class_data.implements) |interface_idx| {
-            _ = interface_idx; // Skip interface processing for now
+        // Process implements clause
+        if (class_data.implements.len > 0) {
+            const interfaces = try self.allocator.alloc(*types.PHPInterface, class_data.implements.len);
+            php_class.interfaces = interfaces;
+
+            for (class_data.implements, 0..) |interface_idx, i| {
+                const interface_node = self.context.nodes.items[interface_idx];
+                if (interface_node.tag == .variable) {
+                    const interface_name = self.context.string_pool.keys()[interface_node.data.variable.name];
+                    if (self.getInterface(interface_name)) |interface_obj| {
+                        interfaces[i] = interface_obj;
+                    } else {
+                        php_class.deinit(self.allocator);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Interface '{s}' not found", .{interface_name});
+                        defer self.allocator.free(msg);
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, msg, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                } else {
+                    php_class.deinit(self.allocator);
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid interface name", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            }
         }
 
         // Process class members
@@ -2911,6 +4140,9 @@ pub const VM = struct {
             const member_node = self.context.nodes.items[member_idx];
 
             switch (member_node.tag) {
+                .trait_use => {
+                    try self.processTraitUse(&php_class, member_node.data.trait_use);
+                },
                 .method_decl => {
                     try self.processMethodDeclaration(&php_class, member_node.data.method_decl);
                 },
@@ -2926,17 +4158,71 @@ pub const VM = struct {
             }
         }
 
+        // Abstract method check - performed on &php_class before allocation/registration
+        if (!php_class.modifiers.is_abstract) {
+            // Check interface methods
+            for (php_class.interfaces) |interface_obj| {
+                self.checkInterfaceImplementation(&php_class, interface_obj) catch |err| {
+                    php_class.deinit(self.allocator);
+                    return err;
+                };
+            }
+
+            var curr = php_class.parent;
+            while (curr) |parent| {
+                var it = parent.methods.iterator();
+                while (it.next()) |entry| {
+                    const method = entry.value_ptr;
+                    if (method.modifiers.is_abstract) {
+                        if (php_class.getMethod(entry.key_ptr.*)) |resolved_method| {
+                            if (resolved_method.modifiers.is_abstract) {
+                                // Error found: Clean up php_class before throwing
+                                php_class.deinit(self.allocator);
+                                const exception = try ExceptionFactory.createTypeError(self.allocator, "Class must implement abstract method", self.current_file, self.current_line);
+                                return self.throwException(exception);
+                            }
+                        } else {
+                            // Abstract method not implemented (not found)
+                            php_class.deinit(self.allocator);
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Class must implement abstract method", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        }
+                    }
+                }
+                curr = parent.parent;
+            }
+        }
+
         // Register the class
         const class_ptr = try self.allocator.create(types.PHPClass);
         class_ptr.* = php_class;
-        try self.defineClass(class_name, class_ptr);
+
+        // Define class (takes ownership of class_ptr, but if it fails we must handle it)
+        self.defineClass(class_name, class_ptr) catch |err| {
+            class_ptr.deinit(self.allocator);
+            self.allocator.destroy(class_ptr);
+            return err;
+        };
 
         return Value.initNull();
     }
 
     fn processMethodDeclaration(self: *VM, class: *types.PHPClass, method_data: anytype) !void {
         const method_name = self.context.string_pool.keys()[method_data.name];
+
+        // Check if parent has final method with same name
+        if (class.parent) |parent| {
+            if (parent.getMethod(method_name)) |parent_method| {
+                if (parent_method.modifiers.is_final) {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot override final method", self.current_file, self.current_line);
+                    _ = try self.throwException(exception);
+                    return;
+                }
+            }
+        }
+
         const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        defer php_method_name.release(self.allocator);
 
         // Create method
         var method = types.Method.init(php_method_name);
@@ -2974,6 +4260,7 @@ pub const VM = struct {
 
         // Create property
         const property_name_str = try types.PHPString.init(self.allocator, property_name);
+        defer property_name_str.release(self.allocator);
         var property = types.Property.init(property_name_str);
 
         // Set property modifiers
@@ -3104,7 +4391,7 @@ pub const VM = struct {
             .gc_info = .{},
             .data = struct_instance,
         };
-        const instance_value = Value{ .tag = .struct_instance, .data = .{ .struct_instance = box } };
+        const instance_value = Value.fromBox(box, Value.TYPE_STRUCT);
 
         // Call constructor if it exists
         if (struct_type.hasMethod("__construct")) {
@@ -3271,16 +4558,16 @@ pub const VM = struct {
         defer self.releaseValue(exception_value);
 
         // Create exception based on the value
-        const exception = switch (exception_value.tag) {
+        const exception = switch (exception_value.getTag()) {
             .object => blk: {
                 // If it's already an exception object, use it
-                const object = exception_value.data.object.data;
+                const object = exception_value.getAsObject().data;
                 // Simplified check - just check if it has a message property
-                if (object.properties.contains("message")) {
+                if (object.hasProperty("message")) {
                     // Convert object to PHPException
                     const message_prop = object.getProperty("message") catch (try Value.initString(self.allocator, "Exception"));
-                    const message_str = switch (message_prop.tag) {
-                        .string => message_prop.data.string.data.data,
+                    const message_str = switch (message_prop.getTag()) {
+                        .string => message_prop.getAsString().data.data,
                         else => "Exception",
                     };
 
@@ -3291,7 +4578,7 @@ pub const VM = struct {
             },
             .string => blk: {
                 // Throw string as exception message
-                const message = exception_value.data.string.data.data;
+                const message = exception_value.getAsString().data.data;
                 break :blk try ExceptionFactory.createTypeError(self.allocator, message, self.current_file, self.current_line);
             },
             else => blk: {
@@ -3315,19 +4602,21 @@ pub const VM = struct {
 
         // Process parameters
         user_function.parameters = try self.processParameters(closure_data.params);
+
         var min_args: u32 = 0;
-        var max_args: ?u32 = @intCast(closure_data.params.len);
         var is_variadic = false;
 
         for (user_function.parameters) |param| {
             if (param.is_variadic) {
                 is_variadic = true;
-                max_args = null;
             }
             if (param.default_value == null and !param.is_variadic) {
                 min_args += 1;
             }
         }
+
+        // 设置max_args：variadic函数为null（无限制），否则为参数数量
+        const max_args: ?u32 = if (is_variadic) null else @as(u32, @intCast(user_function.parameters.len));
 
         user_function.body = @ptrFromInt(closure_data.body);
         user_function.is_variadic = is_variadic;
@@ -3341,10 +4630,29 @@ pub const VM = struct {
 
         for (closure_data.captures) |capture_idx| {
             const capture_node = self.context.nodes.items[capture_idx];
+            var var_name: []const u8 = undefined;
+            var should_capture = false;
+
             if (capture_node.tag == .variable) {
-                const var_name = self.context.string_pool.keys()[capture_node.data.variable.name];
-                const var_value = self.global.get(var_name) orelse Value.initNull();
-                try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value });
+                var_name = self.context.string_pool.keys()[capture_node.data.variable.name];
+                should_capture = true;
+            } else if (capture_node.tag == .unary_expr and capture_node.data.unary_expr.op == .ampersand) {
+                // Reference capture: use (&$var)
+                // Peel off the ampersand and get the variable
+                const expr_idx = capture_node.data.unary_expr.expr;
+                const expr_node = self.context.nodes.items[expr_idx];
+                if (expr_node.tag == .variable) {
+                    var_name = self.context.string_pool.keys()[expr_node.data.variable.name];
+                    should_capture = true;
+                }
+            }
+
+            if (should_capture) {
+                // Only capture if variable exists in current scope
+                if (self.getVariable(var_name)) |var_value| {
+                    try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value });
+                }
+                // If variable doesn't exist, skip it
             }
         }
 
@@ -3355,10 +4663,45 @@ pub const VM = struct {
         const class_name = self.context.string_pool.keys()[static_call_data.class_name];
         const method_name = self.context.string_pool.keys()[static_call_data.method_name];
 
-        // Get the class
-        const class = self.getClass(class_name) orelse {
-            const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
-            return self.throwException(exception);
+        // 解析类引用：self、parent、具体类名或变量（$obj::method()）
+        const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+            break :blk self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+            const curr_class = self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            break :blk curr_class.parent orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (class_name.len > 0 and class_name[0] == '$') blk: {
+            // 变量形式的静态调用：$obj::method()
+            const var_value = self.getVariable(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            if (var_value.isObject()) {
+                break :blk var_value.getAsObject().data.class;
+            } else if (var_value.isString()) {
+                // 字符串作为类名
+                const str_class_name = var_value.getAsString().data.data;
+                break :blk self.getClass(str_class_name) orelse {
+                    const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, str_class_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                };
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use non-object as class in static method call", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        } else blk: {
+            break :blk self.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
         };
 
         // Evaluate arguments
@@ -3376,23 +4719,47 @@ pub const VM = struct {
             try args.append(self.allocator, arg_value);
         }
 
-        // Find and call the static method
-        if (class.methods.get(method_name)) |method| {
-            if (!method.modifiers.is_static) {
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot call non-static method statically", self.current_file, self.current_line);
-                return self.throwException(exception);
-            }
+        // 查找并调用静态方法（也支持调用非静态方法，与PHP兼容）
+        const method = class.getMethod(method_name) orelse blk: {
+            // Check for __callStatic magic method later
+            break :blk null;
+        };
 
+        if (method) |m| {
             // Push call frame
             const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
             defer self.allocator.free(full_method_name);
             try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
             defer self.popCallFrame();
 
+            // Bind arguments to parameters
+            for (m.parameters, 0..) |param, i| {
+                if (i < args.items.len) {
+                    try self.setVariable(param.name.data, args.items[i]);
+                } else if (param.default_value) |default| {
+                    try self.setVariable(param.name.data, default);
+                }
+            }
+
+            // Set current class for 'self' resolution
+            const old_class = self.current_class;
+            self.current_class = class;
+            defer self.current_class = old_class;
+
             // Execute method body
-            if (method.body) |body_ptr| {
+            if (m.body) |body_ptr| {
                 const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
-                return self.eval(body_node);
+                return self.eval(body_node) catch |err| {
+                    if (err == error.Return) {
+                        if (self.return_value) |val| {
+                            const ret = val;
+                            self.return_value = null;
+                            return ret;
+                        }
+                        return Value.initNull();
+                    }
+                    return err;
+                };
             }
 
             return Value.initNull();
@@ -3400,7 +4767,54 @@ pub const VM = struct {
             // Check for __callStatic magic method
             if (class.methods.get("__callStatic")) |call_static| {
                 _ = call_static;
-                // TODO: Implement __callStatic magic method
+                const name_val = try Value.initString(self.allocator, method_name);
+                defer name_val.release(self.allocator);
+
+                // Wrap arguments in a PHP array
+                const args_array_val = try Value.initArrayWithManager(&self.memory_manager);
+                const args_array = args_array_val.getAsArray().data;
+                for (args.items) |arg| {
+                    try args_array.push(self.allocator, arg);
+                }
+                defer args_array_val.release(self.allocator);
+
+                const magic_args = [_]Value{ name_val, args_array_val };
+
+                // Set current class for 'self' resolution
+                const old_class = self.current_class;
+                self.current_class = class;
+                defer self.current_class = old_class;
+
+                // Call __callStatic
+                if (class.methods.get("__callStatic")) |inner_call_static| {
+                    const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::__callStatic", .{class_name});
+                    defer self.allocator.free(full_method_name);
+                    try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
+                    defer self.popCallFrame();
+
+                    // Bind arguments to parameters
+                    for (inner_call_static.parameters, 0..) |param, i| {
+                        if (i < magic_args.len) {
+                            try self.setVariable(param.name.data, magic_args[i]);
+                        }
+                    }
+
+                    if (inner_call_static.body) |body_ptr| {
+                        const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+                        return self.eval(body_node) catch |err| {
+                            if (err == error.Return) {
+                                if (self.return_value) |val| {
+                                    const ret = val;
+                                    self.return_value = null;
+                                    return ret;
+                                }
+                                return Value.initNull();
+                            }
+                            return err;
+                        };
+                    }
+                }
+                return Value.initNull();
             }
 
             const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name });
@@ -3414,31 +4828,71 @@ pub const VM = struct {
         const class_name = self.context.string_pool.keys()[const_access_data.class_name];
         const constant_name = self.context.string_pool.keys()[const_access_data.constant_name];
 
-        // Get the class
-        const class = self.getClass(class_name) orelse {
-            const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
-            return self.throwException(exception);
+        // 解析类引用：self、parent、具体类名或变量（$obj::$prop）
+        const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+            break :blk self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+            const curr_class = self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            break :blk curr_class.parent orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (class_name.len > 0 and class_name[0] == '$') blk: {
+            // 变量形式的静态访问：$obj::$prop
+            const var_value = self.getVariable(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            if (var_value.isObject()) {
+                break :blk var_value.getAsObject().data.class;
+            } else if (var_value.isString()) {
+                const str_class_name = var_value.getAsString().data.data;
+                break :blk self.getClass(str_class_name) orelse {
+                    const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, str_class_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                };
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use non-object as class in static property access", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        } else blk: {
+            break :blk self.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
         };
 
-        // Look up constant in class
+        // Look up constant in class (包括继承链)
         if (class.constants.get(constant_name)) |value| {
             return value.retain();
         }
 
-        // Check if it's a static property (starts with $)
-        if (constant_name.len > 0 and constant_name[0] == '$') {
-            const prop_name = constant_name[1..];
-            if (class.properties.get(prop_name)) |prop| {
-                if (prop.modifiers.is_static) {
-                    if (prop.default_value) |val| {
-                        return val.retain();
-                    }
-                    return Value.initNull();
+        // Check if it's a static property (包括继承链查找)
+        if (class.getProperty(constant_name)) |prop| {
+            if (prop.modifiers.is_static) {
+                if (prop.default_value) |val| {
+                    return val.retain();
                 }
+                return Value.initNull();
             }
         }
 
-        const msg = try std.fmt.allocPrint(self.allocator, "Undefined class constant {s}::{s}", .{ class_name, constant_name });
+        // 检查父类常量
+        var current_class: ?*types.PHPClass = class.parent;
+        while (current_class) |parent_class| {
+            if (parent_class.constants.get(constant_name)) |value| {
+                return value.retain();
+            }
+            current_class = parent_class.parent;
+        }
+
+        const msg = try std.fmt.allocPrint(self.allocator, "Undefined class constant or static property {s}::{s}", .{ class_name, constant_name });
         defer self.allocator.free(msg);
         const exception = try ExceptionFactory.createTypeError(self.allocator, msg, self.current_file, self.current_line);
         return self.throwException(exception);

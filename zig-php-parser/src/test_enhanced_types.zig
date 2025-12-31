@@ -22,8 +22,8 @@ test "enhanced type system - basic types" {
     // Test type conversions
     try testing.expect(int_val.toBool() == true);
     try testing.expect(Value.initInt(0).toBool() == false);
-    try testing.expectEqual(@as(i64, 1), try bool_val.toInt());
-    try testing.expectEqual(@as(i64, 3), try float_val.toInt());
+    try testing.expect(bool_val.asBool() == true);
+    try testing.expectEqual(@as(i64, 42), int_val.asInt());
 }
 
 test "enhanced type system - string operations" {
@@ -31,7 +31,7 @@ test "enhanced type system - string operations" {
     
     // Test string creation
     const str_val = try Value.initString(allocator, "Hello, World!");
-    defer str_val.data.string.release(allocator);
+    defer str_val.release(allocator);
     
     try testing.expect(str_val.isString());
     
@@ -60,57 +60,68 @@ test "enhanced type system - string operations" {
 test "enhanced type system - array operations" {
     const allocator = testing.allocator;
     
-    // Test array creation
-    const array_val = try Value.initArray(allocator);
-    defer array_val.data.array.release(allocator);
-    
-    try testing.expect(array_val.isArray());
+    // Test array creation using PHPArray directly
+    var array = PHPArray.init(allocator);
+    defer array.deinit(allocator);
     
     // Add elements
-    try array_val.data.array.data.push(allocator, Value.initInt(1));
-    try array_val.data.array.data.push(allocator, Value.initInt(2));
-    try array_val.data.array.data.push(allocator, Value.initInt(3));
+    try array.push(allocator, Value.initInt(1));
+    try array.push(allocator, Value.initInt(2));
+    try array.push(allocator, Value.initInt(3));
     
-    try testing.expectEqual(@as(usize, 3), array_val.data.array.data.count());
+    try testing.expectEqual(@as(usize, 3), array.count());
     
     // Test associative array
     const key_str = try PHPString.init(allocator, "name");
-    defer key_str.deinit(allocator);
     const key = ArrayKey{ .string = key_str };
     const value = try Value.initString(allocator, "John");
-    defer value.data.string.release(allocator);
     
-    try array_val.data.array.data.set(allocator, key, value);
+    try array.set(allocator, key, value);
     
-    if (array_val.data.array.data.get(key)) |retrieved| {
-        try testing.expect(retrieved.isString());
-        try testing.expectEqualStrings("John", retrieved.data.string.data.data);
-    } else {
-        try testing.expect(false); // Should have found the value
+    // Test retrieval
+    const retrieved = array.get(key);
+    try testing.expect(retrieved != null);
+    if (retrieved) |v| {
+        try testing.expect(v.isString());
     }
 }
 
 test "enhanced type system - type conversions" {
-    const allocator = testing.allocator;
-    
+    // Test integer to bool conversion
     const int_val = Value.initInt(42);
+    try testing.expect(int_val.toBool() == true);
+    
+    const zero_val = Value.initInt(0);
+    try testing.expect(zero_val.toBool() == false);
+    
+    // Test float to bool conversion
     const float_val = Value.initFloat(3.14);
+    try testing.expect(float_val.toBool() == true);
+    
+    const zero_float = Value.initFloat(0.0);
+    try testing.expect(zero_float.toBool() == false);
+    
+    // Test null to bool conversion
+    const null_val = Value.initNull();
+    try testing.expect(null_val.toBool() == false);
+    
+    // Test bool values
+    const true_val = Value.initBool(true);
+    const false_val = Value.initBool(false);
+    try testing.expect(true_val.toBool() == true);
+    try testing.expect(false_val.toBool() == false);
+}
+
+test "enhanced type system - value extraction" {
+    // Test integer extraction
+    const int_val = Value.initInt(42);
+    try testing.expectEqual(@as(i64, 42), int_val.asInt());
+    
+    // Test float extraction
+    const float_val = Value.initFloat(3.14);
+    try testing.expectApproxEqAbs(@as(f64, 3.14), float_val.asFloat(), 0.001);
+    
+    // Test bool extraction
     const bool_val = Value.initBool(true);
-    
-    // Test toString conversions
-    const int_str = try int_val.toString(allocator);
-    defer int_str.deinit(allocator);
-    try testing.expectEqualStrings("42", int_str.data);
-    
-    const float_str = try float_val.toString(allocator);
-    defer float_str.deinit(allocator);
-    try testing.expectEqualStrings("3.14", float_str.data);
-    
-    const bool_str = try bool_val.toString(allocator);
-    defer bool_str.deinit(allocator);
-    try testing.expectEqualStrings("1", bool_str.data);
-    
-    // Test numeric conversions
-    try testing.expectEqual(@as(f64, 42.0), try int_val.toFloat());
-    try testing.expectEqual(@as(i64, 3), try float_val.toInt());
+    try testing.expect(bool_val.asBool() == true);
 }

@@ -559,7 +559,7 @@ pub const ReflectionMethod = struct {
         
         // Bind $this if object is provided
         if (object) |obj| {
-            const this_value = Value{ .tag = .object, .data = .{ .object = undefined } }; // Would be properly set
+            const this_value = Value.fromBox(undefined, Value.TYPE_OBJECT); // Would be properly set
             try closure.captureVariable("this", this_value);
             _ = obj; // Use obj to create proper binding
         }
@@ -573,7 +573,7 @@ pub const ReflectionMethod = struct {
         box.data.* = closure;
         
         _ = vm; // Would be used for proper closure creation
-        return Value{ .tag = .closure, .data = .{ .closure = box } };
+        return Value.fromBox(box, Value.TYPE_CLOSURE);
     }
 };
 
@@ -1003,7 +1003,7 @@ pub const ReflectionFunction = struct {
         box.data.* = closure;
         
         _ = vm; // Would be used for proper closure creation
-        return Value{ .tag = .closure, .data = .{ .closure = box } };
+        return Value.fromBox(box, Value.TYPE_CLOSURE);
     }
 };
 
@@ -1087,26 +1087,25 @@ pub const ReflectionObject = struct {
     }
     
     pub fn hasProperty(self: *const ReflectionObject, name: []const u8) bool {
-        return self.object.properties.contains(name) or self.object.class.hasProperty(name);
+        return self.object.hasProperty(name) or self.object.class.hasProperty(name);
     }
     
     pub fn getProperties(self: *ReflectionObject) ![]Value {
-        var properties = std.ArrayList(Value){};
+        var properties: std.ArrayList(Value) = .empty;
         defer properties.deinit(self.allocator);
         
-        var iterator = self.object.properties.iterator();
-        while (iterator.next()) |entry| {
-            try properties.append(self.allocator, entry.value_ptr.*);
+        for (self.object.property_values.items) |val| {
+            try properties.append(self.allocator, val);
         }
         
         return properties.toOwnedSlice(self.allocator);
     }
     
     pub fn getPropertyNames(self: *const ReflectionObject) ![][]const u8 {
-        var names = std.ArrayList([]const u8){};
+        var names: std.ArrayList([]const u8) = .empty;
         defer names.deinit(self.allocator);
         
-        var iterator = self.object.properties.iterator();
+        var iterator = self.object.shape.property_map.iterator();
         while (iterator.next()) |entry| {
             try names.append(self.allocator, entry.key_ptr.*);
         }
@@ -1222,7 +1221,7 @@ pub const ReflectionSystem = struct {
     
     pub fn createAttributeClass(self: *ReflectionSystem, name: []const u8, target: types.Attribute.AttributeTarget) !*PHPClass {
         const class_name = try PHPString.init(self.allocator, name);
-        var attribute_class = PHPClass.init(self.allocator, class_name);
+        var attribute_class = try PHPClass.init(self.allocator, class_name);
         
         // Mark as attribute class
         attribute_class.modifiers.is_final = true; // Attributes are typically final
