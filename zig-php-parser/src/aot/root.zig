@@ -65,6 +65,17 @@ pub const getBuiltinReturnType = TypeInferenceMod.getBuiltinReturnType;
 pub const IRGeneratorMod = @import("ir_generator.zig");
 pub const IRGenerator = IRGeneratorMod.IRGenerator;
 
+// AOT Compiler module
+pub const CompilerMod = @import("compiler.zig");
+pub const AOTCompiler = CompilerMod.AOTCompiler;
+pub const CompileResult = CompilerMod.CompileResult;
+pub const CompileError = CompilerMod.CompileError;
+pub const CompileOptions = CompilerMod.CompileOptions;
+pub const OptimizeLevel = CompilerMod.OptimizeLevel;
+pub const Target = CompilerMod.Target;
+pub const supported_targets = CompilerMod.supported_targets;
+pub const listTargets = CompilerMod.listTargets;
+
 // Runtime Library module
 pub const RuntimeLib = @import("runtime_lib.zig");
 pub const PHPValue = RuntimeLib.PHPValue;
@@ -113,206 +124,10 @@ test {
     _ = @import("test_codegen_property.zig");
     _ = @import("linker.zig");
     _ = @import("test_linker_property.zig");
+    _ = @import("compiler.zig");
 }
 
-/// AOT Compiler configuration options
-pub const CompileOptions = struct {
-    /// Input PHP source file path
-    input_file: []const u8,
-    /// Output executable file path (optional, defaults to input name without .php)
-    output_file: ?[]const u8 = null,
-    /// Target platform triple
-    target: Target = Target.native(),
-    /// Optimization level
-    optimize_level: OptimizeLevel = .debug,
-    /// Generate fully static linked executable
-    static_link: bool = true,
-    /// Generate debug information
-    debug_info: bool = true,
-    /// Dump generated IR for debugging
-    dump_ir: bool = false,
-    /// Dump parsed AST for debugging
-    dump_ast: bool = false,
-    /// Verbose output during compilation
-    verbose: bool = false,
-};
-
-/// Optimization levels for AOT compilation
-pub const OptimizeLevel = enum {
-    /// Debug mode: no optimizations, full debug info
-    debug,
-    /// Release safe: optimizations with safety checks
-    release_safe,
-    /// Release fast: maximum performance optimizations
-    release_fast,
-    /// Release small: optimize for binary size
-    release_small,
-
-    pub fn toString(self: OptimizeLevel) []const u8 {
-        return switch (self) {
-            .debug => "debug",
-            .release_safe => "release-safe",
-            .release_fast => "release-fast",
-            .release_small => "release-small",
-        };
-    }
-
-    pub fn fromString(str: []const u8) ?OptimizeLevel {
-        if (std.mem.eql(u8, str, "debug")) return .debug;
-        if (std.mem.eql(u8, str, "release-safe")) return .release_safe;
-        if (std.mem.eql(u8, str, "release-fast")) return .release_fast;
-        if (std.mem.eql(u8, str, "release-small")) return .release_small;
-        return null;
-    }
-};
-
-/// Target platform specification
-pub const Target = struct {
-    arch: Arch,
-    os: OS,
-    abi: ABI,
-
-    pub const Arch = enum {
-        x86_64,
-        aarch64,
-        arm,
-
-        pub fn toString(self: Arch) []const u8 {
-            return switch (self) {
-                .x86_64 => "x86_64",
-                .aarch64 => "aarch64",
-                .arm => "arm",
-            };
-        }
-    };
-
-    pub const OS = enum {
-        linux,
-        macos,
-        windows,
-
-        pub fn toString(self: OS) []const u8 {
-            return switch (self) {
-                .linux => "linux",
-                .macos => "macos",
-                .windows => "windows",
-            };
-        }
-    };
-
-    pub const ABI = enum {
-        gnu,
-        musl,
-        msvc,
-        none,
-
-        pub fn toString(self: ABI) []const u8 {
-            return switch (self) {
-                .gnu => "gnu",
-                .musl => "musl",
-                .msvc => "msvc",
-                .none => "none",
-            };
-        }
-    };
-
-    /// Get the native target for the current platform
-    pub fn native() Target {
-        const builtin = @import("builtin");
-        return .{
-            .arch = switch (builtin.cpu.arch) {
-                .x86_64 => .x86_64,
-                .aarch64 => .aarch64,
-                .arm => .arm,
-                else => .x86_64, // Default fallback
-            },
-            .os = switch (builtin.os.tag) {
-                .linux => .linux,
-                .macos => .macos,
-                .windows => .windows,
-                else => .linux, // Default fallback
-            },
-            .abi = switch (builtin.os.tag) {
-                .linux => .gnu,
-                .macos => .none,
-                .windows => .msvc,
-                else => .gnu,
-            },
-        };
-    }
-
-    /// Parse target from triple string (e.g., "x86_64-linux-gnu")
-    pub fn fromString(triple: []const u8) !Target {
-        var it = std.mem.splitScalar(u8, triple, '-');
-
-        const arch_str = it.next() orelse return error.InvalidTarget;
-        const os_str = it.next() orelse return error.InvalidTarget;
-        const abi_str = it.next();
-
-        const arch: Arch = if (std.mem.eql(u8, arch_str, "x86_64"))
-            .x86_64
-        else if (std.mem.eql(u8, arch_str, "aarch64"))
-            .aarch64
-        else if (std.mem.eql(u8, arch_str, "arm"))
-            .arm
-        else
-            return error.InvalidTarget;
-
-        const os: OS = if (std.mem.eql(u8, os_str, "linux"))
-            .linux
-        else if (std.mem.eql(u8, os_str, "macos") or std.mem.eql(u8, os_str, "darwin"))
-            .macos
-        else if (std.mem.eql(u8, os_str, "windows"))
-            .windows
-        else
-            return error.InvalidTarget;
-
-        const abi: ABI = if (abi_str) |s| blk: {
-            if (std.mem.eql(u8, s, "gnu")) break :blk .gnu;
-            if (std.mem.eql(u8, s, "musl")) break :blk .musl;
-            if (std.mem.eql(u8, s, "msvc")) break :blk .msvc;
-            break :blk .none;
-        } else switch (os) {
-            .linux => .gnu,
-            .macos => .none,
-            .windows => .msvc,
-        };
-
-        return .{ .arch = arch, .os = os, .abi = abi };
-    }
-
-    /// Convert target to triple string
-    pub fn toTriple(self: Target, allocator: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{
-            self.arch.toString(),
-            self.os.toString(),
-            self.abi.toString(),
-        });
-    }
-};
-
-/// List of all supported target platforms
-pub const supported_targets = [_][]const u8{
-    "x86_64-linux-gnu",
-    "x86_64-linux-musl",
-    "aarch64-linux-gnu",
-    "aarch64-linux-musl",
-    "x86_64-macos-none",
-    "aarch64-macos-none",
-    "x86_64-windows-msvc",
-    "aarch64-windows-msvc",
-};
-
-/// Print list of supported targets to stdout
-pub fn listTargets(writer: anytype) !void {
-    try writer.writeAll("Supported target platforms:\n\n");
-    for (supported_targets) |target| {
-        try writer.print("  {s}\n", .{target});
-    }
-    try writer.writeAll("\nUse --target=<triple> to specify a target platform.\n");
-}
-
-// Tests
+// Tests for re-exported types
 test "Target.native" {
     const target = Target.native();
     _ = target.arch.toString();
