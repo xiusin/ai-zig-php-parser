@@ -8,6 +8,7 @@ const PHPArray = types.PHPArray;
 const Property = types.Property;
 const Method = types.Method;
 const gc = types.gc;
+const Shape = types.Shape;
 
 /// PHP内置类管理器
 /// 提供stdClass、Exception、Iterator等内置类
@@ -28,11 +29,8 @@ pub const BuiltinClassManager = struct {
     }
 
     pub fn deinit(self: *BuiltinClassManager) void {
-        var iter = self.classes.iterator();
-        while (iter.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
+        // Classes have been moved to VM.classes, so we don't release them here
+        // VM.deinit will handle the cleanup
         self.classes.deinit();
     }
 
@@ -50,6 +48,7 @@ pub const BuiltinClassManager = struct {
             .hooks = &[_]types.PropertyHook{},
         };
         try class.properties.put(name, property);
+        _ = try class.shape.addProperty(name);
     }
 
     fn registerBuiltinClasses(self: *BuiltinClassManager) !void {
@@ -79,7 +78,8 @@ pub const BuiltinClassManager = struct {
     fn registerPDOClass(self: *BuiltinClassManager) !void {
         const pdo_name = try PHPString.init(self.allocator, "PDO");
         const pdo_class = try self.allocator.create(PHPClass);
-        pdo_class.* = PHPClass.init(self.allocator, pdo_name);
+        pdo_class.* = try PHPClass.init(self.allocator, pdo_name);
+        pdo_name.release(self.allocator);
 
         // PDO属性
         try self.addProperty(pdo_class, "connection", .private, null);
@@ -106,7 +106,8 @@ pub const BuiltinClassManager = struct {
         // PDOStatement类
         const pdo_stmt_name = try PHPString.init(self.allocator, "PDOStatement");
         const pdo_stmt_class = try self.allocator.create(PHPClass);
-        pdo_stmt_class.* = PHPClass.init(self.allocator, pdo_stmt_name);
+        pdo_stmt_class.* = try PHPClass.init(self.allocator, pdo_stmt_name);
+        pdo_stmt_name.release(self.allocator);
 
         try self.addProperty(pdo_stmt_class, "connection", .private, null);
         try self.addProperty(pdo_stmt_class, "sql", .private, null);
@@ -123,7 +124,8 @@ pub const BuiltinClassManager = struct {
     fn registerStdClass(self: *BuiltinClassManager) !void {
         const class_name = try PHPString.init(self.allocator, "stdClass");
         const class = try self.allocator.create(PHPClass);
-        class.* = PHPClass.init(self.allocator, class_name);
+        class.* = try PHPClass.init(self.allocator, class_name);
+        class_name.release(self.allocator);
 
         // stdClass不需要任何预定义属性或方法
         // 它是一个完全动态的类
@@ -136,7 +138,8 @@ pub const BuiltinClassManager = struct {
         // 基础Exception类
         const exception_name = try PHPString.init(self.allocator, "Exception");
         const exception_class = try self.allocator.create(PHPClass);
-        exception_class.* = PHPClass.init(self.allocator, exception_name);
+        exception_class.* = try PHPClass.init(self.allocator, exception_name);
+        exception_name.release(self.allocator);
 
         // 添加Exception属性
         try self.addProperty(exception_class, "message", .public, null);
@@ -150,46 +153,58 @@ pub const BuiltinClassManager = struct {
         // Error类
         const error_name = try PHPString.init(self.allocator, "Error");
         const error_class = try self.allocator.create(PHPClass);
-        error_class.* = PHPClass.init(self.allocator, error_name);
+        error_class.* = try PHPClass.init(self.allocator, error_name);
+        error_name.release(self.allocator);
         try self.addProperty(error_class, "message", .public, null);
         try self.addProperty(error_class, "code", .public, null);
         try self.addProperty(error_class, "file", .protected, null);
         try self.addProperty(error_class, "line", .protected, null);
+
         try self.classes.put("Error", error_class);
 
         // TypeError
         const type_error_name = try PHPString.init(self.allocator, "TypeError");
         const type_error_class = try self.allocator.create(PHPClass);
-        type_error_class.* = PHPClass.init(self.allocator, type_error_name);
+        type_error_class.* = try PHPClass.init(self.allocator, type_error_name);
+        type_error_name.release(self.allocator);
         type_error_class.parent = error_class;
+
         try self.classes.put("TypeError", type_error_class);
 
         // ArgumentCountError
         const arg_count_error_name = try PHPString.init(self.allocator, "ArgumentCountError");
         const arg_count_error_class = try self.allocator.create(PHPClass);
-        arg_count_error_class.* = PHPClass.init(self.allocator, arg_count_error_name);
+        arg_count_error_class.* = try PHPClass.init(self.allocator, arg_count_error_name);
+        arg_count_error_name.release(self.allocator);
         arg_count_error_class.parent = type_error_class;
+
         try self.classes.put("ArgumentCountError", arg_count_error_class);
 
         // RuntimeException
         const runtime_exception_name = try PHPString.init(self.allocator, "RuntimeException");
         const runtime_exception_class = try self.allocator.create(PHPClass);
-        runtime_exception_class.* = PHPClass.init(self.allocator, runtime_exception_name);
+        runtime_exception_class.* = try PHPClass.init(self.allocator, runtime_exception_name);
+        runtime_exception_name.release(self.allocator);
         runtime_exception_class.parent = exception_class;
+
         try self.classes.put("RuntimeException", runtime_exception_class);
 
         // InvalidArgumentException
         const invalid_arg_name = try PHPString.init(self.allocator, "InvalidArgumentException");
         const invalid_arg_class = try self.allocator.create(PHPClass);
-        invalid_arg_class.* = PHPClass.init(self.allocator, invalid_arg_name);
+        invalid_arg_class.* = try PHPClass.init(self.allocator, invalid_arg_name);
+        invalid_arg_name.release(self.allocator);
         invalid_arg_class.parent = exception_class;
+
         try self.classes.put("InvalidArgumentException", invalid_arg_class);
 
         // LogicException
         const logic_exception_name = try PHPString.init(self.allocator, "LogicException");
         const logic_exception_class = try self.allocator.create(PHPClass);
-        logic_exception_class.* = PHPClass.init(self.allocator, logic_exception_name);
+        logic_exception_class.* = try PHPClass.init(self.allocator, logic_exception_name);
+        logic_exception_name.release(self.allocator);
         logic_exception_class.parent = exception_class;
+
         try self.classes.put("LogicException", logic_exception_class);
     }
 
@@ -198,14 +213,16 @@ pub const BuiltinClassManager = struct {
         // Traversable接口（标记接口）
         const traversable_name = try PHPString.init(self.allocator, "Traversable");
         const traversable_class = try self.allocator.create(PHPClass);
-        traversable_class.* = PHPClass.init(self.allocator, traversable_name);
+        traversable_class.* = try PHPClass.init(self.allocator, traversable_name);
+        traversable_name.release(self.allocator);
         traversable_class.modifiers.is_abstract = true;
         try self.classes.put("Traversable", traversable_class);
 
         // Iterator接口
         const iterator_name = try PHPString.init(self.allocator, "Iterator");
         const iterator_class = try self.allocator.create(PHPClass);
-        iterator_class.* = PHPClass.init(self.allocator, iterator_name);
+        iterator_class.* = try PHPClass.init(self.allocator, iterator_name);
+        iterator_name.release(self.allocator);
         iterator_class.modifiers.is_abstract = true;
         // Iterator方法: current(), key(), next(), rewind(), valid()
         try self.classes.put("Iterator", iterator_class);
@@ -213,14 +230,16 @@ pub const BuiltinClassManager = struct {
         // IteratorAggregate接口
         const iterator_agg_name = try PHPString.init(self.allocator, "IteratorAggregate");
         const iterator_agg_class = try self.allocator.create(PHPClass);
-        iterator_agg_class.* = PHPClass.init(self.allocator, iterator_agg_name);
+        iterator_agg_class.* = try PHPClass.init(self.allocator, iterator_agg_name);
+        iterator_agg_name.release(self.allocator);
         iterator_agg_class.modifiers.is_abstract = true;
         try self.classes.put("IteratorAggregate", iterator_agg_class);
 
         // ArrayIterator类
         const array_iterator_name = try PHPString.init(self.allocator, "ArrayIterator");
         const array_iterator_class = try self.allocator.create(PHPClass);
-        array_iterator_class.* = PHPClass.init(self.allocator, array_iterator_name);
+        array_iterator_class.* = try PHPClass.init(self.allocator, array_iterator_name);
+        array_iterator_name.release(self.allocator);
         try self.addProperty(array_iterator_class, "storage", .private, null);
         try self.addProperty(array_iterator_class, "position", .private, null);
         try self.classes.put("ArrayIterator", array_iterator_class);
@@ -230,7 +249,8 @@ pub const BuiltinClassManager = struct {
     fn registerArrayAccess(self: *BuiltinClassManager) !void {
         const array_access_name = try PHPString.init(self.allocator, "ArrayAccess");
         const array_access_class = try self.allocator.create(PHPClass);
-        array_access_class.* = PHPClass.init(self.allocator, array_access_name);
+        array_access_class.* = try PHPClass.init(self.allocator, array_access_name);
+        array_access_name.release(self.allocator);
         array_access_class.modifiers.is_abstract = true;
         // ArrayAccess方法: offsetExists(), offsetGet(), offsetSet(), offsetUnset()
         try self.classes.put("ArrayAccess", array_access_class);
@@ -238,14 +258,16 @@ pub const BuiltinClassManager = struct {
         // Countable接口
         const countable_name = try PHPString.init(self.allocator, "Countable");
         const countable_class = try self.allocator.create(PHPClass);
-        countable_class.* = PHPClass.init(self.allocator, countable_name);
+        countable_class.* = try PHPClass.init(self.allocator, countable_name);
+        countable_name.release(self.allocator);
         countable_class.modifiers.is_abstract = true;
         try self.classes.put("Countable", countable_class);
 
         // ArrayObject类
         const array_object_name = try PHPString.init(self.allocator, "ArrayObject");
         const array_object_class = try self.allocator.create(PHPClass);
-        array_object_class.* = PHPClass.init(self.allocator, array_object_name);
+        array_object_class.* = try PHPClass.init(self.allocator, array_object_name);
+        array_object_name.release(self.allocator);
         try self.addProperty(array_object_class, "storage", .private, null);
         try self.classes.put("ArrayObject", array_object_class);
     }
@@ -254,7 +276,8 @@ pub const BuiltinClassManager = struct {
     fn registerClosureClass(self: *BuiltinClassManager) !void {
         const closure_name = try PHPString.init(self.allocator, "Closure");
         const closure_class = try self.allocator.create(PHPClass);
-        closure_class.* = PHPClass.init(self.allocator, closure_name);
+        closure_class.* = try PHPClass.init(self.allocator, closure_name);
+        closure_name.release(self.allocator);
         closure_class.modifiers.is_final = true;
         // Closure方法: bind(), bindTo(), call(), fromCallable()
         try self.classes.put("Closure", closure_class);
@@ -265,14 +288,16 @@ pub const BuiltinClassManager = struct {
         // DateTimeInterface
         const datetime_interface_name = try PHPString.init(self.allocator, "DateTimeInterface");
         const datetime_interface_class = try self.allocator.create(PHPClass);
-        datetime_interface_class.* = PHPClass.init(self.allocator, datetime_interface_name);
+        datetime_interface_class.* = try PHPClass.init(self.allocator, datetime_interface_name);
+        datetime_interface_name.release(self.allocator);
         datetime_interface_class.modifiers.is_abstract = true;
         try self.classes.put("DateTimeInterface", datetime_interface_class);
 
         // DateTime类
         const datetime_name = try PHPString.init(self.allocator, "DateTime");
         const datetime_class = try self.allocator.create(PHPClass);
-        datetime_class.* = PHPClass.init(self.allocator, datetime_name);
+        datetime_class.* = try PHPClass.init(self.allocator, datetime_name);
+        datetime_name.release(self.allocator);
         try self.addProperty(datetime_class, "timestamp", .private, null);
         try self.addProperty(datetime_class, "timezone", .private, null);
         try self.classes.put("DateTime", datetime_class);
@@ -280,7 +305,8 @@ pub const BuiltinClassManager = struct {
         // DateTimeImmutable类
         const datetime_immutable_name = try PHPString.init(self.allocator, "DateTimeImmutable");
         const datetime_immutable_class = try self.allocator.create(PHPClass);
-        datetime_immutable_class.* = PHPClass.init(self.allocator, datetime_immutable_name);
+        datetime_immutable_class.* = try PHPClass.init(self.allocator, datetime_immutable_name);
+        datetime_immutable_name.release(self.allocator);
         try self.addProperty(datetime_immutable_class, "timestamp", .private, null);
         try self.addProperty(datetime_immutable_class, "timezone", .private, null);
         try self.classes.put("DateTimeImmutable", datetime_immutable_class);
@@ -288,7 +314,8 @@ pub const BuiltinClassManager = struct {
         // DateInterval类
         const date_interval_name = try PHPString.init(self.allocator, "DateInterval");
         const date_interval_class = try self.allocator.create(PHPClass);
-        date_interval_class.* = PHPClass.init(self.allocator, date_interval_name);
+        date_interval_class.* = try PHPClass.init(self.allocator, date_interval_name);
+        date_interval_name.release(self.allocator);
         try self.addProperty(date_interval_class, "y", .public, null);
         try self.addProperty(date_interval_class, "m", .public, null);
         try self.addProperty(date_interval_class, "d", .public, null);
@@ -300,7 +327,8 @@ pub const BuiltinClassManager = struct {
         // DateTimeZone类
         const datetime_zone_name = try PHPString.init(self.allocator, "DateTimeZone");
         const datetime_zone_class = try self.allocator.create(PHPClass);
-        datetime_zone_class.* = PHPClass.init(self.allocator, datetime_zone_name);
+        datetime_zone_class.* = try PHPClass.init(self.allocator, datetime_zone_name);
+        datetime_zone_name.release(self.allocator);
         try self.addProperty(datetime_zone_class, "name", .private, null);
         try self.classes.put("DateTimeZone", datetime_zone_class);
     }
@@ -309,6 +337,7 @@ pub const BuiltinClassManager = struct {
     fn addPDOMethod(self: *BuiltinClassManager, class: *PHPClass, method_name: []const u8, _: u32) !void {
         const method_name_str = try PHPString.init(self.allocator, method_name);
         var method = types.Method.init(method_name_str);
+        method_name_str.release(self.allocator);
 
         // 设置方法为公共的
         method.modifiers = .{
@@ -331,6 +360,7 @@ pub const BuiltinClassManager = struct {
     fn addConstructorMethod(self: *BuiltinClassManager, class: *PHPClass) !void {
         const method_name = try PHPString.init(self.allocator, "__construct");
         var method = types.Method.init(method_name);
+        method_name.release(self.allocator);
 
         // 构造函数是公共的
         method.modifiers = .{
@@ -364,7 +394,7 @@ pub const BuiltinClassManager = struct {
         const std_class = self.classes.get("stdClass") orelse return error.StdClassNotFound;
 
         const php_object = try self.allocator.create(PHPObject);
-        php_object.* = PHPObject.init(self.allocator, std_class);
+        php_object.* = try PHPObject.init(self.allocator, std_class);
 
         const box = try self.allocator.create(gc.Box(*PHPObject));
         box.* = .{
@@ -373,7 +403,7 @@ pub const BuiltinClassManager = struct {
             .data = php_object,
         };
 
-        return Value{ .tag = .object, .data = .{ .object = box } };
+        return Value.fromBox(box, Value.TYPE_OBJECT);
     }
 
     /// 创建Exception实例
@@ -381,7 +411,7 @@ pub const BuiltinClassManager = struct {
         const exception_class = self.classes.get("Exception") orelse return error.ExceptionClassNotFound;
 
         const php_object = try self.allocator.create(PHPObject);
-        php_object.* = PHPObject.init(self.allocator, exception_class);
+        php_object.* = try PHPObject.init(self.allocator, exception_class);
 
         // 设置message属性
         const msg_value = try Value.initString(self.allocator, message);
@@ -398,7 +428,7 @@ pub const BuiltinClassManager = struct {
             .data = php_object,
         };
 
-        return Value{ .tag = .object, .data = .{ .object = box } };
+        return Value.fromBox(box, Value.TYPE_OBJECT);
     }
 };
 
@@ -505,5 +535,5 @@ test "builtin class manager" {
     // 测试创建stdClass实例
     const std_obj = try manager.createStdClass();
     defer std_obj.release(allocator);
-    try std.testing.expect(std_obj.tag == .object);
+    try std.testing.expect(std_obj.getTag() == .object);
 }

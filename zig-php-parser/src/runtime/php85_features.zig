@@ -189,7 +189,7 @@ pub const Uri = struct {
 pub const PipeOperator = struct {
     pub fn evaluate(vm: *VM, left: Value, right: Value) !Value {
         // left |> right equivalent to right(left)
-        switch (right.tag) {
+        switch (right.getTag()) {
             .builtin_function => {
                 const func = right.data.builtin_function;
                 const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(func));
@@ -278,13 +278,13 @@ pub fn registerUriFunctions(stdlib: *@import("stdlib.zig").StandardLibrary) !voi
 fn uriParseFn(vm: *VM, args: []const Value) !Value {
     const uri_string = args[0];
     
-    if (uri_string.tag != .string) {
+    if (uri_string.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "uri_parse() expects parameter 1 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
     
-    const uri = try Uri.parse(uri_string.data.string.data, vm.allocator);
+    const uri = try Uri.parse(uri_string.getAsString().data, vm.allocator);
     
     // Create PHP array with URI components
     var result_array = try vm.allocator.create(PHPArray);
@@ -299,7 +299,7 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .data = scheme,
         };
         
-        const scheme_val = Value{ .tag = .string, .data = .{ .string = scheme_box } };
+        const scheme_val = Value.fromBox(scheme_box, Value.TYPE_STRING);
         try result_array.set(vm.allocator, scheme_key, scheme_val);
         vm.releaseValue(scheme_val);
     }
@@ -313,7 +313,7 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .data = host,
         };
         
-        const host_val = Value{ .tag = .string, .data = .{ .string = host_box } };
+        const host_val = Value.fromBox(host_box, Value.TYPE_STRING);
         try result_array.set(vm.allocator, host_key, host_val);
         vm.releaseValue(host_val);
     }
@@ -332,7 +332,7 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .data = path,
         };
         
-        const path_val = Value{ .tag = .string, .data = .{ .string = path_box } };
+        const path_val = Value.fromBox(path_box, Value.TYPE_STRING);
         try result_array.set(vm.allocator, path_key, path_val);
         vm.releaseValue(path_val);
     }
@@ -346,7 +346,7 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .data = query,
         };
         
-        const query_val = Value{ .tag = .string, .data = .{ .string = query_box } };
+        const query_val = Value.fromBox(query_box, Value.TYPE_STRING);
         try result_array.set(vm.allocator, query_key, query_val);
         vm.releaseValue(query_val);
     }
@@ -360,7 +360,7 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
             .data = fragment,
         };
         
-        const fragment_val = Value{ .tag = .string, .data = .{ .string = fragment_box } };
+        const fragment_val = Value.fromBox(fragment_box, Value.TYPE_STRING);
         try result_array.set(vm.allocator, fragment_key, fragment_val);
         vm.releaseValue(fragment_val);
     }
@@ -372,13 +372,13 @@ fn uriParseFn(vm: *VM, args: []const Value) !Value {
         .data = result_array,
     };
     
-    return Value{ .tag = .array, .data = .{ .array = box } };
+    return Value.fromBox(box, Value.TYPE_ARRAY);
 }
 
 fn uriBuildFn(vm: *VM, args: []const Value) !Value {
     const components = args[0];
     
-    if (components.tag != .array) {
+    if (components.getTag() != .array) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "uri_build() expects parameter 1 to be array", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
@@ -388,44 +388,44 @@ fn uriBuildFn(vm: *VM, args: []const Value) !Value {
     
     // Extract components from array
     const scheme_key = types.ArrayKey{ .string = try PHPString.init(vm.allocator, "scheme") };
-    if (components.data.array.data.get(scheme_key)) |scheme_val| {
-        if (scheme_val.tag == .string) {
-            uri.scheme = try PHPString.init(vm.allocator, scheme_val.data.string.data.data);
+    if (components.getAsArray().data.get(scheme_key)) |scheme_val| {
+        if (scheme_val.getTag() == .string) {
+            uri.scheme = try PHPString.init(vm.allocator, scheme_val.getAsString().data.data);
         }
     }
     
     const host_key = types.ArrayKey{ .string = try PHPString.init(vm.allocator, "host") };
-    if (components.data.array.data.get(host_key)) |host_val| {
-        if (host_val.tag == .string) {
-            uri.host = try PHPString.init(vm.allocator, host_val.data.string.data.data);
+    if (components.getAsArray().data.get(host_key)) |host_val| {
+        if (host_val.getTag() == .string) {
+            uri.host = try PHPString.init(vm.allocator, host_val.getAsString().data.data);
         }
     }
     
     const port_key = types.ArrayKey{ .string = try PHPString.init(vm.allocator, "port") };
-    if (components.data.array.data.get(port_key)) |port_val| {
-        if (port_val.tag == .integer) {
-            uri.port = @intCast(port_val.data.integer);
+    if (components.getAsArray().data.get(port_key)) |port_val| {
+        if (port_val.getTag() == .integer) {
+            uri.port = @intCast(port_val.asInt());
         }
     }
     
     const path_key = types.ArrayKey{ .string = try PHPString.init(vm.allocator, "path") };
-    if (components.data.array.data.get(path_key)) |path_val| {
-        if (path_val.tag == .string) {
-            uri.path = try PHPString.init(vm.allocator, path_val.data.string.data.data);
+    if (components.getAsArray().data.get(path_key)) |path_val| {
+        if (path_val.getTag() == .string) {
+            uri.path = try PHPString.init(vm.allocator, path_val.getAsString().data.data);
         }
     }
     
     const query_key = types.ArrayKey{ .string = try PHPString.init(vm.allocator, "query") };
-    if (components.data.array.data.get(query_key)) |query_val| {
-        if (query_val.tag == .string) {
-            uri.query = try PHPString.init(vm.allocator, query_val.data.string.data.data);
+    if (components.getAsArray().data.get(query_key)) |query_val| {
+        if (query_val.getTag() == .string) {
+            uri.query = try PHPString.init(vm.allocator, query_val.getAsString().data.data);
         }
     }
     
     const fragment_key = types.ArrayKey{ .string = try PHPString.init(vm.allocator, "fragment") };
-    if (components.data.array.data.get(fragment_key)) |fragment_val| {
-        if (fragment_val.tag == .string) {
-            uri.fragment = try PHPString.init(vm.allocator, fragment_val.data.string.data.data);
+    if (components.getAsArray().data.get(fragment_key)) |fragment_val| {
+        if (fragment_val.getTag() == .string) {
+            uri.fragment = try PHPString.init(vm.allocator, fragment_val.getAsString().data.data);
         }
     }
     
@@ -438,21 +438,21 @@ fn uriBuildFn(vm: *VM, args: []const Value) !Value {
         .data = result_str,
     };
     
-    return Value{ .tag = .string, .data = .{ .string = box } };
+    return Value.fromBox(box, Value.TYPE_STRING);
 }
 
 fn uriResolveFn(vm: *VM, args: []const Value) !Value {
     const base_uri = args[0];
     const relative_uri = args[1];
     
-    if (base_uri.tag != .string or relative_uri.tag != .string) {
+    if (base_uri.getTag() != .string or relative_uri.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "uri_resolve() expects both parameters to be strings", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
     
-    const base = try Uri.parse(base_uri.data.string.data, vm.allocator);
-    const resolved = try base.resolve(relative_uri.data.string.data, vm.allocator);
+    const base = try Uri.parse(base_uri.getAsString().data, vm.allocator);
+    const resolved = try base.resolve(relative_uri.getAsString().data, vm.allocator);
     
     const result_str = try resolved.toString(vm.allocator);
     
@@ -463,5 +463,5 @@ fn uriResolveFn(vm: *VM, args: []const Value) !Value {
         .data = result_str,
     };
     
-    return Value{ .tag = .string, .data = .{ .string = box } };
+    return Value.fromBox(box, Value.TYPE_STRING);
 }

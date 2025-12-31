@@ -8,6 +8,12 @@ const PHPClass = types.PHPClass;
 const gc = types.gc;
 const net = std.net;
 const Thread = std.Thread;
+const coroutine = @import("coroutine.zig");
+const CoroutineManager = coroutine.CoroutineManager;
+const http_client = @import("http_client.zig");
+const request_arena = @import("request_arena.zig");
+const RequestArena = request_arena.RequestArena;
+const RequestArenaPool = request_arena.RequestArenaPool;
 
 /// PHP内置HTTP服务器
 /// 提供类似Bun的高性能HTTP服务能力
@@ -22,6 +28,11 @@ pub const HttpServer = struct {
     max_connections: u32,
     keep_alive_timeout: u64,
     request_timeout: u64,
+    coroutine_manager: ?*CoroutineManager,
+    request_context_pool: std.ArrayList(*RequestContext),
+    active_requests: std.atomic.Value(u32),
+    /// 请求级Arena池 - 用于高效的请求内存管理 (Requirements: 4.1, 4.2, 4.3)
+    arena_pool: ?*RequestArenaPool,
 
     pub const Config = struct {
         host: []const u8 = "127.0.0.1",
@@ -30,31 +41,151 @@ pub const HttpServer = struct {
         keep_alive_timeout: u64 = 5000, // ms
         request_timeout: u64 = 30000, // ms
         worker_count: u32 = 0, // 0 = auto (CPU count)
+        enable_coroutines: bool = true, // 启用协程处理
+        context_pool_size: u32 = 100, // 上下文池大小
+        enable_request_arena: bool = true, // 启用请求级Arena内存管理
+        arena_pool_size: u32 = 50, // Arena池大小
+    };
+
+    /// 请求上下文 - 每个请求独立的上下文，防止数据串扰
+    pub const RequestContext = struct {
+        id: u64,
+        request: ?*const HttpRequest,
+        response: ?*HttpResponse,
+        locals: std.StringHashMap(Value),
+        start_time: i64,
+        allocator: std.mem.Allocator,
+        parent_vm: *anyopaque,
+        coroutine_id: ?u64,
+        /// 请求级Arena - 用于请求内的快速内存分配 (Requirements: 4.1, 4.2)
+        arena: ?*RequestArena,
+
+        pub fn init(allocator: std.mem.Allocator, id: u64, parent_vm: *anyopaque) RequestContext {
+            return RequestContext{
+                .id = id,
+                .request = null,
+                .response = null,
+                .locals = std.StringHashMap(Value).init(allocator),
+                .start_time = std.time.milliTimestamp(),
+                .allocator = allocator,
+                .parent_vm = parent_vm,
+                .coroutine_id = null,
+                .arena = null,
+            };
+        }
+
+        pub fn deinit(self: *RequestContext) void {
+            var iter = self.locals.iterator();
+            while (iter.next()) |entry| {
+                entry.value_ptr.*.release(self.allocator);
+            }
+            self.locals.deinit();
+            // Arena由ArenaPool管理，不在这里释放
+        }
+
+        pub fn reset(self: *RequestContext, id: u64) void {
+            var iter = self.locals.iterator();
+            while (iter.next()) |entry| {
+                entry.value_ptr.*.release(self.allocator);
+            }
+            self.locals.clearRetainingCapacity();
+            self.id = id;
+            self.request = null;
+            self.response = null;
+            self.start_time = std.time.milliTimestamp();
+            self.coroutine_id = null;
+            // Arena会在acquireContext时重新分配
+            self.arena = null;
+        }
+
+        /// 获取请求局部变量
+        pub fn getLocal(self: *RequestContext, name: []const u8) ?Value {
+            return self.locals.get(name);
+        }
+
+        /// 设置请求局部变量
+        pub fn setLocal(self: *RequestContext, name: []const u8, value: Value) !void {
+            if (self.locals.get(name)) |old| {
+                old.release(self.allocator);
+            }
+            _ = value.retain();
+            try self.locals.put(name, value);
+        }
+
+        /// 获取请求执行时间（毫秒）
+        pub fn getElapsedTime(self: *RequestContext) i64 {
+            return std.time.milliTimestamp() - self.start_time;
+        }
     };
 
     pub fn init(allocator: std.mem.Allocator, config: Config, vm: *anyopaque) !HttpServer {
         const address = try net.Address.parseIp4(config.host, config.port);
 
-        return HttpServer{
+        var server = HttpServer{
             .allocator = allocator,
             .address = address,
             .server = null,
             .running = std.atomic.Value(bool).init(false),
             .handler = null,
             .vm = vm,
-            .worker_threads = std.ArrayList(Thread).init(allocator),
+            .worker_threads = .empty,
             .max_connections = config.max_connections,
             .keep_alive_timeout = config.keep_alive_timeout,
             .request_timeout = config.request_timeout,
+            .coroutine_manager = null,
+            .request_context_pool = .empty,
+            .active_requests = std.atomic.Value(u32).init(0),
+            .arena_pool = null,
         };
+
+        // 初始化协程管理器
+        if (config.enable_coroutines) {
+            server.coroutine_manager = try allocator.create(CoroutineManager);
+            server.coroutine_manager.?.* = CoroutineManager.init(allocator);
+        }
+
+        // 初始化请求级Arena池 (Requirements: 4.1, 4.2, 4.3)
+        if (config.enable_request_arena) {
+            server.arena_pool = try allocator.create(RequestArenaPool);
+            server.arena_pool.?.* = RequestArenaPool.init(allocator, allocator, config.arena_pool_size);
+        }
+
+        // 预分配上下文池
+        var i: u32 = 0;
+        while (i < config.context_pool_size) : (i += 1) {
+            const ctx = try allocator.create(RequestContext);
+            ctx.* = RequestContext.init(allocator, 0, vm);
+            try server.request_context_pool.append(allocator, ctx);
+        }
+
+        return server;
     }
 
     pub fn deinit(self: *HttpServer) void {
         self.stop();
-        self.worker_threads.deinit();
+        self.worker_threads.deinit(self.allocator);
         if (self.handler) |h| {
             h.release(self.allocator);
         }
+
+        // 清理协程管理器
+        if (self.coroutine_manager) |cm| {
+            cm.deinit();
+            self.allocator.destroy(cm);
+        }
+
+        // 清理请求级Arena池 (Requirements: 4.6)
+        if (self.arena_pool) |pool| {
+            pool.deinit();
+            self.allocator.destroy(pool);
+        }
+
+        // 清理上下文池
+        for (self.request_context_pool.items) |ctx| {
+            ctx.deinit();
+            self.allocator.destroy(ctx);
+        }
+        self.request_context_pool.deinit(self.allocator);
     }
 
     /// 设置请求处理器
@@ -100,9 +231,16 @@ pub const HttpServer = struct {
         }
     }
 
-    /// 处理单个连接
+    /// 处理单个连接（支持协程上下文隔离）
     fn handleConnection(self: *HttpServer, connection: net.Server.Connection) !void {
         defer connection.stream.close();
+
+        // 获取或创建请求上下文
+        const ctx = self.acquireContext();
+        defer self.releaseContext(ctx);
+
+        _ = self.active_requests.fetchAdd(1, .seq_cst);
+        defer _ = self.active_requests.fetchSub(1, .seq_cst);
 
         // 读取HTTP请求
         var buffer: [8192]u8 = undefined;
@@ -111,16 +249,28 @@ pub const HttpServer = struct {
         if (bytes_read == 0) return;
 
         // 解析HTTP请求
-        const request = try HttpRequest.parse(self.allocator, buffer[0..bytes_read]);
+        var request = try HttpRequest.parse(self.allocator, buffer[0..bytes_read]);
         defer request.deinit(self.allocator);
 
         // 创建响应
         var response = HttpResponse.init(self.allocator);
         defer response.deinit();
 
-        // 调用处理器
+        // 绑定到上下文
+        ctx.request = &request;
+        ctx.response = &response;
+
+        // 调用处理器（在协程上下文中）
         if (self.handler) |handler| {
-            try self.invokeHandler(handler, &request, &response);
+            if (self.coroutine_manager) |cm| {
+                // 使用协程处理请求
+                const coroutine_id = try cm.spawn(handler, &[_]Value{});
+                ctx.coroutine_id = coroutine_id;
+                try cm.run(self.vm);
+            } else {
+                // 直接处理
+                try self.invokeHandler(handler, &request, &response);
+            }
         } else {
             response.setStatus(404);
             try response.setBody("Not Found");
@@ -132,16 +282,199 @@ pub const HttpServer = struct {
         _ = try connection.stream.write(response_bytes);
     }
 
+    /// 获取请求上下文（从池中获取或新建）
+    fn acquireContext(self: *HttpServer) *RequestContext {
+        var ctx: *RequestContext = undefined;
+        
+        if (self.request_context_pool.items.len > 0) {
+            if (self.request_context_pool.pop()) |c| {
+                ctx = c;
+                ctx.reset(self.generateContextId());
+            } else {
+                ctx = self.allocator.create(RequestContext) catch unreachable;
+                ctx.* = RequestContext.init(self.allocator, self.generateContextId(), self.vm);
+            }
+        } else {
+            ctx = self.allocator.create(RequestContext) catch unreachable;
+            ctx.* = RequestContext.init(self.allocator, self.generateContextId(), self.vm);
+        }
+        
+        // 为请求分配Arena (Requirements: 4.1, 4.2)
+        if (self.arena_pool) |pool| {
+            ctx.arena = pool.acquire() catch null;
+        }
+        
+        return ctx;
+    }
+
+    /// 释放请求上下文（归还到池中）
+    fn releaseContext(self: *HttpServer, ctx: *RequestContext) void {
+        // 释放请求Arena (Requirements: 4.3, 4.6)
+        if (ctx.arena) |arena| {
+            if (self.arena_pool) |pool| {
+                pool.release(arena);
+            }
+            ctx.arena = null;
+        }
+        
+        if (self.request_context_pool.items.len < 100) {
+            self.request_context_pool.append(self.allocator, ctx) catch {
+                ctx.deinit();
+                self.allocator.destroy(ctx);
+            };
+        } else {
+            ctx.deinit();
+            self.allocator.destroy(ctx);
+        }
+    }
+
+    /// 生成唯一的上下文ID
+    fn generateContextId(self: *HttpServer) u64 {
+        _ = self;
+        return @intCast(std.time.nanoTimestamp());
+    }
+
+    /// 获取当前活跃请求数
+    pub fn getActiveRequestCount(self: *HttpServer) u32 {
+        return self.active_requests.load(.seq_cst);
+    }
+
     /// 调用PHP处理器
     fn invokeHandler(self: *HttpServer, handler: Value, request: *const HttpRequest, response: *HttpResponse) !void {
-        _ = self;
-        _ = handler;
-        _ = request;
-        // 这里需要调用VM来执行PHP回调
-        // 将request转换为PHP对象，将response作为引用传入
-        response.setStatus(200);
-        try response.setBody("Hello from Zig-PHP!");
+        const VM = @import("vm.zig").VM;
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(self.vm)));
+
+        // 创建Request对象
+        const req_value = try self.createRequestValue(vm_instance, request);
+        defer req_value.release(self.allocator);
+
+        // 创建Response对象
+        const res_value = try self.createResponseValue(vm_instance, response);
+        defer res_value.release(self.allocator);
+
+        // 调用处理器
+        const args = [_]Value{ req_value, res_value };
+        _ = try self.callHandler(vm_instance, handler, &args);
     }
+
+    /// 创建Request Value对象
+    fn createRequestValue(self: *HttpServer, vm_instance: anytype, request: *const HttpRequest) !Value {
+        const result = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const arr = result.data.array.data;
+
+        // method
+        const method_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "method") };
+        const method_str = switch (request.method) {
+            .GET => "GET",
+            .POST => "POST",
+            .PUT => "PUT",
+            .DELETE => "DELETE",
+            .PATCH => "PATCH",
+            .HEAD => "HEAD",
+            .OPTIONS => "OPTIONS",
+            .TRACE => "TRACE",
+            .CONNECT => "CONNECT",
+        };
+        const method_val = try Value.initStringWithManager(&vm_instance.memory_manager, method_str);
+        try arr.set(self.allocator, method_key, method_val);
+
+        // path
+        const path_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "path") };
+        const path_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.path);
+        try arr.set(self.allocator, path_key, path_val);
+
+        // body
+        const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
+        const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.body);
+        try arr.set(self.allocator, body_key, body_val);
+
+        // headers
+        const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
+        const headers_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const headers_arr = headers_val.data.array.data;
+
+        var header_iter = request.headers.iterator();
+        while (header_iter.next()) |entry| {
+            const h_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
+            const h_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
+            try headers_arr.set(self.allocator, h_key, h_val);
+        }
+        try arr.set(self.allocator, headers_key, headers_val);
+
+        // query
+        const query_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "query") };
+        const query_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const query_arr = query_val.data.array.data;
+
+        var query_iter = request.query_params.iterator();
+        while (query_iter.next()) |entry| {
+            const q_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
+            const q_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
+            try query_arr.set(self.allocator, q_key, q_val);
+        }
+        try arr.set(self.allocator, query_key, query_val);
+
+        return result;
+    }
+
+    /// 创建Response Value对象
+    fn createResponseValue(self: *HttpServer, vm_instance: anytype, response: *HttpResponse) !Value {
+        _ = response;
+        const result = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        const arr = result.data.array.data;
+
+        // status
+        const status_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "status") };
+        try arr.set(self.allocator, status_key, Value.initInt(200));
+
+        // headers
+        const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
+        const headers_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
+        try arr.set(self.allocator, headers_key, headers_val);
+
+        // body
+        const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
+        const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, "");
+        try arr.set(self.allocator, body_key, body_val);
+
+        return result;
+    }
+
+    /// 调用处理器回调
+    fn callHandler(self: *HttpServer, vm_instance: anytype, handler: Value, args: []const Value) !Value {
+        _ = self;
+        return switch (handler.tag) {
+            .builtin_function => {
+                const function: *const fn (anytype, []const Value) anyerror!Value = @ptrCast(@alignCast(handler.data.builtin_function));
+                return function(vm_instance, args);
+            },
+            .user_function => {
+                return vm_instance.callUserFunction(handler.data.user_function.data, args);
+            },
+            .closure => {
+                return vm_instance.callClosure(handler.data.closure.data, args);
+            },
+            .arrow_function => {
+                return vm_instance.callArrowFunction(handler.data.arrow_function.data, args);
+            },
+            else => Value.initNull(),
+        };
+    }
+
+    /// 获取服务器状态信息
+    pub fn getStats(self: *HttpServer) ServerStats {
+        return ServerStats{
+            .active_requests = self.active_requests.load(.seq_cst),
+            .context_pool_size = @intCast(self.request_context_pool.items.len),
+            .is_running = self.running.load(.seq_cst),
+        };
+    }
+
+    pub const ServerStats = struct {
+        active_requests: u32,
+        context_pool_size: u32,
+        is_running: bool,
+    };
 };
 
 /// HTTP请求
@@ -288,13 +621,13 @@ pub const HttpResponse = struct {
             .status_code = 200,
             .status_text = "OK",
             .headers = std.StringHashMap([]const u8).init(allocator),
-            .body = std.ArrayList(u8).init(allocator),
+            .body = .empty,
         };
     }
 
     pub fn deinit(self: *HttpResponse) void {
         self.headers.deinit();
-        self.body.deinit();
+        self.body.deinit(self.allocator);
     }
 
     /// 设置状态码
@@ -311,37 +644,37 @@ pub const HttpResponse = struct {
     /// 设置响应体
     pub fn setBody(self: *HttpResponse, content: []const u8) !void {
         self.body.clearRetainingCapacity();
-        try self.body.appendSlice(content);
+        try self.body.appendSlice(self.allocator, content);
     }
 
     /// 追加响应体
     pub fn appendBody(self: *HttpResponse, content: []const u8) !void {
-        try self.body.appendSlice(content);
+        try self.body.appendSlice(self.allocator, content);
     }
 
     /// 转换为HTTP响应字节
     pub fn toBytes(self: *HttpResponse) ![]const u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
+        var result: std.ArrayList(u8) = .empty;
 
         // 状态行
-        try result.writer().print("HTTP/1.1 {d} {s}\r\n", .{ self.status_code, self.status_text });
+        try result.writer(self.allocator).print("HTTP/1.1 {d} {s}\r\n", .{ self.status_code, self.status_text });
 
         // 自动添加Content-Length
-        try result.writer().print("Content-Length: {d}\r\n", .{self.body.items.len});
+        try result.writer(self.allocator).print("Content-Length: {d}\r\n", .{self.body.items.len});
 
         // 头部
         var header_iter = self.headers.iterator();
         while (header_iter.next()) |entry| {
-            try result.writer().print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            try result.writer(self.allocator).print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
 
         // 空行分隔
-        try result.appendSlice("\r\n");
+        try result.appendSlice(self.allocator, "\r\n");
 
         // 响应体
-        try result.appendSlice(self.body.items);
+        try result.appendSlice(self.allocator, self.body.items);
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// 发送JSON响应
@@ -415,8 +748,8 @@ pub const Router = struct {
     pub fn init(allocator: std.mem.Allocator) Router {
         return Router{
             .allocator = allocator,
-            .routes = std.ArrayList(Route).init(allocator),
-            .middleware = std.ArrayList(Value).init(allocator),
+            .routes = .empty,
+            .middleware = .empty,
         };
     }
 
@@ -425,12 +758,12 @@ pub const Router = struct {
             route.handler.release(self.allocator);
             route.params.deinit();
         }
-        self.routes.deinit();
+        self.routes.deinit(self.allocator);
 
         for (self.middleware.items) |*mw| {
             mw.release(self.allocator);
         }
-        self.middleware.deinit();
+        self.middleware.deinit(self.allocator);
     }
 
     /// 添加GET路由
@@ -472,12 +805,12 @@ pub const Router = struct {
             pos += 1;
         }
 
-        try self.routes.append(route);
+        try self.routes.append(self.allocator, route);
     }
 
     /// 添加中间件
     pub fn use(self: *Router, middleware: Value) !void {
-        try self.middleware.append(middleware.retain());
+        try self.middleware.append(self.allocator, middleware.retain());
     }
 
     /// 匹配路由
@@ -520,10 +853,122 @@ pub const Router = struct {
     }
 };
 
+/// PHP 内置 Request 类
+pub const PHPRequest = struct {
+    request: *const HttpRequest,
+    allocator: std.mem.Allocator,
+    params: std.StringHashMap([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator, request: *const HttpRequest) PHPRequest {
+        return PHPRequest{
+            .request = request,
+            .allocator = allocator,
+            .params = std.StringHashMap([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *PHPRequest) void {
+        self.params.deinit();
+    }
+
+    /// 获取请求方法
+    pub fn getMethod(self: *const PHPRequest) []const u8 {
+        return switch (self.request.method) {
+            .GET => "GET",
+            .POST => "POST",
+            .PUT => "PUT",
+            .DELETE => "DELETE",
+            .PATCH => "PATCH",
+            .HEAD => "HEAD",
+            .OPTIONS => "OPTIONS",
+            .TRACE => "TRACE",
+            .CONNECT => "CONNECT",
+        };
+    }
+
+    /// 获取请求路径
+    pub fn getPath(self: *const PHPRequest) []const u8 {
+        return self.request.path;
+    }
+
+    /// 获取请求体
+    pub fn getBody(self: *const PHPRequest) []const u8 {
+        return self.request.body;
+    }
+
+    /// 获取请求头
+    pub fn getHeader(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.request.getHeader(name);
+    }
+
+    /// 获取查询参数
+    pub fn getQuery(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.request.getQueryParam(name);
+    }
+
+    /// 获取路由参数
+    pub fn getParam(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.params.get(name);
+    }
+
+    /// 设置路由参数
+    pub fn setParam(self: *PHPRequest, name: []const u8, value: []const u8) !void {
+        try self.params.put(name, value);
+    }
+};
+
+/// PHP 内置 Response 类
+pub const PHPResponse = struct {
+    response: *HttpResponse,
+
+    pub fn init(response: *HttpResponse) PHPResponse {
+        return PHPResponse{
+            .response = response,
+        };
+    }
+
+    /// 设置状态码
+    pub fn setStatus(self: *PHPResponse, code: u16) void {
+        self.response.setStatus(code);
+    }
+
+    /// 设置响应头
+    pub fn setHeader(self: *PHPResponse, name: []const u8, value: []const u8) !void {
+        try self.response.setHeader(name, value);
+    }
+
+    /// 设置响应体
+    pub fn setBody(self: *PHPResponse, content: []const u8) !void {
+        try self.response.setBody(content);
+    }
+
+    /// 发送 JSON 响应
+    pub fn json(self: *PHPResponse, data: []const u8) !void {
+        try self.response.json(data);
+    }
+
+    /// 发送 HTML 响应
+    pub fn html(self: *PHPResponse, content: []const u8) !void {
+        try self.response.html(content);
+    }
+
+    /// 发送重定向
+    pub fn redirect(self: *PHPResponse, url: []const u8, code: u16) !void {
+        try self.response.redirect(url, code);
+    }
+
+    /// 发送文本响应
+    pub fn text(self: *PHPResponse, content: []const u8) !void {
+        try self.response.setHeader("Content-Type", "text/plain; charset=utf-8");
+        try self.response.setBody(content);
+    }
+};
+
 /// PHP HTTP服务器函数绑定
 pub fn registerHttpFunctions(stdlib: anytype) !void {
     _ = stdlib;
     // 注册 http_server_create, http_server_start 等函数
+    // 注册 Request, Response, Router 类
 }
 
 test "http request parsing" {

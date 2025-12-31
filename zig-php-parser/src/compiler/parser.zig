@@ -102,12 +102,14 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) anyerror!ast.Node.Index {
         var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
         defer stmts.deinit(self.allocator);
+        
         while (self.curr.tag != .eof) {
             if (self.curr.tag == .t_open_tag or self.curr.tag == .t_close_tag or self.curr.tag == .t_inline_html) {
                 self.nextToken();
                 continue;
             }
-            const stmt = self.parseStatement() catch {
+            const stmt = self.parseStatement() catch |err| {
+                std.debug.print("DEBUG: parseStatement failed with error: {any} at token: {any} ({s})\n", .{ err, self.curr.tag, self.lexer.buffer[self.curr.loc.start..self.curr.loc.end] });
                 self.synchronize();
                 continue;
             };
@@ -133,7 +135,7 @@ pub const Parser = struct {
             .k_trait => self.parseContainer(.trait_decl, attributes),
             .k_enum => self.parseContainer(.enum_decl, attributes),
             .k_struct => self.parseContainer(.struct_decl, attributes),
-            .k_function => {
+            .k_function, .k_fn => {
                 if (self.peek.tag == .l_paren) return self.parseExpressionStatement();
                 return self.parseFunction(attributes);
             },
@@ -149,7 +151,10 @@ pub const Parser = struct {
             .k_const => self.parseConst(),
             .k_go => self.parseGo(),
             .k_return => self.parseReturn(),
-            .k_public, .k_protected, .k_private, .k_readonly, .k_final, .k_abstract => self.parseClassMember(attributes),
+            .k_break => self.parseBreak(),
+            .k_continue => self.parseContinue(),
+            .k_abstract, .k_final => self.parseModifiedClassOrMember(attributes),
+            .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes, false),
             .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
@@ -159,7 +164,177 @@ pub const Parser = struct {
         };
     }
 
-    fn parseClassMember(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
+    /// 解析带修饰符的类定义或类成员（abstract class / final class / abstract method 等）
+    fn parseModifiedClassOrMember(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
+        var modifiers = ast.Node.Modifier{};
+
+        // 收集所有前置修饰符
+        while (true) {
+            switch (self.curr.tag) {
+                .k_abstract => modifiers.is_abstract = true,
+                .k_final => modifiers.is_final = true,
+                .k_public => modifiers.is_public = true,
+                .k_protected => modifiers.is_protected = true,
+                .k_private => modifiers.is_private = true,
+                .k_static => modifiers.is_static = true,
+                .k_readonly => modifiers.is_readonly = true,
+                else => break,
+            }
+            self.nextToken();
+        }
+
+        // 检查是否是类定义
+        if (self.curr.tag == .k_class) {
+            return self.parseContainerWithModifiers(.class_decl, attributes, modifiers);
+        }
+
+        // 否则是类成员（方法或属性）
+        return self.parseClassMemberWithModifiers(attributes, modifiers, false);
+    }
+
+    /// 解析带修饰符的容器（class/interface/trait等）
+    fn parseTraitUse(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_use);
+        var traits = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        while (true) {
+            try traits.append(self.allocator, try self.parseType());
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+            } else {
+                break;
+            }
+        }
+
+        // Handle adaptations block { ... } or semicolon
+        if (self.curr.tag == .l_brace) {
+            _ = try self.eat(.l_brace);
+            var balance: usize = 1;
+            while (balance > 0 and self.curr.tag != .eof) {
+                if (self.curr.tag == .l_brace) balance += 1;
+                if (self.curr.tag == .r_brace) balance -= 1;
+                if (balance > 0) self.nextToken();
+            }
+            if (self.curr.tag == .r_brace) self.nextToken();
+        } else {
+            _ = try self.eat(.semicolon);
+        }
+
+        const arena = self.context.arena.allocator();
+        const traits_slice = try arena.dupe(ast.Node.Index, traits.items);
+        traits.deinit(self.allocator);
+        return self.createNode(.{ .tag = .trait_use, .main_token = token, .data = .{ .trait_use = .{ .traits = traits_slice } } });
+    }
+
+    fn parseContainerWithModifiers(self: *Parser, tag: ast.Node.Tag, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {
+        const token = self.curr;
+        self.nextToken();
+        const name_tok = try self.eat(.t_string);
+        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        var extends: ?ast.Node.Index = null;
+        if (self.curr.tag == .k_extends) {
+            self.nextToken();
+            extends = try self.parseExpression(0);
+        }
+        var implements = std.ArrayListUnmanaged(ast.Node.Index){};
+        if (self.curr.tag == .k_implements) {
+            self.nextToken();
+            while (true) {
+                try implements.append(self.allocator, try self.parseExpression(0));
+                if (self.curr.tag != .comma) break;
+                self.nextToken();
+            }
+        }
+
+        _ = try self.eat(.l_brace);
+        var members = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        const is_interface = (tag == .interface_decl);
+
+        while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+            var member_attributes: []const ast.Node.Index = &.{};
+            if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
+
+            if (self.curr.tag == .k_const) {
+                try members.append(self.allocator, try self.parseConst());
+            } else if (self.curr.tag == .k_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
+            } else {
+                try members.append(self.allocator, try self.parseClassMember(member_attributes, is_interface));
+            }
+        }
+        _ = try self.eat(.r_brace);
+
+        const arena = self.context.arena.allocator();
+        const implements_slice = try arena.dupe(ast.Node.Index, implements.items);
+        const members_slice = try arena.dupe(ast.Node.Index, members.items);
+        implements.deinit(self.allocator);
+        members.deinit(self.allocator);
+        
+        return self.createNode(.{ .tag = tag, .main_token = token, .data = .{ .container_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .extends = extends, .implements = implements_slice, .members = members_slice } } });
+    }
+
+    /// 解析带预先收集好的修饰符的类成员
+    fn parseClassMemberWithModifiers(self: *Parser, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier, is_interface: bool) anyerror!ast.Node.Index {
+        if (self.curr.tag == .k_function) {
+            const token = try self.eat(.k_function);
+            const name_tok = try self.eat(.t_string);
+            const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+            _ = try self.eat(.l_paren);
+            var params = std.ArrayListUnmanaged(ast.Node.Index){};
+            while (self.curr.tag != .r_paren) {
+                try params.append(self.allocator, try self.parseParameter());
+                if (self.curr.tag == .comma) self.nextToken();
+            }
+            _ = try self.eat(.r_paren);
+            var return_type: ?ast.Node.Index = null;
+            if (self.curr.tag == .colon) {
+                self.nextToken();
+                return_type = try self.parseType();
+            }
+            // abstract方法和接口方法没有方法体，以分号结尾
+            const expects_body = !modifiers.is_abstract and !is_interface;
+            const body = if (!expects_body) blk: {
+                if (self.curr.tag == .semicolon) {
+                    self.nextToken();
+                } else {
+                    return error.UnexpectedToken;
+                }
+                break :blk null;
+            } else try self.parseBlock();
+            return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
+        } else {
+            const token = self.curr;
+            var type_node: ?ast.Node.Index = null;
+            if (self.curr.tag == .t_string or self.curr.tag == .question) {
+                type_node = try self.parseType();
+            }
+            const name_tok = try self.eat(.t_variable);
+            var name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            if (name_str.len > 0 and name_str[0] == '$') {
+                name_str = name_str[1..];
+            }
+            const name_id = try self.context.intern(name_str);
+
+            var default_value: ?ast.Node.Index = null;
+            if (self.curr.tag == .equal) {
+                self.nextToken();
+                default_value = try self.parseExpression(0);
+            }
+
+            var hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+            if (self.curr.tag == .l_brace) {
+                self.nextToken();
+                while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
+                _ = try self.eat(.r_brace);
+            } else if (self.curr.tag == .semicolon) {
+                self.nextToken();
+            }
+            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+        }
+    }
+
+    fn parseClassMember(self: *Parser, attributes: []const ast.Node.Index, is_interface: bool) anyerror!ast.Node.Index {
         var modifiers = ast.Node.Modifier{};
         while (true) {
             switch (self.curr.tag) {
@@ -181,7 +356,6 @@ pub const Parser = struct {
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
-            defer params.deinit(self.allocator);
             while (self.curr.tag != .r_paren) {
                 try params.append(self.allocator, try self.parseParameter());
                 if (self.curr.tag == .comma) self.nextToken();
@@ -192,7 +366,16 @@ pub const Parser = struct {
                 self.nextToken();
                 return_type = try self.parseType();
             }
-            const body = if (modifiers.is_abstract) null else try self.parseBlock();
+
+            const expects_body = !modifiers.is_abstract and !is_interface;
+            const body = if (!expects_body) blk: {
+                if (self.curr.tag == .semicolon) {
+                    self.nextToken();
+                } else {
+                    return error.UnexpectedToken;
+                }
+                break :blk null;
+            } else try self.parseBlock();
             return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
         } else {
             const token = self.curr;
@@ -201,9 +384,20 @@ pub const Parser = struct {
                 type_node = try self.parseType();
             }
             const name_tok = try self.eat(.t_variable);
-            const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+            var name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            // Strip leading '$'
+            if (name_str.len > 0 and name_str[0] == '$') {
+                name_str = name_str[1..];
+            }
+            const name_id = try self.context.intern(name_str);
+
+            var default_value: ?ast.Node.Index = null;
+            if (self.curr.tag == .equal) {
+                self.nextToken();
+                default_value = try self.parseExpression(0);
+            }
+
             var hooks = std.ArrayListUnmanaged(ast.Node.Index){};
-            defer hooks.deinit(self.allocator);
             if (self.curr.tag == .l_brace) {
                 self.nextToken();
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
@@ -211,7 +405,7 @@ pub const Parser = struct {
             } else if (self.curr.tag == .semicolon) {
                 self.nextToken();
             }
-            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = null, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
         }
     }
 
@@ -255,7 +449,6 @@ pub const Parser = struct {
 
     fn parseAttributes(self: *Parser) anyerror![]const ast.Node.Index {
         var attrs = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer attrs.deinit(self.allocator);
         while (self.curr.tag == .t_attribute_start) {
             self.nextToken();
             while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
@@ -263,7 +456,6 @@ pub const Parser = struct {
                 const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
 
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
-                defer args.deinit(self.allocator);
 
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
@@ -294,7 +486,6 @@ pub const Parser = struct {
             extends = try self.parseExpression(0);
         }
         var implements = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer implements.deinit(self.allocator);
         if (self.curr.tag == .k_implements) {
             self.nextToken();
             while (true) {
@@ -306,7 +497,8 @@ pub const Parser = struct {
 
         _ = try self.eat(.l_brace);
         var members = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer members.deinit(self.allocator);
+
+        const is_interface = (tag == .interface_decl);
 
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             var member_attributes: []const ast.Node.Index = &.{};
@@ -314,8 +506,10 @@ pub const Parser = struct {
 
             if (self.curr.tag == .k_const) {
                 try members.append(self.allocator, try self.parseConst());
+            } else if (self.curr.tag == .k_use) {
+                try members.append(self.allocator, try self.parseTraitUse());
             } else {
-                try members.append(self.allocator, try self.parseClassMember(member_attributes));
+                try members.append(self.allocator, try self.parseClassMember(member_attributes, is_interface));
             }
         }
         _ = try self.eat(.r_brace);
@@ -324,12 +518,15 @@ pub const Parser = struct {
     }
 
     fn parseFunction(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
-        const token = try self.eat(.k_function);
+        // 支持 function 和 fn 两个关键字
+        const token = if (self.curr.tag == .k_fn)
+            try self.eat(.k_fn)
+        else
+            try self.eat(.k_function);
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         _ = try self.eat(.l_paren);
         var params = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer params.deinit(self.allocator);
         while (self.curr.tag != .r_paren) {
             try params.append(self.allocator, try self.parseParameter());
             if (self.curr.tag == .comma) self.nextToken();
@@ -407,10 +604,27 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
         const iterable = try self.parseExpression(0);
         _ = try self.eat(.k_as);
-        const value = try self.parseExpression(0);
+
+        // 解析第一个表达式
+        const first_expr = try self.parseExpression(0);
+
+        // 检查是否有 => 符号（键值对语法）
+        var key: ?ast.Node.Index = null;
+        var value: ast.Node.Index = undefined;
+
+        if (self.curr.tag == .fat_arrow) {
+            // 有 => 符号，第一个表达式是键
+            _ = try self.eat(.fat_arrow);
+            key = first_expr;
+            value = try self.parseExpression(0);
+        } else {
+            // 没有 => 符号，第一个表达式是值
+            value = first_expr;
+        }
+
         _ = try self.eat(.r_paren);
         const body = try self.parseStatement();
-        return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = null, .value = value, .body = body } } });
+        return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = key, .value = value, .body = body } } });
     }
 
     fn parseTry(self: *Parser) anyerror!ast.Node.Index {
@@ -464,18 +678,64 @@ pub const Parser = struct {
 
     fn parseFor(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_for);
+
+        // Infinite loop: for { ... }
+        if (self.curr.tag == .l_brace) {
+            const body = try self.parseBlock();
+            return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = null, .condition = null, .loop = null, .body = body } } });
+        }
+
+        // Range loop: for range 10 或 for $i range 10
+        if (self.curr.tag == .k_range or self.curr.tag == .t_variable) {
+            var variable: ?ast.Node.Index = null;
+
+            // 检查是否有变量（for $i range 10）
+            if (self.curr.tag == .t_variable) {
+                variable = try self.parseExpression(0); // 解析变量
+                _ = try self.eat(.k_range); // 吃掉range关键字
+            } else {
+                // for range 10（无变量）
+                _ = try self.eat(.k_range); // 吃掉range关键字
+            }
+
+            const count = try self.parseExpression(0); // 解析范围数值
+
+            const body = try self.parseStatement();
+            return self.createNode(.{ .tag = .for_range_stmt, .main_token = token, .data = .{ .for_range_stmt = .{ .count = count, .variable = variable, .body = body } } });
+        }
+
+        // Standard PHP for loop: for (...)
         _ = try self.eat(.l_paren);
+
+        // Parse initialization (expr1)
+        var init_expr: ?ast.Node.Index = null;
+        if (self.curr.tag != .semicolon) {
+            init_expr = try self.parseExpression(0);
+        }
         _ = try self.eat(.semicolon);
+
+        // Parse condition (expr2)
+        var condition: ?ast.Node.Index = null;
+        if (self.curr.tag != .semicolon) {
+            condition = try self.parseExpression(0);
+        }
         _ = try self.eat(.semicolon);
+
+        // Parse loop expression (expr3)
+        var loop: ?ast.Node.Index = null;
+        if (self.curr.tag != .r_paren) {
+            loop = try self.parseExpression(0);
+        }
         _ = try self.eat(.r_paren);
-        _ = try self.parseStatement();
-        return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .none = {} } });
+
+        const body = try self.parseStatement();
+
+        return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = init_expr, .condition = condition, .loop = loop, .body = body } } });
     }
 
     fn parseGlobal(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_global);
         var vars = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer vars.deinit(self.allocator);
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(100));
             if (self.curr.tag != .comma) break;
@@ -488,7 +748,6 @@ pub const Parser = struct {
     fn parseStatic(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_static);
         var vars = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer vars.deinit(self.allocator);
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(0));
             if (self.curr.tag != .comma) break;
@@ -523,11 +782,43 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .return_stmt, .main_token = token, .data = .{ .return_stmt = .{ .expr = expr } } });
     }
 
+    fn parseBreak(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_break);
+        var level: ?ast.Node.Index = null;
+        if (self.curr.tag != .semicolon) {
+            level = try self.parseExpression(0);
+        }
+        _ = try self.eat(.semicolon);
+        return self.createNode(.{ .tag = .break_stmt, .main_token = token, .data = .{ .break_stmt = .{ .level = level } } });
+    }
+
+    fn parseContinue(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_continue);
+        var level: ?ast.Node.Index = null;
+        if (self.curr.tag != .semicolon) {
+            level = try self.parseExpression(0);
+        }
+        _ = try self.eat(.semicolon);
+        return self.createNode(.{ .tag = .continue_stmt, .main_token = token, .data = .{ .continue_stmt = .{ .level = level } } });
+    }
+
     fn parseEcho(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_echo);
-        const expr = try self.parseExpression(0);
+        var exprs = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer exprs.deinit(self.allocator);
+
+        // Parse first expression
+        try exprs.append(self.allocator, try self.parseExpression(0));
+
+        // Parse additional expressions separated by commas
+        while (self.curr.tag == .comma) {
+            self.nextToken();
+            try exprs.append(self.allocator, try self.parseExpression(0));
+        }
+
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .echo_stmt, .main_token = token, .data = .{ .echo_stmt = .{ .expr = expr } } });
+        const arena = self.context.arena.allocator();
+        return self.createNode(.{ .tag = .echo_stmt, .main_token = token, .data = .{ .echo_stmt = .{ .exprs = try arena.dupe(ast.Node.Index, exprs.items) } } });
     }
 
     fn parseAssignment(self: *Parser) anyerror!ast.Node.Index {
@@ -547,6 +838,8 @@ pub const Parser = struct {
     fn parseBlock(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.l_brace);
         var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+        defer stmts.deinit(self.allocator);
+        
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             try stmts.append(self.allocator, try self.parseStatement());
         }
@@ -556,7 +849,7 @@ pub const Parser = struct {
     }
 
     fn parseExpression(self: *Parser, precedence: u8) anyerror!ast.Node.Index {
-        var left = try self.parsePrimary();
+        var left = try self.parseUnary();
         while (true) {
             const tag = self.curr.tag;
             const next_p = self.getPrecedence(tag);
@@ -564,12 +857,21 @@ pub const Parser = struct {
             const op = self.curr;
             self.nextToken();
             if (tag == .arrow) {
-                const member_name_tok = try self.eat(.t_string);
+                // 方法名可以是标识符，也可以是某些关键字（如 set, get）
+                const member_name_tok = if (self.curr.tag == .t_string)
+                    try self.eat(.t_string)
+                else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
+                    self.curr.tag == .k_unset or self.curr.tag == .k_clone or
+                    self.curr.tag == .k_list or self.curr.tag == .k_print)
+                blk: {
+                    const tok = self.curr;
+                    self.nextToken();
+                    break :blk tok;
+                } else try self.eat(.t_string);
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
                     var args = std.ArrayListUnmanaged(ast.Node.Index){};
-                    defer args.deinit(self.allocator);
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                         try args.append(self.allocator, try self.parseExpression(0));
                         if (self.curr.tag == .comma) self.nextToken();
@@ -580,49 +882,107 @@ pub const Parser = struct {
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
                 }
             } else if (tag == .double_colon) {
-                // Static access: ClassName::member
+                // Static access: ClassName::member, self::member, parent::member, $obj::member
                 const left_node = self.context.nodes.items[left];
-                if (left_node.tag != .variable) {
-                    self.reportError("Invalid static access target");
-                    return error.InvalidStaticAccess;
-                }
-                const class_name_id = left_node.data.variable.name;
-                const member_name_tok = try self.eat(.t_string);
-                const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
-                if (self.curr.tag == .l_paren) {
-                    self.nextToken();
-                    var args = std.ArrayListUnmanaged(ast.Node.Index){};
-                    defer args.deinit(self.allocator);
-                    while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        try args.append(self.allocator, try self.parseExpression(0));
-                        if (self.curr.tag == .comma) self.nextToken();
+
+                // 获取类名ID，支持variable、self_expr、parent_expr节点
+                const class_name_id = switch (left_node.tag) {
+                    .variable => left_node.data.variable.name,
+                    .self_expr => left_node.data.variable.name,
+                    .parent_expr => left_node.data.variable.name,
+                    else => {
+                        self.reportError("Invalid static access target");
+                        return error.InvalidStaticAccess;
+                    },
+                };
+
+                if (self.curr.tag == .t_variable) {
+                    const prop_tok = try self.eat(.t_variable);
+                    var prop_str = self.lexer.buffer[prop_tok.loc.start..prop_tok.loc.end];
+                    // Strip leading '$'
+                    if (prop_str.len > 0 and prop_str[0] == '$') {
+                        prop_str = prop_str[1..];
                     }
-                    _ = try self.eat(.r_paren);
-                    left = try self.createNode(.{ .tag = .static_method_call, .main_token = op, .data = .{ .static_method_call = .{ .class_name = class_name_id, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+                    const prop_id = try self.context.intern(prop_str);
+                    left = try self.createNode(.{ .tag = .static_property_access, .main_token = op, .data = .{ .static_property_access = .{ .class_name = class_name_id, .property_name = prop_id } } });
                 } else {
-                    left = try self.createNode(.{ .tag = .class_constant_access, .main_token = op, .data = .{ .class_constant_access = .{ .class_name = class_name_id, .constant_name = member_id } } });
+                    const member_name_tok = try self.eat(.t_string);
+                    const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
+                    if (self.curr.tag == .l_paren) {
+                        self.nextToken();
+                        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                        while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                            try args.append(self.allocator, try self.parseExpression(0));
+                            if (self.curr.tag == .comma) self.nextToken();
+                        }
+                        _ = try self.eat(.r_paren);
+                        left = try self.createNode(.{ .tag = .static_method_call, .main_token = op, .data = .{ .static_method_call = .{ .class_name = class_name_id, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+                    } else {
+                        left = try self.createNode(.{ .tag = .class_constant_access, .main_token = op, .data = .{ .class_constant_access = .{ .class_name = class_name_id, .constant_name = member_id } } });
+                    }
                 }
             } else if (tag == .l_paren) {
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
-                defer args.deinit(self.allocator);
                 while (self.curr.tag != .r_paren) {
                     try args.append(self.allocator, try self.parseExpression(0));
                     if (self.curr.tag == .comma) self.nextToken();
                 }
                 _ = try self.eat(.r_paren);
                 left = try self.createNode(.{ .tag = .function_call, .main_token = op, .data = .{ .function_call = .{ .name = left, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+            } else if (tag == .l_bracket) {
+                var index: ?ast.Node.Index = null;
+                if (self.curr.tag != .r_bracket) {
+                    index = try self.parseExpression(0);
+                }
+                _ = try self.eat(.r_bracket);
+                left = try self.createNode(.{ .tag = .array_access, .main_token = op, .data = .{ .array_access = .{ .target = left, .index = index } } });
             } else if (tag == .pipe_greater) {
                 const right = try self.parseExpression(next_p);
                 left = try self.createNode(.{ .tag = .pipe_expr, .main_token = op, .data = .{ .pipe_expr = .{ .left = left, .right = right } } });
             } else if (tag == .equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
+            } else if (tag == .question) {
+                var then_expr: ?ast.Node.Index = null;
+                if (self.curr.tag != .colon) {
+                    then_expr = try self.parseExpression(0);
+                }
+                _ = try self.eat(.colon);
+                const else_expr = try self.parseExpression(next_p);
+                left = try self.createNode(.{ .tag = .ternary_expr, .main_token = op, .data = .{ .ternary_expr = .{ .cond = left, .then_expr = then_expr, .else_expr = else_expr } } });
+            } else if (tag == .plus_plus or tag == .minus_minus) {
+                left = try self.createNode(.{ .tag = .postfix_expr, .main_token = op, .data = .{ .postfix_expr = .{ .op = tag, .expr = left } } });
             } else {
                 const right = try self.parseExpression(next_p);
                 left = try self.createNode(.{ .tag = .binary_expr, .main_token = op, .data = .{ .binary_expr = .{ .lhs = left, .op = op.tag, .rhs = right } } });
             }
         }
         return left;
+    }
+
+    fn parseUnary(self: *Parser) anyerror!ast.Node.Index {
+        const tag = self.curr.tag;
+        switch (tag) {
+            .bang, .minus, .plus, .t_variable, .ampersand => {
+                // Determine if it's a unary op or start of primary
+                if (tag == .t_variable) {
+                    return self.parsePrimary();
+                }
+
+                const token = self.curr;
+                self.nextToken();
+                const expr = try self.parseUnary();
+                return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
+            },
+            .plus_plus, .minus_minus => {
+                const token = self.curr;
+                self.nextToken();
+                const expr = try self.parseUnary();
+                return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
+            },
+            .k_clone => return self.parseCloneExpression(),
+            else => return self.parsePrimary(),
+        }
     }
 
     fn parsePrimary(self: *Parser) anyerror!ast.Node.Index {
@@ -633,17 +993,28 @@ pub const Parser = struct {
             .k_match => self.parseMatch(),
             .k_new => self.parseNewOrAnonymousClass(),
             .k_clone => self.parseCloneExpression(),
+            // self:: 和 parent:: 静态访问关键字
+            .k_self => {
+                const t = try self.eat(.k_self);
+                const name_id = try self.context.intern("self");
+                return self.createNode(.{ .tag = .self_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
+            .k_parent => {
+                const t = try self.eat(.k_parent);
+                const name_id = try self.context.intern("parent");
+                return self.createNode(.{ .tag = .parent_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
             .k_true => {
                 const t = try self.eat(.k_true);
-                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = 1 } } });
+                return self.createNode(.{ .tag = .literal_bool, .main_token = t, .data = .{ .literal_int = .{ .value = 1 } } });
             },
             .k_false => {
                 const t = try self.eat(.k_false);
-                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = 0 } } });
+                return self.createNode(.{ .tag = .literal_bool, .main_token = t, .data = .{ .literal_int = .{ .value = 0 } } });
             },
             .k_null => {
                 const t = try self.eat(.k_null);
-                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = 0 } } });
+                return self.createNode(.{ .tag = .literal_null, .main_token = t, .data = .{ .none = {} } });
             },
             .ellipsis => {
                 const token = self.curr;
@@ -673,20 +1044,34 @@ pub const Parser = struct {
             .t_constant_encapsed_string => {
                 const t = try self.eat(.t_constant_encapsed_string);
                 const raw_text = self.lexer.buffer[t.loc.start..t.loc.end];
-                // Remove quotes from string literal
+                // Determine quote type and remove quotes
+                const quote_type: @import("ast.zig").QuoteType = if (raw_text.len >= 2)
+                    if (raw_text[0] == '"') .double else if (raw_text[0] == '\'') .single else .double
+                else
+                    .double;
                 const string_content = if (raw_text.len >= 2 and
                     ((raw_text[0] == '"' and raw_text[raw_text.len - 1] == '"') or
                         (raw_text[0] == '\'' and raw_text[raw_text.len - 1] == '\'')))
                     raw_text[1 .. raw_text.len - 1]
                 else
                     raw_text;
-                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content) } } });
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content), .quote_type = quote_type } } });
             },
             .t_encapsed_and_whitespace => {
                 const t = try self.eat(.t_encapsed_and_whitespace);
                 return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
             },
+            .t_backtick_string => {
+                const t = try self.eat(.t_backtick_string);
+                const raw_text = self.lexer.buffer[t.loc.start..t.loc.end];
+                const string_content = if (raw_text.len >= 2 and raw_text[0] == '`' and raw_text[raw_text.len - 1] == '`')
+                    raw_text[1 .. raw_text.len - 1]
+                else
+                    raw_text;
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content), .quote_type = .backtick } } });
+            },
             .l_bracket => self.parseArrayLiteral(),
+            .l_brace => self.parseJsonObjectLiteral(),
             .l_paren => {
                 self.nextToken();
                 const expr = try self.parseExpression(0);
@@ -724,7 +1109,18 @@ pub const Parser = struct {
                 },
                 .t_dollar_open_curly_brace => {
                     self.nextToken(); // Consume ${
-                    part = try self.parseExpression(0);
+                    // ${name} 语法：name 应作为变量名处理，需加上 $ 前缀
+                    if (self.curr.tag == .t_string) {
+                        const t = try self.eat(.t_string);
+                        const raw_name = self.lexer.buffer[t.loc.start..t.loc.end];
+                        // 添加 $ 前缀作为变量名
+                        const var_name = try std.fmt.allocPrint(self.allocator, "${s}", .{raw_name});
+                        defer self.allocator.free(var_name);
+                        part = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_name) } } });
+                    } else {
+                        // 复杂表达式 ${expr}
+                        part = try self.parseExpression(0);
+                    }
                     _ = try self.eat(.r_brace);
                 },
                 else => {
@@ -751,9 +1147,18 @@ pub const Parser = struct {
     fn parseClosure(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_function);
         _ = try self.eat(.l_paren);
+
+        // Parse parameters
+        var params = std.ArrayListUnmanaged(ast.Node.Index){};
+        while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+            try params.append(self.allocator, try self.parseParameter());
+            if (self.curr.tag == .comma) self.nextToken();
+        }
+
         _ = try self.eat(.r_paren);
+
+        // Parse capture list (use clause)
         var captures = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer captures.deinit(self.allocator);
         if (self.curr.tag == .k_use) {
             self.nextToken();
             _ = try self.eat(.l_paren);
@@ -763,9 +1168,14 @@ pub const Parser = struct {
             }
             _ = try self.eat(.r_paren);
         }
+
         const body = try self.parseBlock();
         const arena = self.context.arena.allocator();
-        return self.createNode(.{ .tag = .closure, .main_token = token, .data = .{ .closure = .{ .attributes = &.{}, .params = &.{}, .captures = try arena.dupe(ast.Node.Index, captures.items), .return_type = null, .body = body, .is_static = false } } });
+        const params_slice = try arena.dupe(ast.Node.Index, params.items);
+        const captures_slice = try arena.dupe(ast.Node.Index, captures.items);
+        params.deinit(self.allocator);
+        captures.deinit(self.allocator);
+        return self.createNode(.{ .tag = .closure, .main_token = token, .data = .{ .closure = .{ .attributes = &.{}, .params = params_slice, .captures = captures_slice, .return_type = null, .body = body, .is_static = false } } });
     }
 
     fn parseMatch(self: *Parser) anyerror!ast.Node.Index {
@@ -775,7 +1185,6 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
         _ = try self.eat(.l_brace);
         var arms = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer arms.deinit(self.allocator);
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             const cond = try self.parseExpression(0);
             _ = try self.eat(.fat_arrow);
@@ -786,7 +1195,9 @@ pub const Parser = struct {
         }
         _ = try self.eat(.r_brace);
         const arena = self.context.arena.allocator();
-        return self.createNode(.{ .tag = .match_expr, .main_token = token, .data = .{ .match_expr = .{ .expression = expr, .arms = try arena.dupe(ast.Node.Index, arms.items) } } });
+        const arms_slice = try arena.dupe(ast.Node.Index, arms.items);
+        arms.deinit(self.allocator);
+        return self.createNode(.{ .tag = .match_expr, .main_token = token, .data = .{ .match_expr = .{ .expression = expr, .arms = arms_slice } } });
     }
 
     fn parseNewOrAnonymousClass(self: *Parser) anyerror!ast.Node.Index {
@@ -799,7 +1210,6 @@ pub const Parser = struct {
 
         const class_name = try self.parsePrimary();
         var args = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer args.deinit(self.allocator);
 
         if (self.curr.tag == .l_paren) {
             self.nextToken();
@@ -810,7 +1220,10 @@ pub const Parser = struct {
             _ = try self.eat(.r_paren);
         }
 
-        return self.createNode(.{ .tag = .object_instantiation, .main_token = token, .data = .{ .object_instantiation = .{ .class_name = class_name, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+        const arena = self.context.arena.allocator();
+        const args_slice = try arena.dupe(ast.Node.Index, args.items);
+        args.deinit(self.allocator);
+        return self.createNode(.{ .tag = .object_instantiation, .main_token = token, .data = .{ .object_instantiation = .{ .class_name = class_name, .args = args_slice } } });
     }
 
     fn parseCloneExpression(self: *Parser) anyerror!ast.Node.Index {
@@ -822,7 +1235,6 @@ pub const Parser = struct {
             _ = try self.eat(.l_brace);
 
             var properties = std.ArrayListUnmanaged(ast.Node.Index){};
-            defer properties.deinit(self.allocator);
 
             while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
                 const prop_name = try self.parseExpression(0);
@@ -838,7 +1250,10 @@ pub const Parser = struct {
             _ = try self.eat(.r_brace);
 
             // Create array node for properties
-            const props_array = try self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = try self.context.arena.allocator().dupe(ast.Node.Index, properties.items) } } });
+            const arena = self.context.arena.allocator();
+            const props_slice = try arena.dupe(ast.Node.Index, properties.items);
+            properties.deinit(self.allocator);
+            const props_array = try self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = props_slice } } });
 
             return self.createNode(.{ .tag = .clone_with_expr, .main_token = token, .data = .{ .clone_with_expr = .{ .object = object, .properties = props_array } } });
         } else {
@@ -850,7 +1265,9 @@ pub const Parser = struct {
     fn getPrecedence(self: *Parser, tag: Token.Tag) u8 {
         _ = self;
         return switch (tag) {
+            .plus_plus, .minus_minus => 120, // Postfix increment/decrement (highest precedence)
             .l_paren => 110,
+            .l_bracket => 110, // Array access
             .arrow => 100,
             .double_colon => 100, // Static access has same precedence as instance access
             .pipe_greater => 90, // Pipe operator has high precedence
@@ -863,6 +1280,7 @@ pub const Parser = struct {
             .double_ampersand => 20, // Logical AND
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
+            .question => 7, // Ternary
             .equal => 5,
             else => 0,
         };
@@ -879,7 +1297,6 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
 
         var params = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer params.deinit(self.allocator);
 
         while (self.curr.tag != .r_paren) {
             try params.append(self.allocator, try self.parseParameter());
@@ -897,18 +1314,36 @@ pub const Parser = struct {
         const body = try self.parseExpression(0);
 
         const arena = self.context.arena.allocator();
-        return self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = try arena.dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body, .is_static = false } } });
+        const params_slice = try arena.dupe(ast.Node.Index, params.items);
+
+        // 在创建节点前清理params数组，避免内存泄漏
+        params.deinit(self.allocator);
+
+        return self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = params_slice, .return_type = return_type, .body = body, .is_static = false } } });
     }
 
     fn parseArrayLiteral(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.l_bracket);
 
         var elements = std.ArrayListUnmanaged(ast.Node.Index){};
-        defer elements.deinit(self.allocator);
 
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
-            const element = try self.parseExpression(0);
-            try elements.append(self.allocator, element);
+            // 解析第一个表达式（可能是键或值）
+            const first_expr = try self.parseExpression(0);
+
+            // 检查是否有 => 符号（关联数组语法）
+            if (self.curr.tag == .fat_arrow) {
+                // 有 => 符号，创建键值对节点
+                _ = try self.eat(.fat_arrow);
+                const value_expr = try self.parseExpression(0);
+
+                // 创建键值对节点
+                const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = token, .data = .{ .array_pair = .{ .key = first_expr, .value = value_expr } } });
+                try elements.append(self.allocator, pair_node);
+            } else {
+                // 没有 => 符号，普通数组元素
+                try elements.append(self.allocator, first_expr);
+            }
 
             if (self.curr.tag == .comma) {
                 self.nextToken();
@@ -919,8 +1354,63 @@ pub const Parser = struct {
 
         _ = try self.eat(.r_bracket);
 
+        // 先复制到arena，然后立即清理ArrayList
         const arena = self.context.arena.allocator();
-        return self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = try arena.dupe(ast.Node.Index, elements.items) } } });
+        const elements_slice = try arena.dupe(ast.Node.Index, elements.items);
+
+        // 在复制后立即清理，避免后续操作导致的问题
+        elements.deinit(self.allocator);
+
+        return self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = elements_slice } } });
+    }
+
+    /// 解析 JSON 风格的对象字面量 {"key": "value", ...}
+    /// 将其转换为 PHP 关联数组
+    fn parseJsonObjectLiteral(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.l_brace);
+
+        var elements = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+            // JSON 对象的键必须是字符串
+            const key_expr = try self.parseExpression(0);
+
+            // 检查是否有 : 符号（JSON 风格）或 => 符号（PHP 风格）
+            if (self.curr.tag == .colon) {
+                // JSON 风格 "key": value
+                _ = try self.eat(.colon);
+                const value_expr = try self.parseExpression(0);
+
+                // 创建键值对节点
+                const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = token, .data = .{ .array_pair = .{ .key = key_expr, .value = value_expr } } });
+                try elements.append(self.allocator, pair_node);
+            } else if (self.curr.tag == .fat_arrow) {
+                // PHP 风格 "key" => value
+                _ = try self.eat(.fat_arrow);
+                const value_expr = try self.parseExpression(0);
+
+                const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = token, .data = .{ .array_pair = .{ .key = key_expr, .value = value_expr } } });
+                try elements.append(self.allocator, pair_node);
+            } else {
+                self.reportError("Expected ':' or '=>' in object literal");
+                return error.InvalidExpression;
+            }
+
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+            } else {
+                break;
+            }
+        }
+
+        _ = try self.eat(.r_brace);
+
+        // 先复制到arena，然后立即清理ArrayList
+        const arena = self.context.arena.allocator();
+        const elements_slice = try arena.dupe(ast.Node.Index, elements.items);
+        elements.deinit(self.allocator);
+
+        return self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = elements_slice } } });
     }
 
     fn parseType(self: *Parser) anyerror!ast.Node.Index {
@@ -932,7 +1422,6 @@ pub const Parser = struct {
 
         if (self.curr.tag == .pipe) {
             var types = std.ArrayListUnmanaged(ast.Node.Index){};
-            defer types.deinit(self.allocator);
             try types.append(self.allocator, left);
 
             while (self.curr.tag == .pipe) {
@@ -941,7 +1430,9 @@ pub const Parser = struct {
             }
 
             const arena = self.context.arena.allocator();
-            return self.createNode(.{ .tag = .union_type, .main_token = self.curr, .data = .{ .union_type = .{ .types = try arena.dupe(ast.Node.Index, types.items) } } });
+            const types_slice = try arena.dupe(ast.Node.Index, types.items);
+            types.deinit(self.allocator);
+            return self.createNode(.{ .tag = .union_type, .main_token = self.curr, .data = .{ .union_type = .{ .types = types_slice } } });
         }
 
         return left;
@@ -952,7 +1443,6 @@ pub const Parser = struct {
 
         if (self.curr.tag == .ampersand) {
             var types = std.ArrayListUnmanaged(ast.Node.Index){};
-            defer types.deinit(self.allocator);
             try types.append(self.allocator, left);
 
             while (self.curr.tag == .ampersand) {
@@ -961,7 +1451,9 @@ pub const Parser = struct {
             }
 
             const arena = self.context.arena.allocator();
-            return self.createNode(.{ .tag = .intersection_type, .main_token = self.curr, .data = .{ .intersection_type = .{ .types = try arena.dupe(ast.Node.Index, types.items) } } });
+            const types_slice = try arena.dupe(ast.Node.Index, types.items);
+            types.deinit(self.allocator);
+            return self.createNode(.{ .tag = .intersection_type, .main_token = self.curr, .data = .{ .intersection_type = .{ .types = types_slice } } });
         }
 
         return left;

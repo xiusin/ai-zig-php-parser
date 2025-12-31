@@ -77,7 +77,7 @@ test "Parameter type validation" {
     // Test with incorrect type
     const string_value = try Value.initString(allocator, "not an int");
     defer {
-        string_value.data.string.release(allocator);
+        string_value.release(allocator);
     }
     try testing.expectError(error.TypeError, parameter.validateType(string_value));
 }
@@ -108,7 +108,7 @@ test "Parameter nullable type validation" {
     // Test with incorrect type
     const string_value = try Value.initString(allocator, "not an int");
     defer {
-        string_value.data.string.release(allocator);
+        string_value.release(allocator);
     }
     try testing.expectError(error.TypeError, parameter.validateType(string_value));
 }
@@ -122,7 +122,7 @@ test "Closure creation and variable capture" {
     
     const user_function = UserFunction.init(func_name);
     var closure = Closure.init(allocator, user_function);
-    defer closure.deinit();
+    defer closure.deinit(allocator);
     
     // Capture a variable
     const captured_value = Value.initInt(100);
@@ -131,14 +131,14 @@ test "Closure creation and variable capture" {
     // Verify variable was captured
     const retrieved_value = closure.captured_vars.get("x");
     try testing.expect(retrieved_value != null);
-    try testing.expectEqual(@as(i64, 100), retrieved_value.?.data.integer);
+    try testing.expectEqual(@as(i64, 100), retrieved_value.?.asInt());
 }
 
 test "ArrowFunction creation and auto-capture" {
     const allocator = testing.allocator;
     
     var arrow_function = ArrowFunction.init(allocator);
-    defer arrow_function.deinit();
+    defer arrow_function.deinit(allocator);
     
     // Auto-capture a variable
     const captured_value = Value.initInt(200);
@@ -147,14 +147,14 @@ test "ArrowFunction creation and auto-capture" {
     // Verify variable was captured
     const retrieved_value = arrow_function.captured_vars.get("y");
     try testing.expect(retrieved_value != null);
-    try testing.expectEqual(@as(i64, 200), retrieved_value.?.data.integer);
+    try testing.expectEqual(@as(i64, 200), retrieved_value.?.asInt());
 }
 
 test "Value isCallable function" {
     const allocator = testing.allocator;
     
-    // Test builtin function
-    const builtin_value = Value{ .tag = .builtin_function, .data = .{ .builtin_function = undefined } };
+    // Test builtin function (native function)
+    const builtin_value = Value.initNativeFunction(@as(*const fn (*anyopaque, []const Value) anyerror!Value, undefined));
     try testing.expect(builtin_value.isCallable());
     
     // Test user function
@@ -173,14 +173,14 @@ test "Value isCallable function" {
         .data = user_function,
     };
     
-    const user_func_value = Value{ .tag = .user_function, .data = .{ .user_function = box } };
+    const user_func_value = Value.fromBox(box, Value.TYPE_USER_FUNC);
     try testing.expect(user_func_value.isCallable());
     
     // Test closure
     const closure = try allocator.create(Closure);
     defer allocator.destroy(closure);
     closure.* = Closure.init(allocator, user_function.*);
-    defer closure.deinit();
+    defer closure.deinit(allocator);
     
     const closure_box = try allocator.create(types.gc.Box(*Closure));
     defer allocator.destroy(closure_box);
@@ -190,14 +190,14 @@ test "Value isCallable function" {
         .data = closure,
     };
     
-    const closure_value = Value{ .tag = .closure, .data = .{ .closure = closure_box } };
+    const closure_value = Value.fromBox(closure_box, Value.TYPE_CLOSURE);
     try testing.expect(closure_value.isCallable());
     
     // Test arrow function
     const arrow_function = try allocator.create(ArrowFunction);
     defer allocator.destroy(arrow_function);
     arrow_function.* = ArrowFunction.init(allocator);
-    defer arrow_function.deinit();
+    defer arrow_function.deinit(allocator);
     
     const arrow_box = try allocator.create(types.gc.Box(*ArrowFunction));
     defer allocator.destroy(arrow_box);
@@ -207,7 +207,7 @@ test "Value isCallable function" {
         .data = arrow_function,
     };
     
-    const arrow_value = Value{ .tag = .arrow_function, .data = .{ .arrow_function = arrow_box } };
+    const arrow_value = Value.fromBox(arrow_box, Value.TYPE_CLOSURE);
     try testing.expect(arrow_value.isCallable());
     
     // Test non-callable value
@@ -221,12 +221,12 @@ test "VM enhanced function calls" {
     defer vm.deinit();
     
     // Test is_callable builtin function
-    const callable_value = Value{ .tag = .builtin_function, .data = .{ .builtin_function = undefined } };
+    const callable_value = Value.initNativeFunction(@as(*const fn (*anyopaque, []const Value) anyerror!Value, undefined));
     _ = callable_value;
     
     // This would test the is_callable function, but we need a proper VM context
     // For now, just verify the function exists
     const is_callable_func = vm.global.get("is_callable");
     try testing.expect(is_callable_func != null);
-    try testing.expect(is_callable_func.?.tag == .builtin_function);
+    try testing.expect(is_callable_func.?.getTag() == .native_function);
 }
