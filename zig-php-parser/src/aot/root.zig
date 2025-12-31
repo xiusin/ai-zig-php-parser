@@ -115,6 +115,15 @@ pub const MultiFileCompiler = MultiFileCompilerMod.MultiFileCompiler;
 pub const MultiFileCompileResult = MultiFileCompilerMod.MultiFileCompileResult;
 pub const CompiledFile = MultiFileCompilerMod.CompiledFile;
 
+// Optimizer module
+pub const OptimizerMod = @import("optimizer.zig");
+pub const IROptimizer = OptimizerMod.IROptimizer;
+pub const IROptimizeLevel = OptimizerMod.OptimizeLevel;
+pub const PassConfig = OptimizerMod.PassConfig;
+pub const OptimizationStats = OptimizerMod.OptimizationStats;
+pub const LLVMPassConfig = OptimizerMod.LLVMPassConfig;
+pub const LLVMPassManager = OptimizerMod.LLVMPassManager;
+
 // Runtime library functions
 pub const php_value_create_null = RuntimeLib.php_value_create_null;
 pub const php_value_create_bool = RuntimeLib.php_value_create_bool;
@@ -142,6 +151,7 @@ test {
     _ = @import("dependency_resolver.zig");
     _ = @import("multi_file_compiler.zig");
     _ = @import("test_multi_file_compiler.zig");
+    _ = @import("optimizer.zig");
 }
 
 // Tests for re-exported types
