@@ -132,6 +132,7 @@ pub const Node = struct {
         global_stmt,
         static_stmt,
         go_stmt,
+        lock_stmt,
         closure,
         arrow_function,
         anonymous_class,
@@ -212,6 +213,7 @@ pub const Node = struct {
         global_stmt: struct { vars: []const Index },
         static_stmt: struct { vars: []const Index },
         go_stmt: struct { call: Index },
+        lock_stmt: struct { body: Index },
         closure: struct { attributes: []const Index, params: []const Index, captures: []const Index, return_type: ?Index, body: Index, is_static: bool },
         arrow_function: struct { attributes: []const Index, params: []const Index, return_type: ?Index, body: Index, is_static: bool },
         anonymous_class: struct { attributes: []const Index, extends: ?Index, implements: []const Index, members: []const Index, args: []const Index },
@@ -587,6 +589,7 @@ pub const IRGenerator = struct {
             .break_stmt => try self.generateBreakStmt(node),
             .continue_stmt => try self.generateContinueStmt(node),
             .echo_stmt => try self.generateEchoStmt(node),
+            .lock_stmt => try self.generateLockStmt(node),
             .expression_stmt => {
                 // Expression statement - just evaluate the expression
                 _ = try self.generateExpression(index);
@@ -1253,6 +1256,42 @@ pub const IRGenerator = struct {
         if (!self.isBlockTerminated()) {
             self.setTerminator(.{ .br = next_block });
         }
+    }
+
+    /// Generate IR for lock statement (mutex syntax sugar)
+    /// lock { ... } is equivalent to:
+    ///   mutex_lock();
+    ///   try { ... } finally { mutex_unlock(); }
+    fn generateLockStmt(self: *Self, node: *const Node) !void {
+        const lock_data = node.data.lock_stmt;
+
+        // Create blocks for lock structure
+        const lock_body_block = try self.createBlock("lock_body");
+        const unlock_block = try self.createBlock("lock_unlock");
+        const exit_block = try self.createBlock("lock_exit");
+
+        // Emit mutex_lock instruction
+        _ = try self.emit(.mutex_lock, null);
+
+        // Jump to lock body
+        self.setTerminator(.{ .br = lock_body_block });
+
+        // Generate lock body
+        self.setCurrentBlock(lock_body_block);
+        try self.generateStatement(lock_data.body);
+
+        // After body, jump to unlock block
+        if (!self.isBlockTerminated()) {
+            self.setTerminator(.{ .br = unlock_block });
+        }
+
+        // Generate unlock block (always executed, like finally)
+        self.setCurrentBlock(unlock_block);
+        _ = try self.emit(.mutex_unlock, null);
+        self.setTerminator(.{ .br = exit_block });
+
+        // Continue in exit block
+        self.setCurrentBlock(exit_block);
     }
 
     /// Generate IR for throw statement

@@ -150,7 +150,7 @@
   - 如有问题请询问用户
 
 
-- [-] 8. LLVM 代码生成
+- [x] 8. LLVM 代码生成
   - [x] 8.1 设置 LLVM 集成
     - 创建 `src/aot/codegen.zig`
     - 配置 LLVM C API 绑定
@@ -193,7 +193,7 @@
     - 保留源代码行号映射
     - _Requirements: 11.1, 11.2, 11.3_
 
-  - [ ] 8.8 编写代码生成属性测试
+  - [x] 8.8 编写代码生成属性测试
     - **Property 6: 安全检查有效性**
     - **Validates: Requirements 12.1, 12.2**
 

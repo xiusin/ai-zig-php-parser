@@ -2552,6 +2552,118 @@ pub fn php_create_exception(class_name: []const u8, message: []const u8, code: i
 
 
 // ============================================================================
+// Mutex / Concurrency Runtime
+// ============================================================================
+
+/// Mutex type for lock statement
+pub const PHPMutex = struct {
+    /// Internal mutex implementation
+    mutex: std.Thread.Mutex,
+    /// Reference count
+    ref_count: u32,
+
+    /// Initialize a new mutex
+    pub fn init() PHPMutex {
+        return .{
+            .mutex = .{},
+            .ref_count = 1,
+        };
+    }
+
+    /// Lock the mutex
+    pub fn lock(self: *PHPMutex) void {
+        self.mutex.lock();
+    }
+
+    /// Unlock the mutex
+    pub fn unlock(self: *PHPMutex) void {
+        self.mutex.unlock();
+    }
+
+    /// Try to lock the mutex (non-blocking)
+    pub fn tryLock(self: *PHPMutex) bool {
+        return self.mutex.tryLock();
+    }
+};
+
+/// Thread-local global mutex for lock {} blocks
+/// This is a simple implementation - each lock {} block uses the same global mutex
+/// For more advanced use cases, users should use explicit mutex objects
+var global_mutex: ?*PHPMutex = null;
+
+/// Get or create the global mutex
+fn getGlobalMutex() *PHPMutex {
+    if (global_mutex == null) {
+        const allocator = getGlobalAllocator();
+        global_mutex = allocator.create(PHPMutex) catch {
+            // Fallback to static mutex if allocation fails
+            const static = struct {
+                var mutex: PHPMutex = PHPMutex.init();
+            };
+            return &static.mutex;
+        };
+        global_mutex.?.* = PHPMutex.init();
+    }
+    return global_mutex.?;
+}
+
+/// Create a new mutex
+pub fn php_mutex_new() *PHPMutex {
+    const allocator = getGlobalAllocator();
+    const mutex = allocator.create(PHPMutex) catch {
+        // Return global mutex as fallback
+        return getGlobalMutex();
+    };
+    mutex.* = PHPMutex.init();
+    return mutex;
+}
+
+/// Acquire the global mutex lock (for lock {} blocks)
+pub fn php_mutex_lock() void {
+    const mutex = getGlobalMutex();
+    mutex.lock();
+}
+
+/// Release the global mutex lock (for lock {} blocks)
+pub fn php_mutex_unlock() void {
+    const mutex = getGlobalMutex();
+    mutex.unlock();
+}
+
+/// Acquire a specific mutex lock
+pub fn php_mutex_lock_ptr(mutex: *PHPMutex) void {
+    mutex.lock();
+}
+
+/// Release a specific mutex lock
+pub fn php_mutex_unlock_ptr(mutex: *PHPMutex) void {
+    mutex.unlock();
+}
+
+/// Try to acquire a specific mutex lock (non-blocking)
+pub fn php_mutex_trylock_ptr(mutex: *PHPMutex) bool {
+    return mutex.tryLock();
+}
+
+/// Retain mutex reference
+pub fn php_mutex_retain(mutex: *PHPMutex) void {
+    mutex.ref_count += 1;
+}
+
+/// Release mutex reference
+pub fn php_mutex_release(mutex: *PHPMutex) void {
+    if (mutex.ref_count == 0) return;
+    mutex.ref_count -= 1;
+    if (mutex.ref_count == 0) {
+        // Don't free the global mutex
+        if (mutex == global_mutex) return;
+        const allocator = getGlobalAllocator();
+        allocator.destroy(mutex);
+    }
+}
+
+
+// ============================================================================
 // Unit Tests
 // ============================================================================
 

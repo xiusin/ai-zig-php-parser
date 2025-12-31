@@ -661,6 +661,14 @@ pub const Instruction = struct {
         /// Clear current exception
         clear_exception: void,
 
+        // ============ Concurrency Operations ============
+        /// Acquire mutex lock
+        mutex_lock: void,
+        /// Release mutex lock
+        mutex_unlock: void,
+        /// Create new mutex
+        mutex_new: void,
+
         // ============ Debugging ============
         /// Debug print
         debug_print: UnaryOp,
@@ -1153,6 +1161,11 @@ pub const IRPrinter = struct {
             },
             .get_exception => try self.write("get_exception"),
             .clear_exception => try self.write("clear_exception"),
+
+            // Concurrency
+            .mutex_lock => try self.write("mutex.lock"),
+            .mutex_unlock => try self.write("mutex.unlock"),
+            .mutex_new => try self.write("mutex.new"),
 
             // Debug
             .debug_print => |op| try self.print("debug.print {any}", .{op.operand}),
