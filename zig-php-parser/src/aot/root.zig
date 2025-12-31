@@ -152,6 +152,11 @@ test {
     _ = @import("multi_file_compiler.zig");
     _ = @import("test_multi_file_compiler.zig");
     _ = @import("optimizer.zig");
+    // End-to-end integration tests
+    _ = @import("test_e2e_roundtrip.zig");
+    _ = @import("test_e2e_error_reporting.zig");
+    _ = @import("test_e2e_cross_platform.zig");
+    _ = @import("test_e2e_performance.zig");
 }
 
 // Tests for re-exported types
