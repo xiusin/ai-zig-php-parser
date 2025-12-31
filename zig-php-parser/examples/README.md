@@ -228,3 +228,93 @@ $res->status(201)->json(['created' => true]);
 ## 更多示例
 
 查看 `examples/` 目录中的其他文件，了解更多PHP特性的使用方法。
+
+## AOT 编译示例
+
+以下示例专门用于演示 AOT (Ahead-of-Time) 编译功能：
+
+### aot_hello.php
+
+最简单的 AOT 编译示例，展示基本的输出和变量操作：
+
+```bash
+# 编译
+zig-php --compile examples/aot_hello.php
+
+# 运行编译后的二进制
+./aot_hello
+```
+
+### aot_functions.php
+
+函数定义和调用示例，包括递归函数：
+
+```bash
+# 编译并优化
+zig-php --compile --optimize=release-fast examples/aot_functions.php
+
+# 运行
+./aot_functions
+```
+
+### aot_arrays.php
+
+数组操作示例，包括索引数组、关联数组和嵌套数组：
+
+```bash
+# 编译
+zig-php --compile examples/aot_arrays.php
+
+# 运行
+./aot_arrays
+```
+
+### aot_classes.php
+
+面向对象编程示例，包括类定义、继承和方法调用：
+
+```bash
+# 编译（带安全检查）
+zig-php --compile --optimize=release-safe examples/aot_classes.php
+
+# 运行
+./aot_classes
+```
+
+### aot_strings.php
+
+字符串操作示例，包括连接、插值和内置函数：
+
+```bash
+# 编译
+zig-php --compile examples/aot_strings.php
+
+# 运行
+./aot_strings
+```
+
+### AOT 编译选项
+
+| 选项 | 说明 |
+|------|------|
+| `--compile` | 启用 AOT 编译模式 |
+| `--output=<file>` | 指定输出文件名 |
+| `--optimize=debug` | 调试模式（默认） |
+| `--optimize=release-safe` | 安全优化模式 |
+| `--optimize=release-fast` | 最快执行速度 |
+| `--optimize=release-small` | 最小二进制体积 |
+| `--static` | 生成完全静态链接的可执行文件 |
+| `--target=<triple>` | 交叉编译到指定平台 |
+
+### 交叉编译示例
+
+```bash
+# 编译为 Linux x86_64
+zig-php --compile --target=x86_64-linux-gnu examples/aot_hello.php
+
+# 编译为 macOS ARM64
+zig-php --compile --target=aarch64-macos-none examples/aot_hello.php
+
+# 编译为 Windows x86_64
+zig-php --compile --target=x86_64-windows-msvc examples/aot_hello.php
+```
