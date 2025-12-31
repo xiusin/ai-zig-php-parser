@@ -292,23 +292,328 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 
     if (options.dump_ast) {
         std.debug.print("\n=== AST Dump ===\n", .{});
-        std.debug.print("(AST node type: {s})\n", .{@typeName(@TypeOf(program))});
+        std.debug.print("Root node index: {d}\n", .{program});
+        std.debug.print("Total nodes: {d}\n", .{context.nodes.items.len});
+        std.debug.print("String pool size: {d}\n", .{context.string_pool.count()});
+        // Print first few nodes for debugging
+        const max_nodes = @min(context.nodes.items.len, 10);
+        for (context.nodes.items[0..max_nodes], 0..) |node, i| {
+            std.debug.print("  Node {d}: tag={s}\n", .{ i, @tagName(node.tag) });
+        }
+        if (context.nodes.items.len > 10) {
+            std.debug.print("  ... and {d} more nodes\n", .{context.nodes.items.len - 10});
+        }
         std.debug.print("=== End AST ===\n\n", .{});
     }
 
     if (options.dump_ir) {
         std.debug.print("\n=== IR Dump ===\n", .{});
-        std.debug.print("(IR generation not yet implemented)\n", .{});
+
+        // Convert parser AST to IR generator format
+        const ir_nodes = try convertASTToIRNodes(allocator, context.nodes.items);
+        defer allocator.free(ir_nodes);
+
+        // Build string table from string pool
+        const string_table = try buildStringTable(allocator, &context.string_pool);
+        defer {
+            for (string_table) |s| {
+                allocator.free(s);
+            }
+            allocator.free(string_table);
+        }
+
+        // Initialize symbol table and type inferencer
+        var symbol_table = try aot.SymbolTable.init(allocator);
+        defer symbol_table.deinit();
+
+        var type_inferencer = aot.TypeInferenceMod.TypeInferencer.init(allocator, &symbol_table, &diagnostics);
+
+        // Initialize IR generator
+        var ir_generator = aot.IRGenerator.init(allocator, &symbol_table, &type_inferencer, &diagnostics);
+        defer ir_generator.deinit();
+
+        // Generate IR - pass the root node index
+        const module = ir_generator.generateFromRoot(ir_nodes, string_table, program, options.input_file, options.input_file) catch |err| {
+            std.debug.print("IR generation error: {s}\n", .{@errorName(err)});
+            std.debug.print("=== End IR ===\n\n", .{});
+            return;
+        };
+        defer {
+            module.deinit();
+            allocator.destroy(module);
+        }
+
+        // Serialize and print IR
+        const ir_text = aot.serializeModule(allocator, module) catch |err| {
+            std.debug.print("IR serialization error: {s}\n", .{@errorName(err)});
+            std.debug.print("=== End IR ===\n\n", .{});
+            return;
+        };
+        defer allocator.free(ir_text);
+
+        std.debug.print("{s}", .{ir_text});
         std.debug.print("=== End IR ===\n\n", .{});
     }
 
-    // TODO: Implement full AOT compilation pipeline
-    // For now, just report that parsing succeeded
+    // Report compilation status
+    if (diagnostics.hasErrors()) {
+        diagnostics.printToStderr();
+        return;
+    }
+
     if (options.verbose) {
         std.debug.print("Parsing completed successfully.\n", .{});
-        std.debug.print("Note: Full AOT compilation pipeline not yet implemented.\n", .{});
-    } else {
-        std.debug.print("AOT compilation not yet fully implemented.\n", .{});
-        std.debug.print("Parsing succeeded. Use --dump-ast to see the AST.\n", .{});
+        if (!options.dump_ir) {
+            std.debug.print("Note: Use --dump-ir to see the generated IR.\n", .{});
+        }
+        std.debug.print("Note: Full AOT compilation pipeline (code generation, linking) not yet implemented.\n", .{});
+    } else if (!options.dump_ir and !options.dump_ast) {
+        std.debug.print("AOT compilation: parsing succeeded.\n", .{});
+        std.debug.print("Use --dump-ir to see the generated IR, or --dump-ast to see the AST.\n", .{});
     }
+}
+
+/// Convert parser AST nodes to IR generator node format
+fn convertASTToIRNodes(allocator: std.mem.Allocator, parser_nodes: []const ast.Node) ![]const aot.IRGeneratorMod.Node {
+    const ir_nodes = try allocator.alloc(aot.IRGeneratorMod.Node, parser_nodes.len);
+
+    for (parser_nodes, 0..) |pnode, i| {
+        ir_nodes[i] = .{
+            .tag = convertNodeTag(pnode.tag),
+            .main_token = convertToken(pnode.main_token),
+            .data = convertNodeData(pnode.data, pnode.tag),
+        };
+    }
+
+    return ir_nodes;
+}
+
+/// Convert parser node tag to IR generator node tag
+fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
+    return switch (tag) {
+        .root => .root,
+        .attribute => .attribute,
+        .class_decl => .class_decl,
+        .interface_decl => .interface_decl,
+        .trait_decl => .trait_decl,
+        .enum_decl => .enum_decl,
+        .struct_decl => .struct_decl,
+        .property_decl => .property_decl,
+        .property_hook => .property_hook,
+        .method_decl => .method_decl,
+        .parameter => .parameter,
+        .const_decl => .const_decl,
+        .global_stmt => .global_stmt,
+        .static_stmt => .static_stmt,
+        .go_stmt => .go_stmt,
+        .closure => .closure,
+        .arrow_function => .arrow_function,
+        .anonymous_class => .anonymous_class,
+        .if_stmt => .if_stmt,
+        .while_stmt => .while_stmt,
+        .for_stmt => .for_stmt,
+        .for_range_stmt => .for_range_stmt,
+        .foreach_stmt => .foreach_stmt,
+        .match_expr => .match_expr,
+        .match_arm => .match_arm,
+        .try_stmt => .try_stmt,
+        .catch_clause => .catch_clause,
+        .finally_clause => .finally_clause,
+        .throw_stmt => .throw_stmt,
+        .method_call => .method_call,
+        .property_access => .property_access,
+        .array_access => .array_access,
+        .function_call => .function_call,
+        .function_decl => .function_decl,
+        .static_method_call => .static_method_call,
+        .static_property_access => .static_property_access,
+        .use_stmt => .use_stmt,
+        .namespace_stmt => .namespace_stmt,
+        .include_stmt => .include_stmt,
+        .require_stmt => .require_stmt,
+        .block => .block,
+        .expression_stmt => .expression_stmt,
+        .assignment => .assignment,
+        .echo_stmt => .echo_stmt,
+        .return_stmt => .return_stmt,
+        .break_stmt => .break_stmt,
+        .continue_stmt => .continue_stmt,
+        .variable => .variable,
+        .literal_int => .literal_int,
+        .literal_float => .literal_float,
+        .literal_string => .literal_string,
+        .literal_bool => .literal_bool,
+        .literal_null => .literal_null,
+        .array_init => .array_init,
+        .array_pair => .array_pair,
+        .binary_expr => .binary_expr,
+        .unary_expr => .unary_expr,
+        .postfix_expr => .postfix_expr,
+        .ternary_expr => .ternary_expr,
+        .unpacking_expr => .unpacking_expr,
+        .pipe_expr => .pipe_expr,
+        .clone_with_expr => .clone_with_expr,
+        .struct_instantiation => .struct_instantiation,
+        .object_instantiation => .object_instantiation,
+        .trait_use => .trait_use,
+        .named_type => .named_type,
+        .union_type => .union_type,
+        .intersection_type => .intersection_type,
+        .class_constant_access => .class_constant_access,
+        .self_expr => .self_expr,
+        .parent_expr => .parent_expr,
+        .static_expr => .static_expr,
+    };
+}
+
+/// Convert parser token to IR generator token
+fn convertToken(token: @import("compiler/token.zig").Token) aot.IRGeneratorMod.Token {
+    return .{
+        .tag = convertTokenTag(token.tag),
+        .start = @intCast(token.loc.start),
+        .end = @intCast(token.loc.end),
+        .line = 0, // Line info not directly available in parser token
+        .column = 0,
+    };
+}
+
+/// Convert parser token tag to IR generator token tag
+fn convertTokenTag(tag: @import("compiler/token.zig").Token.Tag) aot.IRGeneratorMod.TokenTag {
+    return switch (tag) {
+        .t_lnumber => .integer_literal,
+        .t_dnumber => .float_literal,
+        .t_constant_encapsed_string, .t_string => .string_literal,
+        .k_true => .keyword_true,
+        .k_false => .keyword_false,
+        .k_null => .keyword_null,
+        .k_and => .keyword_and,
+        .k_or => .keyword_or,
+        .plus => .plus,
+        .minus => .minus,
+        .asterisk => .star,
+        .slash => .slash,
+        .percent => .percent,
+        .dot => .dot,
+        .ampersand => .ampersand,
+        .pipe => .pipe,
+        .equal_equal => .equal_equal,
+        .bang_equal => .bang_equal,
+        .equal_equal_equal => .equal_equal_equal,
+        .bang_equal_equal => .bang_equal_equal,
+        .less => .less_than,
+        .less_equal => .less_equal,
+        .greater => .greater_than,
+        .greater_equal => .greater_equal,
+        .spaceship => .spaceship,
+        .double_ampersand => .ampersand_ampersand,
+        .double_pipe => .pipe_pipe,
+        .bang => .bang,
+        .double_question => .question_question,
+        .plus_plus => .plus_plus,
+        .minus_minus => .minus_minus,
+        .eof => .eof,
+        else => .eof, // Default for unhandled tags
+    };
+}
+
+/// Convert parser node data to IR generator node data
+fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Data {
+    return switch (tag) {
+        .root => .{ .root = .{ .stmts = data.root.stmts } },
+        .block => .{ .block = .{ .stmts = data.block.stmts } },
+        .function_decl => .{ .function_decl = .{
+            .attributes = data.function_decl.attributes,
+            .name = data.function_decl.name,
+            .params = data.function_decl.params,
+            .body = data.function_decl.body,
+        } },
+        .literal_int => .{ .literal_int = .{ .value = data.literal_int.value } },
+        .literal_float => .{ .literal_float = .{ .value = data.literal_float.value } },
+        .literal_string => .{ .literal_string = .{
+            .value = data.literal_string.value,
+            .quote_type = switch (data.literal_string.quote_type) {
+                .single => .single,
+                .double => .double,
+                .backtick => .backtick,
+            },
+        } },
+        .variable => .{ .variable = .{ .name = data.variable.name } },
+        .binary_expr => .{ .binary_expr = .{
+            .lhs = data.binary_expr.lhs,
+            .op = convertTokenTag(data.binary_expr.op),
+            .rhs = data.binary_expr.rhs,
+        } },
+        .unary_expr => .{ .unary_expr = .{
+            .op = convertTokenTag(data.unary_expr.op),
+            .expr = data.unary_expr.expr,
+        } },
+        .assignment => .{ .assignment = .{
+            .target = data.assignment.target,
+            .value = data.assignment.value,
+        } },
+        .echo_stmt => .{ .echo_stmt = .{ .exprs = data.echo_stmt.exprs } },
+        .return_stmt => .{ .return_stmt = .{ .expr = data.return_stmt.expr } },
+        .if_stmt => .{ .if_stmt = .{
+            .condition = data.if_stmt.condition,
+            .then_branch = data.if_stmt.then_branch,
+            .else_branch = data.if_stmt.else_branch,
+        } },
+        .while_stmt => .{ .while_stmt = .{
+            .condition = data.while_stmt.condition,
+            .body = data.while_stmt.body,
+        } },
+        .for_stmt => .{ .for_stmt = .{
+            .init = data.for_stmt.init,
+            .condition = data.for_stmt.condition,
+            .loop = data.for_stmt.loop,
+            .body = data.for_stmt.body,
+        } },
+        .foreach_stmt => .{ .foreach_stmt = .{
+            .iterable = data.foreach_stmt.iterable,
+            .key = data.foreach_stmt.key,
+            .value = data.foreach_stmt.value,
+            .body = data.foreach_stmt.body,
+        } },
+        .function_call => .{ .function_call = .{
+            .name = data.function_call.name,
+            .args = data.function_call.args,
+        } },
+        .array_init => .{ .array_init = .{ .elements = data.array_init.elements } },
+        .parameter => .{ .parameter = .{
+            .attributes = data.parameter.attributes,
+            .name = data.parameter.name,
+            .type = data.parameter.type,
+            .default_value = data.parameter.default_value,
+            .is_promoted = data.parameter.is_promoted,
+            .modifiers = .{
+                .is_public = data.parameter.modifiers.is_public,
+                .is_protected = data.parameter.modifiers.is_protected,
+                .is_private = data.parameter.modifiers.is_private,
+                .is_static = data.parameter.modifiers.is_static,
+                .is_final = data.parameter.modifiers.is_final,
+                .is_abstract = data.parameter.modifiers.is_abstract,
+                .is_readonly = data.parameter.modifiers.is_readonly,
+            },
+            .is_variadic = data.parameter.is_variadic,
+            .is_reference = data.parameter.is_reference,
+        } },
+        else => .{ .none = {} },
+    };
+}
+
+/// Build string table from parser's string pool
+fn buildStringTable(allocator: std.mem.Allocator, string_pool: *std.StringArrayHashMapUnmanaged(void)) ![][]const u8 {
+    const count = string_pool.count();
+    if (count == 0) {
+        return try allocator.alloc([]const u8, 0);
+    }
+
+    const table = try allocator.alloc([]const u8, count);
+    var i: usize = 0;
+    var iter = string_pool.iterator();
+    while (iter.next()) |entry| {
+        table[i] = try allocator.dupe(u8, entry.key_ptr.*);
+        i += 1;
+    }
+    return table;
 }

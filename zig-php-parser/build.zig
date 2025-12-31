@@ -58,6 +58,7 @@ pub fn build(b: *std.Build) void {
         "src/test_gc_stress.zig",
         "src/aot/root.zig",
         "src/aot/diagnostics.zig",
+        "src/aot/ir_generator.zig",
     };
     
     // Add all test files

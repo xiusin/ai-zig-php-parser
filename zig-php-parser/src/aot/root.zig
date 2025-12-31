@@ -61,6 +61,16 @@ pub const NodeTag = TypeInferenceMod.NodeTag;
 pub const OperatorKind = TypeInferenceMod.OperatorKind;
 pub const getBuiltinReturnType = TypeInferenceMod.getBuiltinReturnType;
 
+// IR Generator module
+pub const IRGeneratorMod = @import("ir_generator.zig");
+pub const IRGenerator = IRGeneratorMod.IRGenerator;
+
+// Property tests (included for test runs)
+test {
+    _ = @import("test_type_inference_property.zig");
+    _ = @import("test_ir_generator_property.zig");
+}
+
 /// AOT Compiler configuration options
 pub const CompileOptions = struct {
     /// Input PHP source file path
