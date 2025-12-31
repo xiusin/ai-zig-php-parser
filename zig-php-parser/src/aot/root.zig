@@ -101,6 +101,20 @@ pub const LinkerError = LinkerMod.LinkerError;
 pub const ObjectCode = LinkerMod.ObjectCode;
 pub const ObjectFormat = LinkerMod.ObjectFormat;
 
+// Dependency Resolver module
+pub const DependencyResolverMod = @import("dependency_resolver.zig");
+pub const DependencyResolver = DependencyResolverMod.DependencyResolver;
+pub const IncludeStatement = DependencyResolverMod.IncludeStatement;
+pub const FileNode = DependencyResolverMod.FileNode;
+pub const CircularDependency = DependencyResolverMod.CircularDependency;
+pub const UnresolvedFile = DependencyResolverMod.UnresolvedFile;
+
+// Multi-File Compiler module
+pub const MultiFileCompilerMod = @import("multi_file_compiler.zig");
+pub const MultiFileCompiler = MultiFileCompilerMod.MultiFileCompiler;
+pub const MultiFileCompileResult = MultiFileCompilerMod.MultiFileCompileResult;
+pub const CompiledFile = MultiFileCompilerMod.CompiledFile;
+
 // Runtime library functions
 pub const php_value_create_null = RuntimeLib.php_value_create_null;
 pub const php_value_create_bool = RuntimeLib.php_value_create_bool;
@@ -125,6 +139,9 @@ test {
     _ = @import("linker.zig");
     _ = @import("test_linker_property.zig");
     _ = @import("compiler.zig");
+    _ = @import("dependency_resolver.zig");
+    _ = @import("multi_file_compiler.zig");
+    _ = @import("test_multi_file_compiler.zig");
 }
 
 // Tests for re-exported types
