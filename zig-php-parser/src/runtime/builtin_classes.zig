@@ -29,8 +29,14 @@ pub const BuiltinClassManager = struct {
     }
 
     pub fn deinit(self: *BuiltinClassManager) void {
-        // Classes have been moved to VM.classes, so we don't release them here
-        // VM.deinit will handle the cleanup
+        // Note: In production, classes are typically moved to VM.classes
+        // and freed there. For standalone testing, we need to clean up here.
+        var iter = self.classes.iterator();
+        while (iter.next()) |entry| {
+            const class = entry.value_ptr.*;
+            class.deinit(self.allocator);
+            self.allocator.destroy(class);
+        }
         self.classes.deinit();
     }
 
