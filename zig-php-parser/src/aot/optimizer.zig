@@ -1015,22 +1015,196 @@ pub const IROptimizer = struct {
         callee: *const Function,
         args: []const Register,
     ) !bool {
-        _ = caller;
-        _ = block;
-        _ = inst_index;
-        _ = callee;
-        _ = args;
-        _ = self;
+        // Safety checks
+        if (callee.blocks.items.len == 0) return false;
+        if (callee.blocks.items.len > 3) return false; // Only inline simple functions
 
-        // Function inlining is complex and requires:
-        // 1. Copying callee's instructions with register renaming
-        // 2. Mapping parameters to arguments
-        // 3. Handling return values
-        // 4. Merging basic blocks
+        const call_inst = block.instructions.items[inst_index];
+        const result_reg = call_inst.result;
 
-        // For now, return false (not implemented)
-        // Full implementation would be added in a future iteration
+        // Get callee's entry block
+        const callee_entry = callee.getEntryBlock() orelse return false;
+
+        // Create register mapping: callee register ID -> new register ID in caller
+        var reg_map = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer reg_map.deinit();
+
+        // Map parameters to arguments
+        for (callee.params.items, 0..) |_, i| {
+            if (i < args.len) {
+                // Map parameter register to argument register
+                // Note: Parameters are typically represented by their index
+                try reg_map.put(@intCast(i), args[i].id);
+            }
+        }
+
+        // Allocate new registers for callee's local registers
+        var next_reg_id = caller.getNextRegisterId();
+
+        // Collect instructions to inline (excluding terminators)
+        var inlined_instructions = std.ArrayList(*Instruction).init(self.allocator);
+        defer inlined_instructions.deinit();
+
+        // Process callee's entry block instructions
+        for (callee_entry.instructions.items) |callee_inst| {
+            // Clone and remap the instruction
+            const new_inst = try self.cloneAndRemapInstruction(callee_inst, &reg_map, &next_reg_id);
+            if (new_inst) |inst| {
+                try inlined_instructions.append(inst);
+            }
+        }
+
+        // Handle return value: find the return terminator and map its value
+        if (callee_entry.terminator) |term| {
+            switch (term) {
+                .ret => |ret_val| {
+                    if (ret_val) |ret_reg| {
+                        // Map the return value to the call result
+                        if (result_reg) |res| {
+                            const mapped_ret_id = reg_map.get(ret_reg.id) orelse ret_reg.id;
+                            // Create a copy instruction from return value to result
+                            const copy_inst = try self.allocator.create(Instruction);
+                            copy_inst.* = Instruction{
+                                .result = res,
+                                .op = .{ .load = .{
+                                    .ptr = Register{ .id = mapped_ret_id, .type_ = ret_reg.type_ },
+                                } },
+                                .location = call_inst.location,
+                            };
+                            try inlined_instructions.append(copy_inst);
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        // Replace the call instruction with inlined instructions
+        if (inlined_instructions.items.len > 0) {
+            // Remove the call instruction
+            _ = block.instructions.orderedRemove(inst_index);
+            self.allocator.destroy(call_inst);
+
+            // Insert inlined instructions at the call site
+            for (inlined_instructions.items, 0..) |inst, i| {
+                try block.instructions.insert(inst_index + i, inst);
+            }
+
+            return true;
+        }
+
         return false;
+    }
+
+    /// Clone an instruction and remap its registers
+    fn cloneAndRemapInstruction(
+        self: *Self,
+        inst: *const Instruction,
+        reg_map: *std.AutoHashMap(u32, u32),
+        next_reg_id: *u32,
+    ) !?*Instruction {
+        const new_inst = try self.allocator.create(Instruction);
+        errdefer self.allocator.destroy(new_inst);
+
+        // Remap result register
+        var new_result: ?Register = null;
+        if (inst.result) |res| {
+            const new_id = next_reg_id.*;
+            next_reg_id.* += 1;
+            try reg_map.put(res.id, new_id);
+            new_result = Register{ .id = new_id, .type_ = res.type_ };
+        }
+
+        // Clone and remap operands based on instruction type
+        const new_op = try self.remapInstructionOp(inst.op, reg_map);
+
+        new_inst.* = Instruction{
+            .result = new_result,
+            .op = new_op,
+            .location = inst.location,
+        };
+
+        return new_inst;
+    }
+
+    /// Remap registers in an instruction operation
+    fn remapInstructionOp(
+        self: *Self,
+        op: Instruction.Op,
+        reg_map: *std.AutoHashMap(u32, u32),
+    ) !Instruction.Op {
+        _ = self;
+        return switch (op) {
+            .add => |bin| .{ .add = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .sub => |bin| .{ .sub = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .mul => |bin| .{ .mul = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .div => |bin| .{ .div = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .mod => |bin| .{ .mod = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .neg => |un| .{ .neg = .{
+                .operand = remapRegister(un.operand, reg_map),
+            } },
+            .not => |un| .{ .not = .{
+                .operand = remapRegister(un.operand, reg_map),
+            } },
+            .eq => |bin| .{ .eq = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .ne => |bin| .{ .ne = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .lt => |bin| .{ .lt = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .le => |bin| .{ .le = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .gt => |bin| .{ .gt = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .ge => |bin| .{ .ge = .{
+                .lhs = remapRegister(bin.lhs, reg_map),
+                .rhs = remapRegister(bin.rhs, reg_map),
+            } },
+            .load => |ld| .{ .load = .{
+                .ptr = remapRegister(ld.ptr, reg_map),
+                .type_ = ld.type_,
+            } },
+            .store => |st| .{ .store = .{
+                .ptr = remapRegister(st.ptr, reg_map),
+                .value = remapRegister(st.value, reg_map),
+            } },
+            // Constants don't need remapping
+            .const_int, .const_float, .const_bool, .const_string, .const_null => op,
+            .alloca => op,
+            // For other operations, return as-is (simplified)
+            else => op,
+        };
+    }
+
+    /// Remap a single register using the mapping
+    fn remapRegister(reg: Register, reg_map: *std.AutoHashMap(u32, u32)) Register {
+        const new_id = reg_map.get(reg.id) orelse reg.id;
+        return Register{ .id = new_id, .type_ = reg.type_ };
     }
 
 
@@ -1088,15 +1262,166 @@ pub const IROptimizer = struct {
     /// Try to specialize an instruction based on known types
     fn specializeInstruction(self: *Self, inst: *Instruction, known_types: *std.AutoHashMap(u32, Type)) !bool {
         _ = self;
-        _ = inst;
-        _ = known_types;
 
-        // Type specialization would:
-        // 1. Replace dynamic operations with typed operations when types are known
-        // 2. Remove unnecessary type checks
-        // 3. Specialize array/string operations
-
-        // For now, return false (basic implementation)
+        switch (inst.op) {
+            // Specialize arithmetic operations when both operands have known integer types
+            .add => |op| {
+                const lhs_type = known_types.get(op.lhs.id);
+                const rhs_type = known_types.get(op.rhs.id);
+                if (lhs_type != null and rhs_type != null) {
+                    if (lhs_type.? == .i64 and rhs_type.? == .i64) {
+                        // Already specialized to integer, update result type
+                        if (inst.result) |*res| {
+                            if (res.type_ == .php_value) {
+                                res.type_ = .i64;
+                                return true;
+                            }
+                        }
+                    } else if (lhs_type.? == .f64 or rhs_type.? == .f64) {
+                        // Specialize to float
+                        if (inst.result) |*res| {
+                            if (res.type_ == .php_value) {
+                                res.type_ = .f64;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            },
+            .sub => |op| {
+                const lhs_type = known_types.get(op.lhs.id);
+                const rhs_type = known_types.get(op.rhs.id);
+                if (lhs_type != null and rhs_type != null) {
+                    if (lhs_type.? == .i64 and rhs_type.? == .i64) {
+                        if (inst.result) |*res| {
+                            if (res.type_ == .php_value) {
+                                res.type_ = .i64;
+                                return true;
+                            }
+                        }
+                    } else if (lhs_type.? == .f64 or rhs_type.? == .f64) {
+                        if (inst.result) |*res| {
+                            if (res.type_ == .php_value) {
+                                res.type_ = .f64;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            },
+            .mul => |op| {
+                const lhs_type = known_types.get(op.lhs.id);
+                const rhs_type = known_types.get(op.rhs.id);
+                if (lhs_type != null and rhs_type != null) {
+                    if (lhs_type.? == .i64 and rhs_type.? == .i64) {
+                        if (inst.result) |*res| {
+                            if (res.type_ == .php_value) {
+                                res.type_ = .i64;
+                                return true;
+                            }
+                        }
+                    } else if (lhs_type.? == .f64 or rhs_type.? == .f64) {
+                        if (inst.result) |*res| {
+                            if (res.type_ == .php_value) {
+                                res.type_ = .f64;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            },
+            .div => |op| {
+                const lhs_type = known_types.get(op.lhs.id);
+                const rhs_type = known_types.get(op.rhs.id);
+                if (lhs_type != null and rhs_type != null) {
+                    // Division typically produces float in PHP
+                    if (inst.result) |*res| {
+                        if (res.type_ == .php_value) {
+                            res.type_ = .f64;
+                            return true;
+                        }
+                    }
+                }
+            },
+            // Specialize comparison operations
+            .eq, .ne, .lt, .le, .gt, .ge => {
+                // Comparisons always return bool
+                if (inst.result) |*res| {
+                    if (res.type_ == .php_value) {
+                        res.type_ = .bool;
+                        return true;
+                    }
+                }
+            },
+            // Specialize logical operations
+            .and_, .or_, .not => {
+                // Logical operations always return bool
+                if (inst.result) |*res| {
+                    if (res.type_ == .php_value) {
+                        res.type_ = .bool;
+                        return true;
+                    }
+                }
+            },
+            // Specialize negation
+            .neg => |op| {
+                const operand_type = known_types.get(op.operand.id);
+                if (operand_type) |t| {
+                    if (inst.result) |*res| {
+                        if (res.type_ == .php_value) {
+                            res.type_ = t;
+                            return true;
+                        }
+                    }
+                }
+            },
+            // Specialize strlen - always returns int
+            .strlen => {
+                if (inst.result) |*res| {
+                    if (res.type_ == .php_value) {
+                        res.type_ = .i64;
+                        return true;
+                    }
+                }
+            },
+            // Specialize array_count - always returns int
+            .array_count => {
+                if (inst.result) |*res| {
+                    if (res.type_ == .php_value) {
+                        res.type_ = .i64;
+                        return true;
+                    }
+                }
+            },
+            // Specialize type_check - always returns bool
+            .type_check => {
+                if (inst.result) |*res| {
+                    if (res.type_ == .php_value) {
+                        res.type_ = .bool;
+                        return true;
+                    }
+                }
+            },
+            // Specialize instanceof - always returns bool
+            .instanceof => {
+                if (inst.result) |*res| {
+                    if (res.type_ == .php_value) {
+                        res.type_ = .bool;
+                        return true;
+                    }
+                }
+            },
+            // Specialize array_key_exists - always returns bool
+            .array_key_exists => {
+                if (inst.result) |*res| {
+                    if (res.type_ == .php_value) {
+                        res.type_ = .bool;
+                        return true;
+                    }
+                }
+            },
+            else => {},
+        }
         return false;
     }
 
@@ -1162,6 +1487,7 @@ pub const IROptimizer = struct {
         var hasher = std.hash.Wyhash.init(0);
 
         switch (inst.op) {
+            // Arithmetic operations
             .add => |op| {
                 hasher.update("add");
                 hasher.update(std.mem.asBytes(&op.lhs.id));
@@ -1182,7 +1508,177 @@ pub const IROptimizer = struct {
                 hasher.update(std.mem.asBytes(&op.lhs.id));
                 hasher.update(std.mem.asBytes(&op.rhs.id));
             },
-            else => return 0, // Not hashable
+            .mod => |op| {
+                hasher.update("mod");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .pow => |op| {
+                hasher.update("pow");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            // Bitwise operations
+            .bit_and => |op| {
+                hasher.update("bit_and");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .bit_or => |op| {
+                hasher.update("bit_or");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .bit_xor => |op| {
+                hasher.update("bit_xor");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .shl => |op| {
+                hasher.update("shl");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .shr => |op| {
+                hasher.update("shr");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            // Comparison operations
+            .eq => |op| {
+                hasher.update("eq");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .ne => |op| {
+                hasher.update("ne");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .lt => |op| {
+                hasher.update("lt");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .le => |op| {
+                hasher.update("le");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .gt => |op| {
+                hasher.update("gt");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .ge => |op| {
+                hasher.update("ge");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .identical => |op| {
+                hasher.update("identical");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .not_identical => |op| {
+                hasher.update("not_identical");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .spaceship => |op| {
+                hasher.update("spaceship");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            // Logical operations
+            .and_ => |op| {
+                hasher.update("and");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .or_ => |op| {
+                hasher.update("or");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            // Unary operations
+            .neg => |op| {
+                hasher.update("neg");
+                hasher.update(std.mem.asBytes(&op.operand.id));
+            },
+            .not => |op| {
+                hasher.update("not");
+                hasher.update(std.mem.asBytes(&op.operand.id));
+            },
+            .bit_not => |op| {
+                hasher.update("bit_not");
+                hasher.update(std.mem.asBytes(&op.operand.id));
+            },
+            // String operations
+            .concat => |op| {
+                hasher.update("concat");
+                hasher.update(std.mem.asBytes(&op.lhs.id));
+                hasher.update(std.mem.asBytes(&op.rhs.id));
+            },
+            .strlen => |op| {
+                hasher.update("strlen");
+                hasher.update(std.mem.asBytes(&op.operand.id));
+            },
+            // Array operations
+            .array_count => |op| {
+                hasher.update("array_count");
+                hasher.update(std.mem.asBytes(&op.operand.id));
+            },
+            // Type operations
+            .cast => |op| {
+                hasher.update("cast");
+                hasher.update(std.mem.asBytes(&op.value.id));
+                hasher.update(std.mem.asBytes(&op.to_type));
+            },
+            .type_check => |op| {
+                hasher.update("type_check");
+                hasher.update(std.mem.asBytes(&op.value.id));
+                hasher.update(std.mem.asBytes(&op.expected_type));
+            },
+            .get_type => |op| {
+                hasher.update("get_type");
+                hasher.update(std.mem.asBytes(&op.operand.id));
+            },
+            // Load operations (pure if pointer is the same)
+            .load => |op| {
+                hasher.update("load");
+                hasher.update(std.mem.asBytes(&op.ptr.id));
+            },
+            // Box/unbox operations
+            .box => |op| {
+                hasher.update("box");
+                hasher.update(std.mem.asBytes(&op.value.id));
+            },
+            .unbox => |op| {
+                hasher.update("unbox");
+                hasher.update(std.mem.asBytes(&op.value.id));
+            },
+            // Constants - hash by value
+            .const_int => |val| {
+                hasher.update("const_int");
+                hasher.update(std.mem.asBytes(&val));
+            },
+            .const_float => |val| {
+                hasher.update("const_float");
+                hasher.update(std.mem.asBytes(&val));
+            },
+            .const_bool => |val| {
+                hasher.update("const_bool");
+                hasher.update(std.mem.asBytes(&val));
+            },
+            .const_string => |id| {
+                hasher.update("const_string");
+                hasher.update(std.mem.asBytes(&id));
+            },
+            .const_null => {
+                hasher.update("const_null");
+            },
+            else => return 0, // Not hashable (has side effects or complex)
         }
 
         return hasher.final();
@@ -1874,4 +2370,360 @@ test "OptimizationStats.print" {
     try std.testing.expect(std.mem.indexOf(u8, output, "Dead instructions removed: 10") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Dead blocks removed: 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Constants propagated: 5") != null);
+}
+
+test "IROptimizer.remapRegister" {
+    var reg_map = std.AutoHashMap(u32, u32).init(std.testing.allocator);
+    defer reg_map.deinit();
+
+    try reg_map.put(1, 100);
+    try reg_map.put(2, 200);
+
+    // Test remapping existing register
+    const reg1 = Register{ .id = 1, .type_ = .i64 };
+    const remapped1 = IROptimizer.remapRegister(reg1, &reg_map);
+    try std.testing.expectEqual(@as(u32, 100), remapped1.id);
+    try std.testing.expectEqual(Type.i64, remapped1.type_);
+
+    // Test remapping non-existing register (should keep original)
+    const reg3 = Register{ .id = 3, .type_ = .f64 };
+    const remapped3 = IROptimizer.remapRegister(reg3, &reg_map);
+    try std.testing.expectEqual(@as(u32, 3), remapped3.id);
+    try std.testing.expectEqual(Type.f64, remapped3.type_);
+}
+
+test "IROptimizer.shouldInline" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    // Add a function to call graph that can be inlined
+    try optimizer.call_graph.put("small_func", .{
+        .instruction_count = 5,
+        .call_count = 2,
+        .has_side_effects = false,
+        .is_recursive = false,
+        .can_inline = true,
+    });
+
+    // Add a function that cannot be inlined (too many calls)
+    try optimizer.call_graph.put("hot_func", .{
+        .instruction_count = 5,
+        .call_count = 10,
+        .has_side_effects = false,
+        .is_recursive = false,
+        .can_inline = true,
+    });
+
+    // Add a recursive function
+    try optimizer.call_graph.put("recursive_func", .{
+        .instruction_count = 5,
+        .call_count = 1,
+        .has_side_effects = false,
+        .is_recursive = true,
+        .can_inline = false,
+    });
+
+    try std.testing.expect(optimizer.shouldInline("small_func"));
+    try std.testing.expect(!optimizer.shouldInline("hot_func")); // Too many call sites
+    try std.testing.expect(!optimizer.shouldInline("recursive_func")); // Recursive
+    try std.testing.expect(!optimizer.shouldInline("unknown_func")); // Not in call graph
+}
+
+test "IROptimizer.specializeInstruction - comparison operations" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    var known_types = std.AutoHashMap(u32, Type).init(allocator);
+    defer known_types.deinit();
+
+    // Test eq specialization
+    var eq_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .php_value },
+        .op = .{ .eq = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+
+    const specialized = try optimizer.specializeInstruction(&eq_inst, &known_types);
+    try std.testing.expect(specialized);
+    try std.testing.expectEqual(Type.bool, eq_inst.result.?.type_);
+}
+
+test "IROptimizer.specializeInstruction - arithmetic with known types" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    var known_types = std.AutoHashMap(u32, Type).init(allocator);
+    defer known_types.deinit();
+
+    // Set up known types
+    try known_types.put(1, .i64);
+    try known_types.put(2, .i64);
+
+    // Test add specialization with integer operands
+    var add_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .php_value },
+        .op = .{ .add = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+
+    const specialized = try optimizer.specializeInstruction(&add_inst, &known_types);
+    try std.testing.expect(specialized);
+    try std.testing.expectEqual(Type.i64, add_inst.result.?.type_);
+}
+
+test "IROptimizer.specializeInstruction - strlen returns int" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    var known_types = std.AutoHashMap(u32, Type).init(allocator);
+    defer known_types.deinit();
+
+    var strlen_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .php_value },
+        .op = .{ .strlen = .{
+            .operand = Register{ .id = 1, .type_ = .php_string },
+        } },
+        .location = .{},
+    };
+
+    const specialized = try optimizer.specializeInstruction(&strlen_inst, &known_types);
+    try std.testing.expect(specialized);
+    try std.testing.expectEqual(Type.i64, strlen_inst.result.?.type_);
+}
+
+test "IROptimizer.specializeInstruction - logical operations return bool" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    var known_types = std.AutoHashMap(u32, Type).init(allocator);
+    defer known_types.deinit();
+
+    // Test not operation
+    var not_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .php_value },
+        .op = .{ .not = .{
+            .operand = Register{ .id = 1, .type_ = .bool },
+        } },
+        .location = .{},
+    };
+
+    const specialized = try optimizer.specializeInstruction(&not_inst, &known_types);
+    try std.testing.expect(specialized);
+    try std.testing.expectEqual(Type.bool, not_inst.result.?.type_);
+}
+
+test "IROptimizer.specializeInstruction - float promotion" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    var known_types = std.AutoHashMap(u32, Type).init(allocator);
+    defer known_types.deinit();
+
+    // Set up known types - one int, one float
+    try known_types.put(1, .i64);
+    try known_types.put(2, .f64);
+
+    // Test mul specialization with mixed types -> float
+    var mul_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .php_value },
+        .op = .{ .mul = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .f64 },
+        } },
+        .location = .{},
+    };
+
+    const specialized = try optimizer.specializeInstruction(&mul_inst, &known_types);
+    try std.testing.expect(specialized);
+    try std.testing.expectEqual(Type.f64, mul_inst.result.?.type_);
+}
+
+test "IROptimizer.cloneAndRemapInstruction" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    var reg_map = std.AutoHashMap(u32, u32).init(allocator);
+    defer reg_map.deinit();
+
+    try reg_map.put(1, 100);
+    try reg_map.put(2, 200);
+
+    var next_reg_id: u32 = 300;
+
+    // Create an add instruction to clone
+    const original = Instruction{
+        .result = Register{ .id = 0, .type_ = .i64 },
+        .op = .{ .add = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+
+    const cloned = try optimizer.cloneAndRemapInstruction(&original, &reg_map, &next_reg_id);
+    defer if (cloned) |c| allocator.destroy(c);
+
+    try std.testing.expect(cloned != null);
+    try std.testing.expectEqual(@as(u32, 300), cloned.?.result.?.id);
+    try std.testing.expectEqual(@as(u32, 301), next_reg_id);
+
+    // Check operands are remapped
+    switch (cloned.?.op) {
+        .add => |op| {
+            try std.testing.expectEqual(@as(u32, 100), op.lhs.id);
+            try std.testing.expectEqual(@as(u32, 200), op.rhs.id);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "IROptimizer.remapInstructionOp - constants unchanged" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    var reg_map = std.AutoHashMap(u32, u32).init(allocator);
+    defer reg_map.deinit();
+
+    // Test that constants are not remapped
+    const const_op = Instruction.Op{ .const_int = 42 };
+    const remapped = try optimizer.remapInstructionOp(const_op, &reg_map);
+
+    switch (remapped) {
+        .const_int => |val| try std.testing.expectEqual(@as(i64, 42), val),
+        else => try std.testing.expect(false),
+    }
+}
+
+
+test "IROptimizer.hashExpression - comprehensive coverage" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    // Test arithmetic operations produce non-zero hashes
+    const add_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .i64 },
+        .op = .{ .add = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+    try std.testing.expect(optimizer.hashExpression(&add_inst) != 0);
+
+    // Test comparison operations
+    const eq_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .bool },
+        .op = .{ .eq = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+    try std.testing.expect(optimizer.hashExpression(&eq_inst) != 0);
+
+    // Test unary operations
+    const neg_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .i64 },
+        .op = .{ .neg = .{
+            .operand = Register{ .id = 1, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+    try std.testing.expect(optimizer.hashExpression(&neg_inst) != 0);
+
+    // Test constants
+    const const_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .i64 },
+        .op = .{ .const_int = 42 },
+        .location = .{},
+    };
+    try std.testing.expect(optimizer.hashExpression(&const_inst) != 0);
+
+    // Test that different operations produce different hashes
+    const sub_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .i64 },
+        .op = .{ .sub = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+    try std.testing.expect(optimizer.hashExpression(&add_inst) != optimizer.hashExpression(&sub_inst));
+
+    // Test that same operation with same operands produces same hash
+    const add_inst2 = Instruction{
+        .result = Register{ .id = 10, .type_ = .i64 }, // Different result register
+        .op = .{ .add = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+    try std.testing.expectEqual(optimizer.hashExpression(&add_inst), optimizer.hashExpression(&add_inst2));
+
+    // Test side-effect operations return 0
+    const call_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .php_value },
+        .op = .{ .call = .{
+            .func_name = "test",
+            .args = &[_]Register{},
+            .return_type = .php_value,
+        } },
+        .location = .{},
+    };
+    try std.testing.expectEqual(@as(u64, 0), optimizer.hashExpression(&call_inst));
+}
+
+test "IROptimizer.hashExpression - bitwise operations" {
+    const allocator = std.testing.allocator;
+
+    var optimizer = IROptimizer.init(allocator, .aggressive, null);
+    defer optimizer.deinit();
+
+    const bit_and_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .i64 },
+        .op = .{ .bit_and = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+    try std.testing.expect(optimizer.hashExpression(&bit_and_inst) != 0);
+
+    const bit_or_inst = Instruction{
+        .result = Register{ .id = 0, .type_ = .i64 },
+        .op = .{ .bit_or = .{
+            .lhs = Register{ .id = 1, .type_ = .i64 },
+            .rhs = Register{ .id = 2, .type_ = .i64 },
+        } },
+        .location = .{},
+    };
+    try std.testing.expect(optimizer.hashExpression(&bit_or_inst) != 0);
+
+    // Different bitwise ops should have different hashes
+    try std.testing.expect(optimizer.hashExpression(&bit_and_inst) != optimizer.hashExpression(&bit_or_inst));
 }
