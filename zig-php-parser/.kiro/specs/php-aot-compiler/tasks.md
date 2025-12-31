@@ -303,20 +303,22 @@
   - ✅ 增强 CSE 哈希函数覆盖所有纯操作
   - ✅ 配置 LLVM Pass 管理器用于各优化级别
 
-- [ ] 15. 端到端集成测试
-  - [ ] 15.1 编写编译执行往返测试
+- [-] 15. 端到端集成测试
+  - [x] 15.1 编写编译执行往返测试
     - **Property 1: 编译执行往返正确性**
     - **Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7**
 
-  - [ ] 15.2 编写错误报告测试
+  - [x] 15.2 编写错误报告测试
     - **Property 5: 错误报告完整性**
     - **Validates: Requirements 7.1, 7.2, 7.3**
+    - ✅ All 12 property tests passed (100 iterations each)
 
-  - [ ] 15.3 编写跨平台测试
+  - [x] 15.3 编写跨平台测试
     - 测试 Linux 目标编译
     - 测试 macOS 目标编译
     - 测试 Windows 目标编译
     - _Requirements: 4.2, 4.3, 9.1_
+    - ✅ All 12 property tests passed (100 iterations each)
 
   - [ ] 15.4 编写性能基准测试
     - 比较编译后与解释执行的性能
