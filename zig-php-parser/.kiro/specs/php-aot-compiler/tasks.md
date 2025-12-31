@@ -103,61 +103,62 @@
   - 验证 `--dump-ir` 输出正确的 IR
   - 如有问题请询问用户
 
-- [-] 6. 运行时库
-  - [ ] 6.1 实现 PHP Value 运行时类型
+- [x] 6. 运行时库
+  - [x] 6.1 实现 PHP Value 运行时类型
     - 创建 `src/aot/runtime_lib.zig`
     - 实现 `PHPValue` 结构和内存布局
     - 实现值创建函数 (int, float, string, array, object)
     - 实现类型转换函数
     - _Requirements: 5.1, 5.2_
 
-  - [ ] 6.2 实现引用计数 GC
+  - [x] 6.2 实现引用计数 GC
     - 实现 `php_gc_retain` 和 `php_gc_release`
     - 实现自动内存释放
     - _Requirements: 5.3_
 
-  - [ ] 6.3 实现数组运行时操作
+  - [x] 6.3 实现数组运行时操作
     - 实现 `php_array_create`, `php_array_get`, `php_array_set`
     - 实现 `php_array_push`, `php_array_count`
     - _Requirements: 5.1, 6.6_
 
-  - [ ] 6.4 实现字符串运行时操作
+  - [x] 6.4 实现字符串运行时操作
     - 实现 `php_string_concat`, `php_string_length`
     - 实现字符串插值支持
     - _Requirements: 5.1, 6.7_
 
-  - [ ] 6.5 实现 I/O 和内置函数
+  - [x] 6.5 实现 I/O 和内置函数
     - 实现 `php_echo`, `php_print`
     - 实现 `php_builtin_strlen`, `php_builtin_count`
     - 实现 `php_builtin_var_dump`
     - _Requirements: 5.1_
 
-  - [ ] 6.6 实现异常处理运行时
+  - [x] 6.6 实现异常处理运行时
     - 实现 `php_throw`, `php_catch`, `php_has_exception`
     - 实现堆栈跟踪生成
     - _Requirements: 5.4, 6.4, 11.4_
 
-  - [ ] 6.7 编写运行时库属性测试
+  - [x] 6.7 编写运行时库属性测试
     - **Property 7: 运行时库类型转换正确性**
     - **Validates: Requirements 5.2**
     - **Property 8: 垃圾回收正确性**
     - **Validates: Requirements 5.3**
+    - ✅ All 11 property tests passed (100 iterations each)
 
-- [ ] 7. Checkpoint - 运行时库完成
+- [x] 7. Checkpoint - 运行时库完成
   - 确保所有测试通过
   - 验证运行时库可以独立编译
   - 如有问题请询问用户
 
 
-- [ ] 8. LLVM 代码生成
-  - [ ] 8.1 设置 LLVM 集成
+- [-] 8. LLVM 代码生成
+  - [x] 8.1 设置 LLVM 集成
     - 创建 `src/aot/codegen.zig`
     - 配置 LLVM C API 绑定
     - 初始化 LLVM 上下文、模块、构建器
     - 配置目标机器
     - _Requirements: 4.1, 4.2, 4.3_
 
-  - [ ] 8.2 实现类型映射
+  - [x] 8.2 实现类型映射
     - 将 IR 类型映射到 LLVM 类型
     - 定义 PHPValue 的 LLVM 结构类型
     - 定义函数类型
