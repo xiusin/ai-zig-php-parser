@@ -49,12 +49,66 @@ The compiled interpreter will be available at `./zig-out/bin/php-interpreter`.
 ### Basic Usage
 
 ```bash
-# Run a PHP file
+# Run a PHP file with interpreter
 ./zig-out/bin/php-interpreter script.php
 
 # Run with arguments
 ./zig-out/bin/php-interpreter script.php arg1 arg2
 ```
+
+### AOT Compilation (Ahead-of-Time)
+
+The interpreter includes a powerful AOT compiler that can compile PHP code directly to native executables, eliminating the need for a PHP runtime at execution time.
+
+```bash
+# Compile PHP to native executable
+./zig-out/bin/php-interpreter --compile hello.php
+
+# Compile with custom output name
+./zig-out/bin/php-interpreter --compile --output=myapp hello.php
+
+# Compile with optimizations
+./zig-out/bin/php-interpreter --compile --optimize=release-fast app.php
+
+# Compile for a specific target platform
+./zig-out/bin/php-interpreter --compile --target=x86_64-linux-gnu app.php
+
+# Generate fully static executable
+./zig-out/bin/php-interpreter --compile --static app.php
+
+# List all supported target platforms
+./zig-out/bin/php-interpreter --list-targets
+```
+
+#### AOT Compiler Options
+
+| Option | Description |
+|--------|-------------|
+| `--compile` | Enable AOT compilation mode |
+| `--output=<file>` | Specify output file name (default: input name without .php) |
+| `--target=<triple>` | Target platform (e.g., x86_64-linux-gnu, aarch64-macos-none) |
+| `--optimize=<level>` | Optimization level: debug, release-safe, release-fast, release-small |
+| `--static` | Generate fully static linked executable |
+| `--dump-ir` | Dump generated IR for debugging |
+| `--dump-ast` | Dump parsed AST for debugging |
+| `--verbose` | Verbose output during compilation |
+| `--list-targets` | List all supported target platforms |
+
+#### Supported Target Platforms
+
+- **Linux**: x86_64-linux-gnu, x86_64-linux-musl, aarch64-linux-gnu, arm-linux-gnueabihf
+- **macOS**: x86_64-macos-none, aarch64-macos-none
+- **Windows**: x86_64-windows-msvc, x86_64-windows-gnu
+
+#### AOT Compilation Features
+
+- **Type Inference**: Automatically infers types for better code generation
+- **SSA-based IR**: Uses Static Single Assignment form for optimization
+- **Multiple Optimization Levels**: From debug builds to highly optimized releases
+- **Cross-compilation**: Compile for any supported platform from any host
+- **Dead Code Elimination**: Only includes used runtime functions
+- **Debug Information**: DWARF debug info for debugging compiled binaries
+- **Multi-file Support**: Handles include/require dependencies automatically
 
 ### Interactive Mode
 ```bash
@@ -175,6 +229,26 @@ foreach ($reflection->getMethods() as $method) {
 6. **Standard Library** (`src/runtime/stdlib.zig`) - Built-in functions
 7. **Reflection** (`src/runtime/reflection.zig`) - Runtime introspection
 
+### AOT Compiler Components
+
+The AOT (Ahead-of-Time) compiler is a complete compilation pipeline:
+
+1. **Type Inference** (`src/aot/type_inference.zig`) - Static type analysis
+2. **Symbol Table** (`src/aot/symbol_table.zig`) - Scope and symbol management
+3. **IR Generator** (`src/aot/ir_generator.zig`) - SSA-based intermediate representation
+4. **Optimizer** (`src/aot/optimizer.zig`) - DCE, constant folding, inlining
+5. **Code Generator** (`src/aot/codegen.zig`) - LLVM-based machine code generation
+6. **Runtime Library** (`src/aot/runtime_lib.zig`) - Native PHP runtime support
+7. **Linker** (`src/aot/linker.zig`) - Static linking for multiple platforms
+8. **Diagnostics** (`src/aot/diagnostics.zig`) - Error reporting and warnings
+
+#### AOT Compilation Pipeline
+
+```
+PHP Source → Lexer → Parser → AST → Type Inference → IR Generation →
+Optimization → LLVM Code Generation → Linking → Native Executable
+```
+
 ### Memory Management
 
 The interpreter uses a sophisticated garbage collection system:
@@ -199,8 +273,14 @@ Comprehensive error handling with:
 # Run all tests
 zig build test
 
-# Run specific test file
-zig test src/test_enhanced_types.zig
+# Run AOT compiler tests
+zig build test-aot
+
+# Run PHP compatibility tests
+zig build test-compat
+
+# Run all tests (unit + compatibility)
+zig build test-all
 ```
 
 ### Test Coverage
@@ -210,6 +290,7 @@ The project includes comprehensive test coverage:
 - Property-based tests for correctness verification
 - Integration tests for end-to-end functionality
 - PHP compatibility tests
+- AOT compiler tests (264 tests covering all modules)
 
 ### Property-Based Testing
 
@@ -273,6 +354,16 @@ Current limitations (to be addressed):
 ├── src/
 │   ├── compiler/          # Lexer, parser, AST
 │   ├── runtime/           # VM, types, stdlib
+│   ├── aot/               # AOT compiler modules
+│   │   ├── compiler.zig   # Main AOT compiler entry
+│   │   ├── ir.zig         # Intermediate representation
+│   │   ├── ir_generator.zig # IR generation from AST
+│   │   ├── type_inference.zig # Static type analysis
+│   │   ├── codegen.zig    # LLVM code generation
+│   │   ├── optimizer.zig  # IR optimization passes
+│   │   ├── linker.zig     # Static linking
+│   │   ├── runtime_lib.zig # Native runtime library
+│   │   └── diagnostics.zig # Error reporting
 │   ├── test_*.zig        # Test files
 │   └── main.zig          # Entry point
 ├── examples/             # Example PHP scripts

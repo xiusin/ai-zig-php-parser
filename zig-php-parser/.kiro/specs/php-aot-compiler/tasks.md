@@ -326,18 +326,18 @@
     - _Requirements: 8.5, 8.6_
     - ✅ All 12 property tests passed (100 iterations each)
 
-- [ ] 16. 文档和示例
-  - [ ] 16.1 更新 README
+- [x] 16. 文档和示例
+  - [x] 16.1 更新 README
     - 添加 AOT 编译功能说明
     - 添加使用示例
     - 添加支持的目标平台列表
 
-  - [ ] 16.2 创建示例 PHP 文件
+  - [x] 16.2 创建示例 PHP 文件
     - 创建简单的 Hello World 示例
     - 创建函数和类示例
     - 创建数组和字符串操作示例
 
-- [ ] 17. Final Checkpoint - 功能完成
+- [x] 17. Final Checkpoint - 功能完成
   - 确保所有测试通过
   - 验证所有需求已实现
   - 如有问题请询问用户
