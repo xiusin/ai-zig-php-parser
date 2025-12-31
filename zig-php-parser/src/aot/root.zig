@@ -82,6 +82,14 @@ pub const CodeGenTarget = CodeGen.Target;
 pub const CodeGenOptimizeLevel = CodeGen.OptimizeLevel;
 pub const CodeGenError = CodeGen.CodeGenError;
 
+// Linker module
+pub const LinkerMod = @import("linker.zig");
+pub const StaticLinker = LinkerMod.StaticLinker;
+pub const LinkerConfig = LinkerMod.LinkerConfig;
+pub const LinkerError = LinkerMod.LinkerError;
+pub const ObjectCode = LinkerMod.ObjectCode;
+pub const ObjectFormat = LinkerMod.ObjectFormat;
+
 // Runtime library functions
 pub const php_value_create_null = RuntimeLib.php_value_create_null;
 pub const php_value_create_bool = RuntimeLib.php_value_create_bool;
@@ -103,6 +111,8 @@ test {
     _ = @import("test_runtime_lib_property.zig");
     _ = @import("codegen.zig");
     _ = @import("test_codegen_property.zig");
+    _ = @import("linker.zig");
+    _ = @import("test_linker_property.zig");
 }
 
 /// AOT Compiler configuration options
