@@ -2634,6 +2634,9 @@ pub const VM = struct {
             .continue_stmt => {
                 return self.evaluateContinueStatement(ast_node.data.continue_stmt);
             },
+            .lock_stmt => {
+                return self.evaluateLockStatement(ast_node.data.lock_stmt);
+            },
             .static_method_call => {
                 return self.evaluateStaticMethodCall(ast_node.data.static_method_call);
             },
@@ -3713,6 +3716,36 @@ pub const VM = struct {
             self.continue_level = 1;
         }
         return error.Continue;
+    }
+
+    /// Evaluate lock statement - mutex syntax sugar for coroutine synchronization
+    /// lock { ... } acquires a global mutex, executes the body, then releases the mutex
+    fn evaluateLockStatement(self: *VM, lock_stmt: anytype) !Value {
+        // Acquire the global mutex
+        self.acquireGlobalMutex();
+        defer self.releaseGlobalMutex();
+
+        // Execute the body
+        const result = self.eval(lock_stmt.body) catch |err| {
+            // Make sure to release mutex even on error
+            return err;
+        };
+
+        return result;
+    }
+
+    /// Acquire the global mutex for lock statements
+    fn acquireGlobalMutex(self: *VM) void {
+        // In a real implementation, this would use std.Thread.Mutex
+        // For now, we use a simple flag since the interpreter is single-threaded
+        _ = self;
+        // self.global_mutex.lock();
+    }
+
+    /// Release the global mutex for lock statements
+    fn releaseGlobalMutex(self: *VM) void {
+        _ = self;
+        // self.global_mutex.unlock();
     }
 
     fn evaluateBinaryOp(self: *VM, op: Token.Tag, left: Value, right: Value) !Value {

@@ -406,6 +406,7 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .global_stmt => .global_stmt,
         .static_stmt => .static_stmt,
         .go_stmt => .go_stmt,
+        .lock_stmt => .lock_stmt,
         .closure => .closure,
         .arrow_function => .arrow_function,
         .anonymous_class => .anonymous_class,
@@ -597,6 +598,8 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
             .is_variadic = data.parameter.is_variadic,
             .is_reference = data.parameter.is_reference,
         } },
+        .lock_stmt => .{ .lock_stmt = .{ .body = data.lock_stmt.body } },
+        .go_stmt => .{ .go_stmt = .{ .call = data.go_stmt.call } },
         else => .{ .none = {} },
     };
 }

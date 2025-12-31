@@ -96,6 +96,7 @@ pub const Token = struct {
         k_require,
         k_require_once,
         k_go, // Coroutine
+        k_lock, // Mutex lock syntax sugar
         k_get,
         k_set, // PHP 8.4 Property Hooks
         // Class context keywords

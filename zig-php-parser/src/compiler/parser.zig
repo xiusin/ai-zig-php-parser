@@ -150,6 +150,7 @@ pub const Parser = struct {
             .k_static => self.parseStatic(),
             .k_const => self.parseConst(),
             .k_go => self.parseGo(),
+            .k_lock => self.parseLock(),
             .k_return => self.parseReturn(),
             .k_break => self.parseBreak(),
             .k_continue => self.parseContinue(),
@@ -772,6 +773,12 @@ pub const Parser = struct {
         const call = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .go_stmt, .main_token = token, .data = .{ .go_stmt = .{ .call = call } } });
+    }
+
+    fn parseLock(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_lock);
+        const body = try self.parseBlock();
+        return self.createNode(.{ .tag = .lock_stmt, .main_token = token, .data = .{ .lock_stmt = .{ .body = body } } });
     }
 
     fn parseReturn(self: *Parser) anyerror!ast.Node.Index {

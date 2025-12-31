@@ -768,6 +768,11 @@ pub const CodeGenerator = struct {
             .get_exception => try self.buildGetException(),
             .clear_exception => try self.buildClearException(),
 
+            // Concurrency operations
+            .mutex_lock => try self.buildMutexLock(),
+            .mutex_unlock => try self.buildMutexUnlock(),
+            .mutex_new => try self.buildMutexNew(),
+
             // Debug
             .debug_print => |op| try self.buildDebugPrint(op.operand),
         };
@@ -1167,6 +1172,31 @@ pub const CodeGenerator = struct {
 
     fn buildClearException(self: *Self) !LLVMValueRef {
         _ = self;
+        return null;
+    }
+
+    // ========================================================================
+    // Concurrency Operations
+    // ========================================================================
+
+    fn buildMutexLock(self: *Self) !LLVMValueRef {
+        _ = self;
+        // In real LLVM mode:
+        // Call php_mutex_lock runtime function
+        return null;
+    }
+
+    fn buildMutexUnlock(self: *Self) !LLVMValueRef {
+        _ = self;
+        // In real LLVM mode:
+        // Call php_mutex_unlock runtime function
+        return null;
+    }
+
+    fn buildMutexNew(self: *Self) !LLVMValueRef {
+        _ = self;
+        // In real LLVM mode:
+        // Call php_mutex_new runtime function
         return null;
     }
 

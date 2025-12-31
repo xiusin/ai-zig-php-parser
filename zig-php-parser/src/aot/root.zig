@@ -102,6 +102,7 @@ test {
     _ = @import("runtime_lib.zig");
     _ = @import("test_runtime_lib_property.zig");
     _ = @import("codegen.zig");
+    _ = @import("test_codegen_property.zig");
 }
 
 /// AOT Compiler configuration options
