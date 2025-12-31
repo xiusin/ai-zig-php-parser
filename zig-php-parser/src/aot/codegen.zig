@@ -586,8 +586,6 @@ pub const CodeGenerator = struct {
 
     /// Declare all runtime functions
     pub fn declareRuntimeFunctions(self: *Self) !void {
-        if (!self.llvm_available) return;
-
         // Declare functions from first signature list
         for (runtime_function_signatures) |sig| {
             try self.declareRuntimeFunction(sig);
@@ -601,8 +599,6 @@ pub const CodeGenerator = struct {
 
     /// Declare a single runtime function
     fn declareRuntimeFunction(self: *Self, sig: RuntimeFunctionSig) !void {
-        if (!self.llvm_available) return;
-
         // In real LLVM mode, we would:
         // 1. Create parameter types array
         // 2. Create function type with LLVMFunctionType
@@ -610,7 +606,7 @@ pub const CodeGenerator = struct {
         // 4. Set calling convention
         // 5. Store in runtime_functions map
 
-        // For now, store null as placeholder
+        // Store null as placeholder (or real LLVM value when available)
         try self.runtime_functions.put(sig.name, null);
     }
 
