@@ -65,10 +65,43 @@ pub const getBuiltinReturnType = TypeInferenceMod.getBuiltinReturnType;
 pub const IRGeneratorMod = @import("ir_generator.zig");
 pub const IRGenerator = IRGeneratorMod.IRGenerator;
 
+// Runtime Library module
+pub const RuntimeLib = @import("runtime_lib.zig");
+pub const PHPValue = RuntimeLib.PHPValue;
+pub const PHPString = RuntimeLib.PHPString;
+pub const PHPArray = RuntimeLib.PHPArray;
+pub const PHPObject = RuntimeLib.PHPObject;
+pub const PHPCallable = RuntimeLib.PHPCallable;
+pub const ValueTag = RuntimeLib.ValueTag;
+pub const ArrayKey = RuntimeLib.ArrayKey;
+
+// Code Generator module
+pub const CodeGen = @import("codegen.zig");
+pub const CodeGenerator = CodeGen.CodeGenerator;
+pub const CodeGenTarget = CodeGen.Target;
+pub const CodeGenOptimizeLevel = CodeGen.OptimizeLevel;
+pub const CodeGenError = CodeGen.CodeGenError;
+
+// Runtime library functions
+pub const php_value_create_null = RuntimeLib.php_value_create_null;
+pub const php_value_create_bool = RuntimeLib.php_value_create_bool;
+pub const php_value_create_int = RuntimeLib.php_value_create_int;
+pub const php_value_create_float = RuntimeLib.php_value_create_float;
+pub const php_value_create_string = RuntimeLib.php_value_create_string;
+pub const php_value_create_array = RuntimeLib.php_value_create_array;
+pub const php_value_create_object = RuntimeLib.php_value_create_object;
+pub const php_gc_retain = RuntimeLib.php_gc_retain;
+pub const php_gc_release = RuntimeLib.php_gc_release;
+pub const php_echo = RuntimeLib.php_echo;
+pub const php_print = RuntimeLib.php_print;
+
 // Property tests (included for test runs)
 test {
     _ = @import("test_type_inference_property.zig");
     _ = @import("test_ir_generator_property.zig");
+    _ = @import("runtime_lib.zig");
+    _ = @import("test_runtime_lib_property.zig");
+    _ = @import("codegen.zig");
 }
 
 /// AOT Compiler configuration options
