@@ -255,6 +255,11 @@ pub const Function = struct {
         self.next_register_id += 1;
         return reg;
     }
+
+    /// Get the next available register ID (for optimizer inlining)
+    pub fn getNextRegisterId(self: *const Self) u32 {
+        return self.next_register_id;
+    }
 };
 
 /// A function parameter

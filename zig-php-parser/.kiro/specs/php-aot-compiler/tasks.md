@@ -294,10 +294,13 @@
     - _Requirements: 8.5, 8.6_
 
 - [x] 14. Checkpoint - 优化器完成
-  - ✅ 所有 optimizer.zig 单元测试通过 (32 tests)
+  - ✅ 所有 optimizer.zig 单元测试通过 (216 tests)
   - ✅ 优化器已集成到编译器流水线
   - ✅ 支持 debug/release-safe/release-fast/release-small 优化级别
   - ✅ 实现 IR 优化 Pass: DCE, 常量传播, CSE, 强度削减
+  - ✅ 实现函数内联 (小函数，非递归，简单控制流)
+  - ✅ 实现类型特化 (算术、比较、逻辑、字符串操作)
+  - ✅ 增强 CSE 哈希函数覆盖所有纯操作
   - ✅ 配置 LLVM Pass 管理器用于各优化级别
 
 - [ ] 15. 端到端集成测试
