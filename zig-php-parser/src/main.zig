@@ -227,9 +227,6 @@ pub fn main() !void {
 
 /// Run AOT compilation
 fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) !void {
-    var diagnostics = aot.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
     if (options.verbose) {
         std.debug.print("AOT Compiler starting...\n", .{});
         std.debug.print("  Input file: {s}\n", .{options.input_file});
@@ -248,12 +245,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 
     // Read source file
     const file = std.fs.cwd().openFile(options.input_file, .{}) catch |err| {
-        diagnostics.reportError(
-            .{ .file = options.input_file },
-            "cannot open file: {s}",
-            .{@errorName(err)},
-        );
-        diagnostics.printToStderr();
+        std.debug.print("Error: cannot open file '{s}': {s}\n", .{ options.input_file, @errorName(err) });
         return;
     };
     defer file.close();
@@ -263,9 +255,6 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     defer allocator.free(source);
     _ = try file.readAll(source);
 
-    // Set source for diagnostic context
-    try diagnostics.setSource(source);
-
     // Parse the source
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -273,20 +262,16 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 
     var p = try parser.Parser.init(arena.allocator(), &context, source);
     const program = p.parse() catch |err| {
-        diagnostics.reportError(
-            .{ .file = options.input_file },
-            "parse error: {s}",
-            .{@errorName(err)},
-        );
-        // Add parser errors to diagnostics
+        std.debug.print("Parse error: {s}\n", .{@errorName(err)});
+        // Add parser errors
         for (context.errors.items) |error_item| {
-            diagnostics.reportError(
-                .{ .file = options.input_file, .line = error_item.line, .column = error_item.column },
-                "{s}",
-                .{error_item.msg},
-            );
+            std.debug.print("  {s}:{d}:{d}: {s}\n", .{
+                options.input_file,
+                error_item.line,
+                error_item.column,
+                error_item.msg,
+            });
         }
-        diagnostics.printToStderr();
         return;
     };
 
@@ -306,30 +291,40 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         std.debug.print("=== End AST ===\n\n", .{});
     }
 
+    // Convert parser AST to IR generator format
+    const ir_nodes = try convertASTToIRNodes(allocator, context.nodes.items);
+    defer allocator.free(ir_nodes);
+
+    // Build string table from string pool
+    const string_table = try buildStringTable(allocator, &context.string_pool);
+    defer {
+        for (string_table) |s| {
+            allocator.free(s);
+        }
+        allocator.free(string_table);
+    }
+
+    // Use the AOTCompiler for the full compilation pipeline
+    var compiler = try aot.AOTCompiler.init(allocator, options);
+    defer compiler.deinit();
+
+    // Set the pre-parsed AST
+    try compiler.setAST(ir_nodes, string_table);
+
+    // Set source for diagnostics
+    try compiler.getDiagnostics().setSource(source);
+
     if (options.dump_ir) {
         std.debug.print("\n=== IR Dump ===\n", .{});
 
-        // Convert parser AST to IR generator format
-        const ir_nodes = try convertASTToIRNodes(allocator, context.nodes.items);
-        defer allocator.free(ir_nodes);
-
-        // Build string table from string pool
-        const string_table = try buildStringTable(allocator, &context.string_pool);
-        defer {
-            for (string_table) |s| {
-                allocator.free(s);
-            }
-            allocator.free(string_table);
-        }
-
-        // Initialize symbol table and type inferencer
+        // Initialize symbol table and type inferencer for IR generation
         var symbol_table = try aot.SymbolTable.init(allocator);
         defer symbol_table.deinit();
 
-        var type_inferencer = aot.TypeInferenceMod.TypeInferencer.init(allocator, &symbol_table, &diagnostics);
+        var type_inferencer = aot.TypeInferenceMod.TypeInferencer.init(allocator, &symbol_table, compiler.getDiagnostics());
 
         // Initialize IR generator
-        var ir_generator = aot.IRGenerator.init(allocator, &symbol_table, &type_inferencer, &diagnostics);
+        var ir_generator = aot.IRGenerator.init(allocator, &symbol_table, &type_inferencer, compiler.getDiagnostics());
         defer ir_generator.deinit();
 
         // Generate IR - pass the root node index
@@ -356,8 +351,8 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     }
 
     // Report compilation status
-    if (diagnostics.hasErrors()) {
-        diagnostics.printToStderr();
+    if (compiler.hasErrors()) {
+        compiler.printDiagnostics();
         return;
     }
 
