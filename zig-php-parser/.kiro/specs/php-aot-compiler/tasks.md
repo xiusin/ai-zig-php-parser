@@ -59,15 +59,15 @@
     - **Validates: Requirements 3.1, 3.2, 3.3, 3.4**
     - ✅ All 10 property tests passed (100 iterations each)
 
-- [ ] 4. IR 生成器
-  - [ ] 4.1 实现 IR 生成器核心
+- [x] 4. IR 生成器
+  - [x] 4.1 实现 IR 生成器核心
     - 创建 `src/aot/ir_generator.zig`
     - 实现 SSA 寄存器分配
     - 实现基本块管理
     - 实现源位置信息传递
     - _Requirements: 2.1, 2.4, 2.6_
 
-  - [ ] 4.2 实现表达式 IR 生成
+  - [x] 4.2 实现表达式 IR 生成
     - 实现字面量 IR 生成
     - 实现变量访问 IR 生成
     - 实现二元/一元运算 IR 生成
@@ -75,7 +75,7 @@
     - 实现数组/对象操作 IR 生成
     - _Requirements: 2.1, 2.2, 2.3_
 
-  - [ ] 4.3 实现语句 IR 生成
+  - [x] 4.3 实现语句 IR 生成
     - 实现赋值语句 IR 生成
     - 实现 if/while/for/foreach IR 生成
     - 实现 try-catch-finally IR 生成
@@ -83,26 +83,27 @@
     - 实现 echo/return IR 生成
     - _Requirements: 6.1, 6.2, 6.3, 6.4_
 
-  - [ ] 4.4 实现常量折叠优化
+  - [x] 4.4 实现常量折叠优化
     - 在 IR 生成时识别常量表达式
     - 计算常量表达式的值
     - 替换为常量 IR 节点
     - _Requirements: 2.5, 8.1_
 
-  - [ ] 4.5 编写 IR 生成属性测试
+  - [x] 4.5 编写 IR 生成属性测试
     - **Property 2: IR SSA 正确性**
     - **Validates: Requirements 2.6**
     - **Property 4: 常量折叠正确性**
     - **Validates: Requirements 2.5, 8.1**
     - **Property 9: 源位置信息保留**
     - **Validates: Requirements 2.4, 11.2**
+    - ✅ All 12 property tests passed (100 iterations each)
 
-- [ ] 5. Checkpoint - IR 生成完成
+- [x] 5. Checkpoint - IR 生成完成
   - 确保所有测试通过
   - 验证 `--dump-ir` 输出正确的 IR
   - 如有问题请询问用户
 
-- [ ] 6. 运行时库
+- [-] 6. 运行时库
   - [ ] 6.1 实现 PHP Value 运行时类型
     - 创建 `src/aot/runtime_lib.zig`
     - 实现 `PHPValue` 结构和内存布局
