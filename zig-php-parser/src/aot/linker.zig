@@ -1090,3 +1090,1013 @@ test "isRuntimeFunction" {
     try std.testing.expect(!StaticLinker.isRuntimeFunction("my_function"));
     try std.testing.expect(!StaticLinker.isRuntimeFunction("main"));
 }
+
+// ============================================================================
+// Zig Linker - Compiles Zig source code to native executables
+// ============================================================================
+
+/// ZigLinker compiles generated Zig source code to native executables
+/// using the Zig compiler. This provides:
+/// - Cross-platform compilation support
+/// - No external LLVM dependency
+/// - Integrated runtime library linking
+pub const ZigLinker = struct {
+    allocator: Allocator,
+    config: ZigLinkerConfig,
+    diagnostics: *Diagnostics.DiagnosticEngine,
+    temp_files: std.ArrayListUnmanaged([]const u8),
+    temp_dirs: std.ArrayListUnmanaged([]const u8),
+    /// Allocated command strings that need to be freed
+    allocated_cmd_strings: std.ArrayListUnmanaged([]const u8),
+
+    const Self = @This();
+
+    /// Initialize a new ZigLinker
+    pub fn init(
+        allocator: Allocator,
+        config: ZigLinkerConfig,
+        diagnostics: *Diagnostics.DiagnosticEngine,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = .{
+            .allocator = allocator,
+            .config = config,
+            .diagnostics = diagnostics,
+            .temp_files = .{},
+            .temp_dirs = .{},
+            .allocated_cmd_strings = .{},
+        };
+        return self;
+    }
+
+    /// Deinitialize and free resources
+    pub fn deinit(self: *Self) void {
+        self.cleanupTempFiles();
+        self.temp_files.deinit(self.allocator);
+        self.temp_dirs.deinit(self.allocator);
+        
+        // Free allocated command strings
+        for (self.allocated_cmd_strings.items) |s| {
+            self.allocator.free(s);
+        }
+        self.allocated_cmd_strings.deinit(self.allocator);
+        
+        self.allocator.destroy(self);
+    }
+
+    /// Clean up all temporary files and directories
+    fn cleanupTempFiles(self: *Self) void {
+        // Delete temporary files
+        for (self.temp_files.items) |path| {
+            std.fs.cwd().deleteFile(path) catch {};
+            self.allocator.free(path);
+        }
+        self.temp_files.clearRetainingCapacity();
+
+        // Delete temporary directories
+        for (self.temp_dirs.items) |path| {
+            std.fs.cwd().deleteTree(path) catch {};
+            self.allocator.free(path);
+        }
+        self.temp_dirs.clearRetainingCapacity();
+    }
+
+    /// Generate a unique temporary file path
+    fn generateTempPath(self: *Self, prefix: []const u8, extension: []const u8) ![]const u8 {
+        const timestamp = std.time.timestamp();
+        const random = std.crypto.random.int(u32);
+        return std.fmt.allocPrint(self.allocator, "/tmp/{s}_{d}_{x}{s}", .{ prefix, timestamp, random, extension });
+    }
+
+    /// Generate a unique temporary directory path
+    fn generateTempDir(self: *Self, prefix: []const u8) ![]const u8 {
+        const timestamp = std.time.timestamp();
+        const random = std.crypto.random.int(u32);
+        return std.fmt.allocPrint(self.allocator, "/tmp/{s}_{d}_{x}", .{ prefix, timestamp, random });
+    }
+
+    /// Write Zig source code to a temporary file
+    pub fn writeTempSourceFile(self: *Self, source: []const u8) ![]const u8 {
+        const temp_path = try self.generateTempPath("php_aot", ".zig");
+
+        const file = std.fs.cwd().createFile(temp_path, .{}) catch |err| {
+            self.diagnostics.reportError(.{}, "Failed to create temporary source file: {s}", .{@errorName(err)});
+            return LinkerError.ObjectFileWriteFailed;
+        };
+        defer file.close();
+
+        file.writeAll(source) catch |err| {
+            self.diagnostics.reportError(.{}, "Failed to write source code: {s}", .{@errorName(err)});
+            return LinkerError.ObjectFileWriteFailed;
+        };
+
+        try self.temp_files.append(self.allocator, temp_path);
+
+        if (self.config.verbose) {
+            std.debug.print("Wrote temporary source file: {s} ({d} bytes)\n", .{ temp_path, source.len });
+        }
+
+        return temp_path;
+    }
+
+    /// Copy runtime library to temporary directory for compilation
+    pub fn prepareRuntimeLib(self: *Self) ![]const u8 {
+        const temp_dir = try self.generateTempDir("php_runtime");
+
+        // Create the temporary directory
+        std.fs.cwd().makeDir(temp_dir) catch |err| {
+            self.diagnostics.reportError(.{}, "Failed to create temporary directory: {s}", .{@errorName(err)});
+            return LinkerError.RuntimeLibCompileFailed;
+        };
+
+        try self.temp_dirs.append(self.allocator, temp_dir);
+
+        // Copy runtime_lib.zig to the temp directory
+        const runtime_dest = try std.fmt.allocPrint(self.allocator, "{s}/runtime_lib.zig", .{temp_dir});
+        defer self.allocator.free(runtime_dest);
+
+        // Try to copy from the source location
+        const runtime_source = "src/aot/runtime_lib.zig";
+        std.fs.cwd().copyFile(runtime_source, std.fs.cwd(), runtime_dest, .{}) catch |err| {
+            if (self.config.verbose) {
+                std.debug.print("Warning: Could not copy runtime library: {s}\n", .{@errorName(err)});
+            }
+            // Continue anyway - the runtime might be embedded or available elsewhere
+        };
+
+        if (self.config.verbose) {
+            std.debug.print("Prepared runtime library in: {s}\n", .{temp_dir});
+        }
+
+        return temp_dir;
+    }
+
+    /// Compile Zig source code to a native executable
+    pub fn compileAndLink(
+        self: *Self,
+        zig_source: []const u8,
+        output_path: []const u8,
+    ) !void {
+        // Write source to temporary file
+        const source_path = try self.writeTempSourceFile(zig_source);
+
+        // Build the Zig compiler command
+        var args = std.ArrayListUnmanaged([]const u8){};
+        defer args.deinit(self.allocator);
+
+        try self.buildZigCommand(&args, source_path, output_path);
+
+        if (self.config.verbose) {
+            std.debug.print("Zig compiler command: ", .{});
+            for (args.items) |arg| {
+                std.debug.print("{s} ", .{arg});
+            }
+            std.debug.print("\n", .{});
+        }
+
+        // Execute the Zig compiler
+        try self.executeZigCompiler(args.items);
+
+        if (self.config.verbose) {
+            std.debug.print("Successfully compiled: {s}\n", .{output_path});
+        }
+    }
+
+    /// Compile Zig source code with runtime library to a native executable
+    /// This method handles static linking of the runtime library
+    pub fn compileAndLinkWithRuntime(
+        self: *Self,
+        zig_source: []const u8,
+        output_path: []const u8,
+        runtime_lib_path: ?[]const u8,
+    ) !void {
+        // Write source to temporary file
+        const source_path = try self.writeTempSourceFile(zig_source);
+
+        // Build the Zig compiler command
+        var args = std.ArrayListUnmanaged([]const u8){};
+        defer args.deinit(self.allocator);
+
+        if (runtime_lib_path) |runtime_path| {
+            try self.buildZigCommandWithRuntime(&args, source_path, output_path, runtime_path);
+        } else {
+            try self.buildZigCommand(&args, source_path, output_path);
+        }
+
+        if (self.config.verbose) {
+            std.debug.print("Zig compiler command: ", .{});
+            for (args.items) |arg| {
+                std.debug.print("{s} ", .{arg});
+            }
+            std.debug.print("\n", .{});
+        }
+
+        // Execute the Zig compiler
+        try self.executeZigCompiler(args.items);
+
+        if (self.config.verbose) {
+            std.debug.print("Successfully compiled with runtime: {s}\n", .{output_path});
+        }
+    }
+
+    /// Compile with embedded runtime library
+    /// The runtime library source is embedded in the generated Zig code
+    pub fn compileWithEmbeddedRuntime(
+        self: *Self,
+        zig_source: []const u8,
+        runtime_source: []const u8,
+        output_path: []const u8,
+    ) !void {
+        // Create a temporary directory for the compilation
+        const temp_dir = try self.generateTempDir("php_compile");
+        std.fs.cwd().makeDir(temp_dir) catch |err| {
+            self.diagnostics.reportError(.{}, "Failed to create compilation directory: {s}", .{@errorName(err)});
+            return LinkerError.RuntimeLibCompileFailed;
+        };
+        try self.temp_dirs.append(self.allocator, temp_dir);
+
+        // Write the main source file
+        const main_path = try std.fmt.allocPrint(self.allocator, "{s}/main.zig", .{temp_dir});
+        defer self.allocator.free(main_path);
+        {
+            const file = std.fs.cwd().createFile(main_path, .{}) catch |err| {
+                self.diagnostics.reportError(.{}, "Failed to create main source file: {s}", .{@errorName(err)});
+                return LinkerError.ObjectFileWriteFailed;
+            };
+            defer file.close();
+            file.writeAll(zig_source) catch |err| {
+                self.diagnostics.reportError(.{}, "Failed to write main source: {s}", .{@errorName(err)});
+                return LinkerError.ObjectFileWriteFailed;
+            };
+        }
+
+        // Write the runtime library source file
+        const runtime_path = try std.fmt.allocPrint(self.allocator, "{s}/runtime_lib.zig", .{temp_dir});
+        defer self.allocator.free(runtime_path);
+        {
+            const file = std.fs.cwd().createFile(runtime_path, .{}) catch |err| {
+                self.diagnostics.reportError(.{}, "Failed to create runtime source file: {s}", .{@errorName(err)});
+                return LinkerError.ObjectFileWriteFailed;
+            };
+            defer file.close();
+            file.writeAll(runtime_source) catch |err| {
+                self.diagnostics.reportError(.{}, "Failed to write runtime source: {s}", .{@errorName(err)});
+                return LinkerError.ObjectFileWriteFailed;
+            };
+        }
+
+        if (self.config.verbose) {
+            std.debug.print("Created compilation directory: {s}\n", .{temp_dir});
+            std.debug.print("  Main source: {s}\n", .{main_path});
+            std.debug.print("  Runtime source: {s}\n", .{runtime_path});
+        }
+
+        // Build the Zig compiler command
+        var args = std.ArrayListUnmanaged([]const u8){};
+        defer args.deinit(self.allocator);
+
+        try self.buildZigCommand(&args, main_path, output_path);
+
+        if (self.config.verbose) {
+            std.debug.print("Zig compiler command: ", .{});
+            for (args.items) |arg| {
+                std.debug.print("{s} ", .{arg});
+            }
+            std.debug.print("\n", .{});
+        }
+
+        // Execute the Zig compiler
+        try self.executeZigCompiler(args.items);
+
+        if (self.config.verbose) {
+            std.debug.print("Successfully compiled with embedded runtime: {s}\n", .{output_path});
+        }
+    }
+
+    /// Get the path to the runtime library source
+    pub fn getRuntimeLibSourcePath(self: *const Self) []const u8 {
+        _ = self;
+        return "src/aot/runtime_lib.zig";
+    }
+
+    /// Check if static linking is enabled
+    pub fn isStaticLinkEnabled(self: *const Self) bool {
+        return self.config.static_link;
+    }
+
+    /// Enable or disable static linking
+    pub fn setStaticLink(self: *Self, enabled: bool) void {
+        self.config.static_link = enabled;
+    }
+
+    /// Build the Zig compiler command arguments
+    pub fn buildZigCommand(
+        self: *Self,
+        args: *std.ArrayListUnmanaged([]const u8),
+        source_path: []const u8,
+        output_path: []const u8,
+    ) !void {
+        // Zig compiler executable
+        try args.append(self.allocator, "zig");
+        try args.append(self.allocator, "build-exe");
+
+        // Source file
+        try args.append(self.allocator, source_path);
+
+        // Output file - use the correct format for zig build-exe
+        const emit_path = try std.fmt.allocPrint(self.allocator, "-femit-bin={s}", .{output_path});
+        try args.append(self.allocator, emit_path);
+        try self.allocated_cmd_strings.append(self.allocator, emit_path);
+
+        // Optimization level
+        try args.append(self.allocator, self.config.optimize_level.toZigFlag());
+
+        // Target platform (if cross-compiling)
+        if (self.config.target) |target| {
+            try args.append(self.allocator, "-target");
+            try args.append(self.allocator, target);
+        }
+
+        // Static linking - use dynamic linker settings
+        if (self.config.static_link) {
+            // For static linking, we need to disable dynamic linking
+            try args.append(self.allocator, "-fno-PIE");
+        }
+
+        // Strip symbols for release builds
+        if (self.config.strip_symbols) {
+            try args.append(self.allocator, "-fstrip");
+        }
+
+        // Single-threaded mode (simpler for now)
+        try args.append(self.allocator, "-fsingle-threaded");
+
+        // Disable stack protector for smaller binaries in release mode
+        if (self.config.optimize_level == .release_small) {
+            try args.append(self.allocator, "-fno-stack-protector");
+        }
+
+        // Add any extra flags
+        for (self.config.extra_flags) |flag| {
+            try args.append(self.allocator, flag);
+        }
+    }
+
+    /// Build Zig command with runtime library module path
+    pub fn buildZigCommandWithRuntime(
+        self: *Self,
+        args: *std.ArrayListUnmanaged([]const u8),
+        source_path: []const u8,
+        output_path: []const u8,
+        runtime_path: []const u8,
+    ) !void {
+        // Zig compiler executable
+        try args.append(self.allocator, "zig");
+        try args.append(self.allocator, "build-exe");
+
+        // Source file
+        try args.append(self.allocator, source_path);
+
+        // Output file
+        const emit_path = try std.fmt.allocPrint(self.allocator, "-femit-bin={s}", .{output_path});
+        try args.append(self.allocator, emit_path);
+        try self.allocated_cmd_strings.append(self.allocator, emit_path);
+
+        // Add runtime library module path
+        const mod_path = try std.fmt.allocPrint(self.allocator, "--mod=runtime_lib:{s}", .{runtime_path});
+        try args.append(self.allocator, mod_path);
+        try self.allocated_cmd_strings.append(self.allocator, mod_path);
+
+        // Optimization level
+        try args.append(self.allocator, self.config.optimize_level.toZigFlag());
+
+        // Target platform (if cross-compiling)
+        if (self.config.target) |target| {
+            try args.append(self.allocator, "-target");
+            try args.append(self.allocator, target);
+        }
+
+        // Static linking
+        if (self.config.static_link) {
+            try args.append(self.allocator, "-fno-PIE");
+        }
+
+        // Strip symbols for release builds
+        if (self.config.strip_symbols) {
+            try args.append(self.allocator, "-fstrip");
+        }
+
+        // Single-threaded mode
+        try args.append(self.allocator, "-fsingle-threaded");
+
+        // Disable stack protector for smaller binaries in release mode
+        if (self.config.optimize_level == .release_small) {
+            try args.append(self.allocator, "-fno-stack-protector");
+        }
+
+        // Add any extra flags
+        for (self.config.extra_flags) |flag| {
+            try args.append(self.allocator, flag);
+        }
+    }
+
+    /// Execute the Zig compiler
+    fn executeZigCompiler(self: *Self, args: []const []const u8) !void {
+        if (args.len == 0) {
+            return LinkerError.LinkerInvocationFailed;
+        }
+
+        // Check if Zig is available
+        if (!self.isZigAvailable()) {
+            self.diagnostics.reportError(.{}, "Zig compiler not found in PATH", .{});
+            return LinkerError.MissingTool;
+        }
+
+        // Use run() which handles output collection properly
+        const result = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = args,
+        }) catch |err| {
+            self.diagnostics.reportError(.{}, "Failed to run Zig compiler: {s}", .{@errorName(err)});
+            return LinkerError.ProcessSpawnError;
+        };
+        defer self.allocator.free(result.stdout);
+        defer self.allocator.free(result.stderr);
+
+        if (result.term.Exited != 0) {
+            // Report compilation error with stderr output
+            if (result.stderr.len > 0) {
+                self.diagnostics.reportError(.{}, "Zig compilation failed:\n{s}", .{result.stderr});
+            } else if (result.stdout.len > 0) {
+                self.diagnostics.reportError(.{}, "Zig compilation failed:\n{s}", .{result.stdout});
+            } else {
+                self.diagnostics.reportError(.{}, "Zig compiler returned non-zero exit code: {d}", .{result.term.Exited});
+            }
+            return LinkerError.LinkerFailed;
+        }
+    }
+
+    /// Check if Zig compiler is available
+    fn isZigAvailable(self: *const Self) bool {
+        _ = self;
+        const result = std.process.Child.run(.{
+            .allocator = std.heap.page_allocator,
+            .argv = &[_][]const u8{ "zig", "version" },
+        }) catch return false;
+
+        defer std.heap.page_allocator.free(result.stdout);
+        defer std.heap.page_allocator.free(result.stderr);
+
+        return result.term.Exited == 0;
+    }
+
+    /// Get the Zig compiler version
+    pub fn getZigVersion(self: *const Self) ?[]const u8 {
+        _ = self;
+        const result = std.process.Child.run(.{
+            .allocator = std.heap.page_allocator,
+            .argv = &[_][]const u8{ "zig", "version" },
+        }) catch return null;
+
+        defer std.heap.page_allocator.free(result.stderr);
+
+        if (result.term.Exited == 0) {
+            // Trim newline from version string
+            var version = result.stdout;
+            if (version.len > 0 and version[version.len - 1] == '\n') {
+                version = version[0 .. version.len - 1];
+            }
+            return version;
+        }
+
+        std.heap.page_allocator.free(result.stdout);
+        return null;
+    }
+
+    /// Generate output file path from input file path
+    /// If output_path is provided, use it directly
+    /// Otherwise, derive from input_path by removing .php extension and adding platform-specific executable extension
+    pub fn generateOutputPath(self: *Self, input_path: []const u8, output_path: ?[]const u8) ![]const u8 {
+        // If output path is explicitly provided, use it
+        if (output_path) |out| {
+            return try self.allocator.dupe(u8, out);
+        }
+
+        // Derive output path from input path
+        const base_name = self.getBaseName(input_path);
+        const ext = self.getExecutableExtension();
+
+        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base_name, ext });
+    }
+
+    /// Get the base name from a file path (without directory and .php extension)
+    fn getBaseName(self: *const Self, path: []const u8) []const u8 {
+        _ = self;
+        // Find the last path separator
+        var start: usize = 0;
+        for (path, 0..) |c, i| {
+            if (c == '/' or c == '\\') {
+                start = i + 1;
+            }
+        }
+
+        // Get the filename part
+        const filename = path[start..];
+
+        // Remove .php extension if present
+        if (std.mem.endsWith(u8, filename, ".php")) {
+            return filename[0 .. filename.len - 4];
+        }
+
+        return filename;
+    }
+
+    /// Get the platform-specific executable extension
+    pub fn getExecutableExtension(self: *const Self) []const u8 {
+        if (self.config.target) |target| {
+            // Check if target is Windows
+            if (std.mem.indexOf(u8, target, "windows") != null) {
+                return ".exe";
+            }
+        } else {
+            // Native platform - check current OS
+            const builtin = @import("builtin");
+            if (builtin.os.tag == .windows) {
+                return ".exe";
+            }
+        }
+        return "";
+    }
+
+    /// Validate output path
+    /// Returns true if the output path is valid and writable
+    pub fn validateOutputPath(self: *Self, output_path: []const u8) bool {
+        _ = self;
+        // Check if the directory exists
+        const dir_path = blk: {
+            var last_sep: ?usize = null;
+            for (output_path, 0..) |c, i| {
+                if (c == '/' or c == '\\') {
+                    last_sep = i;
+                }
+            }
+            if (last_sep) |sep| {
+                break :blk output_path[0..sep];
+            }
+            break :blk ".";
+        };
+
+        // Try to access the directory
+        std.fs.cwd().access(dir_path, .{}) catch {
+            return false;
+        };
+
+        return true;
+    }
+
+    /// Get configuration
+    pub fn getConfig(self: *const Self) ZigLinkerConfig {
+        return self.config;
+    }
+
+    /// Set configuration
+    pub fn setConfig(self: *Self, config: ZigLinkerConfig) void {
+        self.config = config;
+    }
+};
+
+/// Configuration for ZigLinker
+pub const ZigLinkerConfig = struct {
+    /// Target platform triple (e.g., "x86_64-linux-gnu")
+    /// If null, compiles for the native platform
+    target: ?[]const u8,
+
+    /// Optimization level
+    optimize_level: ZigOptimizeLevel,
+
+    /// Whether to statically link
+    static_link: bool,
+
+    /// Whether to strip debug symbols
+    strip_symbols: bool,
+
+    /// Whether to include debug info
+    debug_info: bool,
+
+    /// Extra flags to pass to the Zig compiler
+    extra_flags: []const []const u8,
+
+    /// Verbose output
+    verbose: bool,
+
+    /// Create default configuration
+    pub fn default() ZigLinkerConfig {
+        return .{
+            .target = null,
+            .optimize_level = .debug,
+            .static_link = false,
+            .strip_symbols = false,
+            .debug_info = true,
+            .extra_flags = &[_][]const u8{},
+            .verbose = false,
+        };
+    }
+
+    /// Create release configuration
+    pub fn release() ZigLinkerConfig {
+        return .{
+            .target = null,
+            .optimize_level = .release_safe,
+            .static_link = true,
+            .strip_symbols = true,
+            .debug_info = false,
+            .extra_flags = &[_][]const u8{},
+            .verbose = false,
+        };
+    }
+
+    /// Create configuration from Target and OptimizeLevel
+    pub fn fromTarget(target: Target, opt_level: OptimizeLevel) ZigLinkerConfig {
+        const target_str = switch (target.os) {
+            .linux => switch (target.arch) {
+                .x86_64 => "x86_64-linux-gnu",
+                .aarch64 => "aarch64-linux-gnu",
+                .arm => "arm-linux-gnueabihf",
+            },
+            .macos => switch (target.arch) {
+                .x86_64 => "x86_64-macos",
+                .aarch64 => "aarch64-macos",
+                .arm => "arm-macos",
+            },
+            .windows => switch (target.arch) {
+                .x86_64 => "x86_64-windows-msvc",
+                .aarch64 => "aarch64-windows-msvc",
+                .arm => "arm-windows-msvc",
+            },
+        };
+
+        return .{
+            .target = target_str,
+            .optimize_level = ZigOptimizeLevel.fromOptimizeLevel(opt_level),
+            .static_link = true,
+            .strip_symbols = opt_level != .debug,
+            .debug_info = opt_level == .debug,
+            .extra_flags = &[_][]const u8{},
+            .verbose = false,
+        };
+    }
+};
+
+/// Zig optimization levels
+pub const ZigOptimizeLevel = enum {
+    debug,
+    release_safe,
+    release_fast,
+    release_small,
+
+    /// Convert to Zig compiler flag
+    pub fn toZigFlag(self: ZigOptimizeLevel) []const u8 {
+        return switch (self) {
+            .debug => "-ODebug",
+            .release_safe => "-OReleaseSafe",
+            .release_fast => "-OReleaseFast",
+            .release_small => "-OReleaseSmall",
+        };
+    }
+
+    /// Convert from OptimizeLevel
+    pub fn fromOptimizeLevel(opt: OptimizeLevel) ZigOptimizeLevel {
+        return switch (opt) {
+            .debug => .debug,
+            .release_safe => .release_safe,
+            .release_fast => .release_fast,
+            .release_small => .release_small,
+        };
+    }
+};
+
+// ============================================================================
+// ZigLinker Unit Tests
+// ============================================================================
+
+test "ZigLinkerConfig.default" {
+    const config = ZigLinkerConfig.default();
+    try std.testing.expect(config.target == null);
+    try std.testing.expectEqual(ZigOptimizeLevel.debug, config.optimize_level);
+    try std.testing.expect(!config.static_link);
+    try std.testing.expect(!config.strip_symbols);
+    try std.testing.expect(config.debug_info);
+    try std.testing.expect(!config.verbose);
+}
+
+test "ZigLinkerConfig.release" {
+    const config = ZigLinkerConfig.release();
+    try std.testing.expect(config.target == null);
+    try std.testing.expectEqual(ZigOptimizeLevel.release_safe, config.optimize_level);
+    try std.testing.expect(config.static_link);
+    try std.testing.expect(config.strip_symbols);
+    try std.testing.expect(!config.debug_info);
+}
+
+test "ZigLinkerConfig.fromTarget" {
+    const target = Target{ .arch = .x86_64, .os = .linux, .abi = .gnu };
+    const config = ZigLinkerConfig.fromTarget(target, .release_fast);
+    try std.testing.expectEqualStrings("x86_64-linux-gnu", config.target.?);
+    try std.testing.expectEqual(ZigOptimizeLevel.release_fast, config.optimize_level);
+    try std.testing.expect(config.static_link);
+}
+
+test "ZigOptimizeLevel.toZigFlag" {
+    try std.testing.expectEqualStrings("-ODebug", ZigOptimizeLevel.debug.toZigFlag());
+    try std.testing.expectEqualStrings("-OReleaseSafe", ZigOptimizeLevel.release_safe.toZigFlag());
+    try std.testing.expectEqualStrings("-OReleaseFast", ZigOptimizeLevel.release_fast.toZigFlag());
+    try std.testing.expectEqualStrings("-OReleaseSmall", ZigOptimizeLevel.release_small.toZigFlag());
+}
+
+test "ZigLinker.init and deinit" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    const config = ZigLinkerConfig.default();
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    try std.testing.expectEqual(config.optimize_level, linker.getConfig().optimize_level);
+}
+
+test "ZigLinker.writeTempSourceFile" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    const config = ZigLinkerConfig.default();
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    const source = "pub fn main() void {}";
+    const path = try linker.writeTempSourceFile(source);
+
+    // Verify file was created
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    var buf: [100]u8 = undefined;
+    const bytes_read = try file.readAll(&buf);
+    try std.testing.expectEqualStrings(source, buf[0..bytes_read]);
+}
+
+test "ZigLinker.buildZigCommand" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    // Test with debug configuration
+    var config = ZigLinkerConfig.default();
+    config.verbose = false;
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    var args = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        // Free allocated strings (emit_path is allocated by buildZigCommand)
+        for (args.items) |arg| {
+            if (std.mem.startsWith(u8, arg, "-femit-bin=")) {
+                allocator.free(arg);
+            }
+        }
+        args.deinit(allocator);
+    }
+
+    try linker.buildZigCommand(&args, "test.zig", "test_output");
+
+    // Verify basic command structure
+    try std.testing.expect(args.items.len >= 4);
+    try std.testing.expectEqualStrings("zig", args.items[0]);
+    try std.testing.expectEqualStrings("build-exe", args.items[1]);
+    try std.testing.expectEqualStrings("test.zig", args.items[2]);
+
+    // Verify output path is set
+    var found_output = false;
+    for (args.items) |arg| {
+        if (std.mem.startsWith(u8, arg, "-femit-bin=")) {
+            found_output = true;
+            try std.testing.expect(std.mem.endsWith(u8, arg, "test_output"));
+        }
+    }
+    try std.testing.expect(found_output);
+
+    // Verify optimization flag is present
+    var found_opt = false;
+    for (args.items) |arg| {
+        if (std.mem.startsWith(u8, arg, "-O")) {
+            found_opt = true;
+        }
+    }
+    try std.testing.expect(found_opt);
+}
+
+test "ZigLinker.buildZigCommand with target" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    // Test with cross-compilation target
+    var config = ZigLinkerConfig.default();
+    config.target = "x86_64-linux-gnu";
+    config.optimize_level = .release_fast;
+    config.strip_symbols = true;
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    var args = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        // Free allocated strings (emit_path is allocated by buildZigCommand)
+        for (args.items) |arg| {
+            if (std.mem.startsWith(u8, arg, "-femit-bin=")) {
+                allocator.free(arg);
+            }
+        }
+        args.deinit(allocator);
+    }
+
+    try linker.buildZigCommand(&args, "test.zig", "test_output");
+
+    // Verify target is set
+    var found_target = false;
+    var i: usize = 0;
+    while (i < args.items.len) : (i += 1) {
+        if (std.mem.eql(u8, args.items[i], "-target")) {
+            found_target = true;
+            try std.testing.expect(i + 1 < args.items.len);
+            try std.testing.expectEqualStrings("x86_64-linux-gnu", args.items[i + 1]);
+        }
+    }
+    try std.testing.expect(found_target);
+
+    // Verify strip flag is present
+    var found_strip = false;
+    for (args.items) |arg| {
+        if (std.mem.eql(u8, arg, "-fstrip")) {
+            found_strip = true;
+        }
+    }
+    try std.testing.expect(found_strip);
+
+    // Verify release-fast optimization
+    var found_release_fast = false;
+    for (args.items) |arg| {
+        if (std.mem.eql(u8, arg, "-OReleaseFast")) {
+            found_release_fast = true;
+        }
+    }
+    try std.testing.expect(found_release_fast);
+}
+
+test "ZigLinker.isStaticLinkEnabled" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    // Test default config (static_link = false)
+    const config = ZigLinkerConfig.default();
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    try std.testing.expect(!linker.isStaticLinkEnabled());
+
+    // Enable static linking
+    linker.setStaticLink(true);
+    try std.testing.expect(linker.isStaticLinkEnabled());
+
+    // Disable static linking
+    linker.setStaticLink(false);
+    try std.testing.expect(!linker.isStaticLinkEnabled());
+}
+
+test "ZigLinker.getRuntimeLibSourcePath" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    const config = ZigLinkerConfig.default();
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    const path = linker.getRuntimeLibSourcePath();
+    try std.testing.expectEqualStrings("src/aot/runtime_lib.zig", path);
+}
+
+test "ZigLinkerConfig static linking" {
+    // Test release config has static linking enabled
+    const release_config = ZigLinkerConfig.release();
+    try std.testing.expect(release_config.static_link);
+
+    // Test default config has static linking disabled
+    const default_config = ZigLinkerConfig.default();
+    try std.testing.expect(!default_config.static_link);
+
+    // Test fromTarget with release optimization enables static linking
+    const target = Target{ .arch = .x86_64, .os = .linux, .abi = .gnu };
+    const target_config = ZigLinkerConfig.fromTarget(target, .release_fast);
+    try std.testing.expect(target_config.static_link);
+}
+
+test "ZigLinker.generateOutputPath with explicit output" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    const config = ZigLinkerConfig.default();
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    // Test with explicit output path
+    const output = try linker.generateOutputPath("input.php", "my_app");
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("my_app", output);
+}
+
+test "ZigLinker.generateOutputPath derived from input" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    const config = ZigLinkerConfig.default();
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    // Test deriving output from input (removes .php extension)
+    const output1 = try linker.generateOutputPath("hello.php", null);
+    defer allocator.free(output1);
+    try std.testing.expectEqualStrings("hello", output1);
+
+    // Test with path
+    const output2 = try linker.generateOutputPath("/path/to/script.php", null);
+    defer allocator.free(output2);
+    try std.testing.expectEqualStrings("script", output2);
+
+    // Test without .php extension
+    const output3 = try linker.generateOutputPath("myprogram", null);
+    defer allocator.free(output3);
+    try std.testing.expectEqualStrings("myprogram", output3);
+}
+
+test "ZigLinker.generateOutputPath with Windows target" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    var config = ZigLinkerConfig.default();
+    config.target = "x86_64-windows-msvc";
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    // Test that Windows target adds .exe extension
+    const output = try linker.generateOutputPath("hello.php", null);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("hello.exe", output);
+}
+
+test "ZigLinker.getExecutableExtension" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    // Test Linux target (no extension)
+    var linux_config = ZigLinkerConfig.default();
+    linux_config.target = "x86_64-linux-gnu";
+    const linux_linker = try ZigLinker.init(allocator, linux_config, &diagnostics);
+    defer linux_linker.deinit();
+    try std.testing.expectEqualStrings("", linux_linker.getExecutableExtension());
+
+    // Test Windows target (.exe extension)
+    var windows_config = ZigLinkerConfig.default();
+    windows_config.target = "x86_64-windows-msvc";
+    const windows_linker = try ZigLinker.init(allocator, windows_config, &diagnostics);
+    defer windows_linker.deinit();
+    try std.testing.expectEqualStrings(".exe", windows_linker.getExecutableExtension());
+
+    // Test macOS target (no extension)
+    var macos_config = ZigLinkerConfig.default();
+    macos_config.target = "aarch64-macos";
+    const macos_linker = try ZigLinker.init(allocator, macos_config, &diagnostics);
+    defer macos_linker.deinit();
+    try std.testing.expectEqualStrings("", macos_linker.getExecutableExtension());
+}
+
+test "ZigLinker.validateOutputPath" {
+    const allocator = std.testing.allocator;
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+
+    const config = ZigLinkerConfig.default();
+    const linker = try ZigLinker.init(allocator, config, &diagnostics);
+    defer linker.deinit();
+
+    // Test valid path (current directory)
+    try std.testing.expect(linker.validateOutputPath("test_output"));
+
+    // Test invalid path (non-existent directory)
+    try std.testing.expect(!linker.validateOutputPath("/nonexistent/directory/output"));
+}

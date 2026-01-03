@@ -98,9 +98,14 @@ const CodeGenerator = CodeGen.CodeGenerator;
 const LinkerMod = @import("linker.zig");
 const StaticLinker = LinkerMod.StaticLinker;
 const LinkerConfig = LinkerMod.LinkerConfig;
+const ZigLinker = LinkerMod.ZigLinker;
+const ZigLinkerConfig = LinkerMod.ZigLinkerConfig;
+const ZigOptimizeLevel = LinkerMod.ZigOptimizeLevel;
 const OptimizerMod = @import("optimizer.zig");
 const IROptimizer = OptimizerMod.IROptimizer;
 const IROptimizeLevel = OptimizerMod.OptimizeLevel;
+const ZigCodeGen = @import("zig_codegen.zig");
+const ZigCodeGenerator = ZigCodeGen.ZigCodeGenerator;
 
 // Root module for shared types
 const root = @import("root.zig");
@@ -130,6 +135,8 @@ pub const CompileOptions = struct {
     dump_ir: bool = false,
     /// Dump parsed AST for debugging
     dump_ast: bool = false,
+    /// Dump generated Zig code for debugging
+    dump_zig: bool = false,
     /// Verbose output during compilation
     verbose: bool = false,
     /// Syntax mode for parsing (PHP or Go style)
@@ -426,10 +433,48 @@ pub const CompileError = error{
     TypeInferenceError,
     IRGenerationError,
     CodeGenerationError,
+    ZigCodeGenerationError,
+    ZigCompilationError,
+    ZigCompilerNotFound,
     LinkError,
     OutputWriteError,
     InvalidTarget,
     OutOfMemory,
+    RuntimeLibNotFound,
+};
+
+/// Error context for detailed error reporting
+pub const ErrorContext = struct {
+    /// Error code (e.g., "E001", "E002")
+    code: []const u8,
+    /// Error message
+    message: []const u8,
+    /// Source file (if applicable)
+    file: ?[]const u8,
+    /// Line number (if applicable)
+    line: ?u32,
+    /// Column number (if applicable)
+    column: ?u32,
+    /// Additional context or suggestion
+    hint: ?[]const u8,
+
+    pub fn format(self: ErrorContext, writer: anytype) !void {
+        try writer.print("[{s}] ", .{self.code});
+        if (self.file) |f| {
+            try writer.print("{s}", .{f});
+            if (self.line) |l| {
+                try writer.print(":{d}", .{l});
+                if (self.column) |c| {
+                    try writer.print(":{d}", .{c});
+                }
+            }
+            try writer.print(": ", .{});
+        }
+        try writer.print("{s}\n", .{self.message});
+        if (self.hint) |h| {
+            try writer.print("  hint: {s}\n", .{h});
+        }
+    }
 };
 
 // ============================================================================
@@ -447,6 +492,12 @@ pub const AOTCompiler = struct {
     codegen: ?*CodeGenerator,
     linker: ?*StaticLinker,
     optimizer: ?*IROptimizer,
+    /// Zig code generator for AOT compilation
+    zig_codegen: ?*ZigCodeGenerator,
+    /// Zig linker for compiling generated Zig code
+    zig_linker: ?*ZigLinker,
+    /// Generated Zig source code (for --dump-zig option)
+    generated_zig_source: ?[]const u8,
     /// Syntax configuration derived from options
     syntax_config: SyntaxConfig,
 
@@ -456,6 +507,8 @@ pub const AOTCompiler = struct {
     ast_nodes: ?[]const IRGeneratorMod.Node,
     /// String table from parser
     string_table: ?[]const []const u8,
+    /// Root node index in AST (for IR generation)
+    root_node_index: u32,
     /// Generated IR module
     ir_module: ?*IR.Module,
 
@@ -483,10 +536,14 @@ pub const AOTCompiler = struct {
             .codegen = null,
             .linker = null,
             .optimizer = null,
+            .zig_codegen = null,
+            .zig_linker = null,
+            .generated_zig_source = null,
             .syntax_config = syntax_config,
             .source = null,
             .ast_nodes = null,
             .string_table = null,
+            .root_node_index = 0,
             .ir_module = null,
         };
 
@@ -495,6 +552,22 @@ pub const AOTCompiler = struct {
 
     /// Deinitialize and free all resources
     pub fn deinit(self: *Self) void {
+        // Free generated Zig source
+        if (self.generated_zig_source) |src| {
+            self.allocator.free(src);
+        }
+
+        // Free Zig code generator
+        if (self.zig_codegen) |gen| {
+            gen.deinit();
+            self.allocator.destroy(gen);
+        }
+
+        // Free Zig linker (deinit already destroys itself)
+        if (self.zig_linker) |lnk| {
+            lnk.deinit();
+        }
+
         // Free IR module
         if (self.ir_module) |module| {
             module.deinit();
@@ -504,6 +577,7 @@ pub const AOTCompiler = struct {
         // Free IR generator
         if (self.ir_generator) |gen| {
             gen.deinit();
+            self.allocator.destroy(gen);
         }
 
         // Free optimizer
@@ -512,19 +586,23 @@ pub const AOTCompiler = struct {
             self.allocator.destroy(opt);
         }
 
-        // Free type inferencer (no deinit needed, it's stack-allocated style)
+        // Free type inferencer
+        if (self.type_inferencer) |ti| {
+            self.allocator.destroy(ti);
+        }
+
         // Free symbol table
         if (self.symbol_table) |st| {
             st.deinit();
             self.allocator.destroy(st);
         }
 
-        // Free code generator
+        // Free code generator (deinit already destroys itself)
         if (self.codegen) |cg| {
             cg.deinit();
         }
 
-        // Free linker
+        // Free linker (deinit already destroys itself)
         if (self.linker) |lnk| {
             lnk.deinit();
         }
@@ -585,7 +663,17 @@ pub const AOTCompiler = struct {
         );
         self.optimizer = optimizer;
 
-        // Initialize code generator
+        // Initialize Zig code generator (replaces LLVM-based code generator)
+        const zig_codegen = try self.allocator.create(ZigCodeGenerator);
+        zig_codegen.* = ZigCodeGenerator.init(self.allocator, self.diagnostics);
+        self.zig_codegen = zig_codegen;
+
+        // Initialize Zig linker
+        var zig_linker_config = ZigLinkerConfig.fromTarget(self.options.target.toCodeGenTarget(), self.options.optimize_level.toCodeGenLevel());
+        zig_linker_config.verbose = self.options.verbose;
+        self.zig_linker = try ZigLinker.init(self.allocator, zig_linker_config, self.diagnostics);
+
+        // Initialize legacy code generator (for backward compatibility)
         self.codegen = try CodeGenerator.init(
             self.allocator,
             self.options.target.toCodeGenTarget(),
@@ -594,7 +682,7 @@ pub const AOTCompiler = struct {
             self.diagnostics,
         );
 
-        // Initialize linker
+        // Initialize legacy linker (for backward compatibility)
         const linker_config = LinkerConfig{
             .target = self.options.target.toCodeGenTarget(),
             .optimize_level = self.options.optimize_level.toCodeGenLevel(),
@@ -658,6 +746,11 @@ pub const AOTCompiler = struct {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
+        // Dump generated Zig code if requested
+        if (self.options.dump_zig) {
+            self.dumpZig();
+        }
+
         // Step 6: Link executable
         const output_path = try self.options.getOutputPath(self.allocator);
         try self.linkExecutable(output_path);
@@ -679,6 +772,8 @@ pub const AOTCompiler = struct {
         std.debug.print("  Input file: {s}\n", .{self.options.input_file});
         if (self.options.output_file) |out| {
             std.debug.print("  Output file: {s}\n", .{out});
+        } else {
+            std.debug.print("  Output file: (derived from input)\n", .{});
         }
         if (self.options.target.toTriple(self.allocator)) |target_triple| {
             defer self.allocator.free(target_triple);
@@ -690,6 +785,11 @@ pub const AOTCompiler = struct {
         std.debug.print("  Static link: {}\n", .{self.options.static_link});
         std.debug.print("  Debug info: {}\n", .{self.options.debug_info});
         std.debug.print("  Syntax mode: {s}\n", .{self.options.syntax_mode.toString()});
+        std.debug.print("  Dump options:\n", .{});
+        std.debug.print("    --dump-ast: {}\n", .{self.options.dump_ast});
+        std.debug.print("    --dump-ir: {}\n", .{self.options.dump_ir});
+        std.debug.print("    --dump-zig: {}\n", .{self.options.dump_zig});
+        std.debug.print("\n", .{});
     }
 
     /// Load source file
@@ -748,6 +848,18 @@ pub const AOTCompiler = struct {
         }
     }
 
+    /// Set pre-parsed AST nodes, string table, and root node index
+    /// This is used when the parser is invoked externally (e.g., from main.zig)
+    /// and provides the root node index for proper IR generation
+    pub fn setASTWithRoot(self: *Self, nodes: []const IRGeneratorMod.Node, string_table: []const []const u8, root_index: u32) !void {
+        try self.setAST(nodes, string_table);
+        self.root_node_index = root_index;
+
+        if (self.options.verbose) {
+            std.debug.print("  Root node index: {d}\n", .{root_index});
+        }
+    }
+
     /// Parse source into AST
     /// Note: This method requires the parser module to be available.
     /// When testing the AOT module in isolation, use setAST() instead.
@@ -794,6 +906,7 @@ pub const AOTCompiler = struct {
 
         if (self.options.verbose) {
             std.debug.print("  Generating IR...\n", .{});
+            std.debug.print("  Root node index: {d}\n", .{self.root_node_index});
         }
 
         const ir_gen = self.ir_generator orelse {
@@ -805,10 +918,11 @@ pub const AOTCompiler = struct {
             return;
         };
 
-        // Generate IR module
-        self.ir_module = ir_gen.generate(
+        // Generate IR module using the root node index
+        self.ir_module = ir_gen.generateFromRoot(
             self.ast_nodes.?,
             self.string_table.?,
+            self.root_node_index,
             self.options.input_file,
             self.options.input_file,
         ) catch |err| {
@@ -874,7 +988,7 @@ pub const AOTCompiler = struct {
         }
     }
 
-    /// Generate native code from IR
+    /// Generate native code from IR using Zig code generator
     fn generateCode(self: *Self) !void {
         if (self.ir_module == null) {
             self.diagnostics.reportError(
@@ -886,81 +1000,125 @@ pub const AOTCompiler = struct {
         }
 
         if (self.options.verbose) {
-            std.debug.print("  Generating native code...\n", .{});
+            std.debug.print("  Generating Zig code from IR...\n", .{});
         }
 
-        const codegen = self.codegen orelse {
+        const zig_codegen = self.zig_codegen orelse {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
-                "code generator not initialized",
+                "Zig code generator not initialized",
                 .{},
             );
             return;
         };
 
-        // Generate LLVM IR and native code
-        codegen.generateModule(self.ir_module.?) catch |err| {
+        // Generate Zig source code from IR
+        self.generated_zig_source = zig_codegen.generate(self.ir_module.?) catch |err| {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
-                "code generation failed: {s}",
+                "Zig code generation failed: {s}",
                 .{@errorName(err)},
             );
             return;
         };
 
         if (self.options.verbose) {
-            std.debug.print("  Code generation completed.\n", .{});
+            if (self.generated_zig_source) |src| {
+                std.debug.print("  Zig code generation completed: {d} bytes\n", .{src.len});
+            }
         }
     }
 
-    /// Link executable
+    /// Link executable using Zig compiler
     fn linkExecutable(self: *Self, output_path: []const u8) !void {
         if (self.options.verbose) {
-            std.debug.print("  Linking executable: {s}\n", .{output_path});
+            std.debug.print("  Compiling and linking executable: {s}\n", .{output_path});
         }
 
-        const linker = self.linker orelse {
+        // Check if we have generated Zig source code
+        const zig_source = self.generated_zig_source orelse {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
-                "linker not initialized",
+                "[E005] No Zig source code generated - IR to Zig conversion may have failed",
                 .{},
             );
             return;
         };
 
-        // Generate mock object code for now (actual LLVM output would be used)
-        var object_code = linker.generateMockObjectCode(self.options.input_file) catch |err| {
+        // Get the Zig linker
+        const zig_linker = self.zig_linker orelse {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
-                "object code generation failed: {s}",
-                .{@errorName(err)},
-            );
-            return;
-        };
-        defer object_code.deinit(self.allocator);
-
-        // Write object file
-        const obj_path = linker.writeTempObjectFile(&object_code) catch |err| {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "failed to write object file: {s}",
-                .{@errorName(err)},
+                "[E006] Zig linker not initialized - internal compiler error",
+                .{},
             );
             return;
         };
 
-        // Link with runtime library
-        linker.link(&[_][]const u8{obj_path}, output_path) catch |err| {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "linking failed: {s}",
-                .{@errorName(err)},
-            );
+        // Read the runtime library source
+        const runtime_source = std.fs.cwd().readFileAlloc(
+            self.allocator,
+            zig_linker.getRuntimeLibSourcePath(),
+            1024 * 1024, // 1MB max
+        ) catch |err| {
+            if (self.options.verbose) {
+                std.debug.print("  Warning: Could not read runtime library ({s}): {s}\n", .{ zig_linker.getRuntimeLibSourcePath(), @errorName(err) });
+                std.debug.print("  Attempting compilation without embedded runtime...\n", .{});
+            }
+            // Try to compile without embedded runtime
+            zig_linker.compileAndLink(zig_source, output_path) catch |link_err| {
+                self.reportZigCompilationError(link_err);
+                return;
+            };
+            if (self.options.verbose) {
+                std.debug.print("  Compilation completed.\n", .{});
+            }
+            return;
+        };
+        defer self.allocator.free(runtime_source);
+
+        // Compile with embedded runtime library
+        zig_linker.compileWithEmbeddedRuntime(zig_source, runtime_source, output_path) catch |err| {
+            self.reportZigCompilationError(err);
             return;
         };
 
         if (self.options.verbose) {
-            std.debug.print("  Linking completed.\n", .{});
+            std.debug.print("  Compilation and linking completed.\n", .{});
+        }
+    }
+
+    /// Report Zig compilation error with user-friendly message
+    fn reportZigCompilationError(self: *Self, err: anyerror) void {
+        const error_code = switch (err) {
+            LinkerMod.LinkerError.MissingTool => "[E006]",
+            LinkerMod.LinkerError.LinkerFailed => "[E006]",
+            LinkerMod.LinkerError.ProcessSpawnError => "[E006]",
+            LinkerMod.LinkerError.LinkerInvocationFailed => "[E006]",
+            else => "[E006]",
+        };
+
+        const error_msg = switch (err) {
+            LinkerMod.LinkerError.MissingTool => "Zig compiler not found. Please ensure Zig is installed and in your PATH.",
+            LinkerMod.LinkerError.LinkerFailed => "Zig compilation failed. Check the generated Zig code with --dump-zig for details.",
+            LinkerMod.LinkerError.ProcessSpawnError => "Failed to start Zig compiler process.",
+            LinkerMod.LinkerError.LinkerInvocationFailed => "Zig compiler invocation failed.",
+            LinkerMod.LinkerError.ObjectFileWriteFailed => "Failed to write temporary source file.",
+            LinkerMod.LinkerError.RuntimeLibCompileFailed => "Failed to compile runtime library.",
+            else => "Zig compilation failed.",
+        };
+
+        self.diagnostics.reportError(
+            .{ .file = self.options.input_file },
+            "{s} {s} ({s})",
+            .{ error_code, error_msg, @errorName(err) },
+        );
+
+        // Provide additional hints based on error type
+        if (err == LinkerMod.LinkerError.MissingTool) {
+            std.debug.print("  Hint: Install Zig from https://ziglang.org/download/\n", .{});
+        } else if (err == LinkerMod.LinkerError.LinkerFailed) {
+            std.debug.print("  Hint: Use --dump-zig to see the generated Zig code and identify issues.\n", .{});
         }
     }
 
@@ -1009,6 +1167,24 @@ pub const AOTCompiler = struct {
         }
 
         std.debug.print("=== End IR ===\n\n", .{});
+    }
+
+    /// Dump generated Zig code for debugging
+    fn dumpZig(self: *const Self) void {
+        std.debug.print("\n=== Generated Zig Code ===\n", .{});
+
+        if (self.generated_zig_source) |src| {
+            std.debug.print("{s}", .{src});
+        } else {
+            std.debug.print("No Zig code generated.\n", .{});
+        }
+
+        std.debug.print("=== End Zig Code ===\n\n", .{});
+    }
+
+    /// Get the generated Zig source code (for external use)
+    pub fn getGeneratedZigSource(self: *const Self) ?[]const u8 {
+        return self.generated_zig_source;
     }
 
     /// Compile to IR only (for testing/debugging)

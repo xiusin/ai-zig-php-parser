@@ -35,6 +35,7 @@ fn printUsage() void {
         \\  --static               Generate fully static linked executable
         \\  --dump-ir              Dump generated IR for debugging
         \\  --dump-ast             Dump parsed AST for debugging
+        \\  --dump-zig             Dump generated Zig code for debugging
         \\  --verbose              Verbose output during compilation
         \\  --list-targets         List all supported target platforms
         \\
@@ -158,6 +159,8 @@ pub fn main() !void {
             aot_options.dump_ir = true;
         } else if (std.mem.eql(u8, arg, "--dump-ast")) {
             aot_options.dump_ast = true;
+        } else if (std.mem.eql(u8, arg, "--dump-zig")) {
+            aot_options.dump_zig = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             aot_options.verbose = true;
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {
@@ -293,23 +296,6 @@ pub fn main() !void {
 
 /// Run AOT compilation
 fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) !void {
-    if (options.verbose) {
-        std.debug.print("AOT Compiler starting...\n", .{});
-        std.debug.print("  Input file: {s}\n", .{options.input_file});
-        if (options.output_file) |out| {
-            std.debug.print("  Output file: {s}\n", .{out});
-        }
-        if (options.target.toTriple(allocator)) |target_triple| {
-            defer allocator.free(target_triple);
-            std.debug.print("  Target: {s}\n", .{target_triple});
-        } else |_| {
-            std.debug.print("  Target: unknown\n", .{});
-        }
-        std.debug.print("  Optimize: {s}\n", .{options.optimize_level.toString()});
-        std.debug.print("  Static link: {}\n", .{options.static_link});
-        std.debug.print("  Syntax mode: {s}\n", .{options.syntax_mode.toString()});
-    }
-
     // Read source file
     const file = std.fs.cwd().openFile(options.input_file, .{}) catch |err| {
         std.debug.print("Error: cannot open file '{s}': {s}\n", .{ options.input_file, @errorName(err) });
@@ -348,22 +334,6 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         return;
     };
 
-    if (options.dump_ast) {
-        std.debug.print("\n=== AST Dump ===\n", .{});
-        std.debug.print("Root node index: {d}\n", .{program});
-        std.debug.print("Total nodes: {d}\n", .{context.nodes.items.len});
-        std.debug.print("String pool size: {d}\n", .{context.string_pool.count()});
-        // Print first few nodes for debugging
-        const max_nodes = @min(context.nodes.items.len, 10);
-        for (context.nodes.items[0..max_nodes], 0..) |node, i| {
-            std.debug.print("  Node {d}: tag={s}\n", .{ i, @tagName(node.tag) });
-        }
-        if (context.nodes.items.len > 10) {
-            std.debug.print("  ... and {d} more nodes\n", .{context.nodes.items.len - 10});
-        }
-        std.debug.print("=== End AST ===\n\n", .{});
-    }
-
     // Convert parser AST to IR generator format
     const ir_nodes = try convertASTToIRNodes(allocator, context.nodes.items);
     defer allocator.free(ir_nodes);
@@ -381,63 +351,34 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     var compiler = try aot.AOTCompiler.init(allocator, options);
     defer compiler.deinit();
 
-    // Set the pre-parsed AST
-    try compiler.setAST(ir_nodes, string_table);
+    // Set the pre-parsed AST (with root node index for proper IR generation)
+    try compiler.setASTWithRoot(ir_nodes, string_table, program);
 
     // Set source for diagnostics
     try compiler.getDiagnostics().setSource(source);
 
-    if (options.dump_ir) {
-        std.debug.print("\n=== IR Dump ===\n", .{});
+    // Run the full compilation pipeline
+    const result = try compiler.compile();
 
-        // Initialize symbol table and type inferencer for IR generation
-        var symbol_table = try aot.SymbolTable.init(allocator);
-        defer symbol_table.deinit();
-
-        var type_inferencer = aot.TypeInferenceMod.TypeInferencer.init(allocator, &symbol_table, compiler.getDiagnostics());
-
-        // Initialize IR generator
-        var ir_generator = aot.IRGenerator.init(allocator, &symbol_table, &type_inferencer, compiler.getDiagnostics());
-        defer ir_generator.deinit();
-
-        // Generate IR - pass the root node index
-        const module = ir_generator.generateFromRoot(ir_nodes, string_table, program, options.input_file, options.input_file) catch |err| {
-            std.debug.print("IR generation error: {s}\n", .{@errorName(err)});
-            std.debug.print("=== End IR ===\n\n", .{});
-            return;
-        };
-        defer {
-            module.deinit();
-            allocator.destroy(module);
+    // Report compilation result
+    if (result.success) {
+        if (result.output_path) |output_path| {
+            defer allocator.free(output_path);
+            std.debug.print("Compilation successful: {s}\n", .{output_path});
         }
-
-        // Serialize and print IR
-        const ir_text = aot.serializeModule(allocator, module) catch |err| {
-            std.debug.print("IR serialization error: {s}\n", .{@errorName(err)});
-            std.debug.print("=== End IR ===\n\n", .{});
-            return;
-        };
-        defer allocator.free(ir_text);
-
-        std.debug.print("{s}", .{ir_text});
-        std.debug.print("=== End IR ===\n\n", .{});
-    }
-
-    // Report compilation status
-    if (compiler.hasErrors()) {
-        compiler.printDiagnostics();
-        return;
-    }
-
-    if (options.verbose) {
-        std.debug.print("Parsing completed successfully.\n", .{});
-        if (!options.dump_ir) {
-            std.debug.print("Note: Use --dump-ir to see the generated IR.\n", .{});
+    } else {
+        // Free output_path if it was allocated but compilation failed
+        if (result.output_path) |output_path| {
+            allocator.free(output_path);
         }
-        std.debug.print("Note: Full AOT compilation pipeline (code generation, linking) not yet implemented.\n", .{});
-    } else if (!options.dump_ir and !options.dump_ast) {
-        std.debug.print("AOT compilation: parsing succeeded.\n", .{});
-        std.debug.print("Use --dump-ir to see the generated IR, or --dump-ast to see the AST.\n", .{});
+        // Print any diagnostics
+        if (compiler.hasErrors()) {
+            compiler.printDiagnostics();
+        }
+        std.debug.print("Compilation failed with {d} error(s) and {d} warning(s).\n", .{
+            result.error_count,
+            result.warning_count,
+        });
     }
 }
 
@@ -673,6 +614,24 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
         } },
         .lock_stmt => .{ .lock_stmt = .{ .body = data.lock_stmt.body } },
         .go_stmt => .{ .go_stmt = .{ .call = data.go_stmt.call } },
+        .named_type => .{ .named_type = .{ .name = data.named_type.name } },
+        .array_pair => .{ .array_pair = .{ .key = data.array_pair.key, .value = data.array_pair.value } },
+        .expression_stmt => .{ .none = {} }, // Expression statements wrap expressions
+        .break_stmt, .continue_stmt => .{ .none = {} }, // Control flow statements
+        .postfix_expr => .{ .postfix_expr = .{
+            .op = convertTokenTag(data.postfix_expr.op),
+            .expr = data.postfix_expr.expr,
+        } },
+        .ternary_expr => .{ .ternary_expr = .{
+            .cond = data.ternary_expr.cond,
+            .then_expr = data.ternary_expr.then_expr,
+            .else_expr = data.ternary_expr.else_expr,
+        } },
+        .array_access => .{ .array_access = .{ .target = data.array_access.target, .index = data.array_access.index } },
+        .object_instantiation => .{ .object_instantiation = .{
+            .class_name = data.object_instantiation.class_name,
+            .args = data.object_instantiation.args,
+        } },
         else => .{ .none = {} },
     };
 }

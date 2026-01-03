@@ -17,6 +17,63 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // =========================================================================
+    // AOT Runtime Library - Static Library for AOT compiled programs
+    // =========================================================================
+    const runtime_lib_step = b.step("build-runtime", "Build AOT runtime library as static library");
+
+    // Build runtime library for the target platform
+    const runtime_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "php-runtime",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/aot/runtime_lib.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    runtime_lib.linkLibC();
+
+    // Install the static library
+    const install_runtime = b.addInstallArtifact(runtime_lib, .{});
+    runtime_lib_step.dependOn(&install_runtime.step);
+
+    // Also add a step to build runtime for common cross-compilation targets
+    const cross_runtime_step = b.step("build-runtime-all", "Build AOT runtime library for all supported targets");
+
+    // Define supported targets for cross-compilation
+    const cross_targets = [_]std.Target.Query{
+        // Linux x86_64
+        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
+        // Linux ARM64
+        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
+        // macOS x86_64
+        .{ .cpu_arch = .x86_64, .os_tag = .macos },
+        // macOS ARM64
+        .{ .cpu_arch = .aarch64, .os_tag = .macos },
+        // Windows x86_64
+        .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc },
+    };
+
+    for (cross_targets) |cross_target| {
+        const resolved_target = b.resolveTargetQuery(cross_target);
+        const target_name = getTargetName(cross_target);
+
+        const cross_runtime = b.addLibrary(.{
+            .linkage = .static,
+            .name = b.fmt("php-runtime-{s}", .{target_name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/aot/runtime_lib.zig"),
+                .target = resolved_target,
+                .optimize = optimize,
+            }),
+        });
+        cross_runtime.linkLibC();
+
+        const install_cross = b.addInstallArtifact(cross_runtime, .{});
+        cross_runtime_step.dependOn(&install_cross.step);
+    }
+
     // AOT module tests
     const aot_test_step = b.step("test-aot", "Run AOT module tests");
     const aot_test = b.addTest(.{
@@ -139,4 +196,32 @@ pub fn build(b: *std.Build) void {
     const clean_step = b.step("clean", "Clean build artifacts");
     const clean_cmd = b.addSystemCommand(&[_][]const u8{ "rm", "-rf", "zig-out", ".zig-cache" });
     clean_step.dependOn(&clean_cmd.step);
+}
+
+
+/// Helper function to get a human-readable target name
+fn getTargetName(query: std.Target.Query) []const u8 {
+    const arch = switch (query.cpu_arch orelse .x86_64) {
+        .x86_64 => "x86_64",
+        .aarch64 => "aarch64",
+        .arm => "arm",
+        .riscv64 => "riscv64",
+        else => "unknown",
+    };
+
+    const os = switch (query.os_tag orelse .linux) {
+        .linux => "linux",
+        .macos => "macos",
+        .windows => "windows",
+        .freebsd => "freebsd",
+        else => "unknown",
+    };
+
+    // Return a static string based on the combination
+    if (std.mem.eql(u8, arch, "x86_64") and std.mem.eql(u8, os, "linux")) return "x86_64-linux";
+    if (std.mem.eql(u8, arch, "aarch64") and std.mem.eql(u8, os, "linux")) return "aarch64-linux";
+    if (std.mem.eql(u8, arch, "x86_64") and std.mem.eql(u8, os, "macos")) return "x86_64-macos";
+    if (std.mem.eql(u8, arch, "aarch64") and std.mem.eql(u8, os, "macos")) return "aarch64-macos";
+    if (std.mem.eql(u8, arch, "x86_64") and std.mem.eql(u8, os, "windows")) return "x86_64-windows";
+    return "unknown";
 }

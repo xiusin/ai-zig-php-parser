@@ -178,6 +178,7 @@ echo "Hello, " + name + "\n"
 }
 ```
 
+
 ### Go 模式示例
 
 ```php
@@ -324,23 +325,61 @@ echo $counter->getValue();
 
 ## AOT 编译
 
-AOT（Ahead-of-Time）编译器可将 PHP 代码编译为原生可执行文件。
+AOT（Ahead-of-Time）编译器可将 PHP 代码编译为原生可执行文件，无需 PHP 运行时即可直接执行。
 
 ### 基本编译
 
 ```bash
-# 编译 PHP 文件
+# 编译 PHP 文件（生成与输入文件同名的可执行文件）
 ./zig-out/bin/php-interpreter --compile hello.php
+# 生成 ./hello 可执行文件
 
-# 指定输出文件名
+# 运行编译后的程序
+./hello
+```
+
+### 指定输出文件名
+
+```bash
+# 使用 --output 指定输出文件名
 ./zig-out/bin/php-interpreter --compile --output=myapp hello.php
+# 生成 ./myapp 可执行文件
+```
 
-# 启用优化
+### 优化级别
+
+AOT 编译器支持四种优化级别：
+
+```bash
+# debug - 无优化，包含完整调试信息（默认）
+./zig-out/bin/php-interpreter --compile --optimize=debug app.php
+
+# release-safe - 优化代码，保留安全检查
+./zig-out/bin/php-interpreter --compile --optimize=release-safe app.php
+
+# release-fast - 最大性能优化
 ./zig-out/bin/php-interpreter --compile --optimize=release-fast app.php
 
-# 生成静态链接的可执行文件
+# release-small - 最小体积优化
+./zig-out/bin/php-interpreter --compile --optimize=release-small app.php
+```
+
+| 优化级别 | 说明 | 适用场景 |
+|----------|------|----------|
+| `debug` | 无优化，完整调试信息 | 开发调试 |
+| `release-safe` | 优化 + 安全检查 | 生产环境（推荐） |
+| `release-fast` | 最大性能优化 | 性能关键应用 |
+| `release-small` | 最小体积优化 | 嵌入式/资源受限环境 |
+
+### 静态链接
+
+```bash
+# 生成完全静态链接的可执行文件（无外部依赖）
 ./zig-out/bin/php-interpreter --compile --static app.php
 ```
+
+静态链接的可执行文件可以在没有安装任何依赖的系统上运行。
+
 
 ### AOT 编译选项
 
@@ -353,20 +392,104 @@ AOT（Ahead-of-Time）编译器可将 PHP 代码编译为原生可执行文件�
 | `--static` | 生成完全静态链接的可执行文件 |
 | `--dump-ir` | 输出生成的 IR（用于调试）|
 | `--dump-ast` | 输出解析的 AST（用于调试）|
+| `--dump-zig` | 输出生成的 Zig 代码（用于调试和学习）|
 | `--verbose` | 详细输出编译过程 |
 | `--list-targets` | 列出所有支持的目标平台 |
 
+### 调试选项
+
+```bash
+# 查看生成的 AST（抽象语法树）
+./zig-out/bin/php-interpreter --compile --dump-ast app.php
+
+# 查看生成的 IR（中间表示）
+./zig-out/bin/php-interpreter --compile --dump-ir app.php
+
+# 查看生成的 Zig 代码
+./zig-out/bin/php-interpreter --compile --dump-zig app.php
+
+# 详细输出编译过程
+./zig-out/bin/php-interpreter --compile --verbose app.php
+
+# 组合使用多个调试选项
+./zig-out/bin/php-interpreter --compile --dump-ast --dump-ir --verbose app.php
+```
+
 ### 支持的目标平台
 
-- **Linux**: x86_64-linux-gnu, x86_64-linux-musl, aarch64-linux-gnu
-- **macOS**: x86_64-macos-none, aarch64-macos-none
-- **Windows**: x86_64-windows-msvc, x86_64-windows-gnu
+```bash
+# 查看所有支持的目标平台
+./zig-out/bin/php-interpreter --list-targets
+```
+
+| 平台 | 目标三元组 |
+|------|-----------|
+| Linux x86_64 (glibc) | x86_64-linux-gnu |
+| Linux x86_64 (musl) | x86_64-linux-musl |
+| Linux ARM64 | aarch64-linux-gnu |
+| Linux ARM | arm-linux-gnueabihf |
+| macOS x86_64 | x86_64-macos-none |
+| macOS ARM64 (Apple Silicon) | aarch64-macos-none |
+| Windows x64 (MSVC) | x86_64-windows-msvc |
+| Windows x64 (GNU) | x86_64-windows-gnu |
 
 ### 交叉编译
 
+AOT 编译器支持交叉编译，可以在一个平台上为其他平台生成可执行文件：
+
 ```bash
-# 在 macOS 上编译 Linux 可执行文件
+# 在 macOS 上编译 Linux x86_64 可执行文件
 ./zig-out/bin/php-interpreter --compile --target=x86_64-linux-gnu app.php
+
+# 在 macOS 上编译 Linux ARM64 可执行文件
+./zig-out/bin/php-interpreter --compile --target=aarch64-linux-gnu app.php
+
+# 在 Linux 上编译 macOS ARM64 可执行文件
+./zig-out/bin/php-interpreter --compile --target=aarch64-macos-none app.php
+
+# 编译 Windows 可执行文件
+./zig-out/bin/php-interpreter --compile --target=x86_64-windows-msvc app.php
+```
+
+### 支持的 PHP 特性
+
+AOT 编译器支持以下 PHP 语言特性：
+
+- **基本类型**: null, bool, int, float, string
+- **数组**: 索引数组和关联数组
+- **运算符**: 算术、比较、逻辑、字符串连接
+- **控制结构**: if/else, while, for, foreach
+- **函数**: 用户定义函数、递归函数、默认参数
+- **内置函数**: echo, print, strlen, count, var_dump 等
+- **字符串操作**: 连接、插值、substr, str_replace 等
+
+### 完整编译示例
+
+```bash
+# 开发阶段：快速编译，便于调试
+./zig-out/bin/php-interpreter --compile --optimize=debug --verbose app.php
+
+# 测试阶段：优化编译，保留安全检查
+./zig-out/bin/php-interpreter --compile --optimize=release-safe app.php
+
+# 生产部署：最大性能优化，静态链接
+./zig-out/bin/php-interpreter --compile --optimize=release-fast --static --output=myapp app.php
+
+# 交叉编译：为 Linux 服务器编译
+./zig-out/bin/php-interpreter --compile --target=x86_64-linux-gnu --optimize=release-fast --static app.php
+```
+
+### 错误处理
+
+编译过程中的错误会显示详细信息：
+
+```bash
+# 语法错误示例
+$ ./zig-out/bin/php-interpreter --compile broken.php
+Parse error: app.php:5:10: unexpected token
+
+# 使用 --verbose 获取更多信息
+$ ./zig-out/bin/php-interpreter --compile --verbose broken.php
 ```
 
 ---
@@ -391,10 +514,73 @@ AOT（Ahead-of-Time）编译器可将 PHP 代码编译为原生可执行文件�
 
 ### Q: 如何调试 AOT 编译问题？
 
-使用 `--dump-ast` 和 `--dump-ir` 选项查看中间表示：
+使用 `--dump-ast`、`--dump-ir` 和 `--dump-zig` 选项查看中间表示：
 
 ```bash
-./zig-out/bin/php-interpreter --compile --dump-ast --dump-ir app.php
+# 查看 AST
+./zig-out/bin/php-interpreter --compile --dump-ast app.php
+
+# 查看 IR
+./zig-out/bin/php-interpreter --compile --dump-ir app.php
+
+# 查看生成的 Zig 代码
+./zig-out/bin/php-interpreter --compile --dump-zig app.php
+
+# 详细输出
+./zig-out/bin/php-interpreter --compile --verbose app.php
+```
+
+### Q: AOT 编译后的程序比解释执行快多少？
+
+AOT 编译后的程序通常比解释执行快 10-100 倍，具体取决于代码特性。计算密集型代码提升更明显，I/O 密集型代码提升较小。
+
+### Q: 如何为不同平台编译程序？
+
+使用 `--target` 选项指定目标平台：
+
+```bash
+# 查看支持的平台
+./zig-out/bin/php-interpreter --list-targets
+
+# 为 Linux 编译
+./zig-out/bin/php-interpreter --compile --target=x86_64-linux-gnu app.php
+
+# 为 macOS ARM64 编译
+./zig-out/bin/php-interpreter --compile --target=aarch64-macos-none app.php
+```
+
+### Q: AOT 编译支持哪些 PHP 特性？
+
+目前支持：
+- 基本类型（null, bool, int, float, string）
+- 数组（索引数组和关联数组）
+- 控制结构（if/else, while, for, foreach）
+- 函数定义和调用
+- 字符串操作
+- 内置函数（echo, print, strlen, count 等）
+
+暂不支持：
+- 类和对象（部分支持）
+- 命名空间
+- 异常处理
+- 动态特性（eval, variable variables）
+
+### Q: 如何减小编译后的可执行文件大小？
+
+使用 `--optimize=release-small` 选项：
+
+```bash
+./zig-out/bin/php-interpreter --compile --optimize=release-small app.php
+```
+
+### Q: 静态链接和动态链接有什么区别？
+
+- **动态链接**（默认）：可执行文件较小，但需要系统安装相应的运行时库
+- **静态链接**（`--static`）：可执行文件较大，但可以在任何系统上运行，无需额外依赖
+
+```bash
+# 静态链接
+./zig-out/bin/php-interpreter --compile --static app.php
 ```
 
 ---

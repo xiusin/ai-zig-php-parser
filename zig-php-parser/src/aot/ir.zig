@@ -70,7 +70,10 @@ pub const Module = struct {
         }
         self.types.deinit(self.allocator);
 
-        // Free string table
+        // Free string table - strings are duplicated in internString
+        for (self.string_table.items) |str| {
+            self.allocator.free(@constCast(str));
+        }
         self.string_table.deinit(self.allocator);
     }
 
@@ -97,8 +100,9 @@ pub const Module = struct {
                 return @intCast(i);
             }
         }
-        // Add new string
-        try self.string_table.append(self.allocator, str);
+        // Add new string - duplicate it to ensure we own the memory
+        const duped = try self.allocator.dupe(u8, str);
+        try self.string_table.append(self.allocator, duped);
         return @intCast(self.string_table.items.len - 1);
     }
 
@@ -180,6 +184,8 @@ pub const Function = struct {
     allocator: Allocator,
     /// Function name
     name: []const u8,
+    /// Whether this function owns the name (should free it on deinit)
+    owns_name: bool,
     /// Function parameters
     params: std.ArrayListUnmanaged(Parameter),
     /// Return type
@@ -204,6 +210,7 @@ pub const Function = struct {
         return .{
             .allocator = allocator,
             .name = name,
+            .owns_name = false,
             .params = .{},
             .return_type = .void,
             .blocks = .{},
@@ -215,8 +222,19 @@ pub const Function = struct {
         };
     }
 
+    /// Initialize a new function with an owned name
+    pub fn initOwned(allocator: Allocator, name: []const u8) Self {
+        var func = init(allocator, name);
+        func.owns_name = true;
+        return func;
+    }
+
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
+        // Free the name if we own it
+        if (self.owns_name and self.name.len > 0) {
+            self.allocator.free(@constCast(self.name));
+        }
         self.params.deinit(self.allocator);
         for (self.blocks.items) |block| {
             block.deinit();
@@ -234,6 +252,14 @@ pub const Function = struct {
     pub fn createBlock(self: *Self, label: []const u8) !*BasicBlock {
         const block = try self.allocator.create(BasicBlock);
         block.* = BasicBlock.init(self.allocator, label);
+        try self.blocks.append(self.allocator, block);
+        return block;
+    }
+
+    /// Create a new basic block with an owned (allocated) label
+    pub fn createBlockOwned(self: *Self, label: []const u8) !*BasicBlock {
+        const block = try self.allocator.create(BasicBlock);
+        block.* = BasicBlock.initOwned(self.allocator, label);
         try self.blocks.append(self.allocator, block);
         return block;
     }
@@ -270,10 +296,21 @@ pub const Parameter = struct {
     type_: Type,
     /// Whether this parameter has a default value
     has_default: bool,
+    /// Default value (if has_default is true)
+    default_value: ?DefaultValue,
     /// Whether this is a variadic parameter
     is_variadic: bool,
     /// Whether this is passed by reference
     is_reference: bool,
+};
+
+/// Default value for a parameter
+pub const DefaultValue = union(enum) {
+    int: i64,
+    float: f64,
+    bool_: bool,
+    string: []const u8,
+    null_,
 };
 
 /// A basic block - a sequence of instructions with single entry/exit
@@ -281,6 +318,8 @@ pub const BasicBlock = struct {
     allocator: Allocator,
     /// Block label (for jumps)
     label: []const u8,
+    /// Whether this block owns (allocated) the label
+    owns_label: bool,
     /// Instructions in this block
     instructions: std.ArrayListUnmanaged(*Instruction),
     /// Block terminator (branch, return, etc.)
@@ -297,6 +336,20 @@ pub const BasicBlock = struct {
         return .{
             .allocator = allocator,
             .label = label,
+            .owns_label = false,
+            .instructions = .{},
+            .terminator = null,
+            .predecessors = .{},
+            .successors = .{},
+        };
+    }
+
+    /// Initialize a new basic block with an owned (allocated) label
+    pub fn initOwned(allocator: Allocator, label: []const u8) Self {
+        return .{
+            .allocator = allocator,
+            .label = label,
+            .owns_label = true,
             .instructions = .{},
             .terminator = null,
             .predecessors = .{},
@@ -306,7 +359,12 @@ pub const BasicBlock = struct {
 
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
+        // Free the label if we own it
+        if (self.owns_label and self.label.len > 0) {
+            self.allocator.free(@constCast(self.label));
+        }
         for (self.instructions.items) |inst| {
+            inst.deinit();
             self.allocator.destroy(inst);
         }
         self.instructions.deinit(self.allocator);
@@ -505,6 +563,52 @@ pub const Instruction = struct {
     op: Op,
     /// Source location for debugging
     location: SourceLocation,
+    /// Allocator used for any internal allocations (for cleanup)
+    allocator: ?Allocator = null,
+
+    const Self = @This();
+
+    /// Deinitialize and free any internal allocations
+    pub fn deinit(self: *Self) void {
+        if (self.allocator) |alloc| {
+            switch (self.op) {
+                .call => |call_op| {
+                    if (call_op.owns_func_name and call_op.func_name.len > 0) {
+                        alloc.free(@constCast(call_op.func_name));
+                    }
+                    if (call_op.args.len > 0) {
+                        alloc.free(call_op.args);
+                    }
+                },
+                .call_indirect => |call_op| {
+                    if (call_op.args.len > 0) {
+                        alloc.free(call_op.args);
+                    }
+                },
+                .interpolate => |interp_op| {
+                    if (interp_op.parts.len > 0) {
+                        alloc.free(interp_op.parts);
+                    }
+                },
+                .new_object => |new_op| {
+                    if (new_op.args.len > 0) {
+                        alloc.free(new_op.args);
+                    }
+                },
+                .method_call => |method_op| {
+                    if (method_op.args.len > 0) {
+                        alloc.free(method_op.args);
+                    }
+                },
+                .phi => |phi_op| {
+                    if (phi_op.incoming.len > 0) {
+                        alloc.free(phi_op.incoming);
+                    }
+                },
+                else => {},
+            }
+        }
+    }
 
     /// Instruction operations
     pub const Op = union(enum) {
@@ -712,6 +816,8 @@ pub const Instruction = struct {
     pub const CallOp = struct {
         /// Function name
         func_name: []const u8,
+        /// Whether this call owns the func_name (should free it on deinit)
+        owns_func_name: bool = false,
         /// Arguments
         args: []const Register,
         /// Return type

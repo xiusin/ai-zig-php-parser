@@ -231,69 +231,30 @@ $res->status(201)->json(['created' => true]);
 
 ## AOT 编译示例
 
+详细的 AOT 编译文档请参阅 [AOT_EXAMPLES.md](AOT_EXAMPLES.md)。
+
 以下示例专门用于演示 AOT (Ahead-of-Time) 编译功能：
 
-### aot_hello.php
+| 文件 | 说明 | 演示特性 |
+|------|------|----------|
+| `aot_hello.php` | Hello World | 基本输出、变量、字符串 |
+| `aot_functions.php` | 函数示例 | 函数定义、递归、默认参数 |
+| `aot_arrays.php` | 数组操作 | 索引数组、关联数组、foreach |
+| `aot_strings.php` | 字符串操作 | 连接、插值、内置函数 |
+| `aot_classes.php` | 面向对象 | 类、继承、方法 |
+| `aot_control_flow.php` | 控制流 | if/else、循环、break/continue |
 
-最简单的 AOT 编译示例，展示基本的输出和变量操作：
+### 快速开始
 
 ```bash
-# 编译
-zig-php --compile examples/aot_hello.php
+# 编译 Hello World 示例
+./zig-out/bin/php-interpreter --compile examples/aot_hello.php
 
 # 运行编译后的二进制
 ./aot_hello
 ```
 
-### aot_functions.php
-
-函数定义和调用示例，包括递归函数：
-
-```bash
-# 编译并优化
-zig-php --compile --optimize=release-fast examples/aot_functions.php
-
-# 运行
-./aot_functions
-```
-
-### aot_arrays.php
-
-数组操作示例，包括索引数组、关联数组和嵌套数组：
-
-```bash
-# 编译
-zig-php --compile examples/aot_arrays.php
-
-# 运行
-./aot_arrays
-```
-
-### aot_classes.php
-
-面向对象编程示例，包括类定义、继承和方法调用：
-
-```bash
-# 编译（带安全检查）
-zig-php --compile --optimize=release-safe examples/aot_classes.php
-
-# 运行
-./aot_classes
-```
-
-### aot_strings.php
-
-字符串操作示例，包括连接、插值和内置函数：
-
-```bash
-# 编译
-zig-php --compile examples/aot_strings.php
-
-# 运行
-./aot_strings
-```
-
-### AOT 编译选项
+### 编译选项
 
 | 选项 | 说明 |
 |------|------|
@@ -305,16 +266,23 @@ zig-php --compile examples/aot_strings.php
 | `--optimize=release-small` | 最小二进制体积 |
 | `--static` | 生成完全静态链接的可执行文件 |
 | `--target=<triple>` | 交叉编译到指定平台 |
+| `--dump-ir` | 输出生成的 IR |
+| `--dump-ast` | 输出解析的 AST |
+| `--dump-zig` | 输出生成的 Zig 代码 |
+| `--verbose` | 详细输出编译过程 |
 
-### 交叉编译示例
+### 编译示例
 
 ```bash
-# 编译为 Linux x86_64
-zig-php --compile --target=x86_64-linux-gnu examples/aot_hello.php
+# 基本编译
+./zig-out/bin/php-interpreter --compile examples/aot_hello.php
 
-# 编译为 macOS ARM64
-zig-php --compile --target=aarch64-macos-none examples/aot_hello.php
+# 优化编译
+./zig-out/bin/php-interpreter --compile --optimize=release-fast examples/aot_functions.php
 
-# 编译为 Windows x86_64
-zig-php --compile --target=x86_64-windows-msvc examples/aot_hello.php
+# 静态链接
+./zig-out/bin/php-interpreter --compile --static examples/aot_hello.php
+
+# 交叉编译到 Linux
+./zig-out/bin/php-interpreter --compile --target=x86_64-linux-gnu examples/aot_hello.php
 ```

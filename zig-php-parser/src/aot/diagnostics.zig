@@ -114,6 +114,11 @@ pub const DiagnosticEngine = struct {
 
     /// Set source code for context display
     pub fn setSource(self: *Self, source: []const u8) !void {
+        // Free previous source lines if already set
+        if (self.source_lines) |old_lines| {
+            self.allocator.free(old_lines);
+        }
+
         var lines = std.ArrayListUnmanaged([]const u8){};
         errdefer lines.deinit(self.allocator);
 

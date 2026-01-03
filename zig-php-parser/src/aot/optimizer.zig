@@ -1042,15 +1042,15 @@ pub const IROptimizer = struct {
         var next_reg_id = caller.getNextRegisterId();
 
         // Collect instructions to inline (excluding terminators)
-        var inlined_instructions = std.ArrayList(*Instruction).init(self.allocator);
-        defer inlined_instructions.deinit();
+        var inlined_instructions = std.ArrayListUnmanaged(*Instruction){};
+        defer inlined_instructions.deinit(self.allocator);
 
         // Process callee's entry block instructions
         for (callee_entry.instructions.items) |callee_inst| {
             // Clone and remap the instruction
             const new_inst = try self.cloneAndRemapInstruction(callee_inst, &reg_map, &next_reg_id);
             if (new_inst) |inst| {
-                try inlined_instructions.append(inst);
+                try inlined_instructions.append(self.allocator, inst);
             }
         }
 
@@ -1068,10 +1068,11 @@ pub const IROptimizer = struct {
                                 .result = res,
                                 .op = .{ .load = .{
                                     .ptr = Register{ .id = mapped_ret_id, .type_ = ret_reg.type_ },
+                                    .type_ = ret_reg.type_,
                                 } },
                                 .location = call_inst.location,
                             };
-                            try inlined_instructions.append(copy_inst);
+                            try inlined_instructions.append(self.allocator, copy_inst);
                         }
                     }
                 },
@@ -1087,7 +1088,7 @@ pub const IROptimizer = struct {
 
             // Insert inlined instructions at the call site
             for (inlined_instructions.items, 0..) |inst, i| {
-                try block.instructions.insert(inst_index + i, inst);
+                try block.instructions.insert(self.allocator, inst_index + i, inst);
             }
 
             return true;

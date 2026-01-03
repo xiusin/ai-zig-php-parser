@@ -373,6 +373,12 @@ pub const IRGenerator = struct {
         self.nodes = nodes;
         self.string_table = string_table;
 
+        // Clear per-generation state - use clearAndFree to release all memory
+        self.var_registers.clearAndFree(self.allocator);
+        self.loop_stack.clearAndFree(self.allocator);
+        self.try_stack.clearAndFree(self.allocator);
+        self.block_counter = 0;
+
         // Create module
         const module = try self.allocator.create(Module);
         module.* = Module.init(self.allocator, module_name, source_file);
@@ -476,9 +482,9 @@ pub const IRGenerator = struct {
         const label = std.fmt.bufPrint(&buf, "{s}_{d}", .{ prefix, self.block_counter }) catch prefix;
         self.block_counter += 1;
 
-        // Duplicate the label string
+        // Duplicate the label string and create an owned block
         const label_copy = try self.allocator.dupe(u8, label);
-        return func.createBlock(label_copy);
+        return func.createBlockOwned(label_copy);
     }
 
     /// Set the current block
@@ -503,6 +509,7 @@ pub const IRGenerator = struct {
             .result = result,
             .op = op,
             .location = self.current_location,
+            .allocator = self.allocator,
         };
         try block.appendInstruction(inst);
 
@@ -627,6 +634,8 @@ pub const IRGenerator = struct {
         func.* = Function.init(self.allocator, func_name);
         func.is_exported = true;
         func.location = self.current_location;
+        // PHP functions can return any value, so use php_value as default return type
+        func.return_type = .php_value;
 
         // Add to module
         if (self.module) |module| {
@@ -681,19 +690,54 @@ pub const IRGenerator = struct {
             param_type = try self.resolveTypeNode(type_idx);
         }
 
+        // Extract default value if present
+        var default_value: ?IR.DefaultValue = null;
+        if (param_data.default_value) |default_idx| {
+            default_value = self.extractDefaultValue(default_idx);
+        }
+
         // Add parameter to function
         if (self.current_function) |func| {
+            const param_index = func.params.items.len;
             try func.addParam(.{
                 .name = param_name,
                 .type_ = param_type,
                 .has_default = param_data.default_value != null,
+                .default_value = default_value,
                 .is_variadic = param_data.is_variadic,
                 .is_reference = param_data.is_reference,
             });
-        }
 
-        // Create register for parameter
-        _ = try self.getOrCreateVarRegister(param_name, param_type);
+            // For parameters, we create a register that will be initialized from the argument
+            // The register ID matches the parameter index so the code generator can map them
+            const reg = func.newRegister(.php_value);
+            try self.var_registers.put(self.allocator, param_name, reg);
+            _ = param_index;
+        }
+    }
+
+    /// Extract a default value from an AST node
+    fn extractDefaultValue(self: *Self, index: Node.Index) ?IR.DefaultValue {
+        const node = self.getNode(index) orelse return null;
+
+        switch (node.tag) {
+            .literal_int => {
+                return .{ .int = node.data.literal_int.value };
+            },
+            .literal_float => {
+                return .{ .float = node.data.literal_float.value };
+            },
+            .literal_bool => {
+                return .{ .bool_ = node.main_token.tag == .keyword_true };
+            },
+            .literal_string => {
+                return .{ .string = self.getString(node.data.literal_string.value) };
+            },
+            .literal_null => {
+                return .null_;
+            },
+            else => return null,
+        }
     }
 
     /// Resolve a type node to IR Type
@@ -816,7 +860,7 @@ pub const IRGenerator = struct {
         const name_copy = try self.allocator.dupe(u8, full_name);
 
         const func = try self.allocator.create(Function);
-        func.* = Function.init(self.allocator, name_copy);
+        func.* = Function.initOwned(self.allocator, name_copy);
         func.is_method = true;
         func.class_name = class_name;
         func.location = self.current_location;
@@ -844,6 +888,7 @@ pub const IRGenerator = struct {
                     .name = "this",
                     .type_ = Type{ .php_object = class_name },
                     .has_default = false,
+                    .default_value = null,
                     .is_variadic = false,
                     .is_reference = false,
                 });
@@ -1792,6 +1837,7 @@ pub const IRGenerator = struct {
 
         return self.emitWithResult(.{ .call = .{
             .func_name = name_copy,
+            .owns_func_name = true,
             .args = args,
             .return_type = .php_value,
         } }, .php_value);
@@ -1903,6 +1949,7 @@ pub const IRGenerator = struct {
 
         return self.emitWithResult(.{ .call = .{
             .func_name = name_copy,
+            .owns_func_name = true,
             .args = &.{},
             .return_type = .php_value,
         } }, .php_value);
@@ -1921,6 +1968,7 @@ pub const IRGenerator = struct {
 
         return self.emitWithResult(.{ .call = .{
             .func_name = name_copy,
+            .owns_func_name = true,
             .args = &.{},
             .return_type = .php_value,
         } }, .php_value);
@@ -1937,7 +1985,7 @@ pub const IRGenerator = struct {
         const name_copy = try self.allocator.dupe(u8, func_name);
 
         const func = try self.allocator.create(Function);
-        func.* = Function.init(self.allocator, name_copy);
+        func.* = Function.initOwned(self.allocator, name_copy);
         func.location = self.current_location;
 
         if (self.module) |module| {
@@ -1991,7 +2039,7 @@ pub const IRGenerator = struct {
         const name_copy = try self.allocator.dupe(u8, func_name);
 
         const func = try self.allocator.create(Function);
-        func.* = Function.init(self.allocator, name_copy);
+        func.* = Function.initOwned(self.allocator, name_copy);
         func.location = self.current_location;
 
         if (self.module) |module| {

@@ -1700,6 +1700,439 @@ pub fn php_string_implode(glue: *PHPValue, pieces: *PHPValue) *PHPValue {
 
 
 // ============================================================================
+// Arithmetic Operations (PHP Type Juggling)
+// ============================================================================
+
+/// Helper function to determine if we should use float arithmetic
+fn shouldUseFloatArithmetic(a: *PHPValue, b: *PHPValue) bool {
+    // If either operand is a float, use float arithmetic
+    if (a.tag == .float or b.tag == .float) return true;
+
+    // If either is a string that looks like a float, use float arithmetic
+    if (a.tag == .string) {
+        if (a.data.string_ptr) |str| {
+            const data = str.getData();
+            if (std.mem.indexOf(u8, data, ".") != null or
+                std.mem.indexOf(u8, data, "e") != null or
+                std.mem.indexOf(u8, data, "E") != null)
+            {
+                return true;
+            }
+        }
+    }
+    if (b.tag == .string) {
+        if (b.data.string_ptr) |str| {
+            const data = str.getData();
+            if (std.mem.indexOf(u8, data, ".") != null or
+                std.mem.indexOf(u8, data, "e") != null or
+                std.mem.indexOf(u8, data, "E") != null)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/// PHP addition with type juggling
+/// Follows PHP semantics: converts operands to numbers before adding
+pub fn php_add(a: *PHPValue, b: *PHPValue) *PHPValue {
+    // Division always returns float if either operand is float
+    if (shouldUseFloatArithmetic(a, b)) {
+        const fa = a.toFloat();
+        const fb = b.toFloat();
+        return php_value_create_float(fa + fb);
+    }
+
+    // Integer arithmetic
+    const ia = a.toInt();
+    const ib = b.toInt();
+
+    // Check for overflow
+    const result = @addWithOverflow(ia, ib);
+    if (result[1] != 0) {
+        // Overflow - return as float
+        return php_value_create_float(@as(f64, @floatFromInt(ia)) + @as(f64, @floatFromInt(ib)));
+    }
+
+    return php_value_create_int(result[0]);
+}
+
+/// PHP subtraction with type juggling
+pub fn php_sub(a: *PHPValue, b: *PHPValue) *PHPValue {
+    if (shouldUseFloatArithmetic(a, b)) {
+        const fa = a.toFloat();
+        const fb = b.toFloat();
+        return php_value_create_float(fa - fb);
+    }
+
+    const ia = a.toInt();
+    const ib = b.toInt();
+
+    // Check for overflow
+    const result = @subWithOverflow(ia, ib);
+    if (result[1] != 0) {
+        return php_value_create_float(@as(f64, @floatFromInt(ia)) - @as(f64, @floatFromInt(ib)));
+    }
+
+    return php_value_create_int(result[0]);
+}
+
+/// PHP multiplication with type juggling
+pub fn php_mul(a: *PHPValue, b: *PHPValue) *PHPValue {
+    if (shouldUseFloatArithmetic(a, b)) {
+        const fa = a.toFloat();
+        const fb = b.toFloat();
+        return php_value_create_float(fa * fb);
+    }
+
+    const ia = a.toInt();
+    const ib = b.toInt();
+
+    // Check for overflow
+    const result = @mulWithOverflow(ia, ib);
+    if (result[1] != 0) {
+        return php_value_create_float(@as(f64, @floatFromInt(ia)) * @as(f64, @floatFromInt(ib)));
+    }
+
+    return php_value_create_int(result[0]);
+}
+
+/// PHP division with type juggling
+/// Division always returns float in PHP (unless result is exact integer)
+pub fn php_div(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const fa = a.toFloat();
+    const fb = b.toFloat();
+
+    // Division by zero
+    if (fb == 0.0) {
+        // PHP returns INF or -INF for division by zero (with a warning)
+        if (fa > 0.0) {
+            return php_value_create_float(std.math.inf(f64));
+        } else if (fa < 0.0) {
+            return php_value_create_float(-std.math.inf(f64));
+        } else {
+            return php_value_create_float(std.math.nan(f64));
+        }
+    }
+
+    const result = fa / fb;
+
+    // If result is an exact integer, return as int
+    const int_result = @as(i64, @intFromFloat(result));
+    if (@as(f64, @floatFromInt(int_result)) == result) {
+        return php_value_create_int(int_result);
+    }
+
+    return php_value_create_float(result);
+}
+
+/// PHP modulo with type juggling
+/// Modulo converts operands to integers
+pub fn php_mod(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const ia = a.toInt();
+    const ib = b.toInt();
+
+    // Modulo by zero
+    if (ib == 0) {
+        // PHP throws a DivisionByZeroError, we return NaN for simplicity
+        return php_value_create_float(std.math.nan(f64));
+    }
+
+    // PHP modulo preserves the sign of the dividend
+    const result = @rem(ia, ib);
+    return php_value_create_int(result);
+}
+
+/// PHP power/exponentiation with type juggling
+pub fn php_pow(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const fa = a.toFloat();
+    const fb = b.toFloat();
+
+    const result = std.math.pow(f64, fa, fb);
+
+    // If result is an exact integer and both operands were integers, return as int
+    if (a.tag == .int and b.tag == .int and b.toInt() >= 0) {
+        const int_result = @as(i64, @intFromFloat(result));
+        if (@as(f64, @floatFromInt(int_result)) == result and
+            result >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
+            result <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
+        {
+            return php_value_create_int(int_result);
+        }
+    }
+
+    return php_value_create_float(result);
+}
+
+/// PHP negation (unary minus)
+pub fn php_neg(a: *PHPValue) *PHPValue {
+    if (a.tag == .float) {
+        return php_value_create_float(-a.data.float_val);
+    }
+    return php_value_create_int(-a.toInt());
+}
+
+
+// ============================================================================
+// Comparison Operations (PHP Type Juggling)
+// ============================================================================
+
+/// PHP loose equality (==)
+/// Performs type juggling before comparison
+pub fn php_eq(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const result = php_compare_loose(a, b);
+    return php_value_create_bool(result == 0);
+}
+
+/// PHP loose inequality (!=)
+pub fn php_ne(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const result = php_compare_loose(a, b);
+    return php_value_create_bool(result != 0);
+}
+
+/// PHP less than (<)
+pub fn php_lt(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const result = php_compare_loose(a, b);
+    return php_value_create_bool(result < 0);
+}
+
+/// PHP less than or equal (<=)
+pub fn php_le(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const result = php_compare_loose(a, b);
+    return php_value_create_bool(result <= 0);
+}
+
+/// PHP greater than (>)
+pub fn php_gt(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const result = php_compare_loose(a, b);
+    return php_value_create_bool(result > 0);
+}
+
+/// PHP greater than or equal (>=)
+pub fn php_ge(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const result = php_compare_loose(a, b);
+    return php_value_create_bool(result >= 0);
+}
+
+/// PHP strict equality (===)
+/// No type juggling - types must match
+pub fn php_identical(a: *PHPValue, b: *PHPValue) *PHPValue {
+    // Types must match
+    if (a.tag != b.tag) {
+        return php_value_create_bool(false);
+    }
+
+    const result = switch (a.tag) {
+        .null => true,
+        .bool => a.data.bool_val == b.data.bool_val,
+        .int => a.data.int_val == b.data.int_val,
+        .float => a.data.float_val == b.data.float_val,
+        .string => blk: {
+            if (a.data.string_ptr) |sa| {
+                if (b.data.string_ptr) |sb| {
+                    break :blk sa.eql(sb);
+                }
+            }
+            break :blk a.data.string_ptr == null and b.data.string_ptr == null;
+        },
+        .array => blk: {
+            // Arrays are identical if they have the same keys and values in the same order
+            if (a.data.array_ptr) |aa| {
+                if (b.data.array_ptr) |ba| {
+                    if (aa.count() != ba.count()) break :blk false;
+
+                    var entry_a = aa.first;
+                    var entry_b = ba.first;
+                    while (entry_a != null and entry_b != null) {
+                        const ea = entry_a.?;
+                        const eb = entry_b.?;
+
+                        // Keys must match
+                        if (!ea.key.eql(eb.key)) break :blk false;
+
+                        // Values must be identical (recursive)
+                        const val_identical = php_identical(ea.value, eb.value);
+                        defer php_gc_release(val_identical);
+                        if (!val_identical.data.bool_val) break :blk false;
+
+                        entry_a = ea.next_order;
+                        entry_b = eb.next_order;
+                    }
+                    break :blk entry_a == null and entry_b == null;
+                }
+            }
+            break :blk a.data.array_ptr == null and b.data.array_ptr == null;
+        },
+        .object => a.data.object_ptr == b.data.object_ptr, // Same object instance
+        .resource => a.data.resource_ptr == b.data.resource_ptr,
+        .callable => a.data.callable_ptr == b.data.callable_ptr,
+    };
+
+    return php_value_create_bool(result);
+}
+
+/// PHP strict inequality (!==)
+pub fn php_not_identical(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const identical = php_identical(a, b);
+    const result = !identical.data.bool_val;
+    php_gc_release(identical);
+    return php_value_create_bool(result);
+}
+
+/// PHP spaceship operator (<=>)
+/// Returns -1, 0, or 1
+pub fn php_spaceship(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const result = php_compare_loose(a, b);
+    if (result < 0) return php_value_create_int(-1);
+    if (result > 0) return php_value_create_int(1);
+    return php_value_create_int(0);
+}
+
+/// Internal comparison function for loose comparison
+/// Returns negative if a < b, 0 if a == b, positive if a > b
+fn php_compare_loose(a: *PHPValue, b: *PHPValue) i32 {
+    // Same type - compare directly
+    if (a.tag == b.tag) {
+        return switch (a.tag) {
+            .null => 0,
+            .bool => blk: {
+                const ba = a.data.bool_val;
+                const bb = b.data.bool_val;
+                if (ba == bb) break :blk 0;
+                break :blk if (ba) @as(i32, 1) else @as(i32, -1);
+            },
+            .int => blk: {
+                const ia = a.data.int_val;
+                const ib = b.data.int_val;
+                if (ia < ib) break :blk -1;
+                if (ia > ib) break :blk 1;
+                break :blk 0;
+            },
+            .float => blk: {
+                const fa = a.data.float_val;
+                const fb = b.data.float_val;
+                if (std.math.isNan(fa) or std.math.isNan(fb)) break :blk 1; // NaN comparisons
+                if (fa < fb) break :blk -1;
+                if (fa > fb) break :blk 1;
+                break :blk 0;
+            },
+            .string => blk: {
+                if (a.data.string_ptr) |sa| {
+                    if (b.data.string_ptr) |sb| {
+                        // Try numeric comparison first if both look like numbers
+                        const str_a = sa.getData();
+                        const str_b = sb.getData();
+
+                        const num_a = std.fmt.parseFloat(f64, str_a) catch null;
+                        const num_b = std.fmt.parseFloat(f64, str_b) catch null;
+
+                        if (num_a != null and num_b != null) {
+                            if (num_a.? < num_b.?) break :blk -1;
+                            if (num_a.? > num_b.?) break :blk 1;
+                            break :blk 0;
+                        }
+
+                        // String comparison
+                        const order = sa.compare(sb);
+                        break :blk switch (order) {
+                            .lt => @as(i32, -1),
+                            .gt => @as(i32, 1),
+                            .eq => @as(i32, 0),
+                        };
+                    }
+                }
+                break :blk 0;
+            },
+            .array => blk: {
+                if (a.data.array_ptr) |aa| {
+                    if (b.data.array_ptr) |ba| {
+                        // Compare by count first
+                        const count_a = aa.count();
+                        const count_b = ba.count();
+                        if (count_a < count_b) break :blk -1;
+                        if (count_a > count_b) break :blk 1;
+                        // Same count - compare elements
+                        break :blk 0;
+                    }
+                }
+                break :blk 0;
+            },
+            .object, .resource, .callable => 0, // Objects compare by reference
+        };
+    }
+
+    // Different types - apply PHP type juggling rules
+
+    // null comparisons
+    if (a.tag == .null) {
+        return if (b.isTruthy()) @as(i32, -1) else @as(i32, 0);
+    }
+    if (b.tag == .null) {
+        return if (a.isTruthy()) @as(i32, 1) else @as(i32, 0);
+    }
+
+    // bool comparisons - convert other to bool
+    if (a.tag == .bool or b.tag == .bool) {
+        const ba = a.toBool();
+        const bb = b.toBool();
+        if (ba == bb) return 0;
+        return if (ba) @as(i32, 1) else @as(i32, -1);
+    }
+
+    // Numeric comparisons (int, float, numeric strings)
+    if ((a.tag == .int or a.tag == .float or a.tag == .string) and
+        (b.tag == .int or b.tag == .float or b.tag == .string))
+    {
+        const fa = a.toFloat();
+        const fb = b.toFloat();
+        if (std.math.isNan(fa) or std.math.isNan(fb)) return 1;
+        if (fa < fb) return -1;
+        if (fa > fb) return 1;
+        return 0;
+    }
+
+    // Array vs non-array: array is always greater
+    if (a.tag == .array and b.tag != .array) return 1;
+    if (a.tag != .array and b.tag == .array) return -1;
+
+    // Object vs non-object: object is always greater (except array)
+    if (a.tag == .object and b.tag != .object and b.tag != .array) return 1;
+    if (a.tag != .object and a.tag != .array and b.tag == .object) return -1;
+
+    // Default: compare as floats
+    const fa = a.toFloat();
+    const fb = b.toFloat();
+    if (fa < fb) return -1;
+    if (fa > fb) return 1;
+    return 0;
+}
+
+/// PHP logical AND (&&)
+pub fn php_and(a: *PHPValue, b: *PHPValue) *PHPValue {
+    return php_value_create_bool(a.toBool() and b.toBool());
+}
+
+/// PHP logical OR (||)
+pub fn php_or(a: *PHPValue, b: *PHPValue) *PHPValue {
+    return php_value_create_bool(a.toBool() or b.toBool());
+}
+
+/// PHP logical NOT (!)
+pub fn php_not(a: *PHPValue) *PHPValue {
+    return php_value_create_bool(!a.toBool());
+}
+
+/// PHP logical XOR
+pub fn php_xor(a: *PHPValue, b: *PHPValue) *PHPValue {
+    const ba = a.toBool();
+    const bb = b.toBool();
+    return php_value_create_bool((ba or bb) and !(ba and bb));
+}
+
+
+// ============================================================================
 // I/O Operations
 // ============================================================================
 
@@ -1709,7 +2142,7 @@ pub fn php_echo(val: *PHPValue) void {
     defer php_gc_release(str_val);
 
     if (str_val.data.string_ptr) |str| {
-        const stdout = std.io.getStdOut().writer();
+        const stdout = std.fs.File.stdout();
         stdout.writeAll(str.data[0..str.length]) catch {};
     }
 }
@@ -1723,7 +2156,7 @@ pub fn php_print(val: *PHPValue) i64 {
 /// Print with newline
 pub fn php_println(val: *PHPValue) void {
     php_echo(val);
-    const stdout = std.io.getStdOut().writer();
+    const stdout = std.fs.File.stdout();
     stdout.writeAll("\n") catch {};
 }
 
@@ -1766,8 +2199,12 @@ pub fn php_builtin_count(val: *PHPValue) *PHPValue {
 
 /// var_dump - Dump variable information
 pub fn php_builtin_var_dump(val: *PHPValue) void {
-    const stdout = std.io.getStdOut().writer();
-    dumpValue(stdout, val, 0) catch {};
+    const allocator = getGlobalAllocator();
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    dumpValue(buffer.writer(), val, 0) catch {};
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll(buffer.items) catch {};
 }
 
 /// print_r - Print human-readable representation
@@ -1780,8 +2217,12 @@ pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
         printValue(buffer.writer(), val, 0) catch {};
         return php_value_create_string(buffer.items);
     } else {
-        const stdout = std.io.getStdOut().writer();
-        printValue(stdout, val, 0) catch {};
+        const allocator = getGlobalAllocator();
+        var buffer = std.ArrayList(u8).init(allocator);
+        defer buffer.deinit();
+        printValue(buffer.writer(), val, 0) catch {};
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll(buffer.items) catch {};
         return php_value_create_bool(true);
     }
 }
@@ -1796,8 +2237,12 @@ pub fn php_builtin_var_export(val: *PHPValue, return_output: bool) *PHPValue {
         exportValue(buffer.writer(), val) catch {};
         return php_value_create_string(buffer.items);
     } else {
-        const stdout = std.io.getStdOut().writer();
-        exportValue(stdout, val) catch {};
+        const allocator = getGlobalAllocator();
+        var buffer = std.ArrayList(u8).init(allocator);
+        defer buffer.deinit();
+        exportValue(buffer.writer(), val) catch {};
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll(buffer.items) catch {};
         return php_value_create_null();
     }
 }
@@ -2464,43 +2909,56 @@ pub fn php_get_stack_trace() *PHPValue {
 
 /// Print stack trace to stderr
 pub fn php_print_stack_trace() void {
-    const stderr = std.io.getStdErr().writer();
+    const allocator = getGlobalAllocator();
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    const writer = buffer.writer();
 
-    stderr.writeAll("Stack trace:\n") catch {};
+    writer.writeAll("Stack trace:\n") catch {};
 
     var frame = exception_state.stack_trace;
     var depth: usize = 0;
     while (frame) |f| {
-        stderr.print("#{d} {s}", .{ depth, f.file_name }) catch {};
-        stderr.print("({d}): ", .{f.line}) catch {};
+        writer.print("#{d} {s}", .{ depth, f.file_name }) catch {};
+        writer.print("({d}): ", .{f.line}) catch {};
         if (f.class_name) |cn| {
-            stderr.print("{s}::", .{cn}) catch {};
+            writer.print("{s}::", .{cn}) catch {};
         }
-        stderr.print("{s}()\n", .{f.function_name}) catch {};
+        writer.print("{s}()\n", .{f.function_name}) catch {};
 
         frame = f.next;
         depth += 1;
     }
+
+    const stderr = std.fs.File.stderr();
+    stderr.writeAll(buffer.items) catch {};
 }
 
 /// Handle uncaught exception (called at program exit if exception is pending)
 pub fn php_handle_uncaught_exception() void {
     if (exception_state.current_exception) |ex| {
-        const stderr = std.io.getStdErr().writer();
+        const allocator = getGlobalAllocator();
+        var buffer = std.ArrayList(u8).init(allocator);
+        defer buffer.deinit();
+        const writer = buffer.writer();
 
-        stderr.writeAll("\nFatal error: Uncaught ") catch {};
+        writer.writeAll("\nFatal error: Uncaught ") catch {};
 
         if (ex.tag == .object) {
             if (ex.data.object_ptr) |obj| {
-                stderr.print("{s}", .{obj.class_name}) catch {};
+                writer.print("{s}", .{obj.class_name}) catch {};
             }
         }
 
         if (exception_state.message) |msg| {
-            stderr.print(": {s}", .{msg}) catch {};
+            writer.print(": {s}", .{msg}) catch {};
         }
 
-        stderr.writeAll("\n") catch {};
+        writer.writeAll("\n") catch {};
+
+        const stderr = std.fs.File.stderr();
+        stderr.writeAll(buffer.items) catch {};
+
         php_print_stack_trace();
 
         php_clear_exception();
@@ -3063,4 +3521,167 @@ test "Math functions" {
     const ceil_result = php_builtin_ceil(float_val);
     defer php_gc_release(ceil_result);
     try std.testing.expectApproxEqAbs(@as(f64, 4.0), ceil_result.data.float_val, 0.001);
+}
+
+
+test "Arithmetic operations - php_add" {
+    initRuntime();
+    defer deinitRuntime();
+
+    // Int + Int
+    const a = php_value_create_int(10);
+    defer php_gc_release(a);
+    const b = php_value_create_int(20);
+    defer php_gc_release(b);
+    const result1 = php_add(a, b);
+    defer php_gc_release(result1);
+    try std.testing.expectEqual(ValueTag.int, result1.tag);
+    try std.testing.expectEqual(@as(i64, 30), result1.data.int_val);
+
+    // Float + Int
+    const c = php_value_create_float(3.5);
+    defer php_gc_release(c);
+    const result2 = php_add(c, a);
+    defer php_gc_release(result2);
+    try std.testing.expectEqual(ValueTag.float, result2.tag);
+    try std.testing.expectApproxEqAbs(@as(f64, 13.5), result2.data.float_val, 0.001);
+
+    // String + Int (type juggling)
+    const d = php_value_create_string("5");
+    defer php_gc_release(d);
+    const result3 = php_add(d, a);
+    defer php_gc_release(result3);
+    try std.testing.expectEqual(ValueTag.int, result3.tag);
+    try std.testing.expectEqual(@as(i64, 15), result3.data.int_val);
+}
+
+test "Arithmetic operations - php_sub" {
+    initRuntime();
+    defer deinitRuntime();
+
+    const a = php_value_create_int(30);
+    defer php_gc_release(a);
+    const b = php_value_create_int(10);
+    defer php_gc_release(b);
+    const result = php_sub(a, b);
+    defer php_gc_release(result);
+    try std.testing.expectEqual(@as(i64, 20), result.data.int_val);
+}
+
+test "Arithmetic operations - php_mul" {
+    initRuntime();
+    defer deinitRuntime();
+
+    const a = php_value_create_int(5);
+    defer php_gc_release(a);
+    const b = php_value_create_int(6);
+    defer php_gc_release(b);
+    const result = php_mul(a, b);
+    defer php_gc_release(result);
+    try std.testing.expectEqual(@as(i64, 30), result.data.int_val);
+}
+
+test "Arithmetic operations - php_div" {
+    initRuntime();
+    defer deinitRuntime();
+
+    // Exact division returns int
+    const a = php_value_create_int(20);
+    defer php_gc_release(a);
+    const b = php_value_create_int(4);
+    defer php_gc_release(b);
+    const result1 = php_div(a, b);
+    defer php_gc_release(result1);
+    try std.testing.expectEqual(ValueTag.int, result1.tag);
+    try std.testing.expectEqual(@as(i64, 5), result1.data.int_val);
+
+    // Non-exact division returns float
+    const c = php_value_create_int(10);
+    defer php_gc_release(c);
+    const d = php_value_create_int(3);
+    defer php_gc_release(d);
+    const result2 = php_div(c, d);
+    defer php_gc_release(result2);
+    try std.testing.expectEqual(ValueTag.float, result2.tag);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.333), result2.data.float_val, 0.01);
+}
+
+test "Arithmetic operations - php_mod" {
+    initRuntime();
+    defer deinitRuntime();
+
+    const a = php_value_create_int(17);
+    defer php_gc_release(a);
+    const b = php_value_create_int(5);
+    defer php_gc_release(b);
+    const result = php_mod(a, b);
+    defer php_gc_release(result);
+    try std.testing.expectEqual(@as(i64, 2), result.data.int_val);
+}
+
+test "Comparison operations - php_eq" {
+    initRuntime();
+    defer deinitRuntime();
+
+    // Same type comparison
+    const a = php_value_create_int(10);
+    defer php_gc_release(a);
+    const b = php_value_create_int(10);
+    defer php_gc_release(b);
+    const result1 = php_eq(a, b);
+    defer php_gc_release(result1);
+    try std.testing.expect(result1.data.bool_val);
+
+    // Type juggling: string "10" == int 10
+    const c = php_value_create_string("10");
+    defer php_gc_release(c);
+    const result2 = php_eq(c, a);
+    defer php_gc_release(result2);
+    try std.testing.expect(result2.data.bool_val);
+
+    // Different values
+    const d = php_value_create_int(20);
+    defer php_gc_release(d);
+    const result3 = php_eq(a, d);
+    defer php_gc_release(result3);
+    try std.testing.expect(!result3.data.bool_val);
+}
+
+test "Comparison operations - php_lt and php_gt" {
+    initRuntime();
+    defer deinitRuntime();
+
+    const a = php_value_create_int(5);
+    defer php_gc_release(a);
+    const b = php_value_create_int(10);
+    defer php_gc_release(b);
+
+    const lt_result = php_lt(a, b);
+    defer php_gc_release(lt_result);
+    try std.testing.expect(lt_result.data.bool_val);
+
+    const gt_result = php_gt(b, a);
+    defer php_gc_release(gt_result);
+    try std.testing.expect(gt_result.data.bool_val);
+}
+
+test "Comparison operations - php_identical" {
+    initRuntime();
+    defer deinitRuntime();
+
+    // Same type and value
+    const a = php_value_create_int(10);
+    defer php_gc_release(a);
+    const b = php_value_create_int(10);
+    defer php_gc_release(b);
+    const result1 = php_identical(a, b);
+    defer php_gc_release(result1);
+    try std.testing.expect(result1.data.bool_val);
+
+    // Different types (string "10" !== int 10)
+    const c = php_value_create_string("10");
+    defer php_gc_release(c);
+    const result2 = php_identical(c, a);
+    defer php_gc_release(result2);
+    try std.testing.expect(!result2.data.bool_val);
 }
