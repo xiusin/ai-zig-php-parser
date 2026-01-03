@@ -115,10 +115,16 @@ pub const PHPException = struct {
         for (self.trace) |*frame| {
             frame.deinit(allocator);
         }
-        allocator.free(self.trace);
+        if (self.trace.len > 0) {
+            allocator.free(self.trace);
+        }
 
-        // Set new trace
+        // Set new trace - need to retain the strings since we're sharing them
         self.trace = try allocator.dupe(StackFrame, trace);
+        for (self.trace) |*frame| {
+            frame.function_name.retain();
+            frame.file_name.retain();
+        }
     }
 
     pub fn getTraceAsString(self: *PHPException, allocator: std.mem.Allocator) !*PHPString {

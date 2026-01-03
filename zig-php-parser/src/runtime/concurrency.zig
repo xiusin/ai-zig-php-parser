@@ -31,9 +31,12 @@ pub const PHPMutex = struct {
 
     /// 解锁
     pub fn unlock(self: *PHPMutex) void {
-        _ = self.lock_count.fetchSub(1, .seq_cst);
-        self.owner_thread.store(0, .seq_cst);
-        self.mutex.unlock();
+        const count = self.lock_count.load(.seq_cst);
+        if (count > 0) {
+            _ = self.lock_count.fetchSub(1, .seq_cst);
+            self.owner_thread.store(0, .seq_cst);
+            self.mutex.unlock();
+        }
     }
 
     /// 尝试加锁
@@ -473,9 +476,9 @@ test "PHPSharedData concurrent access" {
     defer shared.deinit();
 
     const value1 = Value.initInt(42);
-    try shared.set("key1", value1);  // access count: 1
+    try shared.set("key1", value1); // access count: 1
 
-    if (shared.get("key1")) |val| {  // access count: 2
+    if (shared.get("key1")) |val| { // access count: 2
         defer val.release(allocator);
         try std.testing.expect(val.getTag() == .integer);
         try std.testing.expect(val.asInt() == 42);

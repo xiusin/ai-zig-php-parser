@@ -103,6 +103,14 @@ pub const Token = struct {
         k_self,
         k_parent,
         k_static_ref, // static:: 用于后期静态绑定
+        // Magic constants
+        m_dir, // __DIR__
+        m_file, // __FILE__
+        m_line, // __LINE__
+        m_function, // __FUNCTION__
+        m_class, // __CLASS__
+        m_method, // __METHOD__
+        m_namespace, // __NAMESPACE__
         // Literals
         k_true,
         k_false,
@@ -163,5 +171,22 @@ pub const Token = struct {
         question, // ! and ?
         k_with, // with keyword for clone with
         t_attribute_start, // #[
+        // Go mode specific tokens
+        t_go_identifier, // Go mode identifier (variable without $ prefix)
     };
+
+    /// Check if the token is a Go mode identifier
+    pub fn isGoIdentifier(self: Token) bool {
+        return self.tag == .t_go_identifier;
+    }
+
+    /// Check if the token is any kind of variable (PHP or Go mode)
+    pub fn isVariable(self: Token) bool {
+        return self.tag == .t_variable or self.tag == .t_go_identifier;
+    }
+
+    /// Check if the token is an identifier (string or Go identifier)
+    pub fn isIdentifier(self: Token) bool {
+        return self.tag == .t_string or self.tag == .t_go_identifier;
+    }
 };

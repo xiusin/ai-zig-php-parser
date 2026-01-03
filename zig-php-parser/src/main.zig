@@ -8,6 +8,10 @@ const Environment = @import("runtime/environment.zig");
 const PHPContext = @import("compiler/parser.zig").PHPContext;
 const ExecutionMode = vm.ExecutionMode;
 const aot = @import("aot/root.zig");
+const SyntaxMode = @import("compiler/syntax_mode.zig").SyntaxMode;
+const SyntaxConfig = @import("compiler/syntax_mode.zig").SyntaxConfig;
+const config_loader = @import("config/loader.zig");
+const ConfigLoader = config_loader.ConfigLoader;
 
 /// 打印使用帮助
 fn printUsage() void {
@@ -16,9 +20,11 @@ fn printUsage() void {
         \\       zig-php --compile [compile-options] <file.php>
         \\
         \\Interpreter Options:
-        \\  --mode=<mode>    Execution mode: tree, bytecode, auto (default: tree)
-        \\  --help, -h       Show this help message
-        \\  --version, -v    Show version information
+        \\  --mode=<mode>      Execution mode: tree, bytecode, auto (default: tree)
+        \\  --syntax=<syntax>  Syntax mode: php, go (default: php)
+        \\  --config=<file>    Load configuration from specified file
+        \\  --help, -h         Show this help message
+        \\  --version, -v      Show version information
         \\
         \\AOT Compiler Options:
         \\  --compile              Compile PHP to native executable
@@ -37,9 +43,19 @@ fn printUsage() void {
         \\  bytecode  Bytecode virtual machine (higher performance)
         \\  auto      Automatically select based on code characteristics
         \\
+        \\Syntax Modes:
+        \\  php       PHP-style syntax: $var, $obj->prop (default)
+        \\  go        Go-style syntax: var, obj.prop
+        \\
+        \\Configuration Files:
+        \\  The interpreter searches for .zigphp.json or zigphp.config.json
+        \\  in the current directory. Command line options override config file.
+        \\
         \\Examples:
         \\  zig-php script.php                        Run with interpreter
         \\  zig-php --mode=bytecode app.php           Run with bytecode VM
+        \\  zig-php --syntax=go app.php               Run with Go-style syntax
+        \\  zig-php --config=myconfig.json app.php    Run with custom config
         \\  zig-php --compile hello.php               Compile to native executable
         \\  zig-php --compile --output=app hello.php  Compile with custom output name
         \\  zig-php --compile --optimize=release-fast --static app.php
@@ -90,7 +106,9 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    // Parse command line options
+    // Track CLI overrides (null means not specified on CLI)
+    var cli_syntax_mode: ?SyntaxMode = null;
+    var cli_config_file: ?[]const u8 = null;
     var execution_mode: ExecutionMode = .tree_walking;
     var php_file: ?[]const u8 = null;
 
@@ -100,6 +118,7 @@ pub fn main() !void {
         .input_file = "",
     };
 
+    // First pass: parse CLI arguments to find config file and overrides
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -150,6 +169,17 @@ pub fn main() !void {
                 std.debug.print("Valid modes: tree, bytecode, auto\n", .{});
                 return;
             }
+        } else if (std.mem.startsWith(u8, arg, "--syntax=")) {
+            const syntax_str = arg[9..];
+            if (SyntaxMode.fromString(syntax_str)) |mode| {
+                cli_syntax_mode = mode;
+            } else {
+                std.debug.print("Error: Unknown syntax mode '{s}'\n", .{syntax_str});
+                std.debug.print("Valid syntax modes: php (default), go\n", .{});
+                return;
+            }
+        } else if (std.mem.startsWith(u8, arg, "--config=")) {
+            cli_config_file = arg[9..];
         } else if (std.mem.startsWith(u8, arg, "-")) {
             std.debug.print("Error: Unknown option '{s}'\n", .{arg});
             printUsage();
@@ -160,10 +190,43 @@ pub fn main() !void {
         }
     }
 
+    // Load configuration from file
+    // Requirements: 12.1, 12.2, 12.3, 12.4
+    var loader = ConfigLoader.init(allocator);
+    var file_config = if (cli_config_file) |config_path|
+        loader.load(config_path) catch |err| {
+            std.debug.print("Error loading config file '{s}': {s}\n", .{ config_path, @errorName(err) });
+            return;
+        }
+    else
+        loader.loadDefault() catch |err| {
+            std.debug.print("Error loading default config: {s}\n", .{@errorName(err) });
+            return;
+        };
+    defer file_config.deinit(allocator);
+
+    // Apply configuration precedence: CLI overrides config file (Requirements: 12.4)
+    // Convert config SyntaxMode to compiler SyntaxMode
+    const config_syntax_mode: SyntaxMode = switch (file_config.syntax_mode) {
+        .php => .php,
+        .go => .go,
+    };
+    const syntax_mode: SyntaxMode = cli_syntax_mode orelse config_syntax_mode;
+
+    // Print info if Go mode is enabled
+    if (syntax_mode == .go) {
+        std.debug.print("Info: Go-style syntax mode enabled (a.b instead of $a->b)\n", .{});
+    }
+
     // Handle AOT compilation mode
     if (compile_mode) {
         if (php_file) |filename| {
             aot_options.input_file = filename;
+            // Convert compiler SyntaxMode to AOT SyntaxMode
+            aot_options.syntax_mode = switch (syntax_mode) {
+                .php => .php,
+                .go => .go,
+            };
             try runAOTCompilation(allocator, aot_options);
         } else {
             std.debug.print("Error: No input file specified for compilation.\n", .{});
@@ -193,7 +256,7 @@ pub fn main() !void {
         php_code = "<?php echo 42;";
     }
 
-    var p = try parser.Parser.init(arena_allocator, &context, php_code);
+    var p = try parser.Parser.initWithMode(arena_allocator, &context, php_code, syntax_mode);
     const program = p.parse() catch |err| {
         std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});
         if (context.errors.items.len > 0) {
@@ -207,6 +270,9 @@ pub fn main() !void {
     var vm_instance = try vm.VM.init(allocator);
     vm_instance.context = &context;
     vm_instance.setExecutionMode(execution_mode);
+    if (php_file) |filename| {
+        vm_instance.current_file = filename;
+    }
     defer vm_instance.deinit();
 
     const result = vm_instance.run(program) catch |err| {
@@ -241,6 +307,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         }
         std.debug.print("  Optimize: {s}\n", .{options.optimize_level.toString()});
         std.debug.print("  Static link: {}\n", .{options.static_link});
+        std.debug.print("  Syntax mode: {s}\n", .{options.syntax_mode.toString()});
     }
 
     // Read source file
@@ -260,7 +327,13 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     defer arena.deinit();
     var context = PHPContext.init(arena.allocator());
 
-    var p = try parser.Parser.init(arena.allocator(), &context, source);
+    // Convert AOT SyntaxMode to compiler SyntaxMode for parser
+    const parser_syntax_mode: SyntaxMode = switch (options.syntax_mode) {
+        .php => .php,
+        .go => .go,
+    };
+
+    var p = try parser.Parser.initWithMode(arena.allocator(), &context, source, parser_syntax_mode);
     const program = p.parse() catch |err| {
         std.debug.print("Parse error: {s}\n", .{@errorName(err)});
         // Add parser errors
@@ -430,6 +503,7 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .block => .block,
         .expression_stmt => .expression_stmt,
         .assignment => .assignment,
+        .compound_assignment => .assignment, // Map to assignment for IR generation
         .echo_stmt => .echo_stmt,
         .return_stmt => .return_stmt,
         .break_stmt => .break_stmt,
@@ -440,8 +514,10 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .literal_string => .literal_string,
         .literal_bool => .literal_bool,
         .literal_null => .literal_null,
+        .magic_constant => .literal_string, // Map magic constants to string literals for IR
         .array_init => .array_init,
         .array_pair => .array_pair,
+        .named_arg => .array_pair, // Map named_arg to array_pair for IR (key-value pair)
         .binary_expr => .binary_expr,
         .unary_expr => .unary_expr,
         .postfix_expr => .postfix_expr,
@@ -453,12 +529,14 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .object_instantiation => .object_instantiation,
         .trait_use => .trait_use,
         .named_type => .named_type,
+        .nullable_type => .nullable_type,
         .union_type => .union_type,
         .intersection_type => .intersection_type,
         .class_constant_access => .class_constant_access,
         .self_expr => .self_expr,
         .parent_expr => .parent_expr,
         .static_expr => .static_expr,
+        .cast_expr => .unary_expr, // Map cast expressions to unary expressions for IR
     };
 }
 

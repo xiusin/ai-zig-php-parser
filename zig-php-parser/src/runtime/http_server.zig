@@ -285,7 +285,7 @@ pub const HttpServer = struct {
     /// 获取请求上下文（从池中获取或新建）
     fn acquireContext(self: *HttpServer) *RequestContext {
         var ctx: *RequestContext = undefined;
-        
+
         if (self.request_context_pool.items.len > 0) {
             if (self.request_context_pool.pop()) |c| {
                 ctx = c;
@@ -298,12 +298,12 @@ pub const HttpServer = struct {
             ctx = self.allocator.create(RequestContext) catch unreachable;
             ctx.* = RequestContext.init(self.allocator, self.generateContextId(), self.vm);
         }
-        
+
         // 为请求分配Arena (Requirements: 4.1, 4.2)
         if (self.arena_pool) |pool| {
             ctx.arena = pool.acquire() catch null;
         }
-        
+
         return ctx;
     }
 
@@ -316,7 +316,7 @@ pub const HttpServer = struct {
             }
             ctx.arena = null;
         }
-        
+
         if (self.request_context_pool.items.len < 100) {
             self.request_context_pool.append(self.allocator, ctx) catch {
                 ctx.deinit();
@@ -377,16 +377,19 @@ pub const HttpServer = struct {
         };
         const method_val = try Value.initStringWithManager(&vm_instance.memory_manager, method_str);
         try arr.set(self.allocator, method_key, method_val);
+        method_key.string.release(self.allocator);
 
         // path
         const path_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "path") };
         const path_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.path);
         try arr.set(self.allocator, path_key, path_val);
+        path_key.string.release(self.allocator);
 
         // body
         const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
         const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.body);
         try arr.set(self.allocator, body_key, body_val);
+        body_key.string.release(self.allocator);
 
         // headers
         const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
@@ -398,8 +401,10 @@ pub const HttpServer = struct {
             const h_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
             const h_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
             try headers_arr.set(self.allocator, h_key, h_val);
+            h_key.string.release(self.allocator);
         }
         try arr.set(self.allocator, headers_key, headers_val);
+        headers_key.string.release(self.allocator);
 
         // query
         const query_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "query") };
@@ -411,8 +416,10 @@ pub const HttpServer = struct {
             const q_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
             const q_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
             try query_arr.set(self.allocator, q_key, q_val);
+            q_key.string.release(self.allocator);
         }
         try arr.set(self.allocator, query_key, query_val);
+        query_key.string.release(self.allocator);
 
         return result;
     }
@@ -426,16 +433,19 @@ pub const HttpServer = struct {
         // status
         const status_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "status") };
         try arr.set(self.allocator, status_key, Value.initInt(200));
+        status_key.string.release(self.allocator);
 
         // headers
         const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
         const headers_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
         try arr.set(self.allocator, headers_key, headers_val);
+        headers_key.string.release(self.allocator);
 
         // body
         const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
         const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, "");
         try arr.set(self.allocator, body_key, body_val);
+        body_key.string.release(self.allocator);
 
         return result;
     }

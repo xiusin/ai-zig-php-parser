@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
         "src/test_attribute_system.zig",
         "src/test_bytecode_vm.zig",
         "src/test_gc_stress.zig",
+        "src/test_bytecode_syntax_mode.zig",
         "src/aot/root.zig",
         "src/aot/diagnostics.zig",
         "src/aot/ir_generator.zig",

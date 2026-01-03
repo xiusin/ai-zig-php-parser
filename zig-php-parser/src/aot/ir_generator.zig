@@ -184,6 +184,7 @@ pub const Node = struct {
         object_instantiation,
         trait_use,
         named_type,
+        nullable_type,
         union_type,
         intersection_type,
         class_constant_access,
@@ -714,7 +715,6 @@ pub const IRGenerator = struct {
         }
     }
 
-
     /// Generate IR for class declaration
     fn generateClassDecl(self: *Self, node: *const Node) !void {
         const class_data = node.data.container_decl;
@@ -1153,7 +1153,6 @@ pub const IRGenerator = struct {
         self.setCurrentBlock(exit_block);
     }
 
-
     /// Generate IR for try-catch-finally statement
     fn generateTryStmt(self: *Self, node: *const Node) !void {
         const try_data = node.data.try_stmt;
@@ -1562,7 +1561,6 @@ pub const IRGenerator = struct {
         return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
     }
 
-
     /// Generate IR for binary expression
     fn generateBinaryExpr(self: *Self, node: *const Node) !Register {
         const bin_data = node.data.binary_expr;
@@ -1798,7 +1796,6 @@ pub const IRGenerator = struct {
             .return_type = .php_value,
         } }, .php_value);
     }
-
 
     /// Generate IR for array initialization
     fn generateArrayInit(self: *Self, node: *const Node) !Register {
@@ -2127,7 +2124,6 @@ pub const IRGenerator = struct {
 
         return cloned_reg;
     }
-
 
     // ========================================================================
     // Constant Folding
@@ -2629,4 +2625,3 @@ test "IRGenerator getConstantValue" {
     try std.testing.expect(null_const != null);
     try std.testing.expect(null_const.?.is_null);
 }
-

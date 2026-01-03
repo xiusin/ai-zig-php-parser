@@ -306,7 +306,7 @@ fn decrementValueRefCount(value: Value, allocator: std.mem.Allocator) void {
         .resource => value.getAsResource().release(allocator),
         .user_function => value.getAsUserFunc().release(allocator),
         .closure => value.getAsClosure().release(allocator),
-        .arrow_function => value.getAsClosure().release(allocator),
+        .arrow_function => value.getAsArrowFunc().release(allocator),
         else => {},
     }
 }
@@ -320,7 +320,7 @@ fn markValueGray(value: Value) void {
         .resource => value.getAsResource().markGray(),
         .user_function => value.getAsUserFunc().markGray(),
         .closure => value.getAsClosure().markGray(),
-        .arrow_function => value.getAsClosure().markGray(),
+        .arrow_function => value.getAsArrowFunc().markGray(),
         else => {},
     }
 }
@@ -334,7 +334,7 @@ fn scanValue(value: Value) void {
         .resource => value.getAsResource().scan(),
         .user_function => value.getAsUserFunc().scan(),
         .closure => value.getAsClosure().scan(),
-        .arrow_function => value.getAsClosure().scan(),
+        .arrow_function => value.getAsArrowFunc().scan(),
         else => {},
     }
 }
@@ -348,7 +348,7 @@ fn markValueBlack(value: Value) void {
         .resource => value.getAsResource().markBlack(),
         .user_function => value.getAsUserFunc().markBlack(),
         .closure => value.getAsClosure().markBlack(),
-        .arrow_function => value.getAsClosure().markBlack(),
+        .arrow_function => value.getAsArrowFunc().markBlack(),
         else => {},
     }
 }
@@ -362,7 +362,7 @@ fn collectValueWhite(value: Value, allocator: std.mem.Allocator) void {
         .resource => value.getAsResource().collectWhite(allocator),
         .user_function => value.getAsUserFunc().collectWhite(allocator),
         .closure => value.getAsClosure().collectWhite(allocator),
-        .arrow_function => value.getAsClosure().collectWhite(allocator),
+        .arrow_function => value.getAsArrowFunc().collectWhite(allocator),
         else => {},
     }
 }
@@ -386,7 +386,7 @@ pub const GarbageCollector = struct {
 
     /// GC统计
     stats: GCStats = .{},
-    
+
     /// 时间戳记录 (用于增量GC时间统计)
     mark_start_time: i64 = 0,
     sweep_start_time: i64 = 0,
@@ -408,13 +408,13 @@ pub const GarbageCollector = struct {
         objects_marked: u64 = 0,
         objects_swept: u64 = 0,
         nursery_promotions: u64 = 0,
-        
+
         // 增强的时间统计 (Requirements 2.6, 9.2)
         timing: GCTiming = .{},
-        
+
         // 内存统计
         memory: GCMemoryStats = .{},
-        
+
         pub const GCTiming = struct {
             /// 最近一次标记阶段耗时 (纳秒)
             last_mark_time_ns: u64 = 0,
@@ -433,7 +433,7 @@ pub const GarbageCollector = struct {
             /// 平均停顿时间 (纳秒)
             avg_pause_time_ns: u64 = 0,
         };
-        
+
         pub const GCMemoryStats = struct {
             /// 回收前内存使用量
             memory_before_gc: usize = 0,
@@ -446,14 +446,14 @@ pub const GarbageCollector = struct {
             /// 峰值内存使用量
             peak_memory_usage: usize = 0,
         };
-        
+
         /// 更新平均停顿时间
         pub fn updateAveragePauseTime(self: *GCStats) void {
             if (self.total_collections > 0) {
                 self.timing.avg_pause_time_ns = self.timing.total_pause_time_ns / self.total_collections;
             }
         }
-        
+
         /// 记录GC开始
         pub fn recordGCStart(self: *GCStats, current_memory: usize) void {
             self.memory.memory_before_gc = current_memory;
@@ -461,16 +461,16 @@ pub const GarbageCollector = struct {
                 self.memory.peak_memory_usage = current_memory;
             }
         }
-        
+
         /// 记录GC结束
         pub fn recordGCEnd(self: *GCStats, current_memory: usize, pause_time_ns: u64) void {
             self.memory.memory_after_gc = current_memory;
-            self.memory.memory_freed = if (self.memory.memory_before_gc > current_memory) 
-                self.memory.memory_before_gc - current_memory 
-            else 
+            self.memory.memory_freed = if (self.memory.memory_before_gc > current_memory)
+                self.memory.memory_before_gc - current_memory
+            else
                 0;
             self.memory.total_memory_freed += self.memory.memory_freed;
-            
+
             self.timing.last_pause_time_ns = pause_time_ns;
             self.timing.total_pause_time_ns += pause_time_ns;
             if (pause_time_ns > self.timing.max_pause_time_ns) {
@@ -478,7 +478,7 @@ pub const GarbageCollector = struct {
             }
             self.updateAveragePauseTime();
         }
-        
+
         /// 生成统计报告
         pub fn generateReport(self: *const GCStats) GCReport {
             return .{
@@ -495,7 +495,7 @@ pub const GarbageCollector = struct {
             };
         }
     };
-    
+
     /// GC报告结构 - 用于外部消费
     pub const GCReport = struct {
         total_collections: u64,
@@ -574,10 +574,10 @@ pub const GarbageCollector = struct {
                 const sweep_end: i64 = @intCast(std.time.nanoTimestamp());
                 self.stats.timing.last_sweep_time_ns = @intCast(sweep_end - self.sweep_start_time);
                 self.stats.timing.total_sweep_time_ns += self.stats.timing.last_sweep_time_ns;
-                
+
                 const total_pause = self.stats.timing.last_mark_time_ns + self.stats.timing.last_sweep_time_ns;
                 self.stats.recordGCEnd(self.allocated_memory, total_pause);
-                
+
                 self.incremental_state = .idle;
                 self.stats.total_collections += 1;
                 return true;
@@ -643,7 +643,7 @@ pub const GarbageCollector = struct {
     pub fn getStats(self: *GarbageCollector) GCStats {
         return self.stats;
     }
-    
+
     /// 获取GC报告 (用于外部消费的格式化报告)
     pub fn getReport(self: *GarbageCollector) GCReport {
         return self.stats.generateReport();

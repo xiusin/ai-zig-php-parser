@@ -116,6 +116,270 @@ The interpreter includes a powerful AOT compiler that can compile PHP code direc
 ./zig-out/bin/php-interpreter -i
 ```
 
+## Multi-Syntax Mode Support
+
+zig-php supports multiple syntax modes, allowing you to write code in your preferred style. Currently supported modes are PHP (default) and Go.
+
+### Syntax Mode Selection
+
+You can select the syntax mode in three ways:
+
+#### 1. Command Line Argument
+
+```bash
+# Use Go syntax mode
+./zig-out/bin/php-interpreter --syntax=go script.php
+
+# Use PHP syntax mode (default)
+./zig-out/bin/php-interpreter --syntax=php script.php
+```
+
+#### 2. File Directive
+
+Add a syntax directive at the beginning of your file:
+
+```php
+// @syntax: go
+<?php
+// Your Go-style code here
+name = "World"
+echo "Hello, " + name + "\n"
+```
+
+Or with PHP-style directive:
+
+```php
+<?php // @syntax: go
+// Your Go-style code here
+```
+
+#### 3. Configuration File
+
+Create a `.zigphp.json` or `zigphp.config.json` file:
+
+```json
+{
+    "syntax": "go"
+}
+```
+
+### Go Syntax Mode Features
+
+In Go mode, you can write PHP code using Go-like syntax:
+
+| Feature | PHP Mode | Go Mode |
+|---------|----------|---------|
+| Variables | `$name` | `name` |
+| Property access | `$obj->prop` | `obj.prop` |
+| Method calls | `$obj->method()` | `obj.method()` |
+| String concatenation | `$a . $b` | `a + b` |
+
+#### Go Mode Example
+
+```php
+// @syntax: go
+<?php
+
+// Variables without $ prefix
+name = "Alice"
+age = 30
+
+// String concatenation with +
+greeting = "Hello, " + name + "!"
+echo greeting + "\n"
+
+// Class with property access using .
+class Person {
+    public name
+    public age
+    
+    function __construct(name, age) {
+        this.name = name
+        this.age = age
+    }
+    
+    function getInfo() {
+        return "Name: " + this.name + ", Age: " + this.age
+    }
+}
+
+person = new Person("Bob", 25)
+echo person.getInfo() + "\n"
+echo "Age: " + person.age + "\n"
+```
+
+See `examples/go_syntax_demo.php` for a comprehensive demonstration.
+
+## Extension System
+
+zig-php provides a powerful extension system that allows third-party developers to add new functionality without modifying the core interpreter.
+
+### Loading Extensions
+
+```bash
+# Load a single extension
+./zig-out/bin/php-interpreter --extension=./myextension.so script.php
+
+# Load multiple extensions
+./zig-out/bin/php-interpreter --extension=./ext1.so --extension=./ext2.so script.php
+```
+
+Or via configuration file:
+
+```json
+{
+    "extensions": [
+        "./extensions/mysql.so",
+        "./extensions/redis.so"
+    ]
+}
+```
+
+### Extension Development Guide
+
+Extensions are written in Zig and compiled as dynamic libraries. Here's how to create one:
+
+#### 1. Define Extension Functions
+
+```zig
+const std = @import("std");
+
+// Extension API types
+pub const EXTENSION_API_VERSION: u32 = 1;
+pub const ExtensionValue = u64;
+
+// Function callback signature
+pub const ExtensionFunctionCallback = *const fn (*anyopaque, []const ExtensionValue) anyerror!ExtensionValue;
+
+// Define your function
+fn myFunction(_: *anyopaque, args: []const ExtensionValue) anyerror!ExtensionValue {
+    if (args.len < 2) return 0;
+    const a: i64 = @bitCast(args[0]);
+    const b: i64 = @bitCast(args[1]);
+    return @bitCast(a + b);
+}
+```
+
+#### 2. Define Extension Classes
+
+```zig
+// Method callback signature
+pub const ExtensionMethodCallback = *const fn (*anyopaque, *anyopaque, []const ExtensionValue) anyerror!ExtensionValue;
+
+// Define class methods
+fn myMethod(_: *anyopaque, _: *anyopaque, args: []const ExtensionValue) anyerror!ExtensionValue {
+    // Method implementation
+    return 0;
+}
+
+const my_methods = [_]ExtensionMethod{
+    .{
+        .name = "myMethod",
+        .callback = myMethod,
+        .modifiers = .{ .is_public = true },
+        .min_args = 0,
+        .max_args = 2,
+    },
+};
+```
+
+#### 3. Create Extension Entry Point
+
+```zig
+// Extension lifecycle callbacks
+fn extensionInit(_: *anyopaque) anyerror!void {
+    // Initialize resources
+}
+
+fn extensionShutdown(_: *anyopaque) void {
+    // Clean up resources
+}
+
+// Extension definition
+const my_extension = Extension{
+    .info = .{
+        .name = "my_extension",
+        .version = "1.0.0",
+        .api_version = EXTENSION_API_VERSION,
+        .author = "Your Name",
+        .description = "My custom extension",
+    },
+    .init_fn = extensionInit,
+    .shutdown_fn = extensionShutdown,
+    .functions = &my_functions,
+    .classes = &my_classes,
+    .syntax_hooks = null,
+};
+
+// Required entry point - MUST be exported with this exact name
+pub export fn zigphp_get_extension() *const Extension {
+    return &my_extension;
+}
+```
+
+#### 4. Build the Extension
+
+```bash
+# Build as dynamic library
+zig build-lib -dynamic my_extension.zig -o libmy_extension.so
+```
+
+See `examples/extensions/sample_extension.zig` for a complete example.
+
+### Extension API Reference
+
+| Type | Description |
+|------|-------------|
+| `ExtensionInfo` | Extension metadata (name, version, author) |
+| `ExtensionFunction` | Function registration (name, callback, args) |
+| `ExtensionClass` | Class registration (name, methods, properties) |
+| `ExtensionMethod` | Method definition with modifiers |
+| `ExtensionProperty` | Property definition with default value |
+| `SyntaxHooks` | Custom syntax parsing hooks |
+
+## Configuration File
+
+zig-php supports configuration files for persistent settings.
+
+### Configuration File Locations
+
+The interpreter looks for configuration in this order:
+1. `.zigphp.json` in the current directory
+2. `zigphp.config.json` in the current directory
+
+### Configuration Options
+
+```json
+{
+    "syntax": "php",
+    "extensions": [
+        "./extensions/mysql.so",
+        "./extensions/redis.so"
+    ],
+    "include_paths": [
+        "./lib",
+        "./vendor"
+    ],
+    "error_reporting": 32767
+}
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `syntax` | string | Default syntax mode: "php" or "go" |
+| `extensions` | array | List of extension paths to auto-load |
+| `include_paths` | array | Additional paths for include/require |
+| `error_reporting` | number | Error reporting level |
+
+### Configuration Precedence
+
+Command line arguments always take precedence over configuration file settings:
+
+```bash
+# This uses Go mode even if config file specifies PHP
+./zig-out/bin/php-interpreter --syntax=go script.php
+```
+
 ## Examples
 
 ### Basic PHP Script
@@ -344,7 +608,6 @@ Current limitations (to be addressed):
 - Some advanced reflection features
 - Certain edge cases in type coercion
 - Performance optimization opportunities
-- Extension system not yet implemented
 
 ## Development
 
@@ -352,8 +615,14 @@ Current limitations (to be addressed):
 
 ```
 ├── src/
-│   ├── compiler/          # Lexer, parser, AST
+│   ├── compiler/          # Lexer, parser, AST, syntax modes
+│   │   └── syntax_mode.zig # Multi-syntax mode support
 │   ├── runtime/           # VM, types, stdlib
+│   ├── extension/         # Extension system
+│   │   ├── api.zig        # Extension API definitions
+│   │   └── registry.zig   # Extension registry
+│   ├── config/            # Configuration system
+│   │   └── loader.zig     # Config file loader
 │   ├── aot/               # AOT compiler modules
 │   │   ├── compiler.zig   # Main AOT compiler entry
 │   │   ├── ir.zig         # Intermediate representation
@@ -367,6 +636,9 @@ Current limitations (to be addressed):
 │   ├── test_*.zig        # Test files
 │   └── main.zig          # Entry point
 ├── examples/             # Example PHP scripts
+│   ├── extensions/       # Sample extensions
+│   │   └── sample_extension.zig
+│   └── go_syntax_demo.php # Go syntax mode demo
 ├── docs/                 # Documentation
 ├── .kiro/specs/         # Specification documents
 └── build.zig            # Build configuration

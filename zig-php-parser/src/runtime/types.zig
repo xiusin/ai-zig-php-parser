@@ -4,6 +4,9 @@ pub const gc = @import("gc.zig");
 // Import NumberWrapper from separate module
 pub const number_wrapper = @import("number_wrapper.zig");
 
+// Import builtin_http for HTTP class method dispatch
+const builtin_http = @import("builtin_http.zig");
+
 // Forward declarations
 pub const PHPString = struct {
     data: []u8,
@@ -31,6 +34,10 @@ pub const PHPString = struct {
     }
 
     pub fn release(self: *PHPString, allocator: std.mem.Allocator) void {
+        // Safety check to prevent integer overflow when ref_count is already 0
+        if (self.ref_count == 0) {
+            return;
+        }
         self.ref_count -= 1;
         if (self.ref_count == 0) {
             self.deinit(allocator);
@@ -480,6 +487,10 @@ pub const PHPInterface = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.methods.deinit();
+        var const_iter = self.constants.iterator();
+        while (const_iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
         self.constants.deinit();
     }
 };
@@ -502,10 +513,7 @@ pub const PHPTrait = struct {
         self.name.release(allocator);
         var prop_iter = self.properties.iterator();
         while (prop_iter.next()) |entry| {
-            entry.value_ptr.name.release(allocator);
-            if (entry.value_ptr.default_value) |val| {
-                val.release(allocator);
-            }
+            entry.value_ptr.deinit(allocator);
         }
         self.properties.deinit();
         var method_iter = self.methods.iterator();
@@ -533,6 +541,7 @@ pub const Attribute = struct {
     };
 
     pub fn init(name: *PHPString, arguments: []const Value, target: AttributeTarget) Attribute {
+        name.retain();
         return Attribute{
             .name = name,
             .arguments = arguments,
@@ -542,6 +551,7 @@ pub const Attribute = struct {
     }
 
     pub fn initWithClass(name: *PHPString, arguments: []const Value, target: AttributeTarget, class_def: *PHPClass) Attribute {
+        name.retain();
         return Attribute{
             .name = name,
             .arguments = arguments,
@@ -561,6 +571,14 @@ pub const Attribute = struct {
             .function => self.target.function,
             .constant => self.target.constant,
         };
+    }
+
+    pub fn deinit(self: *const Attribute, allocator: std.mem.Allocator) void {
+        self.name.release(allocator);
+        for (self.arguments) |arg| {
+            arg.release(allocator);
+        }
+        allocator.free(self.arguments);
     }
 
     pub fn instantiate(self: *const Attribute, allocator: std.mem.Allocator) !*PHPObject {
@@ -642,16 +660,14 @@ pub const PHPClass = struct {
             allocator.free(self.interfaces);
         }
 
+        if (self.traits.len > 0) {
+            allocator.free(self.traits);
+        }
+
         // 释放所有属性
         var prop_iter = self.properties.iterator();
         while (prop_iter.next()) |entry| {
-            entry.value_ptr.name.release(allocator);
-            if (entry.value_ptr.default_value) |val| {
-                // Here we need to release the value using the same logic as Environment.releaseValue
-                // But types.zig doesn't have access to VM's releaseValue.
-                // However, Value has a release(allocator) method!
-                val.release(allocator);
-            }
+            entry.value_ptr.deinit(allocator);
         }
         self.properties.deinit();
 
@@ -663,7 +679,19 @@ pub const PHPClass = struct {
         self.methods.deinit();
 
         // 释放常量HashMap
+        var const_iter = self.constants.iterator();
+        while (const_iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
         self.constants.deinit();
+
+        // 释放属性
+        for (self.attributes) |attr| {
+            attr.deinit(allocator);
+        }
+        if (self.attributes.len > 0) {
+            allocator.free(self.attributes);
+        }
 
         // 释放shape
         self.shape.deinit();
@@ -1166,6 +1194,22 @@ pub const Property = struct {
         };
     }
 
+    pub fn deinit(self: *Property, allocator: std.mem.Allocator) void {
+        self.name.release(allocator);
+        if (self.default_value) |dv| {
+            dv.release(allocator);
+        }
+        for (self.attributes) |attr| {
+            attr.deinit(allocator);
+        }
+        if (self.attributes.len > 0) {
+            allocator.free(self.attributes);
+        }
+        if (self.hooks.len > 0) {
+            allocator.free(self.hooks);
+        }
+    }
+
     pub fn hasGetHook(self: *const Property) bool {
         for (self.hooks) |hook| {
             if (hook.type == .get) return true;
@@ -1239,6 +1283,12 @@ pub const Method = struct {
             if (self.default_value) |dv| {
                 dv.release(allocator);
             }
+            for (self.attributes) |attr| {
+                attr.deinit(allocator);
+            }
+            if (self.attributes.len > 0) {
+                allocator.free(self.attributes);
+            }
         }
 
         pub fn validateType(self: *const Parameter, value: Value) !void {
@@ -1290,8 +1340,16 @@ pub const Method = struct {
             var param = self.parameters[i];
             param.deinit(allocator);
         }
-        allocator.free(self.parameters);
-        // Attributes cleanup...
+        if (self.parameters.len > 0) {
+            allocator.free(self.parameters);
+        }
+
+        for (self.attributes) |attr| {
+            attr.deinit(allocator);
+        }
+        if (self.attributes.len > 0) {
+            allocator.free(self.attributes);
+        }
     }
 
     pub fn isConstructor(self: *const Method) bool {
@@ -1314,6 +1372,7 @@ pub const PHPObject = struct {
     shape: *Shape,
     property_values: std.ArrayList(Value),
     native_data: ?*anyopaque = null,
+    owns_shape: bool = false, // true if shape was created by transition
 
     pub fn init(allocator: std.mem.Allocator, class: *PHPClass) !PHPObject {
         var obj = PHPObject{
@@ -1321,6 +1380,7 @@ pub const PHPObject = struct {
             .shape = class.shape,
             .property_values = try std.ArrayList(Value).initCapacity(allocator, class.shape.property_count),
             .native_data = null,
+            .owns_shape = false,
         };
         for (0..class.shape.property_count) |_| try obj.property_values.append(allocator, Value.initNull());
         return obj;
@@ -1339,6 +1399,12 @@ pub const PHPObject = struct {
             val.release(allocator);
         }
         self.property_values.deinit(allocator);
+
+        // Release shape if we own it (created by transition)
+        if (self.owns_shape) {
+            self.shape.deinit();
+            allocator.destroy(self.shape);
+        }
     }
 
     pub fn getProperty(self: *PHPObject, name: []const u8) !Value {
@@ -1398,6 +1464,16 @@ pub const PHPObject = struct {
         const new_shape = try self.shape.transition(allocator, Shape.next_id, name);
         Shape.next_id += 1;
 
+        // Clear parent reference before releasing old shape to avoid dangling pointer
+        // The new shape has already copied all properties, so parent is not needed
+        new_shape.parent = null;
+
+        // Release old shape if we own it
+        if (self.owns_shape) {
+            self.shape.deinit();
+            allocator.destroy(self.shape);
+        }
+
         var new_values = try std.ArrayList(Value).initCapacity(allocator, new_shape.property_count);
         for (self.property_values.items) |val| {
             try new_values.append(allocator, val);
@@ -1409,6 +1485,7 @@ pub const PHPObject = struct {
         self.property_values.deinit(allocator);
         self.property_values = new_values;
         self.shape = new_shape;
+        self.owns_shape = true; // We now own this shape
 
         // Now set the new property
         const offset = self.shape.getPropertyOffset(name).?;
@@ -1421,7 +1498,12 @@ pub const PHPObject = struct {
         return self.shape.hasProperty(name);
     }
 
-    pub fn callMethod(self: *PHPObject, vm: *anyopaque, instance_value: Value, name: []const u8, args: []const Value) !Value {
+    pub fn callMethod(self: *PHPObject, vm: *anyopaque, object_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const VM = @import("vm.zig").VM;
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+        const class_name = self.class.name.data;
+        const name = method_name;
+
         const method = self.class.getMethod(name);
         if (method == null) {
             // Try magic __call method
@@ -1431,22 +1513,45 @@ pub const PHPObject = struct {
             return error.UndefinedMethod;
         }
 
-        const VM = @import("vm.zig").VM;
-        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
-
         // Special handling for built-in classes with null method bodies
         if (method.?.body == null) {
-            // Check if this is a built-in class method that should be handled specially
-            const class_name = self.class.name.data;
-            if (std.mem.eql(u8, class_name, "PDO")) {
-                return vm_instance.callPDOMethod(instance_value, name, args);
+            // For Exception classes, handle __construct specially
+            if (std.mem.eql(u8, name, "__construct")) {
+                // For Exception/Error classes, set properties from arguments
+                const is_exception = std.mem.eql(u8, class_name, "Exception") or
+                    std.mem.eql(u8, class_name, "RuntimeException") or
+                    std.mem.eql(u8, class_name, "InvalidArgumentException") or
+                    std.mem.eql(u8, class_name, "LogicException") or
+                    std.mem.eql(u8, class_name, "Error") or
+                    std.mem.eql(u8, class_name, "TypeError") or
+                    std.mem.eql(u8, class_name, "ArgumentCountError") or
+                    std.mem.eql(u8, class_name, "DivisionByZeroError") or
+                    (self.class.parent != null and (std.mem.eql(u8, self.class.parent.?.name.data, "Exception") or
+                        std.mem.eql(u8, self.class.parent.?.name.data, "Error")));
+
+                if (is_exception) {
+                    // Set message from first argument if provided
+                    if (args.len > 0) {
+                        try self.setProperty(vm_instance.allocator, "message", args[0]);
+                    }
+                    // Set code from second argument if provided
+                    if (args.len > 1) {
+                        try self.setProperty(vm_instance.allocator, "code", args[1]);
+                    }
+                    return Value.initNull();
+                }
             }
-            if (std.mem.eql(u8, class_name, "Mutex") or std.mem.eql(u8, class_name, "Atomic") or
-                std.mem.eql(u8, class_name, "RWLock") or std.mem.eql(u8, class_name, "SharedData") or
-                std.mem.eql(u8, class_name, "Channel"))
-            {
-                return vm_instance.callConcurrencyMethod(instance_value, name, args);
+
+            // For HttpResponse builtin methods
+            if (std.mem.eql(u8, class_name, "HttpResponse")) {
+                return builtin_http.callHttpResponseMethod(vm_instance, self, name, args);
             }
+
+            // For Router builtin methods
+            if (std.mem.eql(u8, class_name, "Router")) {
+                return builtin_http.callRouterMethod(vm_instance, self, name, args);
+            }
+
             // For other built-in classes, return not implemented for now
             return error.UndefinedMethod; // Built-in method not implemented
         }
@@ -1456,7 +1561,7 @@ pub const PHPObject = struct {
         defer vm_instance.popCallFrame();
 
         // Inject $this
-        try vm_instance.setVariable("$this", instance_value);
+        try vm_instance.setVariable("$this", object_value);
 
         // Inject arguments
         for (method.?.parameters, 0..) |param, i| {
@@ -1499,6 +1604,7 @@ pub const PHPObject = struct {
             .shape = self.shape,
             .property_values = try std.ArrayList(Value).initCapacity(allocator, self.property_values.items.len),
             .native_data = null,
+            .owns_shape = false, // Clone doesn't own the shape
         };
 
         for (self.property_values.items) |val| {
@@ -1603,16 +1709,16 @@ pub const Value = struct {
     // QNAN uses bits 50-62, so we use bits 48-49 for type tags (4 types max)
     // For more types, we use a different encoding scheme
     pub const TAG_PTR: u64 = QNAN; // 不使用 SIGN_BIT，与整数区分
-    
+
     // Type tags use bits 47-49 (3 bits = 8 types)
     pub const TYPE_MASK: u64 = 0x0003800000000000; // Bits 47-49
-    pub const TYPE_STRING: u64 = 0x0000800000000000;      // 001
-    pub const TYPE_ARRAY: u64 = 0x0001000000000000;       // 010
-    pub const TYPE_OBJECT: u64 = 0x0001800000000000;      // 011
-    pub const TYPE_STRUCT: u64 = 0x0002000000000000;      // 100
-    pub const TYPE_CLOSURE: u64 = 0x0002800000000000;     // 101
-    pub const TYPE_RESOURCE: u64 = 0x0003000000000000;    // 110
-    pub const TYPE_USER_FUNC: u64 = 0x0003800000000000;   // 111
+    pub const TYPE_STRING: u64 = 0x0000800000000000; // 001
+    pub const TYPE_ARRAY: u64 = 0x0001000000000000; // 010
+    pub const TYPE_OBJECT: u64 = 0x0001800000000000; // 011
+    pub const TYPE_STRUCT: u64 = 0x0002000000000000; // 100
+    pub const TYPE_CLOSURE: u64 = 0x0002800000000000; // 101
+    pub const TYPE_RESOURCE: u64 = 0x0003000000000000; // 110
+    pub const TYPE_USER_FUNC: u64 = 0x0003800000000000; // 111
     pub const TYPE_NATIVE_FUNC: u64 = 0x0000000000000000; // 000 (default for pointers)
 
     pub fn initNull() Value {
@@ -2008,8 +2114,16 @@ pub const UserFunction = struct {
             var param = self.parameters[i];
             param.deinit(allocator);
         }
-        allocator.free(self.parameters);
-        // Attributes cleanup...
+        if (self.parameters.len > 0) {
+            allocator.free(self.parameters);
+        }
+
+        for (self.attributes) |attr| {
+            attr.deinit(allocator);
+        }
+        if (self.attributes.len > 0) {
+            allocator.free(self.attributes);
+        }
     }
 
     pub fn validateArguments(self: *const UserFunction, args: []const Value) !void {
@@ -2029,28 +2143,48 @@ pub const UserFunction = struct {
     }
 
     pub fn bindArguments(self: *const UserFunction, args: []const Value, allocator: std.mem.Allocator) !std.StringHashMap(Value) {
-        var bound_args = std.StringHashMap(Value).init(allocator);
+        return self.bindArgumentsWithNamed(args, null, allocator);
+    }
 
-        for (self.parameters, 0..) |param, i| {
-            if (i < args.len) {
-                // Bind provided argument
-                _ = args[i].retain();
-                try bound_args.put(param.name.data, args[i]);
+    pub fn bindArgumentsWithNamed(self: *const UserFunction, positional_args: []const Value, named_args: ?*const std.StringHashMap(Value), allocator: std.mem.Allocator) !std.StringHashMap(Value) {
+        var bound_args = std.StringHashMap(Value).init(allocator);
+        var positional_idx: usize = 0;
+
+        for (self.parameters) |param| {
+            const param_name = param.name.data;
+            // Named args use name without $, but param_name has $
+            // So strip $ for matching named args
+            const match_name = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
+
+            // First check if we have a named argument for this parameter
+            if (named_args) |na| {
+                if (na.get(match_name)) |named_value| {
+                    _ = named_value.retain();
+                    try bound_args.put(param_name, named_value);
+                    continue;
+                }
+            }
+
+            // Otherwise use positional argument
+            if (positional_idx < positional_args.len) {
+                _ = positional_args[positional_idx].retain();
+                try bound_args.put(param_name, positional_args[positional_idx]);
+                positional_idx += 1;
             } else if (param.default_value) |default| {
                 // Use default value
                 _ = default.retain();
-                try bound_args.put(param.name.data, default);
+                try bound_args.put(param_name, default);
             } else if (!param.is_variadic) { // Required parameter missing
                 return error.MissingRequiredParameter;
             }
         }
 
         // Handle variadic parameters
-        if (self.is_variadic and args.len > self.parameters.len - 1) {
+        if (self.is_variadic and positional_args.len > self.parameters.len - 1) {
             const variadic_param = self.parameters[self.parameters.len - 1];
             var variadic_array = PHPArray.init(allocator);
 
-            for (args[self.parameters.len - 1 ..]) |arg| {
+            for (positional_args[self.parameters.len - 1 ..]) |arg| {
                 try variadic_array.push(allocator, arg);
             }
 
@@ -2086,14 +2220,22 @@ pub const Closure = struct {
 
     pub fn deinit(self: *Closure, allocator: std.mem.Allocator) void {
         self.function.deinit(allocator);
+        var iter = self.captured_vars.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
         self.captured_vars.deinit();
     }
 
     pub fn call(self: *Closure, vm: *anyopaque, args: []const Value) !Value {
+        return self.callMethod(vm, Value.initNull(), "call", args);
+    }
+
+    pub fn callMethod(self: *Closure, vm: *anyopaque, instance_value: Value, name: []const u8, args: []const Value) !Value {
+        _ = instance_value;
+        _ = name;
         const VM = @import("vm.zig").VM;
         const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
-
-        // Validate arguments
         try self.function.validateArguments(args);
 
         // Set parameters in current call frame

@@ -29,6 +29,14 @@ pub fn registerHttpClasses(vm: anytype) !void {
     try registerHttpFunctions(vm);
 }
 
+/// 清理HTTP相关全局资源
+pub fn cleanup() void {
+    if (global_servers_initialized) {
+        global_servers.deinit();
+        global_servers_initialized = false;
+    }
+}
+
 /// 注册HttpServer类
 fn registerHttpServerClass(vm: anytype) !void {
     const name_str = try types.PHPString.init(vm.allocator, "HttpServer");
@@ -181,8 +189,28 @@ fn registerHttpResponseClass(vm: anytype) !void {
     defer name_str.release(vm.allocator);
     const response_class = try vm.allocator.create(types.PHPClass);
     response_class.* = try types.PHPClass.init(vm.allocator, name_str);
+    response_class.native_destructor = httpResponseDestructor;
+
+    // Add status() method
+    const status_method_name = try types.PHPString.init(vm.allocator, "status");
+    var status_method = types.Method.init(status_method_name);
+    status_method_name.release(vm.allocator); // Release after Method.init retains it
+    status_method.modifiers = .{ .visibility = .public };
+    status_method.parameters = &[_]types.Method.Parameter{};
+    status_method.body = null; // Builtin method
+    try response_class.methods.put("status", status_method);
+
+    // Add json() method
+    const json_method_name = try types.PHPString.init(vm.allocator, "json");
+    var json_method = types.Method.init(json_method_name);
+    json_method_name.release(vm.allocator); // Release after Method.init retains it
+    json_method.modifiers = .{ .visibility = .public };
+    json_method.parameters = &[_]types.Method.Parameter{};
+    json_method.body = null; // Builtin method
+    try response_class.methods.put("json", json_method);
 
     try vm.classes.put("HttpResponse", response_class);
+    try vm.defineBuiltin("HttpResponse", httpResponseConstructor);
 }
 
 /// 注册Router类
@@ -197,13 +225,35 @@ fn registerRouterClass(vm: anytype) !void {
     try vm.defineBuiltin("Router", routerConstructor);
 }
 
+fn httpResponseDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const response = @as(*http_server.HttpResponse, @ptrCast(@alignCast(ptr)));
+    response.deinit();
+    allocator.destroy(response);
+}
+
+/// HttpResponse构造函数
+pub fn httpResponseConstructor(vm: anytype, args: []Value) !Value {
+    _ = args;
+
+    const response = try vm.allocator.create(http_server.HttpResponse);
+    response.* = http_server.HttpResponse.init(vm.allocator);
+
+    const class = vm.classes.get("HttpResponse").?;
+    const box = try vm.memory_manager.allocObject(class);
+    const obj = box.data;
+    obj.native_data = @ptrCast(response);
+
+    return Value{
+        .tag = .object,
+        .data = .{ .object = box },
+    };
+}
+
 fn routerDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
     const router = @as(*http_server.Router, @ptrCast(@alignCast(ptr)));
     router.deinit();
     allocator.destroy(router);
 }
-
-/// Router构造函数
 pub fn routerConstructor(vm: anytype, args: []Value) !Value {
     _ = args;
 
@@ -315,11 +365,13 @@ pub fn httpGet(vm: anytype, args: []Value) !Value {
     // 添加status
     const status_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "status") };
     try arr.set(vm.allocator, status_key, Value.initInt(response.status_code));
+    status_key.string.release(vm.allocator);
 
     // 添加body
     const body_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "body") };
     const body_val = try Value.initStringWithManager(&vm.memory_manager, response.body);
     try arr.set(vm.allocator, body_key, body_val);
+    body_key.string.release(vm.allocator);
 
     return result;
 }
@@ -351,11 +403,13 @@ pub fn httpPost(vm: anytype, args: []Value) !Value {
     // 添加status
     const status_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "status") };
     try arr.set(vm.allocator, status_key, Value.initInt(response.status_code));
+    status_key.string.release(vm.allocator);
 
     // 添加body
     const body_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "body") };
     const body_val = try Value.initStringWithManager(&vm.memory_manager, response.body);
     try arr.set(vm.allocator, body_key, body_val);
+    body_key.string.release(vm.allocator);
 
     return result;
 }
@@ -397,10 +451,12 @@ pub fn httpRequest(vm: anytype, args: []Value) !Value {
 
     const status_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "status") };
     try arr.set(vm.allocator, status_key, Value.initInt(response.status_code));
+    status_key.string.release(vm.allocator);
 
     const body_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "body") };
     const body_val = try Value.initStringWithManager(&vm.memory_manager, response.body);
     try arr.set(vm.allocator, body_key, body_val);
+    body_key.string.release(vm.allocator);
 
     return result;
 }
@@ -431,90 +487,158 @@ pub fn callHttpServerMethod(vm: anytype, obj: *types.PHPObject, method_name: []c
     return error.MethodNotFound;
 }
 
-/// 调用HttpClient方法
-pub fn callHttpClientMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []Value) !Value {
-    const client = @as(*http_client.HttpClient, @ptrCast(@alignCast(obj.native_data.?)));
+/// 调用Router方法
+pub fn callRouterMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []const Value) !Value {
+    const router = @as(*http_server.Router, @ptrCast(@alignCast(obj.native_data.?)));
 
     if (std.mem.eql(u8, method_name, "get")) {
-        if (args.len < 1 or args[0].tag != .string) return Value.initNull();
-        const url = args[0].data.string.data.data;
+        if (args.len < 2 or args[0].getTag() != .string or args[1].getTag() != .string) return Value.initNull();
+        const method = args[0].getAsString().data.data;
+        const path = args[1].getAsString().data.data;
 
-        const response = client.get(url) catch return Value.initNull();
-        return try createResponseValue(vm, response);
-    } else if (std.mem.eql(u8, method_name, "post")) {
-        if (args.len < 1 or args[0].tag != .string) return Value.initNull();
-        const url = args[0].data.string.data.data;
-        const body: ?[]const u8 = if (args.len > 1 and args[1].tag == .string)
-            args[1].data.string.data.data
+        const MethodType = http_server.HttpRequest.Method;
+        const http_method = if (std.mem.eql(u8, method, "GET"))
+            MethodType.GET
+        else if (std.mem.eql(u8, method, "POST"))
+            MethodType.POST
+        else if (std.mem.eql(u8, method, "PUT"))
+            MethodType.PUT
+        else if (std.mem.eql(u8, method, "DELETE"))
+            MethodType.DELETE
         else
-            null;
+            return Value.initNull();
 
-        const response = client.post(url, body) catch return Value.initNull();
-        return try createResponseValue(vm, response);
-    } else if (std.mem.eql(u8, method_name, "put")) {
-        if (args.len < 1 or args[0].tag != .string) return Value.initNull();
-        const url = args[0].data.string.data.data;
-        const body: ?[]const u8 = if (args.len > 1 and args[1].tag == .string)
-            args[1].data.string.data.data
+        const route = router.match(http_method, path);
+        if (route) |r| {
+            // Return route info as array
+            const result = try Value.initArrayWithManager(&vm.memory_manager);
+            const arr = result.getAsArray().data;
+
+            const method_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "method") };
+            const method_val = switch (r.method) {
+                .GET => "GET",
+                .POST => "POST",
+                .PUT => "PUT",
+                .DELETE => "DELETE",
+                else => "UNKNOWN",
+            };
+            try arr.set(vm.allocator, method_key, try Value.initStringWithManager(&vm.memory_manager, method_val));
+            method_key.string.release(vm.allocator);
+
+            const path_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "path") };
+            try arr.set(vm.allocator, path_key, try Value.initStringWithManager(&vm.memory_manager, r.path));
+            path_key.string.release(vm.allocator);
+
+            return result;
+        }
+        return Value.initNull();
+    } else if (std.mem.eql(u8, method_name, "addRoute")) {
+        if (args.len < 3 or args[0].getTag() != .string or args[1].getTag() != .string) return Value.initNull();
+        const method = args[0].getAsString().data.data;
+        const path = args[1].getAsString().data.data;
+
+        const MethodType = http_server.HttpRequest.Method;
+        const http_method = if (std.mem.eql(u8, method, "GET"))
+            MethodType.GET
+        else if (std.mem.eql(u8, method, "POST"))
+            MethodType.POST
+        else if (std.mem.eql(u8, method, "PUT"))
+            MethodType.PUT
+        else if (std.mem.eql(u8, method, "DELETE"))
+            MethodType.DELETE
         else
-            null;
+            return Value.initBool(false);
 
-        const response = client.put(url, body) catch return Value.initNull();
-        return try createResponseValue(vm, response);
-    } else if (std.mem.eql(u8, method_name, "delete")) {
-        if (args.len < 1 or args[0].tag != .string) return Value.initNull();
-        const url = args[0].data.string.data.data;
-
-        const response = client.delete(url) catch return Value.initNull();
-        return try createResponseValue(vm, response);
-    } else if (std.mem.eql(u8, method_name, "setHeader")) {
+        try router.addRoute(http_method, path, args[2]);
+        return Value.initBool(true);
+    } else if (std.mem.eql(u8, method_name, "match")) {
         if (args.len < 2) return Value.initNull();
-        if (args[0].tag != .string or args[1].tag != .string) return Value.initNull();
 
-        const name = args[0].data.string.data.data;
-        const value = args[1].data.string.data.data;
-        try client.setHeader(name, value);
+        // Convert PHP method string to HttpRequest.Method enum
+        const method_arg = args[0];
+        const path_arg = args[1];
+
+        if (method_arg.getTag() != .string or path_arg.getTag() != .string) return Value.initNull();
+
+        const method_str = method_arg.getAsString().data.data;
+        const path = path_arg.getAsString().data.data;
+
+        const MethodType = http_server.HttpRequest.Method;
+        const http_method = if (std.mem.eql(u8, method_str, "GET"))
+            MethodType.GET
+        else if (std.mem.eql(u8, method_str, "POST"))
+            MethodType.POST
+        else if (std.mem.eql(u8, method_str, "PUT"))
+            MethodType.PUT
+        else if (std.mem.eql(u8, method_str, "DELETE"))
+            MethodType.DELETE
+        else
+            return Value.initNull();
+
+        const route = router.match(http_method, path);
+        if (route) |r| {
+            // Return route info as array
+            const result = try Value.initArrayWithManager(&vm.memory_manager);
+            const arr = result.getAsArray().data;
+
+            const method_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "method") };
+            const method_val = switch (r.method) {
+                .GET => "GET",
+                .POST => "POST",
+                .PUT => "PUT",
+                .DELETE => "DELETE",
+                else => "UNKNOWN",
+            };
+            try arr.set(vm.allocator, method_key, try Value.initStringWithManager(&vm.memory_manager, method_val));
+            method_key.string.release(vm.allocator);
+
+            const path_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "path") };
+            try arr.set(vm.allocator, path_key, try Value.initStringWithManager(&vm.memory_manager, r.path));
+            path_key.string.release(vm.allocator);
+
+            const handler_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "handler") };
+            _ = r.handler.retain();
+            try arr.set(vm.allocator, handler_key, r.handler);
+            handler_key.string.release(vm.allocator);
+
+            return result;
+        }
         return Value.initNull();
     }
 
     return error.MethodNotFound;
 }
 
-/// 调用Router方法
-pub fn callRouterMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []Value) !Value {
-    const router = @as(*http_server.Router, @ptrCast(@alignCast(obj.native_data.?)));
+/// 调用HttpResponse方法
+pub fn callHttpResponseMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []const Value) !Value {
+    const response = @as(*http_server.HttpResponse, @ptrCast(@alignCast(obj.native_data.?)));
 
-    if (std.mem.eql(u8, method_name, "get")) {
-        if (args.len < 2) return Value.initNull();
-        if (args[0].tag != .string) return Value.initNull();
-
-        const path = args[0].data.string.data.data;
-        try router.get(path, args[1]);
+    if (std.mem.eql(u8, method_name, "status")) {
+        if (args.len < 1 or args[0].getTag() != .integer) return Value.initNull();
+        const code = @as(u16, @intCast(args[0].asInt()));
+        response.setStatus(code);
         return Value.initNull();
-    } else if (std.mem.eql(u8, method_name, "post")) {
-        if (args.len < 2) return Value.initNull();
-        if (args[0].tag != .string) return Value.initNull();
-
-        const path = args[0].data.string.data.data;
-        try router.post(path, args[1]);
+    } else if (std.mem.eql(u8, method_name, "json")) {
+        if (args.len < 1 or args[0].getTag() != .string) return Value.initNull();
+        const data = args[0].getAsString().data.data;
+        try response.json(data);
         return Value.initNull();
-    } else if (std.mem.eql(u8, method_name, "put")) {
-        if (args.len < 2) return Value.initNull();
-        if (args[0].tag != .string) return Value.initNull();
-
-        const path = args[0].data.string.data.data;
-        try router.put(path, args[1]);
+    } else if (std.mem.eql(u8, method_name, "html")) {
+        if (args.len < 1 or args[0].getTag() != .string) return Value.initNull();
+        const content = args[0].getAsString().data.data;
+        try response.html(content);
         return Value.initNull();
-    } else if (std.mem.eql(u8, method_name, "delete")) {
-        if (args.len < 2) return Value.initNull();
-        if (args[0].tag != .string) return Value.initNull();
-
-        const path = args[0].data.string.data.data;
-        try router.delete(path, args[1]);
+    } else if (std.mem.eql(u8, method_name, "text")) {
+        if (args.len < 1 or args[0].getTag() != .string) return Value.initNull();
+        const content = args[0].getAsString().data.data;
+        try response.setHeader("Content-Type", "text/plain; charset=utf-8");
+        try response.setBody(content);
         return Value.initNull();
-    } else if (std.mem.eql(u8, method_name, "use")) {
-        if (args.len < 1) return Value.initNull();
-        try router.use(args[0]);
+    } else if (std.mem.eql(u8, method_name, "header")) {
+        if (args.len < 2 or args[0].getTag() != .string or args[1].getTag() != .string) return Value.initNull();
+        const name = args[0].getAsString().data.data;
+        const value = args[1].getAsString().data.data;
+        try response.setHeader(name, value);
         return Value.initNull();
     }
 
@@ -525,17 +649,20 @@ pub fn callRouterMethod(vm: anytype, obj: *types.PHPObject, method_name: []const
 /// 创建响应Value
 fn createResponseValue(vm: anytype, response: http_client.HttpResponse) !Value {
     const result = try Value.initArrayWithManager(&vm.memory_manager);
-    const arr = result.data.array.data;
+    const arr = result.getAsArray().data;
 
     const status_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "status") };
     try arr.set(vm.allocator, status_key, Value.initInt(response.status_code));
+    status_key.string.release(vm.allocator);
 
     const body_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "body") };
     const body_val = try Value.initStringWithManager(&vm.memory_manager, response.body);
     try arr.set(vm.allocator, body_key, body_val);
+    body_key.string.release(vm.allocator);
 
     const success_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "success") };
     try arr.set(vm.allocator, success_key, Value.initBool(response.isSuccess()));
+    success_key.string.release(vm.allocator);
 
     return result;
 }

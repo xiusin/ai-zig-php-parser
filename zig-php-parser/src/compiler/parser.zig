@@ -1,8 +1,15 @@
 const std = @import("std");
 const Lexer = @import("lexer.zig").Lexer;
+const SyntaxMode = @import("syntax_mode.zig").SyntaxMode;
+const SyntaxConfig = @import("syntax_mode.zig").SyntaxConfig;
 const Token = @import("token.zig").Token;
 const ast = @import("ast.zig");
 pub const PHPContext = @import("root.zig").PHPContext;
+const extension_api = @import("../extension/api.zig");
+
+/// Syntax hooks interface for extension system
+/// Allows extensions to hook into the parsing process for custom syntax
+pub const SyntaxHooks = extension_api.SyntaxHooks;
 
 pub const Parser = struct {
     lexer: Lexer,
@@ -10,6 +17,9 @@ pub const Parser = struct {
     context: *PHPContext,
     curr: Token,
     peek: Token,
+    syntax_mode: SyntaxMode = .php,
+    /// Syntax hooks for extension system (optional)
+    syntax_hooks: ?*const SyntaxHooks = null,
 
     pub fn init(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8) anyerror!Parser {
         var lexer = Lexer.init(source);
@@ -22,6 +32,53 @@ pub const Parser = struct {
             .curr = curr,
             .peek = peek,
         };
+    }
+
+    pub fn initWithMode(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode) anyerror!Parser {
+        var lexer = Lexer.initWithMode(source, mode);
+        const curr = lexer.next();
+        const peek = lexer.next();
+        return Parser{
+            .lexer = lexer,
+            .allocator = allocator,
+            .context = context,
+            .curr = curr,
+            .peek = peek,
+            .syntax_mode = mode,
+        };
+    }
+
+    /// Initialize parser with syntax mode and syntax hooks
+    pub fn initWithModeAndHooks(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode, hooks: ?*const SyntaxHooks) anyerror!Parser {
+        var lexer = Lexer.initWithMode(source, mode);
+        const curr = lexer.next();
+        const peek = lexer.next();
+        return Parser{
+            .lexer = lexer,
+            .allocator = allocator,
+            .context = context,
+            .curr = curr,
+            .peek = peek,
+            .syntax_mode = mode,
+            .syntax_hooks = hooks,
+        };
+    }
+
+    /// Set syntax hooks after initialization
+    pub fn setSyntaxHooks(self: *Parser, hooks: ?*const SyntaxHooks) void {
+        self.syntax_hooks = hooks;
+    }
+
+    /// Check if a token is a custom keyword registered by extensions
+    pub fn isCustomKeyword(self: *Parser, token_text: []const u8) bool {
+        if (self.syntax_hooks) |hooks| {
+            for (hooks.custom_keywords) |keyword| {
+                if (std.mem.eql(u8, token_text, keyword)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     pub fn deinit(self: *Parser) void {
@@ -102,7 +159,7 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) anyerror!ast.Node.Index {
         var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
         defer stmts.deinit(self.allocator);
-        
+
         while (self.curr.tag != .eof) {
             if (self.curr.tag == .t_open_tag or self.curr.tag == .t_close_tag or self.curr.tag == .t_inline_html) {
                 self.nextToken();
@@ -126,6 +183,38 @@ pub const Parser = struct {
     fn parseStatement(self: *Parser) anyerror!ast.Node.Index {
         var attributes: []const ast.Node.Index = &.{};
         if (self.curr.tag == .t_attribute_start) attributes = try self.parseAttributes();
+
+        // Check syntax hooks first for custom statement parsing
+        if (self.syntax_hooks) |hooks| {
+            if (hooks.parse_statement) |parse_stmt_hook| {
+                // Pass current token tag as u32 to the hook
+                const token_tag: u32 = @intFromEnum(self.curr.tag);
+                const hook_result = parse_stmt_hook(@ptrCast(self), token_tag) catch null;
+                if (hook_result) |result| {
+                    // Hook handled the statement, return the result
+                    return result;
+                }
+                // Hook returned null, fall through to default parsing
+            }
+        }
+
+        // Check for custom keywords registered by extensions
+        if (self.curr.tag == .t_string or self.curr.tag == .t_go_identifier) {
+            const token_text = self.lexer.buffer[self.curr.loc.start..self.curr.loc.end];
+            if (self.isCustomKeyword(token_text)) {
+                // Custom keyword found, try syntax hook
+                if (self.syntax_hooks) |hooks| {
+                    if (hooks.parse_statement) |parse_stmt_hook| {
+                        const token_tag: u32 = @intFromEnum(self.curr.tag);
+                        const hook_result = parse_stmt_hook(@ptrCast(self), token_tag) catch null;
+                        if (hook_result) |result| {
+                            return result;
+                        }
+                        // Fall through to default parsing
+                    }
+                }
+            }
+        }
 
         return switch (self.curr.tag) {
             .k_namespace => self.parseNamespace(),
@@ -154,10 +243,16 @@ pub const Parser = struct {
             .k_return => self.parseReturn(),
             .k_break => self.parseBreak(),
             .k_continue => self.parseContinue(),
+            .k_require, .k_require_once, .k_include, .k_include_once => self.parseInclude(),
             .k_abstract, .k_final => self.parseModifiedClassOrMember(attributes),
             .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes, false),
             .l_brace => self.parseBlock(),
             .t_variable => {
+                if (self.peek.tag == .equal) return self.parseAssignment();
+                return self.parseExpressionStatement();
+            },
+            .t_go_identifier => {
+                // Go mode: identifiers can be variables for assignment
                 if (self.peek.tag == .equal) return self.parseAssignment();
                 return self.parseExpressionStatement();
             },
@@ -271,7 +366,7 @@ pub const Parser = struct {
         const members_slice = try arena.dupe(ast.Node.Index, members.items);
         implements.deinit(self.allocator);
         members.deinit(self.allocator);
-        
+
         return self.createNode(.{ .tag = tag, .main_token = token, .data = .{ .container_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .extends = extends, .implements = implements_slice, .members = members_slice } } });
     }
 
@@ -279,7 +374,11 @@ pub const Parser = struct {
     fn parseClassMemberWithModifiers(self: *Parser, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier, is_interface: bool) anyerror!ast.Node.Index {
         if (self.curr.tag == .k_function) {
             const token = try self.eat(.k_function);
-            const name_tok = try self.eat(.t_string);
+            // Method name can be t_string or t_go_identifier in Go mode
+            const name_tok = if (self.curr.tag == .t_go_identifier)
+                try self.eat(.t_go_identifier)
+            else
+                try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -307,13 +406,40 @@ pub const Parser = struct {
         } else {
             const token = self.curr;
             var type_node: ?ast.Node.Index = null;
-            if (self.curr.tag == .t_string or self.curr.tag == .question) {
-                type_node = try self.parseType();
+            // Check for type hint (same as parseParameter type detection)
+            // In Go mode, t_go_identifier can also be a type name
+            if (self.curr.tag == .t_string or self.curr.tag == .t_go_identifier or self.curr.tag == .question or
+                self.curr.tag == .k_array or self.curr.tag == .k_callable or
+                self.curr.tag == .k_static or self.curr.tag == .k_self or self.curr.tag == .k_parent or
+                self.curr.tag == .k_void or self.curr.tag == .k_mixed or self.curr.tag == .k_never or
+                self.curr.tag == .k_object or self.curr.tag == .k_iterable or self.curr.tag == .k_null or
+                self.curr.tag == .k_true or self.curr.tag == .k_false)
+            {
+                // In Go mode, we need to check if this is a type or a property name
+                // If followed by another identifier or $variable, it's a type
+                if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
+                    // Check if next token is also an identifier (meaning current is type)
+                    if (self.peek.tag == .t_go_identifier or self.peek.tag == .t_variable) {
+                        type_node = try self.parseType();
+                    }
+                    // Otherwise, current token is the property name, not a type
+                } else {
+                    type_node = try self.parseType();
+                }
             }
-            const name_tok = try self.eat(.t_variable);
-            var name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
-            if (name_str.len > 0 and name_str[0] == '$') {
-                name_str = name_str[1..];
+            
+            // In Go mode, property names can be t_go_identifier (without $ prefix)
+            var name_str: []const u8 = undefined;
+            if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
+                const name_tok = try self.eat(.t_go_identifier);
+                name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            } else {
+                const name_tok = try self.eat(.t_variable);
+                name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+                // Strip leading '$' from PHP-style variable
+                if (name_str.len > 0 and name_str[0] == '$') {
+                    name_str = name_str[1..];
+                }
             }
             const name_id = try self.context.intern(name_str);
 
@@ -353,7 +479,11 @@ pub const Parser = struct {
 
         if (self.curr.tag == .k_function) {
             const token = try self.eat(.k_function);
-            const name_tok = try self.eat(.t_string);
+            // Method name can be t_string or t_go_identifier in Go mode
+            const name_tok = if (self.curr.tag == .t_go_identifier)
+                try self.eat(.t_go_identifier)
+            else
+                try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -381,14 +511,40 @@ pub const Parser = struct {
         } else {
             const token = self.curr;
             var type_node: ?ast.Node.Index = null;
-            if (self.curr.tag == .t_string or self.curr.tag == .question) {
-                type_node = try self.parseType();
+            // Check for type hint (same as parseParameter type detection)
+            // In Go mode, t_go_identifier can also be a type name
+            if (self.curr.tag == .t_string or self.curr.tag == .t_go_identifier or self.curr.tag == .question or
+                self.curr.tag == .k_array or self.curr.tag == .k_callable or
+                self.curr.tag == .k_static or self.curr.tag == .k_self or self.curr.tag == .k_parent or
+                self.curr.tag == .k_void or self.curr.tag == .k_mixed or self.curr.tag == .k_never or
+                self.curr.tag == .k_object or self.curr.tag == .k_iterable or self.curr.tag == .k_null or
+                self.curr.tag == .k_true or self.curr.tag == .k_false)
+            {
+                // In Go mode, we need to check if this is a type or a property name
+                // If followed by another identifier or $variable, it's a type
+                if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
+                    // Check if next token is also an identifier (meaning current is type)
+                    if (self.peek.tag == .t_go_identifier or self.peek.tag == .t_variable) {
+                        type_node = try self.parseType();
+                    }
+                    // Otherwise, current token is the property name, not a type
+                } else {
+                    type_node = try self.parseType();
+                }
             }
-            const name_tok = try self.eat(.t_variable);
-            var name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
-            // Strip leading '$'
-            if (name_str.len > 0 and name_str[0] == '$') {
-                name_str = name_str[1..];
+            
+            // In Go mode, property names can be t_go_identifier (without $ prefix)
+            var name_str: []const u8 = undefined;
+            if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
+                const name_tok = try self.eat(.t_go_identifier);
+                name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            } else {
+                const name_tok = try self.eat(.t_variable);
+                name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+                // Strip leading '$' from PHP-style variable
+                if (name_str.len > 0 and name_str[0] == '$') {
+                    name_str = name_str[1..];
+                }
             }
             const name_id = try self.context.intern(name_str);
 
@@ -533,6 +689,14 @@ pub const Parser = struct {
             if (self.curr.tag == .comma) self.nextToken();
         }
         _ = try self.eat(.r_paren);
+
+        // Parse optional return type declaration (: type or : ?type)
+        // We skip the return type as the AST doesn't currently store it
+        if (self.curr.tag == .colon) {
+            self.nextToken(); // consume ':'
+            _ = try self.parseType();
+        }
+
         const body = try self.parseBlock();
         return self.createNode(.{ .tag = .function_decl, .main_token = token, .data = .{ .function_decl = .{ .attributes = attributes, .name = name_id, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .body = body } } });
     }
@@ -552,7 +716,15 @@ pub const Parser = struct {
             self.nextToken();
         }
         var type_node: ?ast.Node.Index = null;
-        if (self.curr.tag == .t_string) {
+        // Handle type declarations including nullable (?type), array, callable, etc.
+        // t_string covers user types and built-in types like int, float, string, bool
+        if (self.curr.tag == .t_string or self.curr.tag == .question or
+            self.curr.tag == .k_array or self.curr.tag == .k_callable or
+            self.curr.tag == .k_static or self.curr.tag == .k_self or self.curr.tag == .k_parent or
+            self.curr.tag == .k_void or self.curr.tag == .k_mixed or self.curr.tag == .k_never or
+            self.curr.tag == .k_object or self.curr.tag == .k_iterable or self.curr.tag == .k_null or
+            self.curr.tag == .k_true or self.curr.tag == .k_false)
+        {
             type_node = try self.parseType();
         }
         var is_reference = false;
@@ -584,7 +756,26 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
         const then = try self.parseStatement();
         var else_branch: ?ast.Node.Index = null;
-        if (self.curr.tag == .k_else) {
+        if (self.curr.tag == .k_elseif) {
+            // elseif is parsed as else { if (...) }
+            else_branch = try self.parseElseif();
+        } else if (self.curr.tag == .k_else) {
+            self.nextToken();
+            else_branch = try self.parseStatement();
+        }
+        return self.createNode(.{ .tag = .if_stmt, .main_token = token, .data = .{ .if_stmt = .{ .condition = cond, .then_branch = then, .else_branch = else_branch } } });
+    }
+
+    fn parseElseif(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_elseif);
+        _ = try self.eat(.l_paren);
+        const cond = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
+        const then = try self.parseStatement();
+        var else_branch: ?ast.Node.Index = null;
+        if (self.curr.tag == .k_elseif) {
+            else_branch = try self.parseElseif();
+        } else if (self.curr.tag == .k_else) {
             self.nextToken();
             else_branch = try self.parseStatement();
         }
@@ -686,7 +877,7 @@ pub const Parser = struct {
             return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = null, .condition = null, .loop = null, .body = body } } });
         }
 
-        // Range loop: for range 10 或 for $i range 10
+        // Range loop: for range 10, for $i range 10, or for range 10 as $i
         if (self.curr.tag == .k_range or self.curr.tag == .t_variable) {
             var variable: ?ast.Node.Index = null;
 
@@ -700,6 +891,12 @@ pub const Parser = struct {
             }
 
             const count = try self.parseExpression(0); // 解析范围数值
+
+            // Check for "as $var" syntax (for range 10 as $i)
+            if (self.curr.tag == .k_as) {
+                self.nextToken(); // consume 'as'
+                variable = try self.parseExpression(0); // parse the variable
+            }
 
             const body = try self.parseStatement();
             return self.createNode(.{ .tag = .for_range_stmt, .main_token = token, .data = .{ .for_range_stmt = .{ .count = count, .variable = variable, .body = body } } });
@@ -781,6 +978,17 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .lock_stmt, .main_token = token, .data = .{ .lock_stmt = .{ .body = body } } });
     }
 
+    fn parseInclude(self: *Parser) anyerror!ast.Node.Index {
+        const token = self.curr;
+        const is_require = token.tag == .k_require or token.tag == .k_require_once;
+        const is_once = token.tag == .k_require_once or token.tag == .k_include_once;
+        const tag: ast.Node.Tag = if (is_require) .require_stmt else .include_stmt;
+        self.nextToken();
+        const expr = try self.parseExpression(0);
+        _ = try self.eat(.semicolon);
+        return self.createNode(.{ .tag = tag, .main_token = token, .data = .{ .include_stmt = .{ .path = expr, .is_once = is_once, .is_require = is_require } } });
+    }
+
     fn parseReturn(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_return);
         var expr: ?ast.Node.Index = null;
@@ -846,7 +1054,7 @@ pub const Parser = struct {
         const token = try self.eat(.l_brace);
         var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
         defer stmts.deinit(self.allocator);
-        
+
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             try stmts.append(self.allocator, try self.parseStatement());
         }
@@ -856,6 +1064,18 @@ pub const Parser = struct {
     }
 
     fn parseExpression(self: *Parser, precedence: u8) anyerror!ast.Node.Index {
+        // Check syntax hooks first for custom expression parsing
+        if (self.syntax_hooks) |hooks| {
+            if (hooks.parse_expression) |parse_expr_hook| {
+                const hook_result = parse_expr_hook(@ptrCast(self), precedence) catch null;
+                if (hook_result) |result| {
+                    // Hook handled the expression, return the result
+                    return result;
+                }
+                // Hook returned null, fall through to default parsing
+            }
+        }
+
         var left = try self.parseUnary();
         while (true) {
             const tag = self.curr.tag;
@@ -865,11 +1085,20 @@ pub const Parser = struct {
             self.nextToken();
             if (tag == .arrow) {
                 // 方法名可以是标识符，也可以是某些关键字（如 set, get）
+                // In Go mode, member names are t_go_identifier; in PHP mode, they are t_string
                 const member_name_tok = if (self.curr.tag == .t_string)
                     try self.eat(.t_string)
+                else if (self.curr.tag == .t_go_identifier)
+                    try self.eat(.t_go_identifier)
                 else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
                     self.curr.tag == .k_unset or self.curr.tag == .k_clone or
-                    self.curr.tag == .k_list or self.curr.tag == .k_print)
+                    self.curr.tag == .k_list or self.curr.tag == .k_print or
+                    self.curr.tag == .k_lock or self.curr.tag == .k_try or
+                    self.curr.tag == .k_catch or self.curr.tag == .k_finally or
+                    self.curr.tag == .k_throw or self.curr.tag == .k_match or
+                    self.curr.tag == .k_default or self.curr.tag == .k_static or
+                    self.curr.tag == .k_class or self.curr.tag == .k_function or
+                    self.curr.tag == .k_array or self.curr.tag == .k_new)
                 blk: {
                     const tok = self.curr;
                     self.nextToken();
@@ -931,7 +1160,22 @@ pub const Parser = struct {
             } else if (tag == .l_paren) {
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
                 while (self.curr.tag != .r_paren) {
-                    try args.append(self.allocator, try self.parseExpression(0));
+                    // Check for named parameter: name: value
+                    if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                        const name_tok = self.curr;
+                        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+                        self.nextToken(); // skip name
+                        self.nextToken(); // skip colon
+                        const value_expr = try self.parseExpression(0);
+                        const named_arg_node = try self.createNode(.{
+                            .tag = .named_arg,
+                            .main_token = name_tok,
+                            .data = .{ .named_arg = .{ .name = name_id, .value = value_expr } },
+                        });
+                        try args.append(self.allocator, named_arg_node);
+                    } else {
+                        try args.append(self.allocator, try self.parseExpression(0));
+                    }
                     if (self.curr.tag == .comma) self.nextToken();
                 }
                 _ = try self.eat(.r_paren);
@@ -949,6 +1193,9 @@ pub const Parser = struct {
             } else if (tag == .equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
+            } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal) {
+                const right = try self.parseExpression(precedence);
+                left = try self.createNode(.{ .tag = .compound_assignment, .main_token = op, .data = .{ .compound_assignment = .{ .target = left, .op = tag, .value = right } } });
             } else if (tag == .question) {
                 var then_expr: ?ast.Node.Index = null;
                 if (self.curr.tag != .colon) {
@@ -961,7 +1208,23 @@ pub const Parser = struct {
                 left = try self.createNode(.{ .tag = .postfix_expr, .main_token = op, .data = .{ .postfix_expr = .{ .op = tag, .expr = left } } });
             } else {
                 const right = try self.parseExpression(next_p);
-                left = try self.createNode(.{ .tag = .binary_expr, .main_token = op, .data = .{ .binary_expr = .{ .lhs = left, .op = op.tag, .rhs = right } } });
+                
+                // In Go mode, + operator on strings should be concatenation (like PHP's .)
+                var effective_op = op.tag;
+                if (self.syntax_mode == .go and tag == .plus) {
+                    // Check if both operands are string literals
+                    const left_node = self.context.nodes.items[left];
+                    const right_node = self.context.nodes.items[right];
+                    const left_is_string = left_node.tag == .literal_string;
+                    const right_is_string = right_node.tag == .literal_string;
+                    
+                    if (left_is_string or right_is_string) {
+                        // Use dot (concat) operator for string concatenation
+                        effective_op = .dot;
+                    }
+                }
+                
+                left = try self.createNode(.{ .tag = .binary_expr, .main_token = op, .data = .{ .binary_expr = .{ .lhs = left, .op = effective_op, .rhs = right } } });
             }
         }
         return left;
@@ -970,16 +1233,15 @@ pub const Parser = struct {
     fn parseUnary(self: *Parser) anyerror!ast.Node.Index {
         const tag = self.curr.tag;
         switch (tag) {
-            .bang, .minus, .plus, .t_variable, .ampersand => {
-                // Determine if it's a unary op or start of primary
-                if (tag == .t_variable) {
-                    return self.parsePrimary();
-                }
-
+            .bang, .minus, .plus, .ampersand => {
                 const token = self.curr;
                 self.nextToken();
-                const expr = try self.parseUnary();
+                // Use parseUnaryPostfix to handle cases like !empty($x)
+                const expr = try self.parseUnaryPostfix();
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
+            },
+            .t_variable, .t_go_identifier => {
+                return self.parseUnaryPostfix();
             },
             .plus_plus, .minus_minus => {
                 const token = self.curr;
@@ -988,8 +1250,59 @@ pub const Parser = struct {
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
             },
             .k_clone => return self.parseCloneExpression(),
-            else => return self.parsePrimary(),
+            else => return self.parseUnaryPostfix(),
         }
+    }
+
+    // Parse primary expression with postfix operators (function calls, array access, etc.)
+    fn parseUnaryPostfix(self: *Parser) anyerror!ast.Node.Index {
+        var left = try self.parsePrimary();
+
+        // Handle postfix operators: function calls, array access
+        while (true) {
+            const tag = self.curr.tag;
+            if (tag == .l_paren) {
+                // Function call
+                const op = self.curr;
+                self.nextToken();
+                var args = std.ArrayList(ast.Node.Index){};
+                while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                    // Check for named argument: name: value
+                    if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                        const name_tok = self.curr;
+                        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+                        self.nextToken(); // skip name
+                        self.nextToken(); // skip colon
+                        const value_expr = try self.parseExpression(0);
+                        const named_arg_node = try self.createNode(.{
+                            .tag = .named_arg,
+                            .main_token = name_tok,
+                            .data = .{ .named_arg = .{ .name = name_id, .value = value_expr } },
+                        });
+                        try args.append(self.allocator, named_arg_node);
+                    } else {
+                        try args.append(self.allocator, try self.parseExpression(0));
+                    }
+                    if (self.curr.tag == .comma) self.nextToken();
+                }
+                _ = try self.eat(.r_paren);
+                left = try self.createNode(.{ .tag = .function_call, .main_token = op, .data = .{ .function_call = .{ .name = left, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+            } else if (tag == .l_bracket) {
+                // Array access
+                const op = self.curr;
+                self.nextToken();
+                var index: ?ast.Node.Index = null;
+                if (self.curr.tag != .r_bracket) {
+                    index = try self.parseExpression(0);
+                }
+                _ = try self.eat(.r_bracket);
+                left = try self.createNode(.{ .tag = .array_access, .main_token = op, .data = .{ .array_access = .{ .target = left, .index = index } } });
+            } else {
+                break;
+            }
+        }
+
+        return left;
     }
 
     fn parsePrimary(self: *Parser) anyerror!ast.Node.Index {
@@ -1023,6 +1336,21 @@ pub const Parser = struct {
                 const t = try self.eat(.k_null);
                 return self.createNode(.{ .tag = .literal_null, .main_token = t, .data = .{ .none = {} } });
             },
+            .m_dir, .m_file, .m_line, .m_function, .m_class, .m_method, .m_namespace => {
+                const t = self.curr;
+                const kind: ast.MagicConstantKind = switch (t.tag) {
+                    .m_dir => .dir,
+                    .m_file => .file,
+                    .m_line => .line,
+                    .m_function => .function,
+                    .m_class => .class,
+                    .m_method => .method,
+                    .m_namespace => .namespace,
+                    else => .dir,
+                };
+                self.nextToken();
+                return self.createNode(.{ .tag = .magic_constant, .main_token = t, .data = .{ .magic_constant = .{ .kind = kind } } });
+            },
             .ellipsis => {
                 const token = self.curr;
                 self.nextToken();
@@ -1033,9 +1361,30 @@ pub const Parser = struct {
                 const t = try self.eat(.t_variable);
                 return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
             },
+            .t_go_identifier => {
+                // Go mode: identifiers are variables, add $ prefix for VM compatibility
+                const t = try self.eat(.t_go_identifier);
+                const raw_name = self.lexer.buffer[t.loc.start..t.loc.end];
+                const var_name = try std.fmt.allocPrint(self.allocator, "${s}", .{raw_name});
+                defer self.allocator.free(var_name);
+                const name_id = try self.context.intern(var_name);
+                return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
             .t_string => {
                 const t = try self.eat(.t_string);
-                const name_id = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]);
+                const raw_name = self.lexer.buffer[t.loc.start..t.loc.end];
+
+                // In Go mode, treat identifiers as variables by adding $ prefix
+                if (self.syntax_mode == .go) {
+                    // Add $ prefix for VM compatibility
+                    const var_name = try std.fmt.allocPrint(self.allocator, "${s}", .{raw_name});
+                    defer self.allocator.free(var_name);
+                    const name_id = try self.context.intern(var_name);
+                    return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+                }
+
+                // PHP mode: resolve as constant/class name
+                const name_id = try self.context.intern(raw_name);
                 const resolved_id = try self.context.resolveName(name_id);
                 return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = resolved_id } } });
             },
@@ -1077,10 +1426,90 @@ pub const Parser = struct {
                     raw_text;
                 return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content), .quote_type = .backtick } } });
             },
+            .t_heredoc_start, .t_nowdoc_start => {
+                // Parse heredoc/nowdoc string with interpolation support
+                const start_tok = self.curr;
+                const is_nowdoc = self.curr.tag == .t_nowdoc_start;
+                self.nextToken();
+
+                if (is_nowdoc) {
+                    // Nowdoc: no interpolation, just get content
+                    var content: []const u8 = "";
+                    if (self.curr.tag == .t_encapsed_and_whitespace) {
+                        const content_tok = self.curr;
+                        content = self.lexer.buffer[content_tok.loc.start..content_tok.loc.end];
+                        self.nextToken();
+                    }
+                    if (self.curr.tag == .t_heredoc_end) {
+                        self.nextToken();
+                    }
+                    return self.createNode(.{ .tag = .literal_string, .main_token = start_tok, .data = .{ .literal_string = .{ .value = try self.context.intern(content) } } });
+                } else {
+                    // Heredoc: support interpolation like double-quoted strings
+                    var left: ?ast.Node.Index = null;
+                    while (self.curr.tag != .t_heredoc_end and self.curr.tag != .eof) {
+                        const part = switch (self.curr.tag) {
+                            .t_encapsed_and_whitespace => blk: {
+                                const t = self.curr;
+                                self.nextToken();
+                                break :blk try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                            },
+                            .t_variable => blk: {
+                                const t = self.curr;
+                                self.nextToken();
+                                break :blk try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                            },
+                            .t_curly_open => blk: {
+                                self.nextToken(); // skip {
+                                const expr = try self.parseExpression(0);
+                                if (self.curr.tag == .r_brace) self.nextToken();
+                                break :blk expr;
+                            },
+                            else => break,
+                        };
+                        left = if (left) |l| try self.createNode(.{ .tag = .binary_expr, .main_token = start_tok, .data = .{ .binary_expr = .{ .lhs = l, .op = .dot, .rhs = part } } }) else part;
+                    }
+                    if (self.curr.tag == .t_heredoc_end) {
+                        self.nextToken();
+                    }
+                    return left orelse try self.createNode(.{ .tag = .literal_string, .main_token = start_tok, .data = .{ .literal_string = .{ .value = try self.context.intern("") } } });
+                }
+            },
             .l_bracket => self.parseArrayLiteral(),
+            .k_array => self.parseArrayConstruct(),
             .l_brace => self.parseJsonObjectLiteral(),
             .l_paren => {
                 self.nextToken();
+                // Check for type cast: (int), (float), (string), (array), (object), (bool)
+                if (self.curr.tag == .k_array or self.curr.tag == .k_object) {
+                    const cast_type = self.curr.tag;
+                    const cast_token = self.curr;
+                    self.nextToken();
+                    if (self.curr.tag == .r_paren) {
+                        self.nextToken();
+                        // Parse the expression being cast
+                        const cast_expr = try self.parseUnaryPostfix();
+                        return self.createNode(.{ .tag = .cast_expr, .main_token = cast_token, .data = .{ .cast_expr = .{ .cast_type = cast_type, .expr = cast_expr } } });
+                    }
+                } else if (self.curr.tag == .t_string) {
+                    // Check for type names like int, float, string, bool
+                    const type_name = self.lexer.buffer[self.curr.loc.start..self.curr.loc.end];
+                    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "float") or
+                        std.mem.eql(u8, type_name, "string") or std.mem.eql(u8, type_name, "bool") or
+                        std.mem.eql(u8, type_name, "integer") or std.mem.eql(u8, type_name, "boolean") or
+                        std.mem.eql(u8, type_name, "double") or std.mem.eql(u8, type_name, "real"))
+                    {
+                        const cast_token = self.curr;
+                        self.nextToken();
+                        if (self.curr.tag == .r_paren) {
+                            self.nextToken();
+                            const cast_expr = try self.parseUnaryPostfix();
+                            // Use t_string as cast_type and store name for VM to handle
+                            return self.createNode(.{ .tag = .cast_expr, .main_token = cast_token, .data = .{ .cast_expr = .{ .cast_type = .t_string, .expr = cast_expr } } });
+                        }
+                    }
+                }
+                // Regular parenthesized expression
                 const expr = try self.parseExpression(0);
                 _ = try self.eat(.r_paren);
                 return expr;
@@ -1288,7 +1717,7 @@ pub const Parser = struct {
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
             .question => 7, // Ternary
-            .equal => 5,
+            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal => 5,
             else => 0,
         };
     }
@@ -1327,6 +1756,34 @@ pub const Parser = struct {
         params.deinit(self.allocator);
 
         return self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = params_slice, .return_type = return_type, .body = body, .is_static = false } } });
+    }
+
+    fn parseArrayConstruct(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_array);
+        _ = try self.eat(.l_paren);
+
+        var elements = std.ArrayListUnmanaged(ast.Node.Index){};
+        while (self.curr.tag != .r_paren) {
+            // Check for key => value syntax
+            const first_expr = try self.parseExpression(0);
+            if (self.curr.tag == .fat_arrow) {
+                self.nextToken();
+                const value_expr = try self.parseExpression(0);
+                const pair = try self.createNode(.{ .tag = .array_pair, .main_token = token, .data = .{ .array_pair = .{ .key = first_expr, .value = value_expr } } });
+                try elements.append(self.allocator, pair);
+            } else {
+                try elements.append(self.allocator, first_expr);
+            }
+
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+            } else {
+                break;
+            }
+        }
+        _ = try self.eat(.r_paren);
+
+        return self.createNode(.{ .tag = .array_init, .main_token = token, .data = .{ .array_init = .{ .elements = try self.context.arena.allocator().dupe(ast.Node.Index, elements.items) } } });
     }
 
     fn parseArrayLiteral(self: *Parser) anyerror!ast.Node.Index {
@@ -1448,34 +1905,67 @@ pub const Parser = struct {
     fn parseIntersectionType(self: *Parser) anyerror!ast.Node.Index {
         const left = try self.parsePrimaryType();
 
+        // Check for intersection type: Type&OtherType
+        // But NOT reference parameter: int &$var (ampersand followed by variable)
         if (self.curr.tag == .ampersand) {
+            // Use peek to see if next token is a variable (reference parameter case)
+            // If so, don't parse as intersection type - let parseParameter handle it
+            if (self.peek.tag == .t_variable or self.peek.tag == .ellipsis) {
+                return left;
+            }
+
             var types = std.ArrayListUnmanaged(ast.Node.Index){};
             try types.append(self.allocator, left);
 
             while (self.curr.tag == .ampersand) {
+                // Check peek: if next is variable or ellipsis, stop parsing intersection
+                if (self.peek.tag == .t_variable or self.peek.tag == .ellipsis) {
+                    break;
+                }
                 self.nextToken();
                 try types.append(self.allocator, try self.parsePrimaryType());
             }
 
-            const arena = self.context.arena.allocator();
-            const types_slice = try arena.dupe(ast.Node.Index, types.items);
+            if (types.items.len > 1) {
+                const arena = self.context.arena.allocator();
+                const types_slice = try arena.dupe(ast.Node.Index, types.items);
+                types.deinit(self.allocator);
+                return self.createNode(.{ .tag = .intersection_type, .main_token = self.curr, .data = .{ .intersection_type = .{ .types = types_slice } } });
+            }
             types.deinit(self.allocator);
-            return self.createNode(.{ .tag = .intersection_type, .main_token = self.curr, .data = .{ .intersection_type = .{ .types = types_slice } } });
         }
 
         return left;
     }
 
     fn parsePrimaryType(self: *Parser) anyerror!ast.Node.Index {
-        if (self.curr.tag == .l_paren) {
+        // Handle nullable types (?type)
+        if (self.curr.tag == .question) {
+            const q_tok = self.curr;
+            self.nextToken();
+            const inner_type = try self.parsePrimaryType();
+            return self.createNode(.{ .tag = .nullable_type, .main_token = q_tok, .data = .{ .nullable_type = .{ .inner = inner_type } } });
+        } else if (self.curr.tag == .l_paren) {
             self.nextToken();
             const type_node = try self.parseType();
             _ = try self.eat(.r_paren);
             return type_node;
-        } else {
-            const type_name_tok = try self.eat(.t_string);
+        } else if (self.curr.tag == .t_string or self.curr.tag == .k_array or
+            self.curr.tag == .k_callable or self.curr.tag == .k_static or
+            self.curr.tag == .k_self or self.curr.tag == .k_parent or
+            self.curr.tag == .k_void or self.curr.tag == .k_mixed or
+            self.curr.tag == .k_never or self.curr.tag == .k_object or
+            self.curr.tag == .k_iterable or self.curr.tag == .k_null or
+            self.curr.tag == .k_true or self.curr.tag == .k_false)
+        {
+            // Handle built-in type keywords and user-defined types
+            const type_name_tok = self.curr;
+            self.nextToken();
             const type_name_id = try self.context.intern(self.lexer.buffer[type_name_tok.loc.start..type_name_tok.loc.end]);
             return self.createNode(.{ .tag = .named_type, .main_token = type_name_tok, .data = .{ .named_type = .{ .name = type_name_id } } });
+        } else {
+            self.reportError("Expected type name");
+            return error.UnexpectedToken;
         }
     }
 };
