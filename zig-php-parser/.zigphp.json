@@ -1,0 +1,7 @@
+{
+    "syntax": "php",
+    "extensions": [],
+    "include_paths": ["./lib"],
+    "error_reporting": 32767
+}
+

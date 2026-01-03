@@ -7,6 +7,16 @@ pub const QuoteType = enum {
     backtick, // 反引号字符串 `xxx` (原始字符串，不处理转义)
 };
 
+pub const MagicConstantKind = enum {
+    dir, // __DIR__
+    file, // __FILE__
+    line, // __LINE__
+    function, // __FUNCTION__
+    class, // __CLASS__
+    method, // __METHOD__
+    namespace, // __NAMESPACE__
+};
+
 pub const Node = struct {
     tag: Tag,
     main_token: Token,
@@ -60,6 +70,7 @@ pub const Node = struct {
         block,
         expression_stmt,
         assignment,
+        compound_assignment,
         echo_stmt,
         return_stmt,
         break_stmt,
@@ -70,8 +81,10 @@ pub const Node = struct {
         literal_string,
         literal_bool,
         literal_null,
+        magic_constant,
         array_init,
         array_pair,
+        named_arg,
         binary_expr,
         unary_expr,
         postfix_expr,
@@ -83,12 +96,14 @@ pub const Node = struct {
         object_instantiation,
         trait_use,
         named_type,
+        nullable_type,
         union_type,
         intersection_type,
         class_constant_access, // 类常量访问 ClassName::CONST
         self_expr,
         parent_expr,
         static_expr, // self, parent, static 关键字
+        cast_expr, // 类型转换 (int), (object), etc.
     };
 
     pub const Modifier = packed struct {
@@ -152,6 +167,7 @@ pub const Node = struct {
         break_stmt: struct { level: ?Index },
         continue_stmt: struct { level: ?Index },
         assignment: struct { target: Index, value: Index },
+        compound_assignment: struct { target: Index, op: Token.Tag, value: Index },
         binary_expr: struct { lhs: Index, op: Token.Tag, rhs: Index },
         unary_expr: struct { op: Token.Tag, expr: Index },
         postfix_expr: struct { op: Token.Tag, expr: Index },
@@ -166,10 +182,14 @@ pub const Node = struct {
         variable: struct { name: StringId },
         literal_int: struct { value: i64 },
         literal_float: struct { value: f64 },
+        magic_constant: struct { kind: MagicConstantKind },
+        named_arg: struct { name: StringId, value: Index },
         trait_use: struct { traits: []const Index },
         named_type: struct { name: StringId },
+        nullable_type: struct { inner: Index },
         union_type: struct { types: []const Index },
         intersection_type: struct { types: []const Index },
+        cast_expr: struct { cast_type: Token.Tag, expr: Index },
         none: void,
     };
 };

@@ -75,6 +75,8 @@ pub const OptimizeLevel = CompilerMod.OptimizeLevel;
 pub const Target = CompilerMod.Target;
 pub const supported_targets = CompilerMod.supported_targets;
 pub const listTargets = CompilerMod.listTargets;
+pub const AOTSyntaxMode = CompilerMod.SyntaxMode;
+pub const AOTSyntaxConfig = CompilerMod.SyntaxConfig;
 
 // Runtime Library module
 pub const RuntimeLib = @import("runtime_lib.zig");

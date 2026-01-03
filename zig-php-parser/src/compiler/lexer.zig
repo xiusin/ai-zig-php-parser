@@ -1,5 +1,7 @@
 const std = @import("std");
 const Token = @import("token.zig").Token;
+pub const SyntaxMode = @import("syntax_mode.zig").SyntaxMode;
+pub const SyntaxConfig = @import("syntax_mode.zig").SyntaxConfig;
 
 pub const Lexer = struct {
     buffer: [:0]const u8,
@@ -7,6 +9,7 @@ pub const Lexer = struct {
     state: State = .initial,
     heredoc_label: ?[]const u8 = null,
     interp_nesting_level: u32 = 0,
+    syntax_mode: SyntaxMode = .php,
 
     pub const State = enum {
         initial,
@@ -18,6 +21,10 @@ pub const Lexer = struct {
 
     pub fn init(buffer: [:0]const u8) Lexer {
         return .{ .buffer = buffer };
+    }
+
+    pub fn initWithMode(buffer: [:0]const u8, mode: SyntaxMode) Lexer {
+        return .{ .buffer = buffer, .syntax_mode = mode };
     }
 
     pub fn next(self: *Lexer) Token {
@@ -69,14 +76,31 @@ pub const Lexer = struct {
             '}' => .{ .tag = .r_brace, .loc = .{ .start = start, .end = self.pos } },
             ';' => .{ .tag = .semicolon, .loc = .{ .start = start, .end = self.pos } },
             ',' => .{ .tag = .comma, .loc = .{ .start = start, .end = self.pos } },
-            '.' => if (self.match('.')) (if (self.match('.')) .{ .tag = .ellipsis, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .dot, .loc = .{ .start = start, .end = self.pos } },
-            '$' => self.lexVariable(start),
+            '.' => if (self.match('.')) (if (self.match('.')) .{ .tag = .ellipsis, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } }) else blk: {
+                // In Go mode, . followed by identifier is property access (like -> in PHP)
+                if (self.syntax_mode == .go and self.pos < self.buffer.len) {
+                    const next_char = self.buffer[self.pos];
+                    if ((next_char >= 'a' and next_char <= 'z') or
+                        (next_char >= 'A' and next_char <= 'Z') or next_char == '_')
+                    {
+                        break :blk .{ .tag = .arrow, .loc = .{ .start = start, .end = self.pos } };
+                    }
+                }
+                break :blk .{ .tag = .dot, .loc = .{ .start = start, .end = self.pos } };
+            },
+            '$' => blk: {
+                // In Go mode, $ is not allowed for variables
+                if (self.syntax_mode == .go) {
+                    break :blk .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
+                }
+                break :blk self.lexVariable(start);
+            },
             '+' => if (self.match('+')) .{ .tag = .plus_plus, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) .{ .tag = .plus_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .plus, .loc = .{ .start = start, .end = self.pos } },
             '-' => if (self.match('>')) .{ .tag = .arrow, .loc = .{ .start = start, .end = self.pos } } else if (self.match('-')) .{ .tag = .minus_minus, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) .{ .tag = .minus_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .minus, .loc = .{ .start = start, .end = self.pos } },
             '*' => if (self.match('=')) .{ .tag = .asterisk_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .asterisk, .loc = .{ .start = start, .end = self.pos } },
             '/' => if (self.match('=')) .{ .tag = .slash_equal, .loc = .{ .start = start, .end = self.pos } } else if (self.match('/')) self.skipLineComment(start) else if (self.match('*')) self.skipBlockComment(start) else .{ .tag = .slash, .loc = .{ .start = start, .end = self.pos } },
             '%' => if (self.match('=')) .{ .tag = .percent_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .percent, .loc = .{ .start = start, .end = self.pos } },
-            '?' => if (self.match('?')) .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .question, .loc = .{ .start = start, .end = self.pos } },
+            '?' => if (self.match('>')) .{ .tag = .t_close_tag, .loc = .{ .start = start, .end = self.pos } } else if (self.match('?')) .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .question, .loc = .{ .start = start, .end = self.pos } },
             '=' => if (self.match('>')) .{ .tag = .fat_arrow, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) (if (self.match('=')) .{ .tag = .equal_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .equal_equal, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .equal, .loc = .{ .start = start, .end = self.pos } },
             '!' => if (self.match('=')) (if (self.match('=')) .{ .tag = .bang_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .bang_equal, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .bang, .loc = .{ .start = start, .end = self.pos } },
             '&' => if (self.match('&')) .{ .tag = .double_ampersand, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .ampersand, .loc = .{ .start = start, .end = self.pos } },
@@ -151,7 +175,8 @@ pub const Lexer = struct {
 
     fn lexNowdoc(self: *Lexer, start: usize) Token {
         if (self.heredoc_label) |label| {
-            if (std.mem.startsWith(u8, self.buffer[self.pos..], label)) {
+            // Check if we're at the ending label (must be at start of line)
+            if (self.isAtLineStart(start) and std.mem.startsWith(u8, self.buffer[self.pos..], label)) {
                 self.pos += label.len;
                 self.state = .script;
                 self.heredoc_label = null;
@@ -160,22 +185,49 @@ pub const Lexer = struct {
         }
         while (self.pos < self.buffer.len) {
             if (self.heredoc_label) |label| {
-                if (std.mem.startsWith(u8, self.buffer[self.pos..], label)) break;
+                // Check for label at start of new line
+                if (self.buffer[self.pos] == '\n') {
+                    const next_pos = self.pos + 1;
+                    if (next_pos < self.buffer.len and std.mem.startsWith(u8, self.buffer[next_pos..], label)) {
+                        self.pos += 1; // include the newline in content
+                        break;
+                    }
+                }
             }
             self.pos += 1;
         }
         return .{ .tag = .t_encapsed_and_whitespace, .loc = .{ .start = start, .end = self.pos } };
     }
 
+    fn isAtLineStart(self: *Lexer, pos: usize) bool {
+        if (pos == 0) return true;
+        const prev_char = self.buffer[pos - 1];
+        return prev_char == '\n' or prev_char == '\r';
+    }
+
     fn lexHeredocStart(self: *Lexer, start: usize) Token {
         self.skipWhitespace();
-        const label_start = self.pos;
         var is_nowdoc = false;
-        if (self.match('"')) is_nowdoc = true;
+        var is_quoted_heredoc = false;
 
+        // Check for nowdoc (single quotes) or quoted heredoc (double quotes)
+        if (self.match('\'')) {
+            is_nowdoc = true;
+        } else if (self.match('"')) {
+            is_quoted_heredoc = true;
+        }
+
+        const label_start = self.pos;
         while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) self.pos += 1;
         const label = self.buffer[label_start..self.pos];
-        if (is_nowdoc) _ = self.match('"');
+
+        // Skip closing quote if present
+        if (is_nowdoc) _ = self.match('\'');
+        if (is_quoted_heredoc) _ = self.match('"');
+
+        // Skip newline after label
+        if (self.pos < self.buffer.len and self.buffer[self.pos] == '\r') self.pos += 1;
+        if (self.pos < self.buffer.len and self.buffer[self.pos] == '\n') self.pos += 1;
 
         self.heredoc_label = label;
         self.state = if (is_nowdoc) .nowdoc else .heredoc;
@@ -238,7 +290,18 @@ pub const Lexer = struct {
     fn lexIdentifier(self: *Lexer, start: usize) Token {
         while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_' or self.buffer[self.pos] == '\\')) self.pos += 1;
         const text = self.buffer[start..self.pos];
-        const tag: Token.Tag = if (std.mem.eql(u8, text, "class")) .k_class else if (std.mem.eql(u8, text, "interface")) .k_interface else if (std.mem.eql(u8, text, "trait")) .k_trait else if (std.mem.eql(u8, text, "enum")) .k_enum else if (std.mem.eql(u8, text, "struct")) .k_struct else if (std.mem.eql(u8, text, "extends")) .k_extends else if (std.mem.eql(u8, text, "implements")) .k_implements else if (std.mem.eql(u8, text, "use")) .k_use else if (std.mem.eql(u8, text, "public")) .k_public else if (std.mem.eql(u8, text, "private")) .k_private else if (std.mem.eql(u8, text, "protected")) .k_protected else if (std.mem.eql(u8, text, "static")) .k_static else if (std.mem.eql(u8, text, "readonly")) .k_readonly else if (std.mem.eql(u8, text, "final")) .k_final else if (std.mem.eql(u8, text, "abstract")) .k_abstract else if (std.mem.eql(u8, text, "function")) .k_function else if (std.mem.eql(u8, text, "fn")) .k_fn else if (std.mem.eql(u8, text, "new")) .k_new else if (std.mem.eql(u8, text, "if")) .k_if else if (std.mem.eql(u8, text, "else")) .k_else else if (std.mem.eql(u8, text, "elseif")) .k_elseif else if (std.mem.eql(u8, text, "while")) .k_while else if (std.mem.eql(u8, text, "for")) .k_for else if (std.mem.eql(u8, text, "foreach")) .k_foreach else if (std.mem.eql(u8, text, "as")) .k_as else if (std.mem.eql(u8, text, "match")) .k_match else if (std.mem.eql(u8, text, "default")) .k_default else if (std.mem.eql(u8, text, "namespace")) .k_namespace else if (std.mem.eql(u8, text, "global")) .k_global else if (std.mem.eql(u8, text, "const")) .k_const else if (std.mem.eql(u8, text, "go")) .k_go else if (std.mem.eql(u8, text, "lock")) .k_lock else if (std.mem.eql(u8, text, "return")) .k_return else if (std.mem.eql(u8, text, "echo")) .k_echo else if (std.mem.eql(u8, text, "get")) .k_get else if (std.mem.eql(u8, text, "set")) .k_set else if (std.mem.eql(u8, text, "break")) .k_break else if (std.mem.eql(u8, text, "case")) .k_case else if (std.mem.eql(u8, text, "catch")) .k_catch else if (std.mem.eql(u8, text, "clone")) .k_clone else if (std.mem.eql(u8, text, "with")) .k_with else if (std.mem.eql(u8, text, "continue")) .k_continue else if (std.mem.eql(u8, text, "declare")) .k_declare else if (std.mem.eql(u8, text, "do")) .k_do else if (std.mem.eql(u8, text, "finally")) .k_finally else if (std.mem.eql(u8, text, "goto")) .k_goto else if (std.mem.eql(u8, text, "include")) .k_include else if (std.mem.eql(u8, text, "instanceof")) .k_instanceof else if (std.mem.eql(u8, text, "print")) .k_print else if (std.mem.eql(u8, text, "require")) .k_require else if (std.mem.eql(u8, text, "switch")) .k_switch else if (std.mem.eql(u8, text, "throw")) .k_throw else if (std.mem.eql(u8, text, "try")) .k_try else if (std.mem.eql(u8, text, "yield")) .k_yield else if (std.mem.eql(u8, text, "from")) .k_from else if (std.mem.eql(u8, text, "range")) .k_range else if (std.mem.eql(u8, text, "in")) .k_in else if (std.mem.eql(u8, text, "self")) .k_self else if (std.mem.eql(u8, text, "parent")) .k_parent else if (std.mem.eql(u8, text, "true")) .k_true else if (std.mem.eql(u8, text, "false")) .k_false else if (std.mem.eql(u8, text, "null")) .k_null else if (std.mem.eql(u8, text, "array")) .k_array else if (std.mem.eql(u8, text, "callable")) .k_callable else if (std.mem.eql(u8, text, "iterable")) .k_iterable else if (std.mem.eql(u8, text, "object")) .k_object else if (std.mem.eql(u8, text, "mixed")) .k_mixed else if (std.mem.eql(u8, text, "never")) .k_never else if (std.mem.eql(u8, text, "void")) .k_void else .t_string;
+        
+        // Check for keywords first (same for both PHP and Go modes)
+        const keyword_tag: ?Token.Tag = if (std.mem.eql(u8, text, "class")) .k_class else if (std.mem.eql(u8, text, "interface")) .k_interface else if (std.mem.eql(u8, text, "trait")) .k_trait else if (std.mem.eql(u8, text, "enum")) .k_enum else if (std.mem.eql(u8, text, "struct")) .k_struct else if (std.mem.eql(u8, text, "extends")) .k_extends else if (std.mem.eql(u8, text, "implements")) .k_implements else if (std.mem.eql(u8, text, "use")) .k_use else if (std.mem.eql(u8, text, "public")) .k_public else if (std.mem.eql(u8, text, "private")) .k_private else if (std.mem.eql(u8, text, "protected")) .k_protected else if (std.mem.eql(u8, text, "static")) .k_static else if (std.mem.eql(u8, text, "readonly")) .k_readonly else if (std.mem.eql(u8, text, "final")) .k_final else if (std.mem.eql(u8, text, "abstract")) .k_abstract else if (std.mem.eql(u8, text, "function")) .k_function else if (std.mem.eql(u8, text, "fn")) .k_fn else if (std.mem.eql(u8, text, "new")) .k_new else if (std.mem.eql(u8, text, "if")) .k_if else if (std.mem.eql(u8, text, "else")) .k_else else if (std.mem.eql(u8, text, "elseif")) .k_elseif else if (std.mem.eql(u8, text, "while")) .k_while else if (std.mem.eql(u8, text, "for")) .k_for else if (std.mem.eql(u8, text, "foreach")) .k_foreach else if (std.mem.eql(u8, text, "as")) .k_as else if (std.mem.eql(u8, text, "match")) .k_match else if (std.mem.eql(u8, text, "default")) .k_default else if (std.mem.eql(u8, text, "namespace")) .k_namespace else if (std.mem.eql(u8, text, "global")) .k_global else if (std.mem.eql(u8, text, "const")) .k_const else if (std.mem.eql(u8, text, "go")) .k_go else if (std.mem.eql(u8, text, "lock")) .k_lock else if (std.mem.eql(u8, text, "return")) .k_return else if (std.mem.eql(u8, text, "echo")) .k_echo else if (std.mem.eql(u8, text, "get")) .k_get else if (std.mem.eql(u8, text, "set")) .k_set else if (std.mem.eql(u8, text, "break")) .k_break else if (std.mem.eql(u8, text, "case")) .k_case else if (std.mem.eql(u8, text, "catch")) .k_catch else if (std.mem.eql(u8, text, "clone")) .k_clone else if (std.mem.eql(u8, text, "with")) .k_with else if (std.mem.eql(u8, text, "continue")) .k_continue else if (std.mem.eql(u8, text, "declare")) .k_declare else if (std.mem.eql(u8, text, "do")) .k_do else if (std.mem.eql(u8, text, "finally")) .k_finally else if (std.mem.eql(u8, text, "goto")) .k_goto else if (std.mem.eql(u8, text, "include")) .k_include else if (std.mem.eql(u8, text, "instanceof")) .k_instanceof else if (std.mem.eql(u8, text, "print")) .k_print else if (std.mem.eql(u8, text, "require")) .k_require else if (std.mem.eql(u8, text, "switch")) .k_switch else if (std.mem.eql(u8, text, "throw")) .k_throw else if (std.mem.eql(u8, text, "try")) .k_try else if (std.mem.eql(u8, text, "yield")) .k_yield else if (std.mem.eql(u8, text, "from")) .k_from else if (std.mem.eql(u8, text, "range")) .k_range else if (std.mem.eql(u8, text, "in")) .k_in else if (std.mem.eql(u8, text, "self")) .k_self else if (std.mem.eql(u8, text, "parent")) .k_parent else if (std.mem.eql(u8, text, "true")) .k_true else if (std.mem.eql(u8, text, "false")) .k_false else if (std.mem.eql(u8, text, "null")) .k_null else if (std.mem.eql(u8, text, "array")) .k_array else if (std.mem.eql(u8, text, "callable")) .k_callable else if (std.mem.eql(u8, text, "iterable")) .k_iterable else if (std.mem.eql(u8, text, "object")) .k_object else if (std.mem.eql(u8, text, "mixed")) .k_mixed else if (std.mem.eql(u8, text, "never")) .k_never else if (std.mem.eql(u8, text, "void")) .k_void else if (std.mem.eql(u8, text, "__DIR__")) .m_dir else if (std.mem.eql(u8, text, "__FILE__")) .m_file else if (std.mem.eql(u8, text, "__LINE__")) .m_line else if (std.mem.eql(u8, text, "__FUNCTION__")) .m_function else if (std.mem.eql(u8, text, "__CLASS__")) .m_class else if (std.mem.eql(u8, text, "__METHOD__")) .m_method else if (std.mem.eql(u8, text, "__NAMESPACE__")) .m_namespace else if (std.mem.eql(u8, text, "include_once")) .k_include_once else if (std.mem.eql(u8, text, "require_once")) .k_require_once else null;
+        
+        // If it's a keyword, return it
+        if (keyword_tag) |tag| {
+            return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
+        }
+        
+        // Not a keyword - in Go mode, treat as a variable (t_go_identifier)
+        // In PHP mode, treat as a string/identifier (t_string)
+        const tag: Token.Tag = if (self.syntax_mode == .go) .t_go_identifier else .t_string;
         return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
     }
 

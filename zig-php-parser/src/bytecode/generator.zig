@@ -16,6 +16,24 @@ const OptimizationResult = escape_analysis.OptimizationResult;
 
 /// 字节码生成器 - 将AST编译为字节码
 /// 真正实现AST遍历和字节码生成
+///
+/// ## Syntax Mode Independence (Requirements 5.1, 5.2, 5.3)
+///
+/// The BytecodeGenerator is designed to be completely syntax-mode agnostic.
+/// It operates on normalized AST nodes where:
+/// - Variable names are already normalized with `$` prefix (added by Parser for Go mode)
+/// - Property access nodes are structurally identical regardless of original syntax
+/// - All identifiers use internal normalized names from the string pool
+///
+/// This design ensures that semantically equivalent code written in different
+/// syntax modes (PHP or Go) produces identical bytecode sequences.
+///
+/// The normalization happens at the Parser level:
+/// - PHP mode: `$var` -> variable node with name "$var"
+/// - Go mode: `var` -> variable node with name "$var" (prefix added internally)
+///
+/// Therefore, the BytecodeGenerator does not need to know about syntax modes
+/// and will produce identical bytecode for equivalent programs.
 pub const BytecodeGenerator = struct {
     allocator: std.mem.Allocator,
     context: *PHPContext,
@@ -1138,4 +1156,50 @@ test "generator init" {
 
     try std.testing.expect(gen.instructions.items.len == 0);
     try std.testing.expect(gen.local_count == 0);
+}
+
+// ============================================================================
+// Syntax Mode Independence Tests (Requirements 5.1, 5.2)
+// ============================================================================
+
+test "generator uses normalized variable names" {
+    // This test verifies that the BytecodeGenerator uses normalized variable names
+    // from the AST, which already have the $ prefix regardless of syntax mode.
+    const allocator = std.testing.allocator;
+    var context = PHPContext.init(allocator);
+    defer context.deinit();
+
+    var gen = BytecodeGenerator.init(allocator, &context);
+    defer gen.deinit();
+
+    // Test that getOrCreateLocal works with normalized names (with $ prefix)
+    const slot1 = try gen.getOrCreateLocal("$myVar");
+    const slot2 = try gen.getOrCreateLocal("$myVar"); // Same name should return same slot
+    const slot3 = try gen.getOrCreateLocal("$otherVar"); // Different name should get new slot
+
+    try std.testing.expectEqual(slot1, slot2);
+    try std.testing.expect(slot1 != slot3);
+    try std.testing.expectEqual(@as(u16, 0), slot1);
+    try std.testing.expectEqual(@as(u16, 1), slot3);
+}
+
+test "generator local count increments correctly" {
+    const allocator = std.testing.allocator;
+    var context = PHPContext.init(allocator);
+    defer context.deinit();
+
+    var gen = BytecodeGenerator.init(allocator, &context);
+    defer gen.deinit();
+
+    try std.testing.expectEqual(@as(u16, 0), gen.local_count);
+
+    _ = try gen.getOrCreateLocal("$a");
+    try std.testing.expectEqual(@as(u16, 1), gen.local_count);
+
+    _ = try gen.getOrCreateLocal("$b");
+    try std.testing.expectEqual(@as(u16, 2), gen.local_count);
+
+    // Accessing existing variable should not increment count
+    _ = try gen.getOrCreateLocal("$a");
+    try std.testing.expectEqual(@as(u16, 2), gen.local_count);
 }

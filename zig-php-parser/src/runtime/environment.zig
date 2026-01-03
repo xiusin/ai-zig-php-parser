@@ -14,6 +14,11 @@ pub const Environment = struct {
     }
 
     pub fn deinit(self: *Environment) void {
+        // Release all stored values before deiniting the hashmap
+        var iterator = self.vars.iterator();
+        while (iterator.next()) |entry| {
+            self.releaseValue(entry.value_ptr.*);
+        }
         self.vars.deinit();
     }
 
@@ -22,7 +27,7 @@ pub const Environment = struct {
         if (self.vars.get(name)) |old_value| {
             self.releaseValue(old_value);
         }
-        
+
         // Retain the new value and store it
         self.retainValue(value);
         try self.vars.put(name, value);
@@ -40,12 +45,12 @@ pub const Environment = struct {
         }
         return false;
     }
-    
+
     fn retainValue(self: *Environment, value: Value) void {
         _ = self;
         _ = value.retain();
     }
-    
+
     fn releaseValue(self: *Environment, value: Value) void {
         value.release(self.allocator);
     }

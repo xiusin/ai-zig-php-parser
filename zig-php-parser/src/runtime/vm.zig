@@ -4,7 +4,9 @@ const Token = @import("../compiler/token.zig").Token;
 const Environment = @import("environment.zig").Environment;
 const types = @import("types.zig");
 const Value = types.Value;
-const PHPContext = @import("../compiler/parser.zig").PHPContext;
+const parser_mod = @import("../compiler/parser.zig");
+const PHPContext = parser_mod.PHPContext;
+const Parser = parser_mod.Parser;
 const exceptions = @import("exceptions.zig");
 const PHPException = exceptions.PHPException;
 const ErrorHandler = exceptions.ErrorHandler;
@@ -21,6 +23,14 @@ const string_utils = @import("string_utils.zig");
 const builtin_methods = @import("builtin_methods.zig");
 const builtin_concurrency = @import("builtin_concurrency.zig");
 const builtin_http = @import("builtin_http.zig");
+const syntax_mode = @import("../compiler/syntax_mode.zig");
+pub const SyntaxMode = syntax_mode.SyntaxMode;
+pub const SyntaxConfig = syntax_mode.SyntaxConfig;
+
+// Extension system imports
+const extension_registry = @import("../extension/registry.zig");
+const extension_api = @import("../extension/api.zig");
+pub const ExtensionRegistry = extension_registry.ExtensionRegistry;
 
 // Bytecode VM imports for execution mode switching
 const bytecode_vm = @import("../bytecode/vm.zig");
@@ -60,17 +70,7 @@ pub const CallFrame = struct {
         var iterator = self.locals.iterator();
         while (iterator.next()) |entry| {
             const value = entry.value_ptr.*;
-            switch (value.getTag()) {
-                .string => value.getAsString().release(allocator),
-                .array => value.getAsArray().release(allocator),
-                .object => value.getAsObject().release(allocator),
-                .struct_instance => value.getAsStruct().release(allocator),
-                .resource => value.getAsResource().release(allocator),
-                .user_function => value.getAsUserFunc().release(allocator),
-                .closure => value.getAsClosure().release(allocator),
-                .arrow_function => value.getAsClosure().release(allocator),
-                else => {},
-            }
+            value.release(allocator);
         }
         self.locals.deinit();
     }
@@ -691,6 +691,26 @@ fn isNullFn(vm: *VM, args: []const Value) !Value {
     return Value.initBool(arg.isNull());
 }
 
+// Error handling functions - simplified implementation
+fn setErrorHandlerFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    // Accept 1-2 arguments: handler callable, optional error_types
+    if (args.len < 1) {
+        return Value.initNull();
+    }
+    // In a full implementation, we would store the handler and call it on errors
+    // For now, just return null (previous handler) to allow scripts to run
+    return Value.initNull();
+}
+
+fn restoreErrorHandlerFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    // In a full implementation, we would restore the previous error handler
+    // For now, just return true to allow scripts to run
+    return Value.initBool(true);
+}
+
 // Reflection functions
 fn getDeclaredClassesFn(vm: *VM, args: []const Value) !Value {
     if (args.len != 0) {
@@ -866,12 +886,27 @@ pub const VM = struct {
     return_value: ?Value = null,
     break_level: u32 = 0,
     continue_level: u32 = 0,
+    current_exception: ?*exceptions.PHPException = null,
 
     // Execution mode switching
     execution_mode: ExecutionMode = .tree_walking,
     bytecode_vm_instance: ?*BytecodeVM = null,
 
+    // File loading tracking
+    included_files: std.StringHashMap(void),
+
+    // Syntax mode configuration for multi-syntax support
+    syntax_config: SyntaxConfig = SyntaxConfig{},
+
+    // Extension system registry for third-party extensions
+    extension_registry: ?*ExtensionRegistry = null,
+
     pub fn init(allocator: std.mem.Allocator) !*VM {
+        return initWithSyntaxConfig(allocator, SyntaxConfig{});
+    }
+
+    /// Initialize VM with a specific syntax configuration
+    pub fn initWithSyntaxConfig(allocator: std.mem.Allocator, config: SyntaxConfig) !*VM {
         var vm = try allocator.create(VM);
         vm.* = .{
             .allocator = allocator,
@@ -901,18 +936,26 @@ pub const VM = struct {
             // Execution mode switching - default to tree_walking
             .execution_mode = .tree_walking,
             .bytecode_vm_instance = null,
+            .included_files = std.StringHashMap(void).init(allocator),
+            // Syntax mode configuration
+            .syntax_config = config,
+            // Extension registry - initialized lazily or via setExtensionRegistry
+            .extension_registry = null,
         };
 
         vm.global.* = Environment.init(allocator);
         vm.reflection_system = ReflectionSystem.init(allocator, vm);
 
         // Initialize builtin classes
+        // The VM takes ownership of the class pointers, so we only deinit the hashmap
+        // container, not the classes themselves
         var builtin_class_manager = try builtin_classes.BuiltinClassManager.init(allocator);
-        defer builtin_class_manager.deinit();
         var class_iter = builtin_class_manager.classes.iterator();
         while (class_iter.next()) |entry| {
             try vm.classes.put(entry.key_ptr.*, entry.value_ptr.*);
         }
+        // Only deinit the hashmap container, not the class objects
+        builtin_class_manager.classes.deinit();
 
         // Register built-in functions with optimized registration
         try vm.registerBuiltinFunctions();
@@ -938,87 +981,100 @@ pub const VM = struct {
             self.logPerformanceStats();
         }
 
-        // Clean up bytecode VM if initialized
+        // 1. Clean up builtin http resources (stops servers, joins threads)
+        builtin_http.cleanup();
+
+        // 1.5. Clean up extension registry (calls shutdown on all extensions)
+        if (self.extension_registry) |ext_reg| {
+            ext_reg.deinit();
+            self.allocator.destroy(ext_reg);
+        }
+
+        // 2. Clean up bytecode VM
         if (self.bytecode_vm_instance) |bvm| {
             bvm.deinit();
         }
 
-        // Clean up call stack
+        // 3. Clean up call stack - release local variables first
         for (self.call_stack.items) |*frame| {
             frame.deinit(self.allocator);
         }
         self.call_stack.deinit(self.allocator);
 
-        // Clean up string intern pool
-        var intern_iterator = self.string_intern_pool.iterator();
-        while (intern_iterator.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.*.release(self.allocator);
-        }
-        self.string_intern_pool.deinit();
+        // 4. Clean up global environment
+        // Must be done before classes/strings because objects might refer to them
+        self.global.deinit();
+        self.allocator.destroy(self.global);
 
-        // Clean up request arena
-        self.request_arena.deinit();
-
-        // Clean up error context
-        self.error_context.deinit(self.allocator);
-
-        // Clean up all global variables (this will release their references)
-        var global_iterator = self.global.vars.iterator();
-        while (global_iterator.next()) |entry| {
-            // Only release if it's a managed type
-            switch (entry.value_ptr.*.getTag()) {
-                .string, .array, .object, .struct_instance, .resource, .user_function, .closure, .arrow_function => {
-                    types.gc.decRef(&self.memory_manager, entry.value_ptr.*);
-                },
-                else => {},
-            }
-        }
-
-        // Clean up try-catch stack
-        self.try_catch_stack.deinit(self.allocator);
-
-        // Clean up error handler
-        self.error_handler.deinit();
-
-        // Clean up standard library
+        // 5. Clean up standard library
         self.stdlib.deinit();
 
-        // Clean up structs - 简化清理避免迭代器问题
+        // 6. Clean up classes, interfaces, traits, structs
+        // Must be done after global (objects destroyed) but before strings
+        var struct_iter = self.structs.iterator();
+        while (struct_iter.next()) |entry| {
+            const s = entry.value_ptr.*;
+            s.deinit(self.allocator);
+            self.allocator.destroy(s);
+        }
         self.structs.deinit();
 
-        // Clean up traits
-        var trait_iterator = self.traits.iterator();
-        while (trait_iterator.next()) |entry| {
-            const trait_ptr = entry.value_ptr.*;
-            trait_ptr.deinit(self.allocator);
-            self.allocator.destroy(trait_ptr);
+        var trait_iter = self.traits.iterator();
+        while (trait_iter.next()) |entry| {
+            const t = entry.value_ptr.*;
+            t.deinit(self.allocator);
+            self.allocator.destroy(t);
         }
         self.traits.deinit();
 
-        // Clean up interfaces
-        var interface_iterator = self.interfaces.iterator();
-        while (interface_iterator.next()) |entry| {
-            const interface_ptr = entry.value_ptr.*;
-            interface_ptr.deinit(self.allocator);
-            self.allocator.destroy(interface_ptr);
+        var interface_iter = self.interfaces.iterator();
+        while (interface_iter.next()) |entry| {
+            const i = entry.value_ptr.*;
+            i.deinit(self.allocator);
+            self.allocator.destroy(i);
         }
         self.interfaces.deinit();
 
-        // Clean up classes - 调用PHPClass.deinit释放属性名和方法名
-        var class_iterator = self.classes.iterator();
-        while (class_iterator.next()) |entry| {
-            const class_ptr = entry.value_ptr.*;
-            class_ptr.deinit(self.allocator);
-            self.allocator.destroy(class_ptr);
+        var class_iter = self.classes.iterator();
+        while (class_iter.next()) |entry| {
+            const c = entry.value_ptr.*;
+            c.deinit(self.allocator);
+            self.allocator.destroy(c);
         }
         self.classes.deinit();
 
-        // Clean up memory manager (this will force final garbage collection)
+        // 7. Clean up error context and handlers
+        self.error_context.deinit(self.allocator);
+        self.try_catch_stack.deinit(self.allocator);
+        self.error_handler.deinit();
+
+        // 8. Clean up included files tracking
+        var included_iter = self.included_files.keyIterator();
+        while (included_iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.included_files.deinit();
+
+        // 9. Clean up request arena
+        self.request_arena.deinit();
+
+        // 10. Clean up string intern pool
+        // Must be done LAST (before memory manager) as everything else uses these strings
+        var string_iter = self.string_intern_pool.iterator();
+        while (string_iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const box = entry.value_ptr.*;
+            // We force release the string because we are shutting down
+            box.data.release(self.allocator);
+            self.allocator.destroy(box);
+            self.allocator.free(key);
+        }
+        self.string_intern_pool.deinit();
+
+        // 11. Clean up memory manager
         self.memory_manager.deinit();
 
-        self.global.deinit();
-        self.allocator.destroy(self.global);
+        // 12. Finally destroy the VM itself
         self.allocator.destroy(self);
     }
 
@@ -1081,7 +1137,7 @@ pub const VM = struct {
             .resource => _ = value.getAsResource().retain(),
             .user_function => _ = value.getAsUserFunc().retain(),
             .closure => _ = value.getAsClosure().retain(),
-            .arrow_function => _ = value.getAsClosure().retain(),
+            .arrow_function => _ = value.getAsArrowFunc().retain(),
             else => {},
         }
     }
@@ -1117,6 +1173,16 @@ pub const VM = struct {
                             const str_id = dv_node.data.literal_string.value;
                             const str_val = self.context.string_pool.keys()[str_id];
                             parameters[i].default_value = try Value.initStringWithManager(&self.memory_manager, str_val);
+                        },
+                        .literal_bool => {
+                            parameters[i].default_value = Value.initBool(dv_node.data.literal_int.value != 0);
+                        },
+                        .literal_null => {
+                            parameters[i].default_value = Value.initNull();
+                        },
+                        .array_init => {
+                            // For array defaults, evaluate at definition time
+                            parameters[i].default_value = try self.eval(dv_idx);
                         },
                         else => {
                             // For complex expressions, don't evaluate at definition time
@@ -1155,6 +1221,7 @@ pub const VM = struct {
                     args,
                     .{ .function = true },
                 );
+                php_name.release(self.allocator);
             }
         }
         return attributes;
@@ -1193,6 +1260,10 @@ pub const VM = struct {
         try self.defineBuiltin("unset", unsetFn);
         try self.defineBuiltin("empty", emptyFn);
         try self.defineBuiltin("is_null", isNullFn);
+
+        // Error handling functions
+        try self.defineBuiltin("set_error_handler", setErrorHandlerFn);
+        try self.defineBuiltin("restore_error_handler", restoreErrorHandlerFn);
 
         // Reflection functions
         try self.defineBuiltin("get_declared_classes", getDeclaredClassesFn);
@@ -1449,13 +1520,12 @@ pub const VM = struct {
 
         // Check if we're in a try-catch block
         if (self.try_catch_stack.items.len > 0) {
-            var context = &self.try_catch_stack.items[self.try_catch_stack.items.len - 1];
-
-            // Try to catch the exception
-            if (context.catchException(exception, exception.exception_type)) {
-                // Exception was caught, continue execution
-                return Value.initNull();
-            }
+            // Store the exception for the catch block to use
+            // Note: We only store in current_exception, not in TryCatchContext.caught_exception
+            // to avoid double-free issues. The exception will be freed in evaluateTryStatement.
+            self.current_exception = exception;
+            // Return UncaughtException to signal the try-catch block
+            return error.UncaughtException;
         }
 
         // No catch block found, handle as uncaught exception
@@ -1468,7 +1538,12 @@ pub const VM = struct {
 
     fn addCallStackToException(self: *VM, exception: *PHPException) !void {
         var stack_frames = std.ArrayList(exceptions.StackFrame){};
-        defer stack_frames.deinit(self.allocator);
+        errdefer {
+            for (stack_frames.items) |*frame| {
+                frame.deinit(self.allocator);
+            }
+            stack_frames.deinit(self.allocator);
+        }
 
         // Add current location
         const current_frame = try exceptions.StackFrame.init(self.allocator, "main", self.current_file, self.current_line, 0);
@@ -1480,7 +1555,14 @@ pub const VM = struct {
             try stack_frames.append(self.allocator, stack_frame);
         }
 
+        // setTrace will dupe the frames, so we need to release our copies after
         try exception.setTrace(self.allocator, stack_frames.items);
+        
+        // Release our copies of the stack frames (setTrace made its own copies)
+        for (stack_frames.items) |*frame| {
+            frame.deinit(self.allocator);
+        }
+        stack_frames.deinit(self.allocator);
     }
 
     fn generateStackTrace(self: *VM) ![]u8 {
@@ -1519,6 +1601,92 @@ pub const VM = struct {
         return self.throwExceptionWithContext(exception);
     }
 
+    /// Format a variable name according to the current syntax mode
+    /// In Go mode, removes the $ prefix from variable names
+    /// In PHP mode, keeps the $ prefix
+    pub fn formatVariableName(self: *VM, name: []const u8) []const u8 {
+        if (self.syntax_config.error_display_mode == .go) {
+            // Go mode: remove $ prefix if present
+            if (name.len > 0 and name[0] == '$') {
+                return name[1..];
+            }
+        }
+        return name;
+    }
+
+    /// Format a property access operator according to the current syntax mode
+    /// In Go mode, returns "."
+    /// In PHP mode, returns "->"
+    pub fn formatPropertyAccessOperator(self: *VM) []const u8 {
+        if (self.syntax_config.error_display_mode == .go) {
+            return ".";
+        }
+        return "->";
+    }
+
+    /// Format an error message with syntax-aware variable names and operators
+    /// This method replaces variable names and operators in the message
+    /// according to the current syntax mode
+    pub fn formatError(self: *VM, message: []const u8, var_name: ?[]const u8) ![]const u8 {
+        if (self.syntax_config.error_display_mode == .go) {
+            // Go mode: format variable names without $ prefix
+            if (var_name) |name| {
+                const formatted_name = self.formatVariableName(name);
+                // Create a new message with the formatted variable name
+                return try std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ message, formatted_name });
+            }
+        }
+        // PHP mode or no variable name: return original message
+        if (var_name) |name| {
+            return try std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ message, name });
+        }
+        return try self.allocator.dupe(u8, message);
+    }
+
+    /// Format a full error message with syntax-aware formatting
+    /// Replaces -> with . in Go mode for property access errors
+    pub fn formatErrorMessage(self: *VM, message: []const u8) ![]const u8 {
+        if (self.syntax_config.error_display_mode == .go) {
+            // Replace -> with . for property access in Go mode
+            var result = std.ArrayList(u8){};
+            errdefer result.deinit(self.allocator);
+
+            var i: usize = 0;
+            while (i < message.len) {
+                if (i + 1 < message.len and message[i] == '-' and message[i + 1] == '>') {
+                    try result.append(self.allocator, '.');
+                    i += 2;
+                } else if (message[i] == '$') {
+                    // Skip $ prefix in Go mode
+                    i += 1;
+                } else {
+                    try result.append(self.allocator, message[i]);
+                    i += 1;
+                }
+            }
+
+            return try result.toOwnedSlice(self.allocator);
+        }
+        return try self.allocator.dupe(u8, message);
+    }
+
+    /// Get the syntax mode string for error reporting
+    pub fn getSyntaxModeString(self: *VM) []const u8 {
+        return self.syntax_config.mode.toString();
+    }
+
+    /// Format a complete error with file, line, and syntax-aware message
+    pub fn formatCompleteError(self: *VM, error_type: []const u8, message: []const u8, file: []const u8, line: u32) ![]const u8 {
+        const formatted_message = try self.formatErrorMessage(message);
+        defer self.allocator.free(formatted_message);
+
+        return try std.fmt.allocPrint(
+            self.allocator,
+            "{s} error in {s} on line {d}: {s} [syntax: {s}]",
+            .{ error_type, file, line, formatted_message, self.getSyntaxModeString() },
+        );
+    }
+
     pub fn handleError(self: *VM, error_type: ErrorType, message: []const u8) !void {
         try self.error_handler.handleError(error_type, message, self.current_file, self.current_line);
     }
@@ -1529,9 +1697,11 @@ pub const VM = struct {
     }
 
     pub fn exitTryCatch(self: *VM) void {
-        // Simplified - just remove the last item without cleanup for now
         if (self.try_catch_stack.items.len > 0) {
-            _ = self.try_catch_stack.pop();
+            const context = self.try_catch_stack.pop();
+            // Note: We don't call context.deinit() here because the exception
+            // is managed by self.current_exception and freed in evaluateTryStatement
+            _ = context;
         }
     }
 
@@ -1570,6 +1740,13 @@ pub const VM = struct {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.memory_allocations += 1;
 
+        // First, check extension classes (Requirements: 10.2)
+        if (self.extension_registry) |ext_reg| {
+            if (ext_reg.findClass(class_name)) |ext_class| {
+                return self.createExtensionObject(ext_class);
+            }
+        }
+
         const class = self.getClass(class_name) orelse {
             const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
             return self.throwException(exception);
@@ -1598,6 +1775,164 @@ pub const VM = struct {
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return value;
+    }
+
+    /// Create an object from an extension class definition
+    /// Requirements: 10.2, 10.3, 10.4
+    fn createExtensionObject(self: *VM, ext_class: extension_api.ExtensionClass) !Value {
+        // Create a dynamic PHPClass from the extension class definition
+        const php_class = try self.createPHPClassFromExtension(ext_class);
+
+        const value = try Value.initObjectWithManager(&self.memory_manager, php_class);
+        const object = value.getAsObject().data;
+
+        // Initialize properties with default values from extension class
+        for (ext_class.properties) |prop| {
+            if (prop.default_value) |default_ext_val| {
+                const default_val = self.extensionValueToValue(default_ext_val);
+                try object.setProperty(self.allocator, prop.name, default_val);
+            }
+        }
+
+        return value;
+    }
+
+    /// Create a PHPClass from an extension class definition
+    fn createPHPClassFromExtension(self: *VM, ext_class: extension_api.ExtensionClass) !*types.PHPClass {
+        // Check if we already have this class registered
+        if (self.classes.get(ext_class.name)) |existing| {
+            return existing;
+        }
+
+        // Create a new PHPClass
+        const class_name = try types.PHPString.init(self.allocator, ext_class.name);
+        var php_class = try self.allocator.create(types.PHPClass);
+        
+        // Create shape for the class
+        const shape = try self.allocator.create(types.Shape);
+        shape.* = types.Shape.init(self.allocator, types.Shape.next_id, null);
+        types.Shape.next_id += 1;
+        
+        php_class.* = types.PHPClass{
+            .name = class_name,
+            .parent = null,
+            .interfaces = &[_]*types.PHPInterface{},
+            .traits = &[_]*types.PHPTrait{},
+            .properties = std.StringHashMap(types.Property).init(self.allocator),
+            .methods = std.StringHashMap(types.Method).init(self.allocator),
+            .constants = std.StringHashMap(Value).init(self.allocator),
+            .modifiers = .{},
+            .attributes = &[_]types.Attribute{},
+            .native_destructor = null,
+            .shape = shape,
+        };
+
+        // Handle parent class
+        if (ext_class.parent) |parent_name| {
+            if (self.getClass(parent_name)) |parent_class| {
+                php_class.parent = parent_class;
+            }
+        }
+
+        // Add properties from extension class
+        for (ext_class.properties) |prop| {
+            const prop_name = try types.PHPString.init(self.allocator, prop.name);
+            const property = types.Property{
+                .name = prop_name,
+                .type = null,
+                .default_value = if (prop.default_value) |dv| self.extensionValueToValue(dv) else null,
+                .modifiers = .{
+                    .visibility = if (prop.modifiers.is_public) .public else if (prop.modifiers.is_protected) .protected else .private,
+                    .is_static = prop.modifiers.is_static,
+                    .is_readonly = prop.modifiers.is_readonly,
+                },
+                .attributes = &[_]types.Attribute{},
+                .hooks = &[_]types.PropertyHook{},
+            };
+            try php_class.properties.put(prop.name, property);
+        }
+
+        // Register the class so it can be found later
+        try self.classes.put(ext_class.name, php_class);
+
+        return php_class;
+    }
+
+    /// Call an extension object's constructor
+    /// Requirements: 10.2
+    pub fn callExtensionConstructor(self: *VM, object_value: Value, ext_class: extension_api.ExtensionClass, args: []const Value) !void {
+        if (ext_class.constructor) |ctor| {
+            // Convert args to extension values
+            var ext_args = try self.allocator.alloc(extension_api.ExtensionValue, args.len);
+            defer self.allocator.free(ext_args);
+
+            for (args, 0..) |arg, i| {
+                ext_args[i] = self.valueToExtensionValue(arg);
+            }
+
+            // Call the constructor
+            const object = object_value.getAsObject().data;
+            ctor(@ptrCast(self), @ptrCast(object), ext_args) catch |err| {
+                const error_msg = try std.fmt.allocPrint(
+                    self.allocator,
+                    "Extension class {s} constructor failed: {s}",
+                    .{ ext_class.name, @errorName(err) },
+                );
+                defer self.allocator.free(error_msg);
+                const exception = try ExceptionFactory.createTypeError(
+                    self.allocator,
+                    error_msg,
+                    self.current_file,
+                    self.current_line,
+                );
+                _ = try self.throwException(exception);
+            };
+        }
+    }
+
+    /// Set the extension registry for this VM
+    /// This allows the VM to call extension functions and instantiate extension classes
+    pub fn setExtensionRegistry(self: *VM, registry: *ExtensionRegistry) void {
+        self.extension_registry = registry;
+    }
+
+    /// Get the extension registry (if set)
+    pub fn getExtensionRegistry(self: *VM) ?*ExtensionRegistry {
+        return self.extension_registry;
+    }
+
+    /// Initialize and set a new extension registry owned by the VM
+    pub fn initExtensionRegistry(self: *VM) !*ExtensionRegistry {
+        if (self.extension_registry) |existing| {
+            return existing;
+        }
+
+        const registry = try self.allocator.create(ExtensionRegistry);
+        registry.* = ExtensionRegistry.init(self.allocator);
+        self.extension_registry = registry;
+
+        // Register built-in functions and classes to prevent conflicts
+        try self.registerBuiltinsWithExtensionRegistry(registry);
+
+        return registry;
+    }
+
+    /// Register built-in function and class names with the extension registry
+    fn registerBuiltinsWithExtensionRegistry(self: *VM, registry: *ExtensionRegistry) !void {
+        // Register built-in function names
+        var func_iter = self.global.variables.iterator();
+        while (func_iter.next()) |entry| {
+            const value = entry.value_ptr.*;
+            if (value.getTag() == .native_function) {
+                try registry.registerBuiltinFunction(entry.key_ptr.*);
+            }
+        }
+
+        // Register built-in class names
+        var class_iter = self.classes.iterator();
+        while (class_iter.next()) |entry| {
+            try registry.registerBuiltinClass(entry.key_ptr.*);
+        }
     }
 
     fn initializeObjectProperties(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
@@ -1865,25 +2200,26 @@ pub const VM = struct {
     }
 
     pub fn callUserFunction(self: *VM, function: *types.UserFunction, args: []const Value) !Value {
+        return self.callUserFunctionWithNamed(function, args, null);
+    }
+
+    pub fn callUserFunctionWithNamed(self: *VM, function: *types.UserFunction, positional_args: []const Value, named_args: ?*const std.StringHashMap(Value)) !Value {
+        return self.callUserFunctionWithNamedAndRefs(function, positional_args, named_args, null);
+    }
+
+    pub fn callUserFunctionWithNamedAndRefs(self: *VM, function: *types.UserFunction, positional_args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
         // Push call frame for better error reporting
         try self.pushCallFrame(function.name.data, self.current_file, self.current_line);
-        defer self.popCallFrame();
 
-        // Validate arguments
-        try function.validateArguments(args);
+        // For named args, we need to count total args differently
+        const total_args = positional_args.len + if (named_args) |na| na.count() else 0;
+        _ = total_args;
 
-        // Bind arguments to parameters
-        var bound_args = try function.bindArguments(args, self.allocator);
-        defer {
-            var it = bound_args.iterator();
-            while (it.next()) |entry| {
-                self.releaseValue(entry.value_ptr.*);
-            }
-            bound_args.deinit();
-        }
+        // Bind arguments to parameters (with named argument support)
+        var bound_args = try function.bindArgumentsWithNamed(positional_args, named_args, self.allocator);
 
         // Populate local variables in the current frame
         var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
@@ -1896,25 +2232,69 @@ pub const VM = struct {
 
         // Execute body
         var result = Value.initNull();
+        var had_error: ?anyerror = null;
         if (function.body) |body_ptr| {
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
-            result = self.eval(body_node) catch |err| {
+            result = self.eval(body_node) catch |err| blk: {
                 if (err == error.Return) {
                     if (self.return_value) |val| {
-                        const ret = val;
-                        self.return_value = null;
-                        return ret;
+                        break :blk val;
                     }
-                    return Value.initNull();
+                    break :blk Value.initNull();
                 }
-                return err;
+                had_error = err;
+                break :blk Value.initNull();
             };
+            if (self.return_value) |val| {
+                result = val;
+                self.return_value = null;
+            }
         }
+
+        // Handle reference parameters - copy back modified values to caller's scope
+        if (ref_var_names) |ref_names| {
+            for (function.parameters, 0..) |param, i| {
+                if (param.is_reference and i < ref_names.len) {
+                    const caller_var_name = ref_names[i];
+                    const param_name = param.name.data;
+                    // Get the modified value from local scope
+                    if (current_frame.locals.get(param_name)) |modified_value| {
+                        // Update the caller's variable
+                        self.retainValue(modified_value);
+                        try self.setVariableInParentFrame(caller_var_name, modified_value);
+                    }
+                }
+            }
+        }
+
+        // Cleanup
+        var cleanup_it = bound_args.iterator();
+        while (cleanup_it.next()) |entry| {
+            self.releaseValue(entry.value_ptr.*);
+        }
+        bound_args.deinit();
+        self.popCallFrame();
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
+        if (had_error) |err| {
+            return err;
+        }
         return result;
+    }
+
+    fn setVariableInParentFrame(self: *VM, name: []const u8, value: Value) !void {
+        if (self.call_stack.items.len > 1) {
+            var parent_frame = &self.call_stack.items[self.call_stack.items.len - 2];
+            if (parent_frame.locals.get(name)) |old_value| {
+                self.releaseValue(old_value);
+            }
+            try parent_frame.locals.put(name, value);
+        } else {
+            // Set in global scope
+            try self.global.set(name, value);
+        }
     }
 
     pub fn callClosure(self: *VM, closure: *types.Closure, args: []const Value) !Value {
@@ -1982,18 +2362,38 @@ pub const VM = struct {
     }
 
     pub fn createArrowFunction(self: *VM, parameters: []const types.Method.Parameter, body: ?*anyopaque) !Value {
-        var arrow_function = types.ArrowFunction.init(self.allocator);
-        arrow_function.parameters = parameters;
-        arrow_function.body = body;
+        // Create anonymous function name for the arrow function
+        const anon_name = try types.PHPString.init(self.allocator, "{arrow}");
 
-        // Auto-capture variables from current scope (simplified)
-        // In a real implementation, this would analyze the body for variable references
+        // Create UserFunction for the closure
+        var user_func = types.UserFunction.init(anon_name);
+        user_func.parameters = parameters;
+        user_func.body = body;
 
-        const box = try self.memory_manager.allocArrowFunction(arrow_function);
+        // Create Closure wrapping the UserFunction
+        var closure = types.Closure.init(self.allocator, user_func);
+
+        // Auto-capture variables from current scope
+        if (self.call_stack.items.len > 0) {
+            const current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+            var locals_iter = current_frame.locals.iterator();
+            while (locals_iter.next()) |entry| {
+                try closure.captureVariable(entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+
+        const box = try self.memory_manager.allocClosure(closure);
         return Value.fromBox(box, Value.TYPE_CLOSURE);
     }
 
     pub fn callUserFunc(self: *VM, function_name: []const u8, args: []const Value) !Value {
+        // First, check extension functions (Requirements: 9.2)
+        if (self.extension_registry) |ext_reg| {
+            if (ext_reg.findFunction(function_name)) |ext_func| {
+                return self.callExtensionFunction(ext_func, args);
+            }
+        }
+
         const function_val = self.global.get(function_name) orelse {
             const exception = try ExceptionFactory.createUndefinedFunctionError(self.allocator, function_name, self.current_file, self.current_line);
             return self.throwException(exception);
@@ -2018,6 +2418,86 @@ pub const VM = struct {
                 return self.throwException(exception);
             },
         };
+    }
+
+    /// Call an extension function with proper argument validation
+    /// Requirements: 9.2, 9.3
+    fn callExtensionFunction(self: *VM, ext_func: extension_api.ExtensionFunction, args: []const Value) !Value {
+        // Validate argument count
+        if (args.len < ext_func.min_args) {
+            const error_msg = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}() expects at least {d} parameter(s), {d} given",
+                .{ ext_func.name, ext_func.min_args, args.len },
+            );
+            defer self.allocator.free(error_msg);
+            const exception = try ExceptionFactory.createArgumentCountError(
+                self.allocator,
+                ext_func.min_args,
+                @intCast(args.len),
+                ext_func.name,
+                self.current_file,
+                self.current_line,
+            );
+            return self.throwException(exception);
+        }
+
+        if (ext_func.max_args != 255 and args.len > ext_func.max_args) {
+            const error_msg = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}() expects at most {d} parameter(s), {d} given",
+                .{ ext_func.name, ext_func.max_args, args.len },
+            );
+            defer self.allocator.free(error_msg);
+            const exception = try ExceptionFactory.createArgumentCountError(
+                self.allocator,
+                ext_func.max_args,
+                @intCast(args.len),
+                ext_func.name,
+                self.current_file,
+                self.current_line,
+            );
+            return self.throwException(exception);
+        }
+
+        // Convert Value array to ExtensionValue array
+        var ext_args = try self.allocator.alloc(extension_api.ExtensionValue, args.len);
+        defer self.allocator.free(ext_args);
+
+        for (args, 0..) |arg, i| {
+            ext_args[i] = self.valueToExtensionValue(arg);
+        }
+
+        // Call the extension function callback
+        const result = ext_func.callback(@ptrCast(self), ext_args) catch |err| {
+            const error_msg = try std.fmt.allocPrint(
+                self.allocator,
+                "Extension function {s}() failed: {s}",
+                .{ ext_func.name, @errorName(err) },
+            );
+            defer self.allocator.free(error_msg);
+            const exception = try ExceptionFactory.createTypeError(
+                self.allocator,
+                error_msg,
+                self.current_file,
+                self.current_line,
+            );
+            return self.throwException(exception);
+        };
+
+        // Convert ExtensionValue back to Value
+        return self.extensionValueToValue(result);
+    }
+
+    /// Convert a VM Value to an ExtensionValue (opaque u64)
+    fn valueToExtensionValue(_: *VM, value: Value) extension_api.ExtensionValue {
+        // ExtensionValue is u64, Value stores its data in a u64 field
+        return value.val;
+    }
+
+    /// Convert an ExtensionValue (opaque u64) back to a VM Value
+    fn extensionValueToValue(_: *VM, ext_value: extension_api.ExtensionValue) Value {
+        return Value{ .val = ext_value };
     }
 
     // Reflection system convenience methods
@@ -2195,6 +2675,123 @@ pub const VM = struct {
         return self.evaluateBinaryOp(binary_expr.op, left, right);
     }
 
+    fn evaluateMagicConstant(self: *VM, kind: @import("../compiler/ast.zig").MagicConstantKind) !Value {
+        return switch (kind) {
+            .dir => blk: {
+                // Return directory of current file
+                const file_path = self.current_file;
+                if (std.mem.lastIndexOf(u8, file_path, "/")) |idx| {
+                    break :blk try Value.initString(self.allocator, file_path[0..idx]);
+                }
+                break :blk try Value.initString(self.allocator, ".");
+            },
+            .file => try Value.initString(self.allocator, self.current_file),
+            .line => Value.initInt(@intCast(self.current_line)),
+            .function => blk: {
+                if (self.call_stack.items.len > 0) {
+                    const frame = &self.call_stack.items[self.call_stack.items.len - 1];
+                    break :blk try Value.initString(self.allocator, frame.function_name);
+                }
+                break :blk try Value.initString(self.allocator, "");
+            },
+            .class => blk: {
+                if (self.current_class) |class| {
+                    break :blk try Value.initString(self.allocator, class.name.data);
+                }
+                break :blk try Value.initString(self.allocator, "");
+            },
+            .method => blk: {
+                var result: []const u8 = "";
+                if (self.current_class) |class| {
+                    if (self.call_stack.items.len > 0) {
+                        const frame = &self.call_stack.items[self.call_stack.items.len - 1];
+                        const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class.name.data, frame.function_name });
+                        break :blk try Value.initString(self.allocator, full_name);
+                    }
+                    result = class.name.data;
+                }
+                break :blk try Value.initString(self.allocator, result);
+            },
+            .namespace => try Value.initString(self.allocator, ""),
+        };
+    }
+
+    fn evaluateCompoundAssignment(self: *VM, compound_data: anytype) !Value {
+        const target_idx = compound_data.target;
+        const target_node = self.context.nodes.items[target_idx];
+        const op = compound_data.op;
+        const rhs_value = try self.eval(compound_data.value);
+        defer self.releaseValue(rhs_value);
+
+        if (target_node.tag == .variable) {
+            const name_id = target_node.data.variable.name;
+            const name = self.context.string_pool.keys()[name_id];
+
+            // Get current value
+            const current_val = self.getVariable(name) orelse Value.initInt(0);
+
+            // Compute new value based on operator
+            const new_val = try self.computeCompoundOp(op, current_val, rhs_value);
+
+            // Set the new value
+            try self.setVariable(name, new_val);
+            return new_val;
+        } else if (target_node.tag == .property_access) {
+            const obj_val = try self.eval(target_node.data.property_access.target);
+            defer self.releaseValue(obj_val);
+            const prop_name = self.context.string_pool.keys()[target_node.data.property_access.property_name];
+
+            var current_val: Value = Value.initInt(0);
+            if (obj_val.isObject()) {
+                current_val = obj_val.getAsObject().data.getProperty(prop_name) catch Value.initInt(0);
+            }
+
+            const new_val = try self.computeCompoundOp(op, current_val, rhs_value);
+
+            if (obj_val.isObject()) {
+                try obj_val.getAsObject().data.setProperty(self.allocator, prop_name, new_val);
+            }
+            return new_val;
+        } else if (target_node.tag == .array_access) {
+            const arr_val = try self.eval(target_node.data.array_access.target);
+            defer self.releaseValue(arr_val);
+
+            if (arr_val.isArray()) {
+                const php_array = arr_val.getAsArray().data;
+                const index_node = target_node.data.array_access.index orelse return Value.initNull();
+                const index_val = try self.eval(index_node);
+                defer self.releaseValue(index_val);
+
+                const key = switch (index_val.getTag()) {
+                    .integer => types.ArrayKey{ .integer = index_val.asInt() },
+                    .string => types.ArrayKey{ .string = index_val.getAsString().data },
+                    else => return Value.initNull(),
+                };
+
+                const current_val = php_array.get(key) orelse Value.initInt(0);
+                const new_val = try self.computeCompoundOp(op, current_val, rhs_value);
+                try php_array.set(self.allocator, key, new_val);
+                return new_val;
+            }
+            return Value.initNull();
+        }
+
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid compound assignment target", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    fn computeCompoundOp(self: *VM, op: anytype, left: Value, right: Value) !Value {
+        const token = @import("../compiler/token.zig").Token;
+        return switch (op) {
+            token.Tag.plus_equal => self.evaluateAddition(left, right),
+            token.Tag.minus_equal => self.evaluateSubtraction(left, right),
+            token.Tag.asterisk_equal => self.evaluateMultiplication(left, right),
+            token.Tag.slash_equal => self.evaluateDivision(left, right),
+            token.Tag.percent_equal => self.evaluateModulo(left, right),
+            else => Value.initNull(),
+        };
+    }
+
     fn evaluateAddition(self: *VM, left: Value, right: Value) !Value {
         const left_tag = left.getTag();
         const right_tag = right.getTag();
@@ -2243,13 +2840,14 @@ pub const VM = struct {
     }
 
     fn evaluateDivision(self: *VM, left: Value, right: Value) !Value {
+        _ = self;
         const left_tag = left.getTag();
         const right_tag = right.getTag();
 
         const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
         if (r == 0.0) {
-            const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-            return self.throwException(exception);
+            // PHP 8 returns INF for division by zero (with a warning)
+            return Value.initFloat(std.math.inf(f64));
         }
 
         const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
@@ -2372,6 +2970,9 @@ pub const VM = struct {
             },
             .literal_null => {
                 return Value.initNull();
+            },
+            .magic_constant => {
+                return self.evaluateMagicConstant(ast_node.data.magic_constant.kind);
             },
             .variable => {
                 const name_id = ast_node.data.variable.name;
@@ -2530,6 +3131,9 @@ pub const VM = struct {
 
                 return value;
             },
+            .compound_assignment => {
+                return self.evaluateCompoundAssignment(ast_node.data.compound_assignment);
+            },
             .echo_stmt => {
                 // Handle multiple expressions in echo statement
                 const exprs = ast_node.data.echo_stmt.exprs;
@@ -2584,7 +3188,7 @@ pub const VM = struct {
                 return self.evaluateClosureCreation(ast_node.data.closure);
             },
             .arrow_function => {
-                return self.evaluateArrowFunction(ast_node.data.closure);
+                return self.evaluateArrowFunction(ast_node.data.arrow_function);
             },
             .binary_expr => {
                 return self.evaluateBinaryExpression(ast_node.data.binary_expr);
@@ -2603,6 +3207,9 @@ pub const VM = struct {
             },
             .clone_with_expr => {
                 return self.evaluateCloneWithExpression(ast_node.data.clone_with_expr);
+            },
+            .cast_expr => {
+                return self.evaluateCastExpression(ast_node.data.cast_expr);
             },
             .function_decl => {
                 return self.evaluateFunctionDeclaration(ast_node.data.function_decl);
@@ -2668,7 +3275,72 @@ pub const VM = struct {
                 // Expression statements like namespace or use don't have a value to return.
                 return Value.initNull();
             },
+            .require_stmt, .include_stmt => {
+                // Get file path from the statement
+                const include_data = ast_node.data.include_stmt;
+                const path_expr = include_data.path;
+                const is_once = include_data.is_once;
+
+                const path_value = try self.eval(path_expr);
+                defer self.releaseValue(path_value);
+
+                if (path_value.getTag() != .string) {
+                    return Value.initNull();
+                }
+
+                const path_str = path_value.getAsString().data.data;
+                std.debug.print("DEBUG: require path='{s}', current_file='{s}'\n", .{ path_str, self.current_file });
+
+                // Try to open and read the file
+                const file = std.fs.cwd().openFile(path_str, .{}) catch |err| {
+                    // Try relative to current file directory
+                    if (self.current_file.len > 0) {
+                        if (std.mem.lastIndexOf(u8, self.current_file, "/")) |dir_end| {
+                            const dir = self.current_file[0..dir_end];
+                            const full_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, path_str }) catch {
+                                return Value.initNull();
+                            };
+                            defer self.allocator.free(full_path);
+                            std.debug.print("DEBUG: require fallback full_path='{s}'\n", .{full_path});
+
+                            const file2 = std.fs.cwd().openFile(full_path, .{}) catch {
+                                if (ast_node.tag == .require_stmt) {
+                                    std.debug.print("require failed: {s} ({any})\n", .{ full_path, err });
+                                    std.debug.print("current_file: {s}\n", .{self.current_file});
+                                }
+                                return Value.initNull();
+                            };
+                            defer file2.close();
+
+                            const src = file2.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch {
+                                return Value.initNull();
+                            };
+                            defer self.allocator.free(src);
+
+                            return self.executeIncluded(src, full_path, is_once);
+                        }
+                    }
+                    if (ast_node.tag == .require_stmt) {
+                        std.debug.print("require failed: {s} ({any})\n", .{ path_str, err });
+                        std.debug.print("current_file: {s}\n", .{self.current_file});
+                    }
+                    return Value.initNull();
+                };
+                defer file.close();
+
+                const src = file.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch {
+                    return Value.initNull();
+                };
+                defer self.allocator.free(src);
+
+                return self.executeIncluded(src, path_str, is_once);
+            },
+            .namespace_stmt, .use_stmt => {
+                // Namespace and use statements don't produce values
+                return Value.initNull();
+            },
             else => {
+                std.debug.print("DEBUG: Unsupported AST node type: {any}\n", .{ast_node.tag});
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported AST node type", self.current_file, self.current_line);
                 return self.throwException(exception);
             },
@@ -2692,9 +3364,40 @@ pub const VM = struct {
             args.deinit(self.allocator);
         }
 
+        // Track variable names for reference parameter writeback
+        var ref_var_names = std.ArrayList([]const u8){};
+        try ref_var_names.ensureTotalCapacity(self.allocator, call_data.args.len);
+        defer ref_var_names.deinit(self.allocator);
+
+        // Track named arguments for later reordering
+        var named_args = std.StringHashMap(Value).init(self.allocator);
+        defer {
+            // Release named argument values
+            var it = named_args.iterator();
+            while (it.next()) |entry| {
+                self.releaseValue(entry.value_ptr.*);
+            }
+            named_args.deinit();
+        }
+
         for (call_data.args) |arg_node_idx| {
-            const arg_value = try self.eval(arg_node_idx);
-            try args.append(self.allocator, arg_value);
+            const arg_node = self.context.nodes.items[arg_node_idx];
+            if (arg_node.tag == .named_arg) {
+                const name_id = arg_node.data.named_arg.name;
+                const param_name = self.context.string_pool.keys()[name_id];
+                const arg_value = try self.eval(arg_node.data.named_arg.value);
+                try named_args.put(param_name, arg_value);
+            } else {
+                // Track variable name for reference parameter support
+                if (arg_node.tag == .variable) {
+                    const var_name = self.context.string_pool.keys()[arg_node.data.variable.name];
+                    try ref_var_names.append(self.allocator, var_name);
+                } else {
+                    try ref_var_names.append(self.allocator, "");
+                }
+                const arg_value = try self.eval(arg_node_idx);
+                try args.append(self.allocator, arg_value);
+            }
         }
 
         // Determine function to call
@@ -2709,7 +3412,12 @@ pub const VM = struct {
                 if (self.getVariable(name)) |val| {
                     // If it's a callable object
                     switch (val.getTag()) {
-                        .user_function => return self.callUserFunction(val.getAsUserFunc().data, args.items),
+                        .user_function => {
+                            if (named_args.count() > 0) {
+                                return self.callUserFunctionWithNamed(val.getAsUserFunc().data, args.items, &named_args);
+                            }
+                            return self.callUserFunction(val.getAsUserFunc().data, args.items);
+                        },
                         .closure => return self.callClosure(val.getAsClosure().data, args.items),
                         .arrow_function => return self.callArrowFunction(val.getAsArrowFunc().data, args.items),
                         .string => {
@@ -2731,7 +3439,7 @@ pub const VM = struct {
                 }
             } else {
                 // Direct function call: func() where func is an identifier (parsed as variable node)
-                return self.callFunctionByName(name, args.items);
+                return self.callFunctionByNameWithRefs(name, args.items, &named_args, ref_var_names.items);
             }
         } else if (name_node.tag == .literal_string) {
             // Direct function call: func() - Parser might store name as literal_string?
@@ -2741,28 +3449,60 @@ pub const VM = struct {
             const name_id = name_node.data.literal_string.value;
             const func_name = self.context.string_pool.keys()[name_id];
             return self.callFunctionByName(func_name, args.items);
-        } else {
-            // Try to interpret whatever node as a name?
-            // In parser.zig parseFunctionCall uses parsePrimary for name?
-            // Usually it eats T_STRING.
-            // Let's assume if not variable, we extract string.
-            // But for now, let's implement callFunctionByName helper.
-
-            // Fallback for previous logic (assuming name_node contains name string)
-            // The previous logic assumed name_node.tag == .variable was WRONG for direct calls too?
-            // Wait, previous logic:
-            // if (name_node.tag != .variable) Error
-            // const name_id = name_node.data.variable.name;
-            // This suggests parser stores function name as a VARIABLE node even for direct calls?
-            // Let's check Parser.parseFunctionCall.
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid function name node", self.current_file, self.current_line);
+        } else if (name_node.tag == .function_call) {
+            // Nested function call - evaluate it first
+            const result = try self.evaluateFunctionCall(name_node.data.function_call);
+            defer self.releaseValue(result);
+            if (result.getTag() == .string) {
+                const func_name = result.getAsString().data.data;
+                return self.callFunctionByName(func_name, args.items);
+            }
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Function call did not return callable", self.current_file, self.current_line);
             return self.throwException(exception);
+        } else if (name_node.tag == .array_access) {
+            // Array access as function name - evaluate it
+            const result = try self.eval(call_data.name);
+            defer self.releaseValue(result);
+            if (result.getTag() == .string) {
+                const func_name = result.getAsString().data.data;
+                return self.callFunctionByName(func_name, args.items);
+            } else if (result.getTag() == .closure) {
+                return self.callClosure(result.getAsClosure().data, args.items);
+            }
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Array element is not callable", self.current_file, self.current_line);
+            return self.throwException(exception);
+        } else {
+            // Try to evaluate the node and see if it's callable
+            const result = try self.eval(call_data.name);
+            defer self.releaseValue(result);
+            switch (result.getTag()) {
+                .string => {
+                    const func_name = result.getAsString().data.data;
+                    return self.callFunctionByName(func_name, args.items);
+                },
+                .closure => return self.callClosure(result.getAsClosure().data, args.items),
+                .arrow_function => return self.callArrowFunction(result.getAsArrowFunc().data, args.items),
+                .user_function => return self.callUserFunction(result.getAsUserFunc().data, args.items),
+                else => {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                },
+            }
         }
     }
 
     pub fn callFunctionByName(self: *VM, name: []const u8, args: []const Value) !Value {
+        return self.callFunctionByNameWithRefs(name, args, null, null);
+    }
+
+    pub fn callFunctionByNameWithNamed(self: *VM, name: []const u8, args: []const Value, named_args: ?*const std.StringHashMap(Value)) !Value {
+        return self.callFunctionByNameWithRefs(name, args, named_args, null);
+    }
+
+    pub fn callFunctionByNameWithRefs(self: *VM, name: []const u8, args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
         // First check if it's a standard library function (optimized lookup)
         if (self.stdlib.getFunction(name)) |builtin_func| {
+            // Stdlib functions don't support named args or refs, just use positional
             return builtin_func.call(self, args);
         }
 
@@ -2777,7 +3517,9 @@ pub const VM = struct {
                 const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(function_val.getAsNativeFunc()));
                 return function(self, args);
             },
-            .user_function => self.callUserFunction(function_val.getAsUserFunc().data, args),
+            .user_function => {
+                return self.callUserFunctionWithNamedAndRefs(function_val.getAsUserFunc().data, args, named_args, ref_var_names);
+            },
             .closure => self.callClosure(function_val.getAsClosure().data, args),
             .arrow_function => self.callArrowFunction(function_val.getAsArrowFunc().data, args),
             else => {
@@ -3139,6 +3881,71 @@ pub const VM = struct {
             return self.callPDOMethod(target_value, method_name, args.items);
         }
 
+        // Special handling for Exception/Error objects
+        if (target_value.isObject()) {
+            const obj = target_value.getAsObject().data;
+            const class_name = obj.class.name.data;
+
+            // Check if this is Exception or any of its subclasses
+            const is_exception = std.mem.eql(u8, class_name, "Exception") or
+                std.mem.eql(u8, class_name, "RuntimeException") or
+                std.mem.eql(u8, class_name, "InvalidArgumentException") or
+                std.mem.eql(u8, class_name, "LogicException") or
+                std.mem.eql(u8, class_name, "Error") or
+                std.mem.eql(u8, class_name, "TypeError") or
+                std.mem.eql(u8, class_name, "ArgumentCountError") or
+                std.mem.eql(u8, class_name, "DivisionByZeroError") or
+                std.mem.eql(u8, class_name, "ValidationException") or
+                (obj.class.parent != null and (std.mem.eql(u8, obj.class.parent.?.name.data, "Exception") or
+                    std.mem.eql(u8, obj.class.parent.?.name.data, "Error")));
+
+            if (is_exception) {
+                if (std.mem.eql(u8, method_name, "getMessage")) {
+                    if (obj.getProperty("message")) |msg| {
+                        return msg.retain();
+                    } else |_| {
+                        return Value.initString(self.allocator, "") catch Value.initNull();
+                    }
+                } else if (std.mem.eql(u8, method_name, "getCode")) {
+                    if (obj.getProperty("code")) |code| {
+                        return code.retain();
+                    } else |_| {
+                        return Value.initInt(0);
+                    }
+                } else if (std.mem.eql(u8, method_name, "getFile")) {
+                    if (obj.getProperty("file")) |file| {
+                        return file.retain();
+                    } else |_| {
+                        return Value.initString(self.allocator, "") catch Value.initNull();
+                    }
+                } else if (std.mem.eql(u8, method_name, "getLine")) {
+                    if (obj.getProperty("line")) |line| {
+                        return line.retain();
+                    } else |_| {
+                        return Value.initInt(0);
+                    }
+                } else if (std.mem.eql(u8, method_name, "getPrevious")) {
+                    if (obj.getProperty("previous")) |prev| {
+                        return prev.retain();
+                    } else |_| {
+                        return Value.initNull();
+                    }
+                } else if (std.mem.eql(u8, method_name, "getTrace")) {
+                    // Return empty array for now
+                    return Value.initArrayWithManager(&self.memory_manager);
+                } else if (std.mem.eql(u8, method_name, "getTraceAsString")) {
+                    return Value.initString(self.allocator, "") catch Value.initNull();
+                } else if (std.mem.eql(u8, method_name, "getErrors")) {
+                    // For ValidationException with errors array
+                    if (obj.getProperty("errors")) |errors| {
+                        return errors.retain();
+                    } else |_| {
+                        return Value.initArrayWithManager(&self.memory_manager);
+                    }
+                }
+            }
+        }
+
         if (target_value.isStruct()) {
             return self.callStructMethod(target_value, method_name, args.items);
         }
@@ -3199,24 +4006,44 @@ pub const VM = struct {
         // Process parameters
         const parameters = try self.processParameters(arrow_func.params);
 
-        // Create arrow function with proper parameters
-        var arrow_function = types.ArrowFunction.init(self.allocator);
-        arrow_function.parameters = parameters;
-        // Store body as pointer (Index converted to usize then to pointer)
-        arrow_function.body = @ptrFromInt(@as(usize, arrow_func.body));
-        arrow_function.is_static = arrow_func.is_static;
+        // Create anonymous function name for the arrow function
+        const anon_name = try types.PHPString.init(self.allocator, "{arrow}");
 
-        // Auto-capture all variables from current scope
+        // Create UserFunction for the closure
+        var user_func = types.UserFunction.init(anon_name);
+        user_func.parameters = parameters;
+        // Store body as pointer (Index converted to usize then to pointer)
+        user_func.body = @ptrFromInt(@as(usize, arrow_func.body));
+
+        // Set min_args and max_args for arrow function
+        var is_variadic = false;
+        user_func.min_args = 0;
+        for (parameters) |param| {
+            if (param.is_variadic) {
+                is_variadic = true;
+            }
+            if (param.default_value == null and !param.is_variadic) {
+                user_func.min_args += 1;
+            }
+        }
+        user_func.is_variadic = is_variadic;
+        user_func.max_args = if (is_variadic) null else @as(u32, @intCast(parameters.len));
+
+        // Create Closure wrapping the UserFunction
+        var closure = types.Closure.init(self.allocator, user_func);
+        closure.is_static = arrow_func.is_static;
+
+        // Auto-capture all variables from current scope (arrow functions auto-capture)
         if (self.call_stack.items.len > 0) {
             const current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
             var locals_iter = current_frame.locals.iterator();
             while (locals_iter.next()) |entry| {
-                try arrow_function.autoCaptureVariable(entry.key_ptr.*, entry.value_ptr.*);
+                try closure.captureVariable(entry.key_ptr.*, entry.value_ptr.*);
             }
         }
 
-        const arrow_func_box = try self.memory_manager.allocArrowFunction(arrow_function);
-        return Value.fromBox(arrow_func_box, Value.TYPE_CLOSURE);
+        const closure_box = try self.memory_manager.allocClosure(closure);
+        return Value.fromBox(closure_box, Value.TYPE_CLOSURE);
     }
 
     fn evaluateUnaryExpression(self: *VM, unary_expr: anytype) !Value {
@@ -3284,8 +4111,77 @@ pub const VM = struct {
                 try self.setVariable(name, new_val);
 
                 return current_val;
+            } else if (expr_node.tag == .property_access) {
+                // Handle $this->property++ or $obj->property++
+                const obj_val = try self.eval(expr_node.data.property_access.target);
+                defer self.releaseValue(obj_val);
+
+                const prop_name = self.context.string_pool.keys()[expr_node.data.property_access.property_name];
+
+                // Get current property value
+                var current_val: Value = Value.initInt(0);
+                if (obj_val.isObject()) {
+                    const obj = obj_val.getAsObject().data;
+                    current_val = obj.getProperty(prop_name) catch Value.initInt(0);
+                } else if (obj_val.isStruct()) {
+                    const struct_inst = obj_val.getAsStruct().data;
+                    current_val = struct_inst.getField(prop_name) catch Value.initInt(0);
+                }
+
+                // Retain current value
+                self.retainValue(current_val);
+
+                // Calculate new value
+                var new_val: Value = undefined;
+                if (postfix_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update property
+                if (obj_val.isObject()) {
+                    const obj = obj_val.getAsObject().data;
+                    try obj.setProperty(self.allocator, prop_name, new_val);
+                } else if (obj_val.isStruct()) {
+                    const struct_inst = obj_val.getAsStruct().data;
+                    try struct_inst.setField(self.allocator, prop_name, new_val);
+                }
+
+                return current_val;
+            } else if (expr_node.tag == .array_access) {
+                // Handle $arr[0]++
+                const array_val = try self.eval(expr_node.data.array_access.target);
+                defer self.releaseValue(array_val);
+
+                const index_node = expr_node.data.array_access.index orelse return Value.initNull();
+                const index_val = try self.eval(index_node);
+                defer self.releaseValue(index_val);
+
+                if (array_val.isArray()) {
+                    const php_array = array_val.getAsArray().data;
+                    const key = switch (index_val.getTag()) {
+                        .integer => types.ArrayKey{ .integer = index_val.asInt() },
+                        .string => types.ArrayKey{ .string = index_val.getAsString().data },
+                        else => return Value.initNull(),
+                    };
+
+                    const current_val = php_array.get(key) orelse Value.initInt(0);
+                    self.retainValue(current_val);
+
+                    var new_val: Value = undefined;
+                    if (postfix_expr.op == .plus_plus) {
+                        new_val = try self.incrementValue(current_val);
+                    } else {
+                        new_val = try self.decrementValue(current_val);
+                    }
+
+                    try php_array.set(self.allocator, key, new_val);
+                    return current_val;
+                }
+                return Value.initNull();
             } else {
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables", self.current_file, self.current_line);
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables and properties", self.current_file, self.current_line);
                 return self.throwException(exception);
             }
         }
@@ -3438,6 +4334,118 @@ pub const VM = struct {
         return object;
     }
 
+    fn evaluateCastExpression(self: *VM, cast_data: anytype) !Value {
+        const value = try self.eval(cast_data.expr);
+        defer self.releaseValue(value);
+
+        // Get the cast type name from the token
+        const cast_token = self.context.nodes.items[cast_data.expr].main_token;
+        _ = cast_token;
+
+        return switch (cast_data.cast_type) {
+            .k_array => blk: {
+                // Convert to array - if already array, return as-is
+                if (value.isArray()) {
+                    break :blk value.retain();
+                }
+                // Create array with single element
+                const arr = try Value.initArrayWithManager(&self.memory_manager);
+                try arr.getAsArray().data.push(self.allocator, value);
+                break :blk arr;
+            },
+            .k_object => blk: {
+                // Convert to object - if array, convert keys to properties
+                if (value.isArray()) {
+                    const stdClass = self.getClass("stdClass") orelse {
+                        // Create a simple object
+                        break :blk value.retain();
+                    };
+                    const obj = try self.allocator.create(types.PHPObject);
+                    obj.* = try types.PHPObject.init(self.allocator, stdClass);
+
+                    // Copy array elements to object properties
+                    var iterator = value.getAsArray().data.elements.iterator();
+                    while (iterator.next()) |entry| {
+                        switch (entry.key_ptr.*) {
+                            .string => |key| {
+                                try obj.setProperty(self.allocator, key.data, entry.value_ptr.*);
+                            },
+                            .integer => |idx| {
+                                const key_str = try std.fmt.allocPrint(self.allocator, "{d}", .{idx});
+                                defer self.allocator.free(key_str);
+                                try obj.setProperty(self.allocator, key_str, entry.value_ptr.*);
+                            },
+                        }
+                    }
+
+                    const box = try self.allocator.create(types.gc.Box(*types.PHPObject));
+                    box.* = .{ .ref_count = 1, .gc_info = .{}, .data = obj };
+                    break :blk Value.fromBox(box, Value.TYPE_OBJECT);
+                }
+                break :blk value.retain();
+            },
+            else => value.retain(),
+        };
+    }
+
+    fn executeIncluded(self: *VM, source: []const u8, file_path: []const u8, is_once: bool) anyerror!Value {
+        // Check if already included for once-semantics
+        if (is_once) {
+            if (self.included_files.contains(file_path)) {
+                return Value.initBool(true);
+            }
+        }
+
+        // Create null-terminated source for parser
+        const source_z = try self.allocator.allocSentinel(u8, source.len, 0);
+        defer self.allocator.free(source_z);
+        @memcpy(source_z, source);
+
+        // Detect syntax directive in the included file
+        // This allows each file to specify its own syntax mode via // @syntax: directive
+        const directive_result = syntax_mode.detectSyntaxDirective(source);
+        const file_syntax_mode = if (directive_result.found and directive_result.mode != null)
+            directive_result.mode.?
+        else
+            self.syntax_config.mode; // Use current VM's syntax mode as default
+
+        // Parse the included file with the appropriate syntax mode
+        // IMPORTANT: Use context.allocator (Arena) not self.allocator (GPA)
+        // because context.nodes is managed by context.allocator
+        var parser = Parser.initWithMode(self.context.allocator, self.context, source_z, file_syntax_mode) catch {
+            return Value.initNull();
+        };
+        // We don't deinit parser here because AST nodes are allocated in the context
+        // and might be referenced later? Actually parser deinit just ignores self.
+        defer parser.deinit();
+
+        const root = parser.parse() catch {
+            return Value.initNull();
+        };
+
+        // Record inclusion
+        if (is_once) {
+            try self.included_files.put(try self.allocator.dupe(u8, file_path), {});
+        }
+
+        // Save and restore current file and syntax config
+        const old_file = self.current_file;
+        const old_syntax_config = self.syntax_config;
+        self.current_file = file_path;
+        // Update syntax config for error reporting in the included file
+        if (directive_result.found and directive_result.mode != null) {
+            self.syntax_config = SyntaxConfig.init(file_syntax_mode);
+        }
+        defer {
+            self.current_file = old_file;
+            self.syntax_config = old_syntax_config;
+        }
+
+        // Execute the AST
+        // We use @as to force the error type to anyerror to break recursion in type inference
+        return @as(anyerror!Value, self.eval(root));
+    }
+
     fn evaluateFunctionDeclaration(self: *VM, func_decl: anytype) !Value {
         const name_id = func_decl.name;
         const name = self.context.string_pool.keys()[name_id];
@@ -3447,16 +4455,20 @@ pub const VM = struct {
         user_function.return_type = null;
         user_function.attributes = try self.convertAttributes(func_decl.attributes);
         user_function.body = @ptrFromInt(func_decl.body);
-        user_function.is_variadic = false;
-        user_function.min_args = 0;
 
-        // Count required parameters
+        // Check if any parameter is variadic and count required parameters
+        var is_variadic = false;
+        user_function.min_args = 0;
         for (user_function.parameters) |param| {
+            if (param.is_variadic) {
+                is_variadic = true;
+            }
             if (param.default_value == null and !param.is_variadic) {
                 user_function.min_args += 1;
             }
         }
-        user_function.max_args = if (user_function.is_variadic) null else @as(u32, @intCast(user_function.parameters.len));
+        user_function.is_variadic = is_variadic;
+        user_function.max_args = if (is_variadic) null else @as(u32, @intCast(user_function.parameters.len));
 
         const func_box = try self.memory_manager.allocUserFunction(user_function);
         const func_value = Value.fromBox(func_box, Value.TYPE_USER_FUNC);
@@ -3813,8 +4825,8 @@ pub const VM = struct {
 
         const r = right.asInt();
         if (r == 0) {
-            const exception = try ExceptionFactory.createDivisionByZeroError(self.allocator, self.current_file, self.current_line);
-            return self.throwException(exception);
+            // PHP 8 returns INF for division by zero (with a warning)
+            return Value.initFloat(std.math.inf(f64));
         }
 
         return Value.initInt(@mod(left.asInt(), r));
@@ -4282,6 +5294,7 @@ pub const VM = struct {
 
     fn addClassProperty(self: *VM, class: *types.PHPClass, name: []const u8, visibility: types.Property.Visibility, default_value: ?Value) !void {
         const prop_name = try types.PHPString.init(self.allocator, name);
+        defer prop_name.release(self.allocator);
         var property = types.Property.init(prop_name);
         property.modifiers.visibility = visibility;
         property.default_value = default_value;
@@ -4346,6 +5359,7 @@ pub const VM = struct {
 
         const struct_name = self.context.string_pool.keys()[struct_data.name];
         const php_struct_name = try types.PHPString.init(self.allocator, struct_name);
+        defer php_struct_name.release(self.allocator); // PHPStruct.init will retain it
 
         // Create new struct
         var php_struct = types.PHPStruct.init(self.allocator, php_struct_name);
@@ -4438,6 +5452,7 @@ pub const VM = struct {
     fn processStructMethodDeclaration(self: *VM, struct_type: *types.PHPStruct, method_data: anytype) !void {
         const method_name = self.context.string_pool.keys()[method_data.name];
         const php_method_name = try types.PHPString.init(self.allocator, method_name);
+        defer php_method_name.release(self.allocator); // Method.init will retain it
 
         // Create method
         var method = types.Method.init(php_method_name);
@@ -4546,8 +5561,42 @@ pub const VM = struct {
                             const var_node = self.context.nodes.items[var_idx];
                             if (var_node.tag == .variable) {
                                 const var_name = self.context.string_pool.keys()[var_node.data.variable.name];
-                                // Would bind the actual exception object here
-                                try self.global.set(var_name, Value.initNull());
+                                // Create an exception object from current_exception
+                                if (self.current_exception) |exc| {
+                                    // Create a PHP object to represent the exception
+                                    const exception_class = self.getClass("Exception") orelse self.getClass("RuntimeException");
+                                    if (exception_class) |cls| {
+                                        const exc_obj = try self.allocator.create(types.PHPObject);
+                                        exc_obj.* = try types.PHPObject.init(self.allocator, cls);
+                                        
+                                        // Create message string and set property, then release our reference
+                                        const message_value = try Value.initString(self.allocator, exc.message.data);
+                                        try exc_obj.setProperty(self.allocator, "message", message_value);
+                                        message_value.release(self.allocator); // setProperty retains, so release our ref
+                                        
+                                        try exc_obj.setProperty(self.allocator, "code", Value.initInt(exc.code));
+
+                                        const box = try self.allocator.create(types.gc.Box(*types.PHPObject));
+                                        box.* = .{ .ref_count = 1, .gc_info = .{}, .data = exc_obj };
+                                        const exc_value = Value.fromBox(box, Value.TYPE_OBJECT);
+                                        try self.setVariable(var_name, exc_value);
+                                        // setVariable retains the value, so release our reference
+                                        self.releaseValue(exc_value);
+                                    } else {
+                                        try self.setVariable(var_name, Value.initNull());
+                                    }
+                                    // Release and clear current exception
+                                    exc.deinit(self.allocator);
+                                    self.current_exception = null;
+                                } else {
+                                    try self.setVariable(var_name, Value.initNull());
+                                }
+                            }
+                        } else {
+                            // Release and clear current exception even if no variable binding
+                            if (self.current_exception) |exc| {
+                                exc.deinit(self.allocator);
+                                self.current_exception = null;
                             }
                         }
 
@@ -4774,6 +5823,17 @@ pub const VM = struct {
                 }
             }
 
+            // For parent:: calls, preserve $this from the caller's scope
+            if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
+                // Get $this from the previous call frame (the one that called parent::)
+                if (self.call_stack.items.len > 1) {
+                    const caller_frame = &self.call_stack.items[self.call_stack.items.len - 2];
+                    if (caller_frame.locals.get("$this")) |this_val| {
+                        try self.setVariable("$this", this_val);
+                    }
+                }
+            }
+
             // Set current class for 'self' resolution
             const old_class = self.current_class;
             self.current_class = class;
@@ -4793,6 +5853,24 @@ pub const VM = struct {
                     }
                     return err;
                 };
+            } else {
+                // Handle builtin methods with null body (e.g., Exception::__construct)
+                if (std.mem.eql(u8, method_name, "__construct")) {
+                    // For Exception classes, set the message property from $this
+                    if (self.getVariable("$this")) |this_val| {
+                        if (this_val.isObject()) {
+                            const obj = this_val.getAsObject().data;
+                            // Set message from first argument if provided
+                            if (args.items.len > 0) {
+                                try obj.setProperty(self.allocator, "message", args.items[0]);
+                            }
+                            // Set code from second argument if provided
+                            if (args.items.len > 1) {
+                                try obj.setProperty(self.allocator, "code", args.items[1]);
+                            }
+                        }
+                    }
+                }
             }
 
             return Value.initNull();

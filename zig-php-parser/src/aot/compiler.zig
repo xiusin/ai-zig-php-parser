@@ -24,6 +24,65 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+// ============================================================================
+// Syntax Mode Types (local definitions for AOT module independence)
+// ============================================================================
+
+/// 语法模式枚举
+/// Defines the syntax style for variable declarations and property access
+pub const SyntaxMode = enum {
+    /// PHP 风格: $var, $obj->prop, $obj->method()
+    php,
+    /// Go 风格: var, obj.prop, obj.method()
+    go,
+
+    /// Parse a syntax mode from a string
+    /// Returns null if the string doesn't match any valid mode
+    pub fn fromString(str: []const u8) ?SyntaxMode {
+        if (std.mem.eql(u8, str, "php")) return .php;
+        if (std.mem.eql(u8, str, "go")) return .go;
+        return null;
+    }
+
+    /// Convert the syntax mode to its string representation
+    pub fn toString(self: SyntaxMode) []const u8 {
+        return switch (self) {
+            .php => "php",
+            .go => "go",
+        };
+    }
+};
+
+/// 语法模式配置
+/// Configuration for syntax mode behavior
+pub const SyntaxConfig = struct {
+    /// The active syntax mode
+    mode: SyntaxMode = .php,
+    /// 是否允许混合模式（文件级别切换）
+    allow_mixed_mode: bool = true,
+    /// 错误消息使用的语法风格
+    error_display_mode: SyntaxMode = .php,
+
+    /// Initialize a SyntaxConfig with the specified mode
+    /// Sets error_display_mode to match the specified mode
+    pub fn init(mode: SyntaxMode) SyntaxConfig {
+        return .{
+            .mode = mode,
+            .error_display_mode = mode,
+        };
+    }
+
+    /// Check if the current mode is PHP
+    pub fn isPhpMode(self: SyntaxConfig) bool {
+        return self.mode == .php;
+    }
+
+    /// Check if the current mode is Go
+    pub fn isGoMode(self: SyntaxConfig) bool {
+        return self.mode == .go;
+    }
+};
+
 // AOT module imports
 const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
@@ -73,6 +132,8 @@ pub const CompileOptions = struct {
     dump_ast: bool = false,
     /// Verbose output during compilation
     verbose: bool = false,
+    /// Syntax mode for parsing (PHP or Go style)
+    syntax_mode: SyntaxMode = .php,
 
     /// Get the output file path, deriving from input if not specified
     pub fn getOutputPath(self: *const CompileOptions, allocator: Allocator) ![]const u8 {
@@ -386,6 +447,8 @@ pub const AOTCompiler = struct {
     codegen: ?*CodeGenerator,
     linker: ?*StaticLinker,
     optimizer: ?*IROptimizer,
+    /// Syntax configuration derived from options
+    syntax_config: SyntaxConfig,
 
     /// Source code (loaded from file)
     source: ?[]const u8,
@@ -407,6 +470,9 @@ pub const AOTCompiler = struct {
         const diagnostics = try allocator.create(DiagnosticEngine);
         diagnostics.* = DiagnosticEngine.init(allocator);
 
+        // Initialize syntax config from options
+        const syntax_config = SyntaxConfig.init(options.syntax_mode);
+
         self.* = .{
             .allocator = allocator,
             .options = options,
@@ -417,6 +483,7 @@ pub const AOTCompiler = struct {
             .codegen = null,
             .linker = null,
             .optimizer = null,
+            .syntax_config = syntax_config,
             .source = null,
             .ast_nodes = null,
             .string_table = null,
@@ -622,6 +689,7 @@ pub const AOTCompiler = struct {
         std.debug.print("  Optimize: {s}\n", .{self.options.optimize_level.toString()});
         std.debug.print("  Static link: {}\n", .{self.options.static_link});
         std.debug.print("  Debug info: {}\n", .{self.options.debug_info});
+        std.debug.print("  Syntax mode: {s}\n", .{self.options.syntax_mode.toString()});
     }
 
     /// Load source file
@@ -967,6 +1035,16 @@ pub const AOTCompiler = struct {
         return self.diagnostics;
     }
 
+    /// Get syntax configuration
+    pub fn getSyntaxConfig(self: *const Self) SyntaxConfig {
+        return self.syntax_config;
+    }
+
+    /// Get syntax mode
+    pub fn getSyntaxMode(self: *const Self) SyntaxMode {
+        return self.options.syntax_mode;
+    }
+
     /// Check if compilation had errors
     pub fn hasErrors(self: *const Self) bool {
         return self.diagnostics.hasErrors();
@@ -1061,4 +1139,49 @@ test "Target.toTriple" {
     const triple = try target.toTriple(allocator);
     defer allocator.free(triple);
     try std.testing.expectEqualStrings("x86_64-linux-gnu", triple);
+}
+
+test "CompileOptions default syntax mode is PHP" {
+    const opts = CompileOptions{
+        .input_file = "test.php",
+    };
+    try std.testing.expectEqual(SyntaxMode.php, opts.syntax_mode);
+}
+
+test "CompileOptions with Go syntax mode" {
+    const opts = CompileOptions{
+        .input_file = "test.php",
+        .syntax_mode = .go,
+    };
+    try std.testing.expectEqual(SyntaxMode.go, opts.syntax_mode);
+}
+
+test "AOTCompiler initializes syntax config from options" {
+    const allocator = std.testing.allocator;
+    
+    // Test with PHP mode
+    {
+        const opts = CompileOptions{
+            .input_file = "test.php",
+            .syntax_mode = .php,
+        };
+        var compiler = try AOTCompiler.init(allocator, opts);
+        defer compiler.deinit();
+        
+        try std.testing.expectEqual(SyntaxMode.php, compiler.getSyntaxMode());
+        try std.testing.expect(compiler.getSyntaxConfig().isPhpMode());
+    }
+    
+    // Test with Go mode
+    {
+        const opts = CompileOptions{
+            .input_file = "test.php",
+            .syntax_mode = .go,
+        };
+        var compiler = try AOTCompiler.init(allocator, opts);
+        defer compiler.deinit();
+        
+        try std.testing.expectEqual(SyntaxMode.go, compiler.getSyntaxMode());
+        try std.testing.expect(compiler.getSyntaxConfig().isGoMode());
+    }
 }

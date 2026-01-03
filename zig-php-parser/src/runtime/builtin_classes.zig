@@ -41,20 +41,13 @@ pub const BuiltinClassManager = struct {
     }
 
     fn addProperty(self: *BuiltinClassManager, class: *PHPClass, name: []const u8, visibility: Property.Visibility, default_value: ?Value) !void {
-        const property = Property{
-            .name = try PHPString.init(self.allocator, name),
-            .type = null,
-            .modifiers = .{
-                .visibility = visibility,
-                .is_static = false,
-                .is_readonly = false,
-            },
-            .default_value = default_value,
-            .attributes = &[_]types.Attribute{},
-            .hooks = &[_]types.PropertyHook{},
-        };
+        const prop_name = try PHPString.init(self.allocator, name);
+        var property = Property.init(prop_name);
+        property.modifiers.visibility = visibility;
+        property.default_value = default_value;
         try class.properties.put(name, property);
         _ = try class.shape.addProperty(name);
+        prop_name.release(self.allocator);
     }
 
     fn registerBuiltinClasses(self: *BuiltinClassManager) !void {
@@ -154,6 +147,18 @@ pub const BuiltinClassManager = struct {
         try self.addProperty(exception_class, "line", .protected, null);
         try self.addProperty(exception_class, "previous", .private, null);
 
+        // 添加 __construct 方法
+        try self.addExceptionConstructor(exception_class);
+
+        // 添加 getMessage 方法
+        try self.addExceptionMethod(exception_class, "getMessage");
+        try self.addExceptionMethod(exception_class, "getCode");
+        try self.addExceptionMethod(exception_class, "getFile");
+        try self.addExceptionMethod(exception_class, "getLine");
+        try self.addExceptionMethod(exception_class, "getTrace");
+        try self.addExceptionMethod(exception_class, "getTraceAsString");
+        try self.addExceptionMethod(exception_class, "getPrevious");
+
         try self.classes.put("Exception", exception_class);
 
         // Error类
@@ -192,6 +197,8 @@ pub const BuiltinClassManager = struct {
         runtime_exception_class.* = try PHPClass.init(self.allocator, runtime_exception_name);
         runtime_exception_name.release(self.allocator);
         runtime_exception_class.parent = exception_class;
+        try self.addExceptionConstructor(runtime_exception_class);
+        try self.addExceptionMethod(runtime_exception_class, "getMessage");
 
         try self.classes.put("RuntimeException", runtime_exception_class);
 
@@ -201,6 +208,8 @@ pub const BuiltinClassManager = struct {
         invalid_arg_class.* = try PHPClass.init(self.allocator, invalid_arg_name);
         invalid_arg_name.release(self.allocator);
         invalid_arg_class.parent = exception_class;
+        try self.addExceptionConstructor(invalid_arg_class);
+        try self.addExceptionMethod(invalid_arg_class, "getMessage");
 
         try self.classes.put("InvalidArgumentException", invalid_arg_class);
 
@@ -210,8 +219,30 @@ pub const BuiltinClassManager = struct {
         logic_exception_class.* = try PHPClass.init(self.allocator, logic_exception_name);
         logic_exception_name.release(self.allocator);
         logic_exception_class.parent = exception_class;
+        try self.addExceptionConstructor(logic_exception_class);
+        try self.addExceptionMethod(logic_exception_class, "getMessage");
 
         try self.classes.put("LogicException", logic_exception_class);
+
+        // DivisionByZeroError
+        const divzero_error_name = try PHPString.init(self.allocator, "DivisionByZeroError");
+        const divzero_error_class = try self.allocator.create(PHPClass);
+        divzero_error_class.* = try PHPClass.init(self.allocator, divzero_error_name);
+        divzero_error_name.release(self.allocator);
+        divzero_error_class.parent = error_class;
+        try self.addExceptionConstructor(divzero_error_class);
+        try self.addExceptionMethod(divzero_error_class, "getMessage");
+
+        try self.classes.put("DivisionByZeroError", divzero_error_class);
+
+        // Throwable interface (for catch blocks)
+        const throwable_name = try PHPString.init(self.allocator, "Throwable");
+        const throwable_class = try self.allocator.create(PHPClass);
+        throwable_class.* = try PHPClass.init(self.allocator, throwable_name);
+        throwable_name.release(self.allocator);
+        throwable_class.modifiers.is_abstract = true;
+
+        try self.classes.put("Throwable", throwable_class);
     }
 
     /// 注册Iterator接口
@@ -381,6 +412,63 @@ pub const BuiltinClassManager = struct {
 
         // 构造函数体为null（由解释器处理）
         method.body = null;
+
+        try class.methods.put("__construct", method);
+    }
+
+    /// 辅助函数：添加Exception方法（如 getMessage, getCode 等）
+    fn addExceptionMethod(self: *BuiltinClassManager, class: *PHPClass, method_name: []const u8) !void {
+        const method_name_str = try PHPString.init(self.allocator, method_name);
+        var method = types.Method.init(method_name_str);
+        method_name_str.release(self.allocator);
+
+        method.modifiers = .{
+            .is_static = false,
+            .is_final = true,
+            .is_abstract = false,
+            .visibility = .public,
+        };
+
+        method.parameters = &[_]types.Method.Parameter{};
+        method.body = null; // Handled by interpreter
+
+        try class.methods.put(method_name, method);
+    }
+
+    /// 辅助函数：添加Exception构造函数方法
+    fn addExceptionConstructor(self: *BuiltinClassManager, class: *PHPClass) !void {
+        const method_name = try PHPString.init(self.allocator, "__construct");
+        var method = types.Method.init(method_name);
+        method_name.release(self.allocator);
+
+        // 构造函数是公共的
+        method.modifiers = .{
+            .is_static = false,
+            .is_final = false,
+            .is_abstract = false,
+            .visibility = .public,
+        };
+
+        // Exception构造函数参数: $message = "", $code = 0, $previous = null
+        var params = try self.allocator.alloc(types.Method.Parameter, 3);
+
+        const msg_name = try PHPString.init(self.allocator, "$message");
+        params[0] = types.Method.Parameter.init(msg_name);
+        params[0].default_value = Value.initNull(); // Will be set to empty string
+        msg_name.release(self.allocator);
+
+        const code_name = try PHPString.init(self.allocator, "$code");
+        params[1] = types.Method.Parameter.init(code_name);
+        params[1].default_value = Value.initInt(0);
+        code_name.release(self.allocator);
+
+        const prev_name = try PHPString.init(self.allocator, "$previous");
+        params[2] = types.Method.Parameter.init(prev_name);
+        params[2].default_value = Value.initNull();
+        prev_name.release(self.allocator);
+
+        method.parameters = params;
+        method.body = null; // Handled by interpreter - body=null means builtin
 
         try class.methods.put("__construct", method);
     }
