@@ -268,6 +268,10 @@ pub const Parser = struct {
             .k_require, .k_require_once, .k_include, .k_include_once => self.parseInclude(),
             .k_abstract, .k_final => self.parseModifiedClassOrMember(attributes),
             .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes, false),
+            .k_set, .k_get => {
+                // Property hooks are handled in parseClassMember
+                return self.parseClassMember(attributes, false);
+            },
             .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();

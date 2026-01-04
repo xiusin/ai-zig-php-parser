@@ -126,7 +126,7 @@
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/model/personalWechat.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767514303264" />
+              <option name="lastModified" value="1767519397068" />
               <option name="schema">
                 <list>
                   <option value="PersonalWechat" />
@@ -145,7 +145,7 @@
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/counter.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767517413380" />
+              <option name="lastModified" value="1767519727500" />
               <option name="schema">
                 <list>
                   <option value="WsRequestData" />
