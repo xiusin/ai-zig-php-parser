@@ -100,7 +100,17 @@ pub const Lexer = struct {
             '*' => if (self.match('=')) .{ .tag = .asterisk_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .asterisk, .loc = .{ .start = start, .end = self.pos } },
             '/' => if (self.match('=')) .{ .tag = .slash_equal, .loc = .{ .start = start, .end = self.pos } } else if (self.match('/')) self.skipLineComment(start) else if (self.match('*')) self.skipBlockComment(start) else .{ .tag = .slash, .loc = .{ .start = start, .end = self.pos } },
             '%' => if (self.match('=')) .{ .tag = .percent_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .percent, .loc = .{ .start = start, .end = self.pos } },
-            '?' => if (self.match('>')) .{ .tag = .t_close_tag, .loc = .{ .start = start, .end = self.pos } } else if (self.match('?')) .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .question, .loc = .{ .start = start, .end = self.pos } },
+            '?' => if (self.match('>')) .{ .tag = .t_close_tag, .loc = .{ .start = start, .end = self.pos } } else if (self.match('?')) .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } } else if (self.match('-')) {
+                // Check for ?-> (safe arrow in PHP mode)
+                if (self.match('>')) {
+                    return .{ .tag = .safe_arrow, .loc = .{ .start = start, .end = self.pos } };
+                }
+                // If not ?->, it's invalid
+                return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
+            } else if (self.match('.')) {
+                // ?. (safe dot in Go mode)
+                return .{ .tag = .safe_dot, .loc = .{ .start = start, .end = self.pos } };
+            } else .{ .tag = .question, .loc = .{ .start = start, .end = self.pos } },
             '=' => if (self.match('>')) .{ .tag = .fat_arrow, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) (if (self.match('=')) .{ .tag = .equal_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .equal_equal, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .equal, .loc = .{ .start = start, .end = self.pos } },
             '!' => if (self.match('=')) (if (self.match('=')) .{ .tag = .bang_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .bang_equal, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .bang, .loc = .{ .start = start, .end = self.pos } },
             '&' => if (self.match('&')) .{ .tag = .double_ampersand, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .ampersand, .loc = .{ .start = start, .end = self.pos } },

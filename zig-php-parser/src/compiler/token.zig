@@ -171,6 +171,9 @@ pub const Token = struct {
         question, // ! and ?
         k_with, // with keyword for clone with
         t_attribute_start, // #[
+        // Safe navigation operators (null-safe)
+        safe_arrow, // ?-> (PHP mode)
+        safe_dot,   // ?.  (Go mode)
         // Go mode specific tokens
         t_go_identifier, // Go mode identifier (variable without $ prefix)
     };

@@ -491,6 +491,7 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .throw_stmt => .throw_stmt,
         .method_call => .method_call,
         .property_access => .property_access,
+        .safe_property_access => .property_access, // 安全导航操作符映射到 property_access
         .array_access => .array_access,
         .function_call => .function_call,
         .function_decl => .function_decl,

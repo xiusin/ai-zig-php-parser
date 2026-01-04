@@ -23,6 +23,7 @@ const string_utils = @import("string_utils.zig");
 const builtin_methods = @import("builtin_methods.zig");
 const builtin_concurrency = @import("builtin_concurrency.zig");
 const builtin_http = @import("builtin_http.zig");
+const builtin_io = @import("builtin_io.zig");
 const syntax_mode = @import("../compiler/syntax_mode.zig");
 pub const SyntaxMode = syntax_mode.SyntaxMode;
 pub const SyntaxConfig = syntax_mode.SyntaxConfig;
@@ -945,6 +946,14 @@ pub const VM = struct {
 
         vm.global.* = Environment.init(allocator);
         vm.reflection_system = ReflectionSystem.init(allocator, vm);
+
+        // Load security configuration
+        builtin_io.loadConfig(allocator) catch |err| {
+            std.log.warn("Failed to load security configuration: {}", .{err});
+        };
+
+        // Initialize file handle registry
+        builtin_io.initFileHandles(allocator);
 
         // Initialize builtin classes
         // The VM takes ownership of the class pointers, so we only deinit the hashmap
@@ -3154,6 +3163,9 @@ pub const VM = struct {
             .property_access => {
                 return self.evaluatePropertyAccess(ast_node.data.property_access);
             },
+            .safe_property_access => {
+                return self.evaluateSafePropertyAccess(ast_node.data.safe_property_access);
+            },
             .array_access => {
                 return self.evaluateArrayAccess(ast_node.data.array_access);
             },
@@ -3545,6 +3557,30 @@ pub const VM = struct {
         } else {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
             return self.throwException(exception);
+        }
+    }
+
+    fn evaluateSafePropertyAccess(self: *VM, property_data: anytype) !Value {
+        const target_value = try self.eval(property_data.target);
+        defer self.releaseValue(target_value);
+
+        // 如果目标为 null，直接返回 null（安全导航的核心）
+        if (target_value.isNull()) {
+            return Value.initNull();
+        }
+
+        const property_name = self.context.string_pool.keys()[property_data.property_name];
+
+        if (target_value.isStruct()) {
+            const struct_inst = target_value.getAsStruct().data;
+            const value = try struct_inst.getField(property_name);
+            self.retainValue(value);
+            return value;
+        } else if (target_value.isObject()) {
+            return self.getObjectProperty(target_value, property_name);
+        } else {
+            // 对于安全导航操作符，如果目标不是对象，返回 null 而不是抛出异常
+            return Value.initNull();
         }
     }
 

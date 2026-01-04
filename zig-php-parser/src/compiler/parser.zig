@@ -1117,6 +1117,30 @@ pub const Parser = struct {
                 } else {
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
                 }
+            } else if (tag == .safe_arrow or tag == .safe_dot) {
+                // 安全导航操作符 ?-> (PHP) 或 ?. (Go)
+                // 方法名可以是标识符，也可以是某些关键字
+                const member_name_tok = if (self.curr.tag == .t_string)
+                    try self.eat(.t_string)
+                else if (self.curr.tag == .t_go_identifier)
+                    try self.eat(.t_go_identifier)
+                else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
+                    self.curr.tag == .k_unset or self.curr.tag == .k_clone or
+                    self.curr.tag == .k_list or self.curr.tag == .k_print or
+                    self.curr.tag == .k_lock or self.curr.tag == .k_try or
+                    self.curr.tag == .k_catch or self.curr.tag == .k_finally or
+                    self.curr.tag == .k_throw or self.curr.tag == .k_match or
+                    self.curr.tag == .k_default or self.curr.tag == .k_static or
+                    self.curr.tag == .k_class or self.curr.tag == .k_function or
+                    self.curr.tag == .k_array or self.curr.tag == .k_new)
+                blk: {
+                    const tok = self.curr;
+                    self.nextToken();
+                    break :blk tok;
+                } else try self.eat(.t_string);
+                const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
+                // 安全导航操作符目前只支持属性访问，不支持方法调用
+                left = try self.createNode(.{ .tag = .safe_property_access, .main_token = op, .data = .{ .safe_property_access = .{ .target = left, .property_name = member_id } } });
             } else if (tag == .double_colon) {
                 // Static access: ClassName::member, self::member, parent::member, $obj::member
                 const left_node = self.context.nodes.items[left];
@@ -1705,6 +1729,8 @@ pub const Parser = struct {
             .l_paren => 110,
             .l_bracket => 110, // Array access
             .arrow => 100,
+            .safe_arrow => 100, // 安全导航操作符 ?-> (PHP 模式)
+            .safe_dot => 100,   // 安全导航操作符 ?. (Go 模式)
             .double_colon => 100, // Static access has same precedence as instance access
             .pipe_greater => 90, // Pipe operator has high precedence
             .asterisk, .slash, .percent => 60,
