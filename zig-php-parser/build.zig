@@ -17,6 +17,18 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // AOT module tests
+    const aot_test_step = b.step("test-aot", "Run AOT module tests");
+    const aot_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/aot/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_aot_test = b.addRunArtifact(aot_test);
+    aot_test_step.dependOn(&run_aot_test.step);
+
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -42,6 +54,12 @@ pub fn build(b: *std.Build) void {
         "src/test_object_system.zig",
         "src/test_reflection.zig",
         "src/test_attribute_system.zig",
+        "src/test_bytecode_vm.zig",
+        "src/test_gc_stress.zig",
+        "src/test_bytecode_syntax_mode.zig",
+        "src/aot/root.zig",
+        "src/aot/diagnostics.zig",
+        "src/aot/ir_generator.zig",
     };
     
     // Add all test files

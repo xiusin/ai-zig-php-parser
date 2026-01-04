@@ -22,8 +22,8 @@ test "ReflectionClass basic functionality" {
     const class_name = try PHPString.init(allocator, "TestClass");
     defer class_name.deinit(allocator);
     
-    var test_class = PHPClass.init(allocator, class_name);
-    defer test_class.deinit();
+    var test_class = try PHPClass.init(allocator, class_name);
+    defer test_class.deinit(allocator);
     
     // Add a method
     const method_name = try PHPString.init(allocator, "testMethod");
@@ -81,8 +81,8 @@ test "ReflectionMethod functionality" {
     const class_name = try PHPString.init(allocator, "TestClass");
     defer class_name.deinit(allocator);
     
-    var test_class = PHPClass.init(allocator, class_name);
-    defer test_class.deinit();
+    var test_class = try PHPClass.init(allocator, class_name);
+    defer test_class.deinit(allocator);
     
     const method_name = try PHPString.init(allocator, "testMethod");
     defer method_name.deinit(allocator);
@@ -137,8 +137,8 @@ test "ReflectionProperty functionality" {
     const class_name = try PHPString.init(allocator, "TestClass");
     defer class_name.deinit(allocator);
     
-    var test_class = PHPClass.init(allocator, class_name);
-    defer test_class.deinit();
+    var test_class = try PHPClass.init(allocator, class_name);
+    defer test_class.deinit(allocator);
     
     const property_name = try PHPString.init(allocator, "testProperty");
     defer property_name.deinit(allocator);
@@ -165,8 +165,8 @@ test "ReflectionProperty functionality" {
     // Test default value
     try testing.expect(reflected_property.hasDefaultValue());
     const default_value = reflected_property.getDefaultValue().?;
-    try testing.expect(default_value.tag == .integer);
-    try testing.expect(default_value.data.integer == 123);
+    try testing.expect(default_value.getTag() == .integer);
+    try testing.expect(default_value.asInt() == 123);
 }
 
 test "ReflectionSystem integration" {
@@ -181,7 +181,7 @@ test "ReflectionSystem integration" {
     defer class_name.deinit(allocator);
     
     var test_class = try allocator.create(PHPClass);
-    test_class.* = PHPClass.init(allocator, class_name);
+    test_class.* = try PHPClass.init(allocator, class_name);
     
     // Add method
     const method_name = try PHPString.init(allocator, "testMethod");
@@ -210,16 +210,17 @@ test "ReflectionObject functionality" {
     const class_name = try PHPString.init(allocator, "TestClass");
     defer class_name.deinit(allocator);
     
-    var test_class = PHPClass.init(allocator, class_name);
-    defer test_class.deinit();
+    var test_class = try PHPClass.init(allocator, class_name);
+    defer test_class.deinit(allocator);
     
     // Create an object
-    var object = PHPObject.init(allocator, &test_class);
-    defer object.deinit();
+    var object = try PHPObject.init(allocator, &test_class);
+    defer object.deinit(allocator);
     
     // Set some properties
-    try object.setProperty("prop1", Value.initInt(42));
-    try object.setProperty("prop2", try Value.initString(allocator, "test"));
+    try object.setProperty(allocator, "prop1", Value.initInt(42));
+    const str_val = try Value.initString(allocator, "test");
+    try object.setProperty(allocator, "prop2", str_val);
     
     // Create reflection object
     const reflection_object = reflection.ReflectionObject.init(allocator, &object);
@@ -234,9 +235,6 @@ test "ReflectionObject functionality" {
     const property_names = try reflection_object.getPropertyNames();
     defer allocator.free(property_names);
     try testing.expect(property_names.len == 2);
-    
-    // Clean up string value
-    object.properties.get("prop2").?.data.string.release(allocator);
 }
 
 test "Class inheritance reflection" {
@@ -246,8 +244,8 @@ test "Class inheritance reflection" {
     const parent_name = try PHPString.init(allocator, "ParentClass");
     defer parent_name.deinit(allocator);
     
-    var parent_class = PHPClass.init(allocator, parent_name);
-    defer parent_class.deinit();
+    var parent_class = try PHPClass.init(allocator, parent_name);
+    defer parent_class.deinit(allocator);
     
     const parent_method_name = try PHPString.init(allocator, "parentMethod");
     defer parent_method_name.deinit(allocator);
@@ -259,8 +257,8 @@ test "Class inheritance reflection" {
     const child_name = try PHPString.init(allocator, "ChildClass");
     defer child_name.deinit(allocator);
     
-    var child_class = PHPClass.init(allocator, child_name);
-    defer child_class.deinit();
+    var child_class = try PHPClass.init(allocator, child_name);
+    defer child_class.deinit(allocator);
     child_class.parent = &parent_class;
     
     const child_method_name = try PHPString.init(allocator, "childMethod");
@@ -323,7 +321,7 @@ test "Reflection builtin functions" {
     defer class_name.deinit(allocator);
     
     var test_class = try allocator.create(PHPClass);
-    test_class.* = PHPClass.init(allocator, class_name);
+    test_class.* = try PHPClass.init(allocator, class_name);
     
     // Add method and property
     const method_name = try PHPString.init(allocator, "testMethod");
@@ -344,7 +342,7 @@ test "Reflection builtin functions" {
     
     // Test class_exists
     const class_name_value = try Value.initString(allocator, "TestClass");
-    const class_exists_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("class_exists").?.data.builtin_function));
+    const class_exists_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("class_exists").?.getAsNativeFunc()));
     const exists_result = try class_exists_fn(vm, &[_]Value{class_name_value});
     try testing.expect(exists_result.toBool());
     
@@ -357,27 +355,27 @@ test "Reflection builtin functions" {
     const object_value = try vm.createObject("TestClass");
     
     // Test get_class
-    const get_class_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("get_class").?.data.builtin_function));
+    const get_class_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("get_class").?.getAsNativeFunc()));
     const get_class_result = try get_class_fn(vm, &[_]Value{object_value});
-    try testing.expect(std.mem.eql(u8, get_class_result.data.string.data.data, "TestClass"));
+    try testing.expect(std.mem.eql(u8, get_class_result.getAsString().data.data, "TestClass"));
     
     // Test method_exists
     const method_name_value = try Value.initString(allocator, "testMethod");
-    const method_exists_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("method_exists").?.data.builtin_function));
+    const method_exists_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("method_exists").?.getAsNativeFunc()));
     const method_exists_result = try method_exists_fn(vm, &[_]Value{ object_value, method_name_value });
     try testing.expect(method_exists_result.toBool());
     
     // Test property_exists
     const property_name_value = try Value.initString(allocator, "testProperty");
-    const property_exists_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("property_exists").?.data.builtin_function));
+    const property_exists_fn: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(vm.global.get("property_exists").?.getAsNativeFunc()));
     const property_exists_result = try property_exists_fn(vm, &[_]Value{ object_value, property_name_value });
     try testing.expect(property_exists_result.toBool());
     
     // Clean up string values
-    class_name_value.data.string.release(allocator);
-    non_existent_class.data.string.release(allocator);
-    get_class_result.data.string.release(allocator);
-    method_name_value.data.string.release(allocator);
-    property_name_value.data.string.release(allocator);
-    object_value.data.object.release(allocator);
+    class_name_value.release(allocator);
+    non_existent_class.release(allocator);
+    get_class_result.release(allocator);
+    method_name_value.release(allocator);
+    property_name_value.release(allocator);
+    object_value.release(allocator);
 }

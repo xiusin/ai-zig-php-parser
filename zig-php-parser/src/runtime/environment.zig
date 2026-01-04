@@ -14,6 +14,11 @@ pub const Environment = struct {
     }
 
     pub fn deinit(self: *Environment) void {
+        // Release all stored values before deiniting the hashmap
+        var iterator = self.vars.iterator();
+        while (iterator.next()) |entry| {
+            self.releaseValue(entry.value_ptr.*);
+        }
         self.vars.deinit();
     }
 
@@ -22,7 +27,7 @@ pub const Environment = struct {
         if (self.vars.get(name)) |old_value| {
             self.releaseValue(old_value);
         }
-        
+
         // Retain the new value and store it
         self.retainValue(value);
         try self.vars.put(name, value);
@@ -40,33 +45,13 @@ pub const Environment = struct {
         }
         return false;
     }
-    
+
     fn retainValue(self: *Environment, value: Value) void {
         _ = self;
-        switch (value.tag) {
-            .string => _ = value.data.string.retain(),
-            .array => _ = value.data.array.retain(),
-            .object => _ = value.data.object.retain(),
-            .struct_instance => _ = value.data.struct_instance.retain(),
-            .resource => _ = value.data.resource.retain(),
-            .user_function => _ = value.data.user_function.retain(),
-            .closure => _ = value.data.closure.retain(),
-            .arrow_function => _ = value.data.arrow_function.retain(),
-            else => {},
-        }
+        _ = value.retain();
     }
-    
+
     fn releaseValue(self: *Environment, value: Value) void {
-        switch (value.tag) {
-            .string => value.data.string.release(self.allocator),
-            .array => value.data.array.release(self.allocator),
-            .object => value.data.object.release(self.allocator),
-            .struct_instance => value.data.struct_instance.release(self.allocator),
-            .resource => value.data.resource.release(self.allocator),
-            .user_function => value.data.user_function.release(self.allocator),
-            .closure => value.data.closure.release(self.allocator),
-            .arrow_function => value.data.arrow_function.release(self.allocator),
-            else => {},
-        }
+        value.release(self.allocator);
     }
 };

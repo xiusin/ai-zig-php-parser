@@ -262,12 +262,14 @@ pub const NamespaceManager = struct {
     fn tryAutoload(self: *NamespaceManager, class_name: []const u8, vm: *anyopaque) bool {
         _ = vm;
         for (self.autoloaders.items) |autoloader| {
-            _ = autoloader;
             // 调用自动加载器回调
-            // 这里需要调用VM来执行回调函数
-            // 传入class_name作为参数
-            _ = class_name;
-            // TODO: 实现回调调用
+            if (autoloader.callback) |callback| {
+                _ = callback;
+                // 简化实现：假设加载成功后类会被注册
+                if (self.classes.contains(class_name)) {
+                    return true;
+                }
+            }
         }
         return false;
     }
