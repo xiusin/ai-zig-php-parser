@@ -9,7 +9,7 @@ Sum of numbers: 15
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 18961000ns
+Execution time: 20371000ns
 Peak memory usage: 0 bytes
 String intern pool size: 17
 Call stack depth: 0
@@ -26,7 +26,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3341000ns
+Execution time: 2962000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -43,7 +43,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 4742000ns
+Execution time: 4149000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -60,7 +60,7 @@ AOT compilation successful!
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 7240000ns
+Execution time: 7028000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -85,7 +85,7 @@ Line 3
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 24951000ns
+Execution time: 21280000ns
 Peak memory usage: 0 bytes
 String intern pool size: 23
 Call stack depth: 0
@@ -104,7 +104,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 11161000ns
+Execution time: 10767000ns
 Peak memory usage: 0 bytes
 String intern pool size: 10
 Call stack depth: 0
@@ -114,9 +114,9 @@ Call stack depth: 0
 DEBUG: parseStatement failed with error: error.InvalidExpression at token: .equal (=)
 DEBUG: parseStatement failed with error: error.InvalidExpression at token: .r_brace (})
 === PHP Interpreter Performance Benchmark ===
-Arithmetic operations (10k): 21.614789962768555ms
-String concatenation (1k): -0.8203983306884766ms
-Array append (5k): 17.1968936920166ms
+Arithmetic operations (10k): 18.280982971191406ms
+String concatenation (1k): -0.4019737243652344ms
+Array append (5k): 11.282920837402344ms
 Uncaught UndefinedVariableError: Undefined variable: $x in examples/benchmark.php:0
 Stack trace:
 #0 examples/benchmark.php(0): main
@@ -127,7 +127,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 160901000ns
+Execution time: 120508000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -147,7 +147,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 3
 GC collections: 0
-Execution time: 3266000ns
+Execution time: 3158000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -159,7 +159,7 @@ Struct defined successfully!
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 241000ns
+Execution time: 165000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -176,7 +176,7 @@ Triggering a warning...
 Function calls: 3
 Memory allocations: 0
 GC collections: 0
-Execution time: 19660000ns
+Execution time: 18301000ns
 Peak memory usage: 0 bytes
 String intern pool size: 6
 Call stack depth: 0
@@ -193,7 +193,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 4519000ns
+Execution time: 4105000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -212,7 +212,7 @@ Hello, World!
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 4660000ns
+Execution time: 4392000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -594,7 +594,7 @@ echo "平均响应时间: {$stats['avg_response_time']}ms
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 5471000ns
+Execution time: 4905000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -630,7 +630,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 70596000ns
+Execution time: 46899000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -643,7 +643,7 @@ Hello World
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 138000ns
+Execution time: 127000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -660,7 +660,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 2765000ns
+Execution time: 2710000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -676,7 +676,7 @@ s$a
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 2900000ns
+Execution time: 2804000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -689,7 +689,7 @@ Negative: -1
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1307000ns
+Execution time: 1224000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -702,7 +702,7 @@ Included!
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 206000ns
+Execution time: 195000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -739,7 +739,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 65343000ns
+Execution time: 65086000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -756,7 +756,7 @@ Runtime error: UncaughtException
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 3142000ns
+Execution time: 3004000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -768,7 +768,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 24000ns
+Execution time: 51000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -782,7 +782,7 @@ Testing empty: true
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 768000ns
+Execution time: 784000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -817,7 +817,7 @@ foreach数值数组:
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 20238000ns
+Execution time: 30378000ns
 Peak memory usage: 0 bytes
 String intern pool size: 8
 Call stack depth: 0
@@ -835,7 +835,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 2910000ns
+Execution time: 2931000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -955,7 +955,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 7604000ns
+Execution time: 7387000ns
 Peak memory usage: 0 bytes
 String intern pool size: 13
 Call stack depth: 0
@@ -1022,7 +1022,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 4608000ns
+Execution time: 4517000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -1088,7 +1088,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 7210000ns
+Execution time: 6330000ns
 Peak memory usage: 0 bytes
 String intern pool size: 9
 Call stack depth: 0
@@ -1111,7 +1111,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1203000ns
+Execution time: 1224000ns
 Peak memory usage: 0 bytes
 String intern pool size: 5
 Call stack depth: 0
@@ -1129,7 +1129,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 2197000ns
+Execution time: 2186000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1141,7 +1141,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 38000ns
+Execution time: 40000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1165,7 +1165,7 @@ age => 25
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 5741000ns
+Execution time: 5759000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -1190,7 +1190,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 8685000ns
+Execution time: 8568000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -1222,7 +1222,7 @@ x 大于 10
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 11230000ns
+Execution time: 9725000ns
 Peak memory usage: 0 bytes
 String intern pool size: 6
 Call stack depth: 0
@@ -1247,7 +1247,7 @@ n = 3
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 11978000ns
+Execution time: 11851000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -1263,7 +1263,7 @@ Runtime error: UndefinedMethod
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 467000ns
+Execution time: 466000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -1281,7 +1281,7 @@ Derived::$foo => foo
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 7006000ns
+Execution time: 6982000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -1299,7 +1299,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 2650000ns
+Execution time: 2776000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1316,7 +1316,7 @@ Runtime error: UndefinedMethod
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 626000ns
+Execution time: 612000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1333,7 +1333,7 @@ Runtime error: UndefinedMethod
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 405000ns
+Execution time: 406000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1364,7 +1364,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 4
 GC collections: 0
-Execution time: 11445000ns
+Execution time: 10925000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -1388,7 +1388,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 773000ns
+Execution time: 771000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1407,7 +1407,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 3307000ns
+Execution time: 3405000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -1422,7 +1422,7 @@ Mutex 类型: Mutex
 Function calls: 0
 Memory allocations: 1
 GC collections: 0
-Execution time: 1680000ns
+Execution time: 1630000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -1439,7 +1439,7 @@ i = 2
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 4727000ns
+Execution time: 4626000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -1458,7 +1458,7 @@ Loop ended
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 8900000ns
+Execution time: 8691000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -1474,7 +1474,7 @@ Final test: no auto newline - works correctly
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1952000ns
+Execution time: 963000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -1490,7 +1490,7 @@ Hello from echo function!
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 254000ns
+Execution time: 244000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -1506,7 +1506,7 @@ Mixed: string, 42, true
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1305000ns
+Execution time: 1280000ns
 Peak memory usage: 0 bytes
 String intern pool size: 10
 Call stack depth: 0
@@ -1520,7 +1520,7 @@ Test 2
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 387000ns
+Execution time: 396000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1533,7 +1533,7 @@ Hello World
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 132000ns
+Execution time: 139000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1548,7 +1548,7 @@ Test 3: \Alice
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 2382000ns
+Execution time: 2379000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -1569,7 +1569,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3291000ns
+Execution time: 3191000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -1596,7 +1596,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 2854000ns
+Execution time: 2369000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -1627,7 +1627,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 3173000ns
+Execution time: 3045000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -1646,7 +1646,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1057000ns
+Execution time: 933000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -1694,7 +1694,7 @@ Runtime error: UncaughtException
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 21163000ns
+Execution time: 20290000ns
 Peak memory usage: 0 bytes
 String intern pool size: 25
 Call stack depth: 0
@@ -1744,7 +1744,7 @@ Runtime error: UncaughtException
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 25494000ns
+Execution time: 22689000ns
 Peak memory usage: 0 bytes
 String intern pool size: 29
 Call stack depth: 0
@@ -1815,7 +1815,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 32683000ns
+Execution time: 29520000ns
 Peak memory usage: 0 bytes
 String intern pool size: 17
 Call stack depth: 0
@@ -1840,7 +1840,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 5366000ns
+Execution time: 5237000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -1874,7 +1874,7 @@ Runtime error: UncaughtException
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 9199000ns
+Execution time: 8834000ns
 Peak memory usage: 0 bytes
 String intern pool size: 11
 Call stack depth: 0
@@ -1891,7 +1891,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 3081000ns
+Execution time: 3361000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -1927,7 +1927,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 48761000ns
+Execution time: 40882000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -1947,7 +1947,7 @@ foreach结束
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 6916000ns
+Execution time: 6429000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -1977,7 +1977,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 16516000ns
+Execution time: 15833000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -1997,7 +1997,7 @@ Runtime error: UncaughtException
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 2035000ns
+Execution time: 2003000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2009,7 +2009,7 @@ Alice
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 490000ns
+Execution time: 503000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2022,7 +2022,7 @@ DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .t_go_i
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 0ns
+Execution time: 1000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2036,7 +2036,7 @@ Test
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 130000ns
+Execution time: 138000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2051,7 +2051,7 @@ Test 1: Variable Assignment
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 129000ns
+Execution time: 127000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2082,7 +2082,7 @@ Runtime error: UncaughtException
 Function calls: 2
 Memory allocations: 0
 GC collections: 0
-Execution time: 5601000ns
+Execution time: 5750000ns
 Peak memory usage: 0 bytes
 String intern pool size: 4
 Call stack depth: 0
@@ -2111,7 +2111,7 @@ HttpClient 方法列表:
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 13129000ns
+Execution time: 12801000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -2129,7 +2129,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 468000ns
+Execution time: 433000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2149,7 +2149,7 @@ i = 4
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 7969000ns
+Execution time: 8010000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2163,7 +2163,7 @@ After pre-increment: 3
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 2297000ns
+Execution time: 2260000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2180,7 +2180,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 3876000ns
+Execution time: 3390000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2197,7 +2197,7 @@ Empty: End
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 6577000ns
+Execution time: 6408000ns
 Peak memory usage: 0 bytes
 String intern pool size: 8
 Call stack depth: 0
@@ -2209,7 +2209,7 @@ Hello World!Hello World!
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1799000ns
+Execution time: 1786000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -2226,7 +2226,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 2914000ns
+Execution time: 2900000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2247,7 +2247,7 @@ All JSON array tests passed!
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 9793000ns
+Execution time: 9600000ns
 Peak memory usage: 0 bytes
 String intern pool size: 23
 Call stack depth: 0
@@ -2311,7 +2311,7 @@ x = 4
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 62635000ns
+Execution time: 59564000ns
 Peak memory usage: 0 bytes
 String intern pool size: 8
 Call stack depth: 0
@@ -2325,7 +2325,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 243000ns
+Execution time: 236000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2337,7 +2337,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 158000ns
+Execution time: 152000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2352,7 +2352,7 @@ Value: $var = 1
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 4975000ns
+Execution time: 4971000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2367,7 +2367,7 @@ Runtime error: UndefinedMethod
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 311000ns
+Execution time: 289000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2406,7 +2406,7 @@ base64_decode('SGVsbG8='): Hello
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 16004000ns
+Execution time: 15393000ns
 Peak memory usage: 0 bytes
 String intern pool size: 18
 Call stack depth: 0
@@ -2420,7 +2420,7 @@ x = 10
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1243000ns
+Execution time: 1260000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2433,7 +2433,7 @@ Classes defined
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 639000ns
+Execution time: 644000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2450,7 +2450,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 2986000ns
+Execution time: 3074000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2468,7 +2468,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3143000ns
+Execution time: 3152000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -2485,7 +2485,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3198000ns
+Execution time: 2989000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2502,7 +2502,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3023000ns
+Execution time: 2784000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2519,7 +2519,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3607000ns
+Execution time: 3121000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2536,7 +2536,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3104000ns
+Execution time: 2911000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2553,7 +2553,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 2960000ns
+Execution time: 2716000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2570,7 +2570,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3126000ns
+Execution time: 3180000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -2587,7 +2587,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3344000ns
+Execution time: 3112000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -2604,7 +2604,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 2729000ns
+Execution time: 2685000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2621,7 +2621,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 2760000ns
+Execution time: 2431000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2638,7 +2638,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3037000ns
+Execution time: 2967000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2655,7 +2655,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3141000ns
+Execution time: 3135000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -2672,7 +2672,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3116000ns
+Execution time: 2939000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2689,7 +2689,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 2979000ns
+Execution time: 2908000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2706,7 +2706,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 2985000ns
+Execution time: 2911000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2723,7 +2723,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3294000ns
+Execution time: 2997000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2752,7 +2752,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 13778000ns
+Execution time: 13234000ns
 Peak memory usage: 0 bytes
 String intern pool size: 20
 Call stack depth: 0
@@ -2769,7 +2769,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 4033000ns
+Execution time: 3708000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2785,7 +2785,7 @@ DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .r_brac
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 0ns
+Execution time: 1000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2805,7 +2805,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3037000ns
+Execution time: 3034000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2840,7 +2840,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 3150000ns
+Execution time: 3091000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2858,7 +2858,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 4997000ns
+Execution time: 4990000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -2872,7 +2872,7 @@ Runtime error: UndefinedMethod
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 222000ns
+Execution time: 186000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2887,7 +2887,7 @@ Runtime error: UndefinedMethod
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 474000ns
+Execution time: 444000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2901,7 +2901,7 @@ DEBUG: parseStatement failed with error: error.InvalidExpression at token: .r_br
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 315000ns
+Execution time: 318000ns
 Peak memory usage: 0 bytes
 String intern pool size: 3
 Call stack depth: 0
@@ -2916,7 +2916,7 @@ i = 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1895000ns
+Execution time: 1826000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2930,7 +2930,7 @@ Hello from method
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 739000ns
+Execution time: 775000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2943,7 +2943,7 @@ x = 10
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1120000ns
+Execution time: 1174000ns
 Peak memory usage: 0 bytes
 String intern pool size: 1
 Call stack depth: 0
@@ -2956,7 +2956,7 @@ Hello World
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 137000ns
+Execution time: 127000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -2969,7 +2969,7 @@ Hello World
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 134000ns
+Execution time: 117000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -3021,7 +3021,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 17540000ns
+Execution time: 17245000ns
 Peak memory usage: 0 bytes
 String intern pool size: 12
 Call stack depth: 0
@@ -3055,7 +3055,7 @@ Unix换行
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 7450000ns
+Execution time: 7188000ns
 Peak memory usage: 0 bytes
 String intern pool size: 9
 Call stack depth: 0
@@ -3103,7 +3103,7 @@ $value = 100 元
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 17616000ns
+Execution time: 17503000ns
 Peak memory usage: 0 bytes
 String intern pool size: 5
 Call stack depth: 0
@@ -3130,7 +3130,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 6650000ns
+Execution time: 6552000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -3181,7 +3181,7 @@ world的位置: 6
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 18222000ns
+Execution time: 17775000ns
 Peak memory usage: 0 bytes
 String intern pool size: 19
 Call stack depth: 0
@@ -3210,7 +3210,7 @@ Array
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 10404000ns
+Execution time: 9815000ns
 Peak memory usage: 0 bytes
 String intern pool size: 16
 Call stack depth: 0
@@ -3227,7 +3227,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1831000ns
+Execution time: 1779000ns
 Peak memory usage: 0 bytes
 String intern pool size: 7
 Call stack depth: 0
@@ -3257,7 +3257,7 @@ Call stack depth: 0
 Function calls: 1
 Memory allocations: 1
 GC collections: 0
-Execution time: 673000ns
+Execution time: 618000ns
 Peak memory usage: 0 bytes
 String intern pool size: 0
 Call stack depth: 0
@@ -3275,7 +3275,7 @@ Call stack depth: 0
 Function calls: 0
 Memory allocations: 0
 GC collections: 0
-Execution time: 1723000ns
+Execution time: 1709000ns
 Peak memory usage: 0 bytes
 String intern pool size: 10
 Call stack depth: 0
@@ -3293,7 +3293,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 3452000ns
+Execution time: 3353000ns
 Peak memory usage: 0 bytes
 String intern pool size: 2
 Call stack depth: 0
@@ -3342,7 +3342,7 @@ Runtime error: UncaughtException
 Function calls: 1
 Memory allocations: 0
 GC collections: 0
-Execution time: 30217000ns
+Execution time: 29713000ns
 Peak memory usage: 0 bytes
 String intern pool size: 26
 Call stack depth: 0

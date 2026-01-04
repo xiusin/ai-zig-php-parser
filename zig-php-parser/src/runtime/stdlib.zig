@@ -494,6 +494,10 @@ fn arrayReduceFn(vm: *VM, args: []const Value) !Value {
 
 fn arrayMergeFn(vm: *VM, args: []const Value) !Value {
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     for (args) |arg| {
@@ -536,6 +540,10 @@ fn arrayKeysFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     var iterator = array.getAsArray().data.elements.iterator();
@@ -579,6 +587,10 @@ fn arrayValuesFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     var iterator = array.getAsArray().data.elements.iterator();
@@ -1216,6 +1228,10 @@ fn explodeFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     const delim = delimiter.getAsString().data;
@@ -2274,6 +2290,10 @@ fn hashAlgosFn(vm: *VM, args: []const Value) !Value {
     _ = args;
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     const algorithms = [_][]const u8{ "md5", "sha1", "sha256", "sha512" };
@@ -2463,6 +2483,10 @@ fn arrayReverseFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     // Collect elements in reverse order using ArrayListUnmanaged
@@ -2502,6 +2526,10 @@ fn arrayUniqueFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     var seen = std.StringHashMap(void).init(vm.allocator);
@@ -2540,6 +2568,10 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     var iterator = array.getAsArray().data.elements.iterator();
@@ -2589,6 +2621,10 @@ fn arraySliceFn(vm: *VM, args: []const Value) !Value {
     const length: i64 = if (length_val.getTag() == .integer) length_val.asInt() else @intCast(count);
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     // Collect elements
@@ -2634,6 +2670,10 @@ fn arrayColumnFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     const col_key: ArrayKey = switch (column_key.getTag()) {
@@ -2679,6 +2719,10 @@ fn rangeFunction(vm: *VM, args: []const Value) !Value {
     };
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     if (start <= end) {
@@ -2704,6 +2748,10 @@ fn arrayFillFn(vm: *VM, args: []const Value) !Value {
     const value = args[2];
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     var i: i64 = 0;
@@ -3353,6 +3401,10 @@ fn unserializeValue(vm: *VM, data: []const u8, pos: *usize) !Value {
             pos.* += 1; // Skip '{'
 
             var result_array = try vm.allocator.create(PHPArray);
+            errdefer {
+                result_array.deinit(vm.allocator);
+                vm.allocator.destroy(result_array);
+            }
             result_array.* = PHPArray.init(vm.allocator);
 
             var i: usize = 0;
