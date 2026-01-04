@@ -21,15 +21,16 @@ fn testE2E(source: []const u8, expected_value: Value) !void {
     var parser = try Parser.init(arena_allocator, &context, source);
     const root_node_index = try parser.parse();
 
-    // 2. Compiling
-    var compiler = Compiler.init(allocator, &context, null);
-    const main_func = try compiler.compile(root_node_index);
-    defer main_func.deinit(allocator);
-
     // 3. Execution
     var vm = VM.init(allocator);
     defer vm.deinit();
-    const result = try vm.interpret(main_func.chunk);
+
+    // 2. Compiling
+    var compiler = Compiler.init(allocator, &context, &vm, null);
+    const main_func = try compiler.compile(root_node_index);
+    defer main_func.deinit(allocator);
+
+    const result = try vm.interpret(main_func);
 
     // 4. Verification
     try testing.expectEqual(expected_value.tag, result.tag);

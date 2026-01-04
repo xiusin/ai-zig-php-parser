@@ -20,6 +20,7 @@ pub const VM = struct {
     stack: [STACK_MAX]Value,
     stack_top: *Value,
     globals: std.StringHashMap(Value),
+    structs: std.StringHashMap(*PHPStruct),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) VM {
@@ -29,6 +30,7 @@ pub const VM = struct {
             .stack = undefined,
             .stack_top = undefined,
             .globals = std.StringHashMap(Value).init(allocator),
+            .structs = std.StringHashMap(*PHPStruct).init(allocator),
             .allocator = allocator,
         };
         vm.stack_top = &vm.stack[0];
@@ -37,6 +39,7 @@ pub const VM = struct {
 
     pub fn deinit(self: *VM) void {
         self.globals.deinit();
+        self.structs.deinit();
     }
 
     pub fn interpret(self: *VM, function: *Function) !Value {

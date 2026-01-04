@@ -20,12 +20,13 @@ const CompilerScope = struct {
 
 pub const Compiler = struct {
     context: *PHPContext,
+    vm: *VM,
     chunk: *Chunk,
     allocator: std.mem.Allocator,
     scope: *CompilerScope,
     parent: ?*Compiler,
 
-    pub fn init(allocator: std.mem.Allocator, context: *PHPContext, parent_compiler: ?*Compiler) Compiler {
+    pub fn init(allocator: std.mem.Allocator, context: *PHPContext, vm: *VM, parent_compiler: ?*Compiler) Compiler {
         const new_scope = allocator.create(CompilerScope) catch @panic("oom");
         new_scope.* = .{
             .locals = std.ArrayList(Local).init(allocator),
@@ -35,6 +36,7 @@ pub const Compiler = struct {
         return Compiler{
             .allocator = allocator,
             .context = context,
+            .vm = vm,
             .chunk = undefined,
             .scope = new_scope,
             .parent = parent_compiler,
@@ -167,6 +169,18 @@ pub const Compiler = struct {
                 const value = Value.initInt(node.data.literal_int.value);
                 try self.emitConstant(value, node.main_token.loc.start);
             },
+            .struct_decl => {
+                const decl = node.data.container_decl;
+                const name = self.context.string_pool.keys()[decl.name];
+                const php_struct_name = try PHPString.init(self.allocator, name);
+
+                var php_struct = self.allocator.create(PHPStruct) catch return error.OutOfMemory;
+                php_struct.* = PHPStruct.init(self.allocator, php_struct_name);
+
+                // TODO: compile fields and methods
+
+                try self.vm.structs.put(name, php_struct);
+            },
             .binary_expr => {
                 try self.compileNode(node.data.binary_expr.lhs);
                 try self.compileNode(node.data.binary_expr.rhs);
@@ -247,7 +261,7 @@ pub const Compiler = struct {
         const func_name = self.context.string_pool.keys()[func_data.name];
         const func_name_const_idx = try self.identifierConstant(func_name);
 
-        var function_compiler = Compiler.init(self.allocator, self.context, self);
+        var function_compiler = Compiler.init(self.allocator, self.context, self.vm, self);
 
         const function = try function_compiler.compileFunction(func_data, func_name);
 
