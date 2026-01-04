@@ -1,6 +1,22 @@
 const std = @import("std");
 const Token = @import("token.zig").Token;
 
+pub const QuoteType = enum {
+    single, // 单引号字符串 'xxx'
+    double, // 双引号字符串 "xxx" (支持变量插值和转义)
+    backtick, // 反引号字符串 `xxx` (原始字符串，不处理转义)
+};
+
+pub const MagicConstantKind = enum {
+    dir, // __DIR__
+    file, // __FILE__
+    line, // __LINE__
+    function, // __FUNCTION__
+    class, // __CLASS__
+    method, // __METHOD__
+    namespace, // __NAMESPACE__
+};
+
 pub const Node = struct {
     tag: Tag,
     main_token: Token,
@@ -25,12 +41,14 @@ pub const Node = struct {
         global_stmt,
         static_stmt,
         go_stmt,
+        lock_stmt,
         closure,
         arrow_function,
         anonymous_class,
         if_stmt,
         while_stmt,
         for_stmt,
+        for_range_stmt,
         foreach_stmt,
         match_expr,
         match_arm,
@@ -40,6 +58,7 @@ pub const Node = struct {
         throw_stmt,
         method_call,
         property_access,
+        array_access,
         function_call,
         function_decl,
         static_method_call,
@@ -51,28 +70,40 @@ pub const Node = struct {
         block,
         expression_stmt,
         assignment,
+        compound_assignment,
         echo_stmt,
         return_stmt,
+        break_stmt,
+        continue_stmt,
         variable,
         literal_int,
         literal_float,
         literal_string,
+        literal_bool,
+        literal_null,
+        magic_constant,
         array_init,
+        array_pair,
+        named_arg,
         binary_expr,
         unary_expr,
+        postfix_expr,
         ternary_expr,
         unpacking_expr,
         pipe_expr,
         clone_with_expr,
         struct_instantiation,
         object_instantiation,
+        trait_use,
         named_type,
+        nullable_type,
         union_type,
         intersection_type,
         class_constant_access, // 类常量访问 ClassName::CONST
         self_expr,
         parent_expr,
         static_expr, // self, parent, static 关键字
+        cast_expr, // 类型转换 (int), (object), etc.
     };
 
     pub const Modifier = packed struct {
@@ -99,11 +130,14 @@ pub const Node = struct {
         global_stmt: struct { vars: []const Index },
         static_stmt: struct { vars: []const Index },
         go_stmt: struct { call: Index },
+        lock_stmt: struct { body: Index },
         closure: struct { attributes: []const Index, params: []const Index, captures: []const Index, return_type: ?Index, body: Index, is_static: bool },
         arrow_function: struct { attributes: []const Index, params: []const Index, return_type: ?Index, body: Index, is_static: bool },
         anonymous_class: struct { attributes: []const Index, extends: ?Index, implements: []const Index, members: []const Index, args: []const Index },
         if_stmt: struct { condition: Index, then_branch: Index, else_branch: ?Index },
         while_stmt: struct { condition: Index, body: Index },
+        for_stmt: struct { init: ?Index, condition: ?Index, loop: ?Index, body: Index },
+        for_range_stmt: struct { count: Index, variable: ?Index, body: Index },
         foreach_stmt: struct { iterable: Index, key: ?Index, value: Index, body: Index },
         try_stmt: struct { body: Index, catch_clauses: []const Index, finally_clause: ?Index },
         catch_clause: struct { exception_type: ?Index, variable: ?Index, body: Index },
@@ -113,6 +147,7 @@ pub const Node = struct {
         match_arm: struct { conditions: []const Index, body: Index },
         method_call: struct { target: Index, method_name: StringId, args: []const Index },
         property_access: struct { target: Index, property_name: StringId },
+        array_access: struct { target: Index, index: ?Index },
         static_method_call: struct { class_name: StringId, method_name: StringId, args: []const Index },
         static_property_access: struct { class_name: StringId, property_name: StringId },
         class_constant_access: struct { class_name: StringId, constant_name: StringId },
@@ -121,13 +156,21 @@ pub const Node = struct {
         include_stmt: struct { path: Index, is_once: bool, is_require: bool },
         function_call: struct { name: Index, args: []const Index },
         array_init: struct { elements: []const Index },
-        literal_string: struct { value: StringId },
+        array_pair: struct { key: Index, value: Index },
+        literal_string: struct {
+            value: StringId,
+            quote_type: QuoteType = .double,
+        },
         root: struct { stmts: []const Index },
-        echo_stmt: struct { expr: Index },
+        echo_stmt: struct { exprs: []const Index },
         return_stmt: struct { expr: ?Index },
+        break_stmt: struct { level: ?Index },
+        continue_stmt: struct { level: ?Index },
         assignment: struct { target: Index, value: Index },
+        compound_assignment: struct { target: Index, op: Token.Tag, value: Index },
         binary_expr: struct { lhs: Index, op: Token.Tag, rhs: Index },
         unary_expr: struct { op: Token.Tag, expr: Index },
+        postfix_expr: struct { op: Token.Tag, expr: Index },
         ternary_expr: struct { cond: Index, then_expr: ?Index, else_expr: Index },
         unpacking_expr: struct { expr: Index },
         pipe_expr: struct { left: Index, right: Index },
@@ -139,9 +182,14 @@ pub const Node = struct {
         variable: struct { name: StringId },
         literal_int: struct { value: i64 },
         literal_float: struct { value: f64 },
+        magic_constant: struct { kind: MagicConstantKind },
+        named_arg: struct { name: StringId, value: Index },
+        trait_use: struct { traits: []const Index },
         named_type: struct { name: StringId },
+        nullable_type: struct { inner: Index },
         union_type: struct { types: []const Index },
         intersection_type: struct { types: []const Index },
+        cast_expr: struct { cast_type: Token.Tag, expr: Index },
         none: void,
     };
 };

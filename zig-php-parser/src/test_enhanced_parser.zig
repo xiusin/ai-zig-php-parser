@@ -90,10 +90,8 @@ test "enhanced lexer - PHP 8.5 features" {
 
 test "enhanced parser - arrow functions" {
     const allocator = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
     
-    var context = PHPContext.init(arena.allocator());
+    var context = PHPContext.init(allocator);
     defer context.deinit();
     
     var parser = try Parser.init(allocator, &context, "<?php fn($x) => $x * 2;");
@@ -105,10 +103,8 @@ test "enhanced parser - arrow functions" {
 
 test "enhanced parser - try-catch-finally" {
     const allocator = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
     
-    var context = PHPContext.init(arena.allocator());
+    var context = PHPContext.init(allocator);
     defer context.deinit();
     
     const source = 
@@ -131,10 +127,8 @@ test "enhanced parser - try-catch-finally" {
 
 test "enhanced parser - array literals" {
     const allocator = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
     
-    var context = PHPContext.init(arena.allocator());
+    var context = PHPContext.init(allocator);
     defer context.deinit();
     
     var parser = try Parser.init(allocator, &context, "<?php [1, 2, 3, 'hello'];");
@@ -146,10 +140,8 @@ test "enhanced parser - array literals" {
 
 test "enhanced parser - pipe operator" {
     const allocator = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
     
-    var context = PHPContext.init(arena.allocator());
+    var context = PHPContext.init(allocator);
     defer context.deinit();
     
     var parser = try Parser.init(allocator, &context, "<?php $value |> strtoupper |> trim;");

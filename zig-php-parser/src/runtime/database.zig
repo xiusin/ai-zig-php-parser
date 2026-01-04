@@ -450,10 +450,10 @@ pub const PDOStatement = struct {
     fn rowToObject(self: *PDOStatement, row: *ResultSet.Row) !Value {
         // 创建stdClass对象
         const std_class_name = try PHPString.init(self.allocator, "stdClass");
-        var std_class = PHPClass.init(self.allocator, std_class_name);
+        var std_class = try PHPClass.init(self.allocator, std_class_name);
 
         const php_object = try self.allocator.create(PHPObject);
-        php_object.* = PHPObject.init(self.allocator, &std_class);
+        php_object.* = try PHPObject.init(self.allocator, &std_class);
 
         for (row.columns, 0..) |col_name, i| {
             try php_object.setProperty(self.allocator, col_name, row.values[i]);
@@ -466,7 +466,7 @@ pub const PDOStatement = struct {
             .data = php_object,
         };
 
-        return Value{ .tag = .object, .data = .{ .object = box } };
+        return Value.fromBox(box, Value.TYPE_OBJECT);
     }
 };
 
@@ -500,6 +500,14 @@ pub const Connection = struct {
 
     pub fn close(self: *Connection) void {
         self.memory_db.deinit();
+        // Free the DSN strings that were allocated by parseDSN
+        // Only free if they're not the default values (which are string literals)
+        if (self.host.len > 0 and !std.mem.eql(u8, self.host, "localhost")) {
+            self.allocator.free(self.host);
+        }
+        if (self.database.len > 0) {
+            self.allocator.free(self.database);
+        }
         self.connected = false;
     }
 
@@ -664,15 +672,15 @@ pub const Table = struct {
             self.allocator.free(col.name);
             self.allocator.free(col.type_name);
         }
-        self.columns.deinit();
+        self.columns.deinit(self.allocator);
 
         for (self.rows.items) |*row| {
             for (row.values.items) |*val| {
                 val.release(self.allocator);
             }
-            row.values.deinit();
+            row.values.deinit(self.allocator);
         }
-        self.rows.deinit();
+        self.rows.deinit(self.allocator);
     }
 
     pub fn addColumn(self: *Table, name: []const u8, type_name: []const u8, nullable: bool, primary_key: bool, auto_increment: bool) !void {
