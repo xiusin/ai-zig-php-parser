@@ -1,3 +1,3 @@
 <?php
-$test = function($x) { return $x; };
+echo "Hello\n";
 ?>

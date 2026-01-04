@@ -85,6 +85,25 @@ pub const curl = @import("curl.zig");
 pub const CurlHandle = curl.CurlHandle;
 pub const CurlMulti = curl.CurlMulti;
 
+// 高级GC系统
+pub const concurrent_gc = @import("concurrent_gc.zig");
+pub const ConcurrentGC = concurrent_gc.ConcurrentGC;
+
+pub const compacting_gc = @import("compacting_gc.zig");
+pub const CompactingGC = compacting_gc.CompactingGC;
+
+// 性能监控
+pub const performance_monitor = @import("performance_monitor.zig");
+pub const RealTimeProfiler = performance_monitor.RealTimeProfiler;
+
+// 插件系统
+pub const plugin_system = @import("plugin_system.zig");
+pub const PluginSystem = plugin_system.PluginSystem;
+
+// 调试器
+pub const debugger = @import("debugger.zig");
+pub const Debugger = debugger.Debugger;
+
 test {
     // 运行所有子模块测试
     @import("std").testing.refAllDecls(@This());
