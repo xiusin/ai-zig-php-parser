@@ -1,5 +1,5 @@
 const std = @import("std");
-const Parser = @import("parser.zig").Parser;
+pub const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
 
 pub const Error = struct {

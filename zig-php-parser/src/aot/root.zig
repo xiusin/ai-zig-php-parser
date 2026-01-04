@@ -117,6 +117,10 @@ pub const MultiFileCompiler = MultiFileCompilerMod.MultiFileCompiler;
 pub const MultiFileCompileResult = MultiFileCompilerMod.MultiFileCompileResult;
 pub const CompiledFile = MultiFileCompilerMod.CompiledFile;
 
+// Incremental Compiler module
+pub const IncrementalCompilerMod = @import("incremental_compiler.zig");
+pub const IncrementalCompiler = IncrementalCompilerMod.IncrementalCompiler;
+
 // Optimizer module
 pub const OptimizerMod = @import("optimizer.zig");
 pub const IROptimizer = OptimizerMod.IROptimizer;

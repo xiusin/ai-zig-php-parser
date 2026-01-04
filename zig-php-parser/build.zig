@@ -17,6 +17,38 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // LSP Server
+    const lsp = b.addExecutable(.{
+        .name = "zig-php-lsp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tool/lsp/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    
+    // Allow LSP to import files from src/ as if it were in the root
+    lsp.root_module.addImport("project_root", b.createModule(.{
+        .root_source_file = b.path("src/compiler/root.zig"), // Expose compiler root
+    }));
+    // We also need raw access to files for relative imports if we want to mimic src structure
+    // But since Zig modules are strict, let's expose specific submodules or the compiler root.
+    // The previous analysis showed compiler/root.zig exposes PHPContext.
+    
+    // Let's verify imports in main.zig:
+    // const parser = @import("compiler/parser.zig");
+    // This implies main.zig relies on file system structure relative to itself.
+    
+    // For the LSP, living in tool/lsp/main.zig, to import "compiler/parser.zig",
+    // we would need to map "compiler" to "src/compiler".
+    
+    lsp.root_module.addImport("compiler", b.createModule(.{
+        .root_source_file = b.path("src/compiler/root.zig"),
+    }));
+
+    lsp.linkLibC();
+    b.installArtifact(lsp);
+
     // AOT module tests
     const aot_test_step = b.step("test-aot", "Run AOT module tests");
     const aot_test = b.addTest(.{
