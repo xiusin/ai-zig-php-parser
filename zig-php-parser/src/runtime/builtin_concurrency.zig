@@ -145,31 +145,36 @@ pub fn sharedDataConstructor(vm: anytype, args: []Value) !Value {
 
 // ==================== Mutex 方法实现 ====================
 
-pub fn callMutexMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []Value) !Value {
+pub fn callMutexMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []const Value) !Value {
     const mutex = @as(*concurrency.PHPMutex, @ptrCast(@alignCast(obj.native_data.?)));
 
+    // Get current coroutine ID if available
+    const coroutine_id: u64 = if (vm.coroutine_manager) |cm|
+        cm.currentId() orelse 0
+    else
+        0;
+
     if (std.mem.eql(u8, method_name, "lock")) {
-        mutex.lock();
+        mutex.lock(coroutine_id);
         return Value.initNull();
     } else if (std.mem.eql(u8, method_name, "unlock")) {
         mutex.unlock();
         return Value.initNull();
     } else if (std.mem.eql(u8, method_name, "tryLock")) {
-        const result = mutex.tryLock();
+        const result = mutex.tryLock(coroutine_id);
         return Value.initBool(result);
     } else if (std.mem.eql(u8, method_name, "getLockCount")) {
         const count = mutex.getLockCount();
         return Value.initInt(@intCast(count));
     }
 
-    _ = vm;
     _ = args;
     return error.MethodNotFound;
 }
 
 // ==================== Atomic 方法实现 ====================
 
-pub fn callAtomicMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []Value) !Value {
+pub fn callAtomicMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []const Value) !Value {
     const atomic = @as(*concurrency.PHPAtomic, @ptrCast(@alignCast(obj.native_data.?)));
 
     if (std.mem.eql(u8, method_name, "load")) {
@@ -209,7 +214,7 @@ pub fn callAtomicMethod(vm: anytype, obj: *types.PHPObject, method_name: []const
 
 // ==================== RWLock 方法实现 ====================
 
-pub fn callRWLockMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []Value) !Value {
+pub fn callRWLockMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []const Value) !Value {
     const rwlock = @as(*concurrency.PHPRWLock, @ptrCast(@alignCast(obj.native_data.?)));
 
     if (std.mem.eql(u8, method_name, "lockRead")) {
@@ -239,7 +244,7 @@ pub fn callRWLockMethod(vm: anytype, obj: *types.PHPObject, method_name: []const
 
 // ==================== SharedData 方法实现 ====================
 
-pub fn callSharedDataMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []Value) !Value {
+pub fn callSharedDataMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []const Value) !Value {
     const shared = @as(*concurrency.PHPSharedData, @ptrCast(@alignCast(obj.native_data.?)));
 
     if (std.mem.eql(u8, method_name, "set")) {
@@ -319,7 +324,7 @@ pub fn channelConstructor(vm: anytype, args: []Value) !Value {
     return Value.fromBox(box, Value.TYPE_OBJECT);
 }
 
-pub fn callChannelMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []Value) !Value {
+pub fn callChannelMethod(vm: anytype, obj: *types.PHPObject, method_name: []const u8, args: []const Value) !Value {
     const channel = @as(*concurrency.PHPChannel, @ptrCast(@alignCast(obj.native_data.?)));
 
     if (std.mem.eql(u8, method_name, "send")) {

@@ -1,32 +1,34 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
+const coroutine = @import("coroutine.zig");
+const CoMutex = coroutine.CoMutex;
 
 /// PHP 互斥锁 - 用于协程间的同步
 pub const PHPMutex = struct {
-    mutex: std.Thread.Mutex,
+    comutex: CoMutex,
     allocator: std.mem.Allocator,
     lock_count: std.atomic.Value(u32),
-    owner_thread: std.atomic.Value(u64),
+    owner_coroutine: std.atomic.Value(u64),
 
     pub fn init(allocator: std.mem.Allocator) PHPMutex {
         return PHPMutex{
-            .mutex = std.Thread.Mutex{},
+            .comutex = CoMutex.init(allocator),
             .allocator = allocator,
             .lock_count = std.atomic.Value(u32).init(0),
-            .owner_thread = std.atomic.Value(u64).init(0),
+            .owner_coroutine = std.atomic.Value(u64).init(0),
         };
     }
 
     pub fn deinit(self: *PHPMutex) void {
-        _ = self;
+        self.comutex.deinit();
     }
 
-    /// 加锁
-    pub fn lock(self: *PHPMutex) void {
-        self.mutex.lock();
+    /// 加锁（需要提供协程 ID）
+    pub fn lock(self: *PHPMutex, coroutine_id: u64) void {
+        self.comutex.lock(coroutine_id);
         _ = self.lock_count.fetchAdd(1, .seq_cst);
-        self.owner_thread.store(std.Thread.getCurrentId(), .seq_cst);
+        self.owner_coroutine.store(coroutine_id, .seq_cst);
     }
 
     /// 解锁
@@ -34,16 +36,16 @@ pub const PHPMutex = struct {
         const count = self.lock_count.load(.seq_cst);
         if (count > 0) {
             _ = self.lock_count.fetchSub(1, .seq_cst);
-            self.owner_thread.store(0, .seq_cst);
-            self.mutex.unlock();
+            self.owner_coroutine.store(0, .seq_cst);
+            self.comutex.unlock();
         }
     }
 
-    /// 尝试加锁
-    pub fn tryLock(self: *PHPMutex) bool {
-        if (self.mutex.tryLock()) {
+    /// 尝试加锁（需要提供协程 ID）
+    pub fn tryLock(self: *PHPMutex, coroutine_id: u64) bool {
+        if (self.comutex.tryLock(coroutine_id)) {
             _ = self.lock_count.fetchAdd(1, .seq_cst);
-            self.owner_thread.store(std.Thread.getCurrentId(), .seq_cst);
+            self.owner_coroutine.store(coroutine_id, .seq_cst);
             return true;
         }
         return false;
@@ -54,11 +56,10 @@ pub const PHPMutex = struct {
         return self.lock_count.load(.seq_cst);
     }
 
-    /// 检查是否被当前线程持有
-    pub fn isLockedByCurrentThread(self: *PHPMutex) bool {
-        const current = std.Thread.getCurrentId();
-        const owner = self.owner_thread.load(.seq_cst);
-        return owner != 0 and owner == current;
+    /// 检查是否被指定协程持有
+    pub fn isLockedByCoroutine(self: *PHPMutex, coroutine_id: u64) bool {
+        const owner = self.owner_coroutine.load(.seq_cst);
+        return owner != 0 and owner == coroutine_id;
     }
 };
 
