@@ -910,6 +910,9 @@ pub const VM = struct {
     // Extension system registry for third-party extensions
     extension_registry: ?*ExtensionRegistry = null,
 
+    // Anonymous class counter for generating unique names
+    anonymous_class_counter: u64 = 0,
+
     pub fn init(allocator: std.mem.Allocator) !*VM {
         return initWithSyntaxConfig(allocator, SyntaxConfig{});
     }
@@ -3398,6 +3401,9 @@ pub const VM = struct {
             .object_instantiation => {
                 return self.evaluateObjectInstantiation(ast_node.data.object_instantiation);
             },
+            .anonymous_class => {
+                return self.evaluateAnonymousClass(ast_node.data.anonymous_class);
+            },
             .try_stmt => {
                 return self.evaluateTryStatement(ast_node.data.try_stmt);
             },
@@ -3949,6 +3955,116 @@ pub const VM = struct {
             // Call constructor, release the object if it fails
             const ctor_result = self.callObjectMethod(value, "__construct", args.items) catch |err| {
                 // Constructor failed, release the object
+                self.releaseValue(value);
+                return err;
+            };
+            self.releaseValue(ctor_result);
+        }
+
+        return value;
+    }
+
+    fn evaluateAnonymousClass(self: *VM, anon_data: anytype) !Value {
+        // Generate a unique name for the anonymous class
+        const timestamp = std.time.timestamp();
+        self.anonymous_class_counter += 1;
+        const anon_class_name = try std.fmt.allocPrint(self.allocator, "anonymous_class_{d}_{d}", .{ timestamp, self.anonymous_class_counter });
+        defer self.allocator.free(anon_class_name);
+
+        // Create the class on the heap
+        const php_class_name = try types.PHPString.init(self.allocator, anon_class_name);
+        defer php_class_name.release(self.allocator);
+
+        const php_class_ptr = try self.allocator.create(types.PHPClass);
+        
+        // Initialize the class
+        php_class_ptr.* = try types.PHPClass.init(self.allocator, php_class_name);
+
+        // Register cleanup in case of error before defineClass
+        var class_registered = false;
+        errdefer {
+            if (!class_registered) {
+                // Class not registered yet, clean it up
+                php_class_ptr.deinit(self.allocator);
+                self.allocator.destroy(php_class_ptr);
+            }
+        }
+
+        // Process extends clause
+        if (anon_data.extends) |extends_idx| {
+            const extends_node = self.context.nodes.items[extends_idx];
+            if (extends_node.tag == .variable) {
+                const parent_name = self.context.string_pool.keys()[extends_node.data.variable.name];
+                if (self.getClass(parent_name)) |parent_class| {
+                    php_class_ptr.parent = parent_class;
+                }
+            }
+        }
+
+        // Process implements clause
+        if (anon_data.implements.len > 0) {
+            const interfaces = try self.allocator.alloc(*types.PHPInterface, anon_data.implements.len);
+            php_class_ptr.interfaces = interfaces;
+
+            for (anon_data.implements, 0..) |interface_idx, i| {
+                const interface_node = self.context.nodes.items[interface_idx];
+                if (interface_node.tag == .variable) {
+                    const interface_name = self.context.string_pool.keys()[interface_node.data.variable.name];
+                    if (self.getInterface(interface_name)) |interface_obj| {
+                        interfaces[i] = interface_obj;
+                    }
+                }
+            }
+        }
+
+        // Process class members
+        for (anon_data.members) |member_idx| {
+            const member_node = self.context.nodes.items[member_idx];
+
+            switch (member_node.tag) {
+                .method_decl => {
+                    try self.processMethodDeclaration(php_class_ptr, member_node.data.method_decl);
+                },
+                .property_decl => {
+                    try self.processPropertyDeclaration(php_class_ptr, member_node.data.property_decl);
+                },
+                .const_decl => {
+                    try self.processConstantDeclaration(php_class_ptr, member_node.data.const_decl);
+                },
+                else => {
+                    // Skip unsupported member types
+                },
+            }
+        }
+
+        // Register the anonymous class
+        try self.defineClass(anon_class_name, php_class_ptr);
+        class_registered = true; // Class is now owned by the VM
+
+        // Create an instance of the anonymous class
+        const value = try self.createObject(anon_class_name);
+        errdefer {
+            // If an error occurs after creating the object, release it
+            self.releaseValue(value);
+        }
+        const object = value.getAsObject().data;
+
+        // Call constructor if it exists with the provided arguments
+        if (object.class.hasMethod("__construct")) {
+            var args = std.ArrayList(Value){};
+            defer {
+                for (args.items) |arg| {
+                    self.releaseValue(arg);
+                }
+                args.deinit(self.allocator);
+            }
+
+            try args.ensureTotalCapacity(self.allocator, anon_data.args.len);
+            for (anon_data.args) |arg_idx| {
+                try args.append(self.allocator, try self.eval(arg_idx));
+            }
+
+            const ctor_result = self.callObjectMethod(value, "__construct", args.items) catch |err| {
                 self.releaseValue(value);
                 return err;
             };

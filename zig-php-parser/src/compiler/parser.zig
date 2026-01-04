@@ -1708,8 +1708,65 @@ pub const Parser = struct {
         const token = try self.eat(.k_new);
         if (self.curr.tag == .k_class) {
             self.nextToken();
-            const body = try self.parseBlock();
-            return self.createNode(.{ .tag = .anonymous_class, .main_token = token, .data = .{ .anonymous_class = .{ .attributes = &.{}, .extends = null, .implements = &.{}, .members = &.{body}, .args = &.{} } } });
+            
+            // Parse constructor arguments
+            var args = std.ArrayListUnmanaged(ast.Node.Index){};
+            if (self.curr.tag == .l_paren) {
+                self.nextToken();
+                while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                    try args.append(self.allocator, try self.parseExpression(0));
+                    if (self.curr.tag == .comma) self.nextToken();
+                }
+                _ = try self.eat(.r_paren);
+            }
+            
+            // Parse extends
+            var extends: ?ast.Node.Index = null;
+            if (self.curr.tag == .k_extends) {
+                self.nextToken();
+                extends = try self.parsePrimary();
+            }
+            
+            // Parse implements
+            var implements = std.ArrayListUnmanaged(ast.Node.Index){};
+            if (self.curr.tag == .k_implements) {
+                self.nextToken();
+                while (self.curr.tag != .l_brace and self.curr.tag != .eof) {
+                    try implements.append(self.allocator, try self.parsePrimary());
+                    if (self.curr.tag == .comma) self.nextToken();
+                }
+            }
+            
+            // Parse class body
+            _ = try self.eat(.l_brace);
+            var members = std.ArrayListUnmanaged(ast.Node.Index){};
+            while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+                try members.append(self.allocator, try self.parseStatement());
+            }
+            _ = try self.eat(.r_brace);
+            
+            const arena = self.context.arena.allocator();
+            const args_slice = try arena.dupe(ast.Node.Index, args.items);
+            const implements_slice = try arena.dupe(ast.Node.Index, implements.items);
+            const members_slice = try arena.dupe(ast.Node.Index, members.items);
+            
+            args.deinit(self.allocator);
+            implements.deinit(self.allocator);
+            members.deinit(self.allocator);
+            
+            return self.createNode(.{ 
+                .tag = .anonymous_class, 
+                .main_token = token, 
+                .data = .{ 
+                    .anonymous_class = .{ 
+                        .attributes = &.{}, 
+                        .extends = extends, 
+                        .implements = implements_slice, 
+                        .members = members_slice, 
+                        .args = args_slice 
+                    } 
+                } 
+            });
         }
 
         // In Go mode, class names are t_go_identifier (without $ prefix)
