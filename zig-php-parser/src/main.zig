@@ -256,7 +256,43 @@ pub fn main() !void {
         php_code = "<?php echo 42;";
     }
 
-    var p = try parser.Parser.initWithMode(arena_allocator, &context, php_code, syntax_mode);
+    // Detect syntax directive in the source code
+    const syntax_mode_module = @import("compiler/syntax_mode.zig");
+    const directive_result = syntax_mode_module.detectSyntaxDirective(php_code);
+    const effective_syntax_mode: SyntaxMode = if (directive_result.found and directive_result.mode != null)
+        directive_result.mode.?
+    else
+        syntax_mode;
+
+    // Check for syntax mixing if a directive was found
+    if (directive_result.found and directive_result.mode != null) {
+        const detected_mode = directive_result.mode.?;
+        // If file declares Go mode, check for PHP syntax mixing
+        if (detected_mode == .go) {
+            if (std.mem.indexOf(u8, php_code, "$") != null) {
+                std.debug.print("Error: File declares Go mode (// @syntax: go) but contains PHP-style variables ($var). Syntax mixing is not allowed.\n", .{});
+                return;
+            }
+        }
+        // If file declares PHP mode, check for Go syntax mixing (optional, can be relaxed)
+        if (detected_mode == .php) {
+            // Check for Go-style property access (obj.prop) without ->
+            // This is a heuristic check, not comprehensive
+            var j: usize = 0;
+            while (j < php_code.len - 1) : (j += 1) {
+                if (php_code[j] == '.' and php_code[j + 1] >= 'a' and php_code[j + 1] <= 'z') {
+                    // Found potential Go-style property access
+                    // Check if it's not part of a number (e.g., 3.14)
+                    if (j == 0 or !(php_code[j - 1] >= '0' and php_code[j - 1] <= '9')) {
+                        std.debug.print("Warning: File declares PHP mode but may contain Go-style property access (obj.prop). Consider using -> instead.\n", .{});
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    var p = try parser.Parser.initWithMode(arena_allocator, &context, php_code, effective_syntax_mode);
     const program = p.parse() catch |err| {
         std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});
         if (context.errors.items.len > 0) {
@@ -279,16 +315,24 @@ pub fn main() !void {
         if (err == error.Return) {
             const ret = vm_instance.return_value orelse Value.initNull();
             vm_instance.return_value = null;
-            return ret.release(allocator);
+            const result = ret.release(allocator);
+            // Clean up global variables to prevent memory leak warnings
+            vm_instance.cleanupGlobalVariables();
+            return result;
         }
         // If it's a runtime exception (handled within VM but returned as error here), we just exit
         // If it's a Zig error, we print it
         std.debug.print("Runtime error: {s}\n", .{@errorName(err)});
+        // Clean up global variables to prevent memory leak warnings
+        vm_instance.cleanupGlobalVariables();
         return;
     };
 
     // Release the final result to prevent memory leak
     result.release(allocator);
+    
+    // Clean up global variables to prevent memory leak warnings
+    vm_instance.cleanupGlobalVariables();
 }
 
 /// Run AOT compilation

@@ -984,6 +984,18 @@ pub const VM = struct {
         return vm;
     }
 
+    /// 清理全局环境中的所有变量，释放其引用
+    /// 这应该在脚本执行完成后调用，以避免内存泄露警告
+    pub fn cleanupGlobalVariables(self: *VM) void {
+        var iterator = self.global.vars.iterator();
+        while (iterator.next()) |entry| {
+            // 释放变量的引用
+            entry.value_ptr.release(self.allocator);
+        }
+        // 清空全局变量表
+        self.global.vars.clearRetainingCapacity();
+    }
+
     pub fn deinit(self: *VM) void {
         // Performance statistics logging
         if (self.optimization_flags.enable_opcode_caching) {
@@ -3738,7 +3750,12 @@ pub const VM = struct {
                 try args.append(self.allocator, try self.eval(arg_idx));
             }
 
-            const ctor_result = try self.callObjectMethod(value, "__construct", args.items);
+            // Call constructor, release the object if it fails
+            const ctor_result = self.callObjectMethod(value, "__construct", args.items) catch |err| {
+                // Constructor failed, release the object
+                self.releaseValue(value);
+                return err;
+            };
             self.releaseValue(ctor_result);
         }
 
@@ -5478,7 +5495,11 @@ pub const VM = struct {
 
         // Call constructor if it exists
         if (struct_type.hasMethod("__construct")) {
-            const ctor_result = try struct_instance.callMethod(self, instance_value, "__construct", args.items);
+            const ctor_result = struct_instance.callMethod(self, instance_value, "__construct", args.items) catch |err| {
+                // Clean up on error
+                self.releaseValue(instance_value);
+                return err;
+            };
             self.releaseValue(ctor_result);
         }
 

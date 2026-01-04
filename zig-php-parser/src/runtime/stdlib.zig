@@ -349,6 +349,10 @@ fn arrayMapFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     var iterator = array.getAsArray().data.elements.iterator();
@@ -397,6 +401,10 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
     }
 
     var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
     result_array.* = PHPArray.init(vm.allocator);
 
     const callback = if (args.len > 1) args[1] else null;
