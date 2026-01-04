@@ -3,10 +3,45 @@
   <component name="GoORMHelperCache">
     <option name="schemaMapping">
       <map>
+        <entry key="AddFans">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go" />
+            </set>
+          </value>
+        </entry>
+        <entry key="Confirm">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go" />
+            </set>
+          </value>
+        </entry>
         <entry key="CustBaseWhere">
           <value>
             <set>
               <option value="file://$USER_HOME$/products/fansnewgo/internal/middleware/checklogin.go" />
+            </set>
+          </value>
+        </entry>
+        <entry key="Login">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go" />
+            </set>
+          </value>
+        </entry>
+        <entry key="LoginOrPing">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go" />
+            </set>
+          </value>
+        </entry>
+        <entry key="OpenChat">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go" />
             </set>
           </value>
         </entry>
@@ -59,7 +94,7 @@
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/checklogin.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767515152488" />
+              <option name="lastModified" value="1767516714509" />
               <option name="schema">
                 <list>
                   <option value="CustBaseWhere" />
@@ -71,7 +106,7 @@
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/cors.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767515898429" />
+              <option name="lastModified" value="1767516714517" />
             </ScannedPath>
           </value>
         </entry>
@@ -103,14 +138,14 @@
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/cache.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767514294910" />
+              <option name="lastModified" value="1767516714522" />
             </ScannedPath>
           </value>
         </entry>
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/counter.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767514530204" />
+              <option name="lastModified" value="1767517413380" />
               <option name="schema">
                 <list>
                   <option value="WsRequestData" />
@@ -121,12 +156,32 @@
             </ScannedPath>
           </value>
         </entry>
+        <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go">
+          <value>
+            <ScannedPath>
+              <option name="lastModified" value="1767518484563" />
+              <option name="schema">
+                <list>
+                  <option value="LoginOrPing" />
+                  <option value="AddFans" />
+                  <option value="Confirm" />
+                  <option value="OpenChat" />
+                </list>
+              </option>
+            </ScannedPath>
+          </value>
+        </entry>
       </map>
     </option>
     <option name="tableStructMapping">
       <map>
+        <entry key="add_fans" value="AddFans" />
         <entry key="body_log_writer" value="bodyLogWriter" />
+        <entry key="confirm" value="Confirm" />
         <entry key="cust_base_where" value="CustBaseWhere" />
+        <entry key="login" value="Login" />
+        <entry key="login_or_ping" value="LoginOrPing" />
+        <entry key="open_chat" value="OpenChat" />
         <entry key="options" value="options" />
         <entry key="personal_wechat" value="PersonalWechat" />
         <entry key="personal_wechat_counter" value="PersonalWechatCounter" />
