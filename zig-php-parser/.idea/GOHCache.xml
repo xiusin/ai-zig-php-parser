@@ -38,6 +38,20 @@
             </set>
           </value>
         </entry>
+        <entry key="bodyLogWriter">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/middleware/logging.go" />
+            </set>
+          </value>
+        </entry>
+        <entry key="options">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/middleware/logging.go" />
+            </set>
+          </value>
+        </entry>
       </map>
     </option>
     <option name="scannedPathMapping">
@@ -49,6 +63,26 @@
               <option name="schema">
                 <list>
                   <option value="CustBaseWhere" />
+                </list>
+              </option>
+            </ScannedPath>
+          </value>
+        </entry>
+        <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/cors.go">
+          <value>
+            <ScannedPath>
+              <option name="lastModified" value="1767515898429" />
+            </ScannedPath>
+          </value>
+        </entry>
+        <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/logging.go">
+          <value>
+            <ScannedPath>
+              <option name="lastModified" value="1767515620884" />
+              <option name="schema">
+                <list>
+                  <option value="options" />
+                  <option value="bodyLogWriter" />
                 </list>
               </option>
             </ScannedPath>
@@ -91,7 +125,9 @@
     </option>
     <option name="tableStructMapping">
       <map>
+        <entry key="body_log_writer" value="bodyLogWriter" />
         <entry key="cust_base_where" value="CustBaseWhere" />
+        <entry key="options" value="options" />
         <entry key="personal_wechat" value="PersonalWechat" />
         <entry key="personal_wechat_counter" value="PersonalWechatCounter" />
         <entry key="ws_request_data" value="WsRequestData" />

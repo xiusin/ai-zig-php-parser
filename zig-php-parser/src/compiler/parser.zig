@@ -20,17 +20,23 @@ pub const Parser = struct {
     syntax_mode: SyntaxMode = .php,
     /// Syntax hooks for extension system (optional)
     syntax_hooks: ?*const SyntaxHooks = null,
+    /// Collect all tokens for line number calculation
+    all_tokens: std.ArrayList(Token),
 
     pub fn init(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8) anyerror!Parser {
         var lexer = Lexer.init(source);
         const curr = lexer.next();
         const peek = lexer.next();
+        var all_tokens = try std.ArrayList(Token).initCapacity(allocator, 100);
+        try all_tokens.append(allocator, curr);
+        try all_tokens.append(allocator, peek);
         return Parser{
             .lexer = lexer,
             .allocator = allocator,
             .context = context,
             .curr = curr,
             .peek = peek,
+            .all_tokens = all_tokens,
         };
     }
 
@@ -38,6 +44,9 @@ pub const Parser = struct {
         var lexer = Lexer.initWithMode(source, mode);
         const curr = lexer.next();
         const peek = lexer.next();
+        var all_tokens = try std.ArrayList(Token).initCapacity(allocator, 100);
+        try all_tokens.append(allocator, curr);
+        try all_tokens.append(allocator, peek);
         return Parser{
             .lexer = lexer,
             .allocator = allocator,
@@ -45,6 +54,7 @@ pub const Parser = struct {
             .curr = curr,
             .peek = peek,
             .syntax_mode = mode,
+            .all_tokens = all_tokens,
         };
     }
 
@@ -53,6 +63,9 @@ pub const Parser = struct {
         var lexer = Lexer.initWithMode(source, mode);
         const curr = lexer.next();
         const peek = lexer.next();
+        var all_tokens = try std.ArrayList(Token).initCapacity(allocator, 100);
+        try all_tokens.append(allocator, curr);
+        try all_tokens.append(allocator, peek);
         return Parser{
             .lexer = lexer,
             .allocator = allocator,
@@ -61,6 +74,7 @@ pub const Parser = struct {
             .peek = peek,
             .syntax_mode = mode,
             .syntax_hooks = hooks,
+            .all_tokens = all_tokens,
         };
     }
 
@@ -88,6 +102,7 @@ pub const Parser = struct {
     fn nextToken(self: *Parser) void {
         self.curr = self.peek;
         self.peek = self.lexer.next();
+        self.all_tokens.append(self.allocator, self.peek) catch {};
     }
 
     fn reportError(self: *Parser, msg: []const u8) void {
@@ -172,6 +187,13 @@ pub const Parser = struct {
             };
             try stmts.append(self.allocator, stmt);
         }
+        
+        // Copy all tokens to context for line number calculation
+        try self.context.tokens.ensureUnusedCapacity(self.context.allocator, self.all_tokens.items.len);
+        for (self.all_tokens.items) |token| {
+            self.context.tokens.appendAssumeCapacity(token);
+        }
+        
         const arena = self.context.arena.allocator();
         return self.createNode(.{
             .tag = .root,

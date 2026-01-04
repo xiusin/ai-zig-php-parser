@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
+const token = @import("token.zig");
 
 pub const Error = struct {
     msg: []const u8,
@@ -12,6 +13,7 @@ pub const PHPContext = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     nodes: std.ArrayListUnmanaged(ast.Node),
+    tokens: std.ArrayListUnmanaged(token.Token), // Store tokens for line number calculation
     string_pool: std.StringArrayHashMapUnmanaged(void),
     errors: std.ArrayListUnmanaged(Error),
     
@@ -24,6 +26,7 @@ pub const PHPContext = struct {
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .nodes = .{}, 
+            .tokens = .{},
             .string_pool = .{}, 
             .errors = .{}, 
             .imports = .{}, 
@@ -33,6 +36,7 @@ pub const PHPContext = struct {
     pub fn deinit(self: *PHPContext) void {
         self.arena.deinit();
         self.nodes.deinit(self.allocator);
+        self.tokens.deinit(self.allocator);
         self.string_pool.deinit(self.allocator);
         self.errors.deinit(self.allocator);
         self.imports.deinit(self.allocator);
@@ -42,6 +46,7 @@ pub const PHPContext = struct {
     pub fn reset(self: *PHPContext) void {
         _ = self.arena.reset(.retain_capacity);
         self.nodes.clearRetainingCapacity();
+        self.tokens.clearRetainingCapacity();
         self.string_pool.clearRetainingCapacity();
         self.errors.clearRetainingCapacity();
         self.imports.clearRetainingCapacity();
