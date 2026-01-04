@@ -6,8 +6,10 @@
 PHP_INTERPRETER="./zig-out/bin/php-interpreter"
 TEST_DIR="examples"
 LOG_FILE="memory_leak_test_results.log"
+DEBUG_ERRORS_FILE="exception_debug_errors.log"
 FAILED_TESTS=()
 PASSED_TESTS=()
+DEBUG_ERRORS=()
 
 # Test files to check
 TEST_FILES=(
@@ -70,6 +72,9 @@ if [ ! -f "$PHP_INTERPRETER" ]; then
     exit 1
 fi
 
+# Clear previous debug errors file
+> "$DEBUG_ERRORS_FILE"
+
 # Run each test
 for test_file in "${TEST_FILES[@]}"; do
     test_path="$TEST_DIR/$test_file"
@@ -85,19 +90,27 @@ for test_file in "${TEST_FILES[@]}"; do
     output=$("$PHP_INTERPRETER" "$test_path" 2>&1)
     exit_code=$?
 
+    # Check for DEBUG errors
+    debug_errors=$(echo "$output" | grep -c "^DEBUG:")
+    if [ "$debug_errors" -gt 0 ]; then
+        echo "  ⚠️  Found $debug_errors DEBUG error(s) in $test_file" | tee -a "$LOG_FILE"
+        echo "$output" | grep "^DEBUG:" | tee -a "$DEBUG_ERRORS_FILE"
+        DEBUG_ERRORS+=("$test_file($debug_errors errors)")
+    fi
+
     # Check for memory leaks in output
     # Look for patterns that indicate memory leaks
     if echo "$output" | grep -qi "memory leak\|leak\|not freed\|memory.*not.*released"; then
-        echo "FAILED: Memory leak detected in $test_file" | tee -a "$LOG_FILE"
+        echo "  ✗ FAILED: Memory leak detected in $test_file" | tee -a "$LOG_FILE"
         echo "$output" | tee -a "$LOG_FILE"
         FAILED_TESTS+=("$test_file")
     else
         # Check if the program ran (even with expected errors)
         if [ $exit_code -eq 0 ] || echo "$output" | grep -qi "error\|exception\|undefined"; then
-            echo "PASSED: No memory leak in $test_file" | tee -a "$LOG_FILE"
+            echo "  ✓ PASSED: No memory leak in $test_file" | tee -a "$LOG_FILE"
             PASSED_TESTS+=("$test_file")
         else
-            echo "WARNING: Unexpected exit code $exit_code for $test_file" | tee -a "$LOG_FILE"
+            echo "  ⚠️  WARNING: Unexpected exit code $exit_code for $test_file" | tee -a "$LOG_FILE"
             echo "$output" | tee -a "$LOG_FILE"
             FAILED_TESTS+=("$test_file")
         fi
@@ -111,6 +124,7 @@ echo "=== Test Summary ===" | tee -a "$LOG_FILE"
 echo "Total tests: ${#TEST_FILES[@]}" | tee -a "$LOG_FILE"
 echo "Passed: ${#PASSED_TESTS[@]}" | tee -a "$LOG_FILE"
 echo "Failed: ${#FAILED_TESTS[@]}" | tee -a "$LOG_FILE"
+echo "DEBUG errors: ${#DEBUG_ERRORS[@]}" | tee -a "$LOG_FILE"
 echo "" | tee -a "$LOG_FILE"
 
 if [ ${#FAILED_TESTS[@]} -gt 0 ]; then
@@ -120,8 +134,24 @@ if [ ${#FAILED_TESTS[@]} -gt 0 ]; then
     done
     echo "" | tee -a "$LOG_FILE"
     echo "Some tests failed with memory leaks. Please review the log." | tee -a "$LOG_FILE"
+fi
+
+if [ ${#DEBUG_ERRORS[@]} -gt 0 ]; then
+    echo "Tests with DEBUG errors:" | tee -a "$LOG_FILE"
+    for debug_err in "${DEBUG_ERRORS[@]}"; do
+        echo "  - $debug_err" | tee -a "$LOG_FILE"
+    done
+    echo "" | tee -a "$LOG_FILE"
+    echo "DEBUG errors saved to: $DEBUG_ERRORS_FILE" | tee -a "$LOG_FILE"
+    echo "These may indicate unimplemented features or syntax issues." | tee -a "$LOG_FILE"
+fi
+
+if [ ${#FAILED_TESTS[@]} -gt 0 ]; then
     exit 1
 else
     echo "All tests passed! No memory leaks detected." | tee -a "$LOG_FILE"
+    if [ ${#DEBUG_ERRORS[@]} -eq 0 ]; then
+        echo "No DEBUG errors found." | tee -a "$LOG_FILE"
+    fi
     exit 0
 fi
