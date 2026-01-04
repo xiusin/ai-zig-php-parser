@@ -76,7 +76,7 @@ pub const Lexer = struct {
             '}' => .{ .tag = .r_brace, .loc = .{ .start = start, .end = self.pos } },
             ';' => .{ .tag = .semicolon, .loc = .{ .start = start, .end = self.pos } },
             ',' => .{ .tag = .comma, .loc = .{ .start = start, .end = self.pos } },
-            '.' => if (self.match('.')) (if (self.match('.')) .{ .tag = .ellipsis, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } }) else blk: {
+            '.' => if (self.match('.')) (if (self.match('.')) .{ .tag = .ellipsis, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } }) else if (self.match('=')) .{ .tag = .dot_equal, .loc = .{ .start = start, .end = self.pos } } else blk: {
                 // In Go mode, . followed by identifier is property access (like -> in PHP)
                 if (self.syntax_mode == .go and self.pos < self.buffer.len) {
                     const next_char = self.buffer[self.pos];
@@ -118,7 +118,13 @@ pub const Lexer = struct {
             '<' => if (self.match('<')) {
                 if (self.match('<')) return self.lexHeredocStart(start);
                 return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
-            } else if (self.match('=')) .{ .tag = .less_equal, .loc = .{ .start = start, .end = self.pos } } else if (self.match('>')) .{ .tag = .spaceship, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .less, .loc = .{ .start = start, .end = self.pos } },
+            } else if (self.match('=')) {
+                // Check for <=> (spaceship) first, then <= (less_equal)
+                if (self.match('>')) {
+                    return .{ .tag = .spaceship, .loc = .{ .start = start, .end = self.pos } };
+                }
+                return .{ .tag = .less_equal, .loc = .{ .start = start, .end = self.pos } };
+            } else .{ .tag = .less, .loc = .{ .start = start, .end = self.pos } },
             '>' => if (self.match('=')) .{ .tag = .greater_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .greater, .loc = .{ .start = start, .end = self.pos } },
             '#' => if (self.match('[')) .{ .tag = .t_attribute_start, .loc = .{ .start = start, .end = self.pos } } else self.skipLineComment(start),
             ':' => if (self.match(':')) .{ .tag = .double_colon, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .colon, .loc = .{ .start = start, .end = self.pos } },

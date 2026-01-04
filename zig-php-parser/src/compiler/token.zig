@@ -152,6 +152,7 @@ pub const Token = struct {
         asterisk_equal,
         slash_equal,
         percent_equal,
+        dot_equal, // .= string concatenation assignment
         equal_equal,
         equal_equal_equal,
         bang_equal,

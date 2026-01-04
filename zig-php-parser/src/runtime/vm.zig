@@ -3012,6 +3012,7 @@ pub const VM = struct {
             token.Tag.asterisk_equal => self.evaluateMultiplication(left, right),
             token.Tag.slash_equal => self.evaluateDivision(left, right),
             token.Tag.percent_equal => self.evaluateModulo(left, right),
+            token.Tag.dot_equal => self.concatenateStrings(left, right),
             else => Value.initNull(),
         };
     }

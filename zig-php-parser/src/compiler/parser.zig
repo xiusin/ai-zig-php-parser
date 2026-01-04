@@ -268,10 +268,6 @@ pub const Parser = struct {
             .k_require, .k_require_once, .k_include, .k_include_once => self.parseInclude(),
             .k_abstract, .k_final => self.parseModifiedClassOrMember(attributes),
             .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes, false),
-            .k_set, .k_get => {
-                // Property hooks are handled in parseClassMember
-                return self.parseClassMember(attributes, false);
-            },
             .k_switch => self.parseSwitch(),
             .k_yield => self.parseYield(),
             .l_brace => self.parseBlock(),
@@ -406,10 +402,15 @@ pub const Parser = struct {
     fn parseClassMemberWithModifiers(self: *Parser, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier, is_interface: bool) anyerror!ast.Node.Index {
         if (self.curr.tag == .k_function) {
             const token = try self.eat(.k_function);
-            // Method name can be t_string or t_go_identifier in Go mode
+            // Method name can be t_string, t_go_identifier, or reserved words like set/get
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
-            else
+            else if (self.curr.tag == .k_set or self.curr.tag == .k_get) blk: {
+                // Allow 'set' and 'get' as method names
+                const tok = self.curr;
+                self.nextToken();
+                break :blk tok;
+            } else
                 try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
@@ -511,10 +512,15 @@ pub const Parser = struct {
 
         if (self.curr.tag == .k_function) {
             const token = try self.eat(.k_function);
-            // Method name can be t_string or t_go_identifier in Go mode
+            // Method name can be t_string, t_go_identifier, or reserved words like set/get
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
-            else
+            else if (self.curr.tag == .k_set or self.curr.tag == .k_get) blk: {
+                // Allow 'set' and 'get' as method names
+                const tok = self.curr;
+                self.nextToken();
+                break :blk tok;
+            } else
                 try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
@@ -616,9 +622,26 @@ pub const Parser = struct {
 
     fn parseNamespace(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_namespace);
+        
+        // Handle global namespace: namespace { ... }
+        if (self.curr.tag == .l_brace) {
+            // Global namespace block
+            self.context.current_namespace = 0; // Reset to global namespace
+            const body = try self.parseBlock();
+            return body;
+        }
+        
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         self.context.current_namespace = name_id;
+        
+        // Handle namespace with block: namespace Foo { ... }
+        if (self.curr.tag == .l_brace) {
+            const body = try self.parseBlock();
+            return body;
+        }
+        
+        // Handle namespace with semicolon: namespace Foo;
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .expression_stmt, .main_token = token, .data = .{ .none = {} } });
     }
@@ -1267,7 +1290,7 @@ pub const Parser = struct {
             } else if (tag == .equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
-            } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal) {
+            } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .compound_assignment, .main_token = op, .data = .{ .compound_assignment = .{ .target = left, .op = tag, .value = right } } });
             } else if (tag == .question) {
@@ -1555,6 +1578,12 @@ pub const Parser = struct {
             .l_bracket => self.parseArrayLiteral(),
             .k_array => self.parseArrayConstruct(),
             .l_brace => self.parseJsonObjectLiteral(),
+            // PHP 8.0+ throw expression support (throw can be used as expression, not just statement)
+            .k_throw => {
+                const token = try self.eat(.k_throw);
+                const expression = try self.parseExpression(0);
+                return self.createNode(.{ .tag = .throw_stmt, .main_token = token, .data = .{ .throw_stmt = .{ .expression = expression } } });
+            },
             .l_paren => {
                 self.nextToken();
                 // Check for type cast: (int), (float), (string), (array), (object), (bool)
@@ -1784,6 +1813,11 @@ pub const Parser = struct {
             }
         }
         
+        // Consume semicolon if present (yield as statement)
+        if (self.curr.tag == .semicolon) {
+            self.nextToken();
+        }
+        
         return self.createNode(.{ .tag = .yield_expr, .main_token = token, .data = .{ .yield_expr = .{ .key = key, .value = value } } });
     }
 
@@ -1936,7 +1970,7 @@ pub const Parser = struct {
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
             .question => 7, // Ternary
-            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal => 5,
+            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal => 5,
             else => 0,
         };
     }
