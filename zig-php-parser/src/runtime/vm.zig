@@ -3458,6 +3458,20 @@ pub const VM = struct {
             .foreach_stmt => {
                 return self.evaluateForeachStatement(ast_node.data.foreach_stmt);
             },
+            .switch_stmt => {
+                return self.evaluateSwitchStatement(ast_node.data.switch_stmt);
+            },
+            .case => {
+                // case is handled within switch_stmt
+                return Value.initNull();
+            },
+            .default => {
+                // default is handled within switch_stmt
+                return Value.initNull();
+            },
+            .match_expr => {
+                return self.evaluateMatchExpression(ast_node.data.match_expr);
+            },
             .return_stmt => {
                 return self.evaluateReturnStatement(ast_node.data.return_stmt);
             },
@@ -5056,6 +5070,97 @@ pub const VM = struct {
         return last_val;
     }
 
+    fn evaluateSwitchStatement(self: *VM, switch_stmt: anytype) !Value {
+        const expr = try self.eval(switch_stmt.expression);
+        defer self.releaseValue(expr);
+
+        var matched = false;
+        var last_val = Value.initNull();
+
+        // Evaluate each case
+        for (switch_stmt.cases) |case_idx| {
+            const case_node = self.context.nodes.items[case_idx];
+            const case_data = case_node.data.case;
+
+            // Only evaluate conditions if not already matched
+            if (!matched) {
+                const condition = try self.eval(case_data.condition);
+                defer self.releaseValue(condition);
+
+                // Compare expression with condition
+                if (self.valuesEqual(expr, condition)) {
+                    matched = true;
+                }
+            }
+
+            // If matched, execute the case body
+            if (matched) {
+                for (case_data.body) |stmt| {
+                    self.releaseValue(last_val);
+                    last_val = self.eval(stmt) catch |err| blk: {
+                        if (err == error.Break) {
+                            self.break_level -= 1;
+                            if (self.break_level > 0) return error.Break;
+                            break :blk Value.initNull();
+                        }
+                        return err;
+                    };
+                }
+            }
+        }
+
+        // Evaluate default case if provided and no match found
+        if (!matched and switch_stmt.default != null) {
+            const default_idx = switch_stmt.default.?;
+            const default_node = self.context.nodes.items[default_idx];
+            const default_data = default_node.data.default;
+
+            for (default_data.body) |stmt| {
+                self.releaseValue(last_val);
+                last_val = self.eval(stmt) catch |err| blk: {
+                    if (err == error.Break) {
+                        self.break_level -= 1;
+                        if (self.break_level > 0) return error.Break;
+                        break :blk Value.initNull();
+                    }
+                    return err;
+                };
+            }
+        }
+
+        return last_val;
+    }
+
+    fn evaluateMatchExpression(self: *VM, match_expr: anytype) !Value {
+        const expr = try self.eval(match_expr.expression);
+        defer self.releaseValue(expr);
+
+        // Evaluate each arm
+        for (match_expr.arms) |arm_idx| {
+            const arm_node = self.context.nodes.items[arm_idx];
+            const arm_data = arm_node.data.match_arm;
+
+            // If no conditions, this is the default arm
+            if (arm_data.conditions.len == 0) {
+                return self.eval(arm_data.body);
+            }
+
+            // Check if any condition matches
+            for (arm_data.conditions) |cond_idx| {
+                const condition = try self.eval(cond_idx);
+                defer self.releaseValue(condition);
+
+                if (self.valuesEqual(expr, condition)) {
+                    return self.eval(arm_data.body);
+                }
+            }
+        }
+
+        // If no match found, return an UnhandledMatchError
+        const exception = try ExceptionFactory.createTypeError(self.allocator, "Unhandled match value", self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
     fn evaluateReturnStatement(self: *VM, return_stmt: anytype) !Value {
         if (return_stmt.expr) |expr| {
             // Release previous return value if any (shouldn't happen in normal flow but safe to do)
@@ -5143,10 +5248,14 @@ pub const VM = struct {
             .bang_equal => return Value.initBool(!self.valuesEqual(left, right)),
             .equal_equal_equal => return Value.initBool(self.valuesStrictEqual(left, right)),
             .bang_equal_equal => return Value.initBool(!self.valuesStrictEqual(left, right)),
-            .less => return Value.initBool(try self.compareValues(left, right, .less)),
-            .less_equal => return Value.initBool(try self.compareValues(left, right, .less_equal)),
-            .greater => return Value.initBool(try self.compareValues(left, right, .greater)),
-            .greater_equal => return Value.initBool(try self.compareValues(left, right, .greater_equal)),
+            .less => return Value.initBool((try self.compareValues(left, right, .less)) != 0),
+            .less_equal => return Value.initBool((try self.compareValues(left, right, .less_equal)) != 0),
+            .greater => return Value.initBool((try self.compareValues(left, right, .greater)) != 0),
+            .greater_equal => return Value.initBool((try self.compareValues(left, right, .greater_equal)) != 0),
+            .spaceship => {
+                const cmp = try self.compareValues(left, right, .spaceship);
+                return Value.initInt(cmp);
+            },
             .double_ampersand => return Value.initBool(left.toBool() and right.toBool()),
             .double_pipe => return Value.initBool(left.toBool() or right.toBool()),
             .double_question => {
@@ -5253,7 +5362,7 @@ pub const VM = struct {
         };
     }
 
-    fn compareValues(self: *VM, left: Value, right: Value, op: Token.Tag) !bool {
+    fn compareValues(self: *VM, left: Value, right: Value, op: Token.Tag) !i64 {
         _ = self;
         const left_tag = left.getTag();
         const right_tag = right.getTag();
@@ -5261,16 +5370,22 @@ pub const VM = struct {
         if ((left_tag == .integer or left_tag == .float) and (right_tag == .integer or right_tag == .float)) {
             const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
             const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+            
             return switch (op) {
-                .less => l < r,
-                .less_equal => l <= r,
-                .greater => l > r,
-                .greater_equal => l >= r,
-                else => false,
+                .less => if (l < r) 1 else 0,
+                .less_equal => if (l <= r) 1 else 0,
+                .greater => if (l > r) 1 else 0,
+                .greater_equal => if (l >= r) 1 else 0,
+                .spaceship => {
+                    if (l < r) return -1;
+                    if (l > r) return 1;
+                    return 0;
+                },
+                else => 0,
             };
         }
 
-        return false;
+        return 0;
     }
 
     fn concatenateValues(self: *VM, left: Value, right: Value) !Value {

@@ -132,7 +132,7 @@ pub const Parser = struct {
                 return;
             }
             switch (self.curr.tag) {
-                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn, .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, .k_use, .k_try, .k_throw, .k_match, .k_switch => return,
+                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn, .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, .k_use, .k_try, .k_throw, .k_match => return,
                 else => self.nextToken(),
             }
         }
@@ -159,7 +159,7 @@ pub const Parser = struct {
                     // Don't consume the closing brace, let the caller handle it
                     return;
                 },
-                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn, .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, .k_use, .k_try, .k_throw, .k_match, .k_switch => {
+                .k_class, .k_interface, .k_trait, .k_enum, .k_function, .k_fn, .k_if, .k_for, .k_while, .k_foreach, .k_return, .k_namespace, .k_use, .k_try, .k_throw, .k_match => {
                     // Found a statement start, stop here
                     return;
                 },
@@ -272,6 +272,8 @@ pub const Parser = struct {
                 // Property hooks are handled in parseClassMember
                 return self.parseClassMember(attributes, false);
             },
+            .k_switch => self.parseSwitch(),
+            .k_yield => self.parseYield(),
             .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
@@ -1276,6 +1278,9 @@ pub const Parser = struct {
                 _ = try self.eat(.colon);
                 const else_expr = try self.parseExpression(next_p);
                 left = try self.createNode(.{ .tag = .ternary_expr, .main_token = op, .data = .{ .ternary_expr = .{ .cond = left, .then_expr = then_expr, .else_expr = else_expr } } });
+            } else if (tag == .k_instanceof) {
+                const right = try self.parseExpression(next_p);
+                left = try self.createNode(.{ .tag = .binary_expr, .main_token = op, .data = .{ .binary_expr = .{ .lhs = left, .op = .k_instanceof, .rhs = right } } });
             } else if (tag == .plus_plus or tag == .minus_minus) {
                 left = try self.createNode(.{ .tag = .postfix_expr, .main_token = op, .data = .{ .postfix_expr = .{ .op = tag, .expr = left } } });
             } else {
@@ -1693,19 +1698,93 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
         _ = try self.eat(.l_brace);
         var arms = std.ArrayListUnmanaged(ast.Node.Index){};
+        var default_arm: ?ast.Node.Index = null;
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
-            const cond = try self.parseExpression(0);
-            _ = try self.eat(.fat_arrow);
-            const body = try self.parseExpression(0);
-            const arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{cond}, .body = body } } });
-            try arms.append(self.allocator, arm);
+            if (self.curr.tag == .k_default) {
+                self.nextToken();
+                _ = try self.eat(.fat_arrow);
+                const body = try self.parseExpression(0);
+                default_arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{}, .body = body } } });
+            } else {
+                const cond = try self.parseExpression(0);
+                _ = try self.eat(.fat_arrow);
+                const body = try self.parseExpression(0);
+                const arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{cond}, .body = body } } });
+                try arms.append(self.allocator, arm);
+            }
             if (self.curr.tag == .comma) self.nextToken();
         }
         _ = try self.eat(.r_brace);
         const arena = self.context.arena.allocator();
         const arms_slice = try arena.dupe(ast.Node.Index, arms.items);
         arms.deinit(self.allocator);
-        return self.createNode(.{ .tag = .match_expr, .main_token = token, .data = .{ .match_expr = .{ .expression = expr, .arms = arms_slice } } });
+        return self.createNode(.{ .tag = .match_expr, .main_token = token, .data = .{ .match_expr = .{ .expression = expr, .arms = arms_slice, .default = default_arm } } });
+    }
+
+    fn parseSwitch(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_switch);
+        _ = try self.eat(.l_paren);
+        const expr = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
+        _ = try self.eat(.l_brace);
+        
+        var cases = std.ArrayListUnmanaged(ast.Node.Index){};
+        var default_case: ?ast.Node.Index = null;
+        
+        while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+            if (self.curr.tag == .k_case) {
+                self.nextToken();
+                const case_expr = try self.parseExpression(0);
+                _ = try self.eat(.colon); // or .fat_arrow
+                var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+                while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != .r_brace and self.curr.tag != .eof) {
+                    try stmts.append(self.allocator, try self.parseStatement());
+                }
+                const arena = self.context.arena.allocator();
+                const stmts_slice = try arena.dupe(ast.Node.Index, stmts.items);
+                stmts.deinit(self.allocator);
+                const case_node = try self.createNode(.{ .tag = .case, .main_token = token, .data = .{ .case = .{ .condition = case_expr, .body = stmts_slice } } });
+                try cases.append(self.allocator, case_node);
+            } else if (self.curr.tag == .k_default) {
+                self.nextToken();
+                _ = try self.eat(.colon); // or .fat_arrow
+                var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+                while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != .r_brace and self.curr.tag != .eof) {
+                    try stmts.append(self.allocator, try self.parseStatement());
+                }
+                const arena = self.context.arena.allocator();
+                const stmts_slice = try arena.dupe(ast.Node.Index, stmts.items);
+                stmts.deinit(self.allocator);
+                default_case = try self.createNode(.{ .tag = .default, .main_token = token, .data = .{ .default = .{ .body = stmts_slice } } });
+            } else {
+                self.nextToken(); // Skip unexpected tokens
+            }
+        }
+        
+        _ = try self.eat(.r_brace);
+        const arena = self.context.arena.allocator();
+        const cases_slice = try arena.dupe(ast.Node.Index, cases.items);
+        cases.deinit(self.allocator);
+        return self.createNode(.{ .tag = .switch_stmt, .main_token = token, .data = .{ .switch_stmt = .{ .expression = expr, .cases = cases_slice, .default = default_case } } });
+    }
+
+    fn parseYield(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_yield);
+        var key: ?ast.Node.Index = null;
+        var value: ?ast.Node.Index = null;
+        
+        if (self.curr.tag != .semicolon and self.curr.tag != .r_brace and self.curr.tag != .r_paren) {
+            // Check for yield key => value
+            value = try self.parseExpression(0);
+            if (self.curr.tag == .fat_arrow) {
+                self.nextToken();
+                // Actually, we parsed the key, need to reparse
+                key = value;
+                value = try self.parseExpression(0);
+            }
+        }
+        
+        return self.createNode(.{ .tag = .yield_expr, .main_token = token, .data = .{ .yield_expr = .{ .key = key, .value = value } } });
     }
 
     fn parseNewOrAnonymousClass(self: *Parser) anyerror!ast.Node.Index {
@@ -1849,6 +1928,7 @@ pub const Parser = struct {
             .asterisk, .slash, .percent => 60,
             .plus, .minus, .dot => 50, // String concatenation has same precedence as addition/subtraction
             .less, .greater, .less_equal, .greater_equal, .spaceship => 40,
+            .k_instanceof => 38, // instanceof has precedence between comparison and equality
             .equal_equal, .equal_equal_equal, .bang_equal, .bang_equal_equal => 35,
             .ampersand => 30, // Bitwise AND
             .pipe => 25, // Bitwise OR
