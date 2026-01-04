@@ -394,7 +394,7 @@ pub const CoroutineManager = struct {
         // 尝试从池中获取协程
         var coroutine: *Coroutine = undefined;
         if (self.pool.items.len > 0) {
-            coroutine = self.pool.pop();
+            coroutine = self.pool.pop() orelse return error.PoolEmpty;
             coroutine.reset(id, callback, args);
             coroutine.priority = priority;
         } else {

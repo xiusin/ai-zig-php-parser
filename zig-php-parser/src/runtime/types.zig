@@ -7,6 +7,9 @@ pub const number_wrapper = @import("number_wrapper.zig");
 // Import builtin_http for HTTP class method dispatch
 const builtin_http = @import("builtin_http.zig");
 
+// Import builtin_concurrency for concurrency class method dispatch
+const builtin_concurrency = @import("builtin_concurrency.zig");
+
 // Forward declarations
 pub const PHPString = struct {
     data: []u8,
@@ -1506,6 +1509,32 @@ pub const PHPObject = struct {
 
         const method = self.class.getMethod(name);
         if (method == null) {
+            // Method doesn't exist in class - check if it's a built-in class method
+            // For Mutex builtin methods
+            if (std.mem.eql(u8, class_name, "Mutex")) {
+                return builtin_concurrency.callMutexMethod(vm_instance, self, name, args);
+            }
+
+            // For Atomic builtin methods
+            if (std.mem.eql(u8, class_name, "Atomic")) {
+                return builtin_concurrency.callAtomicMethod(vm_instance, self, name, args);
+            }
+
+            // For RWLock builtin methods
+            if (std.mem.eql(u8, class_name, "RWLock")) {
+                return builtin_concurrency.callRWLockMethod(vm_instance, self, name, args);
+            }
+
+            // For SharedData builtin methods
+            if (std.mem.eql(u8, class_name, "SharedData")) {
+                return builtin_concurrency.callSharedDataMethod(vm_instance, self, name, args);
+            }
+
+            // For Channel builtin methods
+            if (std.mem.eql(u8, class_name, "Channel")) {
+                return builtin_concurrency.callChannelMethod(vm_instance, self, name, args);
+            }
+
             // Try magic __call method
             if (self.class.hasMethod("__call")) {
                 return error.MagicMethodCall;

@@ -24,6 +24,7 @@ const builtin_methods = @import("builtin_methods.zig");
 const builtin_concurrency = @import("builtin_concurrency.zig");
 const builtin_http = @import("builtin_http.zig");
 const builtin_io = @import("builtin_io.zig");
+const coroutine = @import("coroutine.zig");
 const syntax_mode = @import("../compiler/syntax_mode.zig");
 pub const SyntaxMode = syntax_mode.SyntaxMode;
 pub const SyntaxConfig = syntax_mode.SyntaxConfig;
@@ -40,7 +41,7 @@ const BytecodeVM = bytecode_vm.BytecodeVM;
 const bytecode_generator = @import("../bytecode/generator.zig");
 const BytecodeGenerator = bytecode_generator.BytecodeGenerator;
 
-const CapturedVar = struct { name: []const u8, value: Value };
+const CapturedVar = struct { name: []const u8, value: Value, is_reference: bool = false };
 
 /// 执行模式枚举 - 支持树遍历和字节码两种执行方式
 pub const ExecutionMode = enum {
@@ -219,7 +220,7 @@ fn callUserFuncArrayFn(vm: *VM, args: []const Value) !Value {
     var iterator = php_array.elements.iterator();
     while (iterator.next()) |entry| {
         func_args[i] = entry.value_ptr.*;
-        vm.retainValue(func_args[i]);  // Retain each argument
+        vm.retainValue(func_args[i]); // Retain each argument
         i += 1;
     }
 
@@ -910,6 +911,9 @@ pub const VM = struct {
     // Extension system registry for third-party extensions
     extension_registry: ?*ExtensionRegistry = null,
 
+    // Coroutine system for concurrent execution
+    coroutine_manager: ?*coroutine.CoroutineManager = null,
+
     // Anonymous class counter for generating unique names
     anonymous_class_counter: u64 = 0,
 
@@ -994,6 +998,15 @@ pub const VM = struct {
         vm.execution_stats.reset();
 
         return vm;
+    }
+
+    /// Get or create the coroutine manager (lazy initialization)
+    pub fn getCoroutineManager(self: *VM) !*coroutine.CoroutineManager {
+        if (self.coroutine_manager == null) {
+            self.coroutine_manager = try self.allocator.create(coroutine.CoroutineManager);
+            self.coroutine_manager.?.* = coroutine.CoroutineManager.init(self.allocator);
+        }
+        return self.coroutine_manager.?;
     }
 
     /// 清理全局环境中的所有变量，释放其引用
@@ -1364,8 +1377,8 @@ pub const VM = struct {
     }
 
     fn cleanupStringInternPool(self: *VM) !void {
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove = std.ArrayListUnmanaged([]const u8){};
+        defer to_remove.deinit(self.allocator);
 
         var iterator = self.string_intern_pool.iterator();
         while (iterator.next()) |entry| {
@@ -1546,7 +1559,7 @@ pub const VM = struct {
     /// Calculate line number from byte position in source code
     fn getLineFromPos(self: *VM, pos: usize) u32 {
         if (pos >= self.current_source.len) return 0;
-        
+
         var line: u32 = 1;
         var i: usize = 0;
         while (i < pos and i < self.current_source.len) : (i += 1) {
@@ -1608,7 +1621,7 @@ pub const VM = struct {
 
         // setTrace will dupe the frames, so we need to release our copies after
         try exception.setTrace(self.allocator, stack_frames.items);
-        
+
         // Release our copies of the stack frames (setTrace made its own copies)
         for (stack_frames.items) |*frame| {
             frame.deinit(self.allocator);
@@ -1858,12 +1871,12 @@ pub const VM = struct {
         // Create a new PHPClass
         const class_name = try types.PHPString.init(self.allocator, ext_class.name);
         var php_class = try self.allocator.create(types.PHPClass);
-        
+
         // Create shape for the class
         const shape = try self.allocator.create(types.Shape);
         shape.* = types.Shape.init(self.allocator, types.Shape.next_id, null);
         types.Shape.next_id += 1;
-        
+
         php_class.* = types.PHPClass{
             .name = class_name,
             .parent = null,
@@ -2245,50 +2258,34 @@ pub const VM = struct {
     }
 
     fn callPDORollBack(self: *VM, pdo_value: Value, args: []const Value) !Value {
+        if (args.len != 0) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::rollBack() expects no parameters", self.current_file, self.current_line);
 
-            if (args.len != 0) {
-
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::rollBack() expects no parameters", self.current_file, self.current_line);
-
-                return self.throwException(exception);
-
-            }
-
-    
-
-            const pdo_object = pdo_value.getAsObject().data;
-
-    
-
-            // Get the stored PDO connection
-
-            const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
-
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
-
-                return self.throwException(exception);
-
-            };
-
-    
-
-            if (connection_prop.getTag() != .integer) {
-
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
-
-                return self.throwException(exception);
-
-            }
-
-    
-
-            const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
-
-            const result = try pdo_ptr.rollBack();
-
-            return Value.initBool(result);
-
+            return self.throwException(exception);
         }
+
+        const pdo_object = pdo_value.getAsObject().data;
+
+        // Get the stored PDO connection
+
+        const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+
+            return self.throwException(exception);
+        };
+
+        if (connection_prop.getTag() != .integer) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+
+            return self.throwException(exception);
+        }
+
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
+
+        const result = try pdo_ptr.rollBack();
+
+        return Value.initBool(result);
+    }
 
     fn callPDOLastInsertId(self: *VM, pdo_value: Value, args: []const Value) !Value {
         if (args.len > 1) {
@@ -2585,6 +2582,22 @@ pub const VM = struct {
         return Value.fromBox(box, Value.TYPE_CLOSURE);
     }
 
+    pub fn createClosureWithRefs(self: *VM, function: types.UserFunction, captured_vars: []const CapturedVar) !Value {
+        var closure = types.Closure.init(self.allocator, function);
+
+        // Capture variables, handling references
+        for (captured_vars) |capture| {
+            if (capture.is_reference) {
+                try closure.captureByReference(capture.name, capture.value);
+            } else {
+                try closure.captureVariable(capture.name, capture.value);
+            }
+        }
+
+        const box = try self.memory_manager.allocClosure(closure);
+        return Value.fromBox(box, Value.TYPE_CLOSURE);
+    }
+
     pub fn createArrowFunction(self: *VM, parameters: []const types.Method.Parameter, body: ?*anyopaque) !Value {
         // Create anonymous function name for the arrow function
         const anon_name = try types.PHPString.init(self.allocator, "{arrow}");
@@ -2875,7 +2888,7 @@ pub const VM = struct {
     pub fn run(self: *VM, node: ast.Node.Index) !Value {
         defer _ = self.request_arena.reset(.retain_capacity);
 
-        return switch (self.execution_mode) {
+        const result = switch (self.execution_mode) {
             .tree_walking => self.runTreeWalking(node),
             .bytecode => self.runBytecode(node),
             .auto => {
@@ -2887,6 +2900,23 @@ pub const VM = struct {
                 }
             },
         };
+
+        // Run coroutines after main execution
+        try self.runCoroutines();
+
+        return result;
+    }
+
+    /// Run all pending coroutines
+    fn runCoroutines(self: *VM) !void {
+        if (self.coroutine_manager == null) return;
+
+        const cm = self.coroutine_manager.?;
+
+        // Run coroutines until all are completed
+        while (cm.hasIOWaiting() or cm.getQueueLengths()[0] > 0) {
+            try cm.run(self);
+        }
     }
 
     fn evaluateBinaryExpression(self: *VM, binary_expr: anytype) !Value {
@@ -3098,15 +3128,19 @@ pub const VM = struct {
     }
 
     fn concatenateStrings(self: *VM, left: Value, right: Value) !Value {
-        const left_str = left.getAsString().data.data;
-        const right_str = right.getAsString().data.data;
+        // Convert both values to strings (PHP behavior)
+        const left_str = try self.valueToString(left);
+        defer if (left_str.needs_free) self.allocator.free(left_str.str);
+
+        const right_str = try self.valueToString(right);
+        defer if (right_str.needs_free) self.allocator.free(right_str.str);
 
         if (self.optimization_flags.enable_string_interning) {
-            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
+            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str.str, right_str.str });
             defer self.allocator.free(result);
             return self.createInternedString(result);
         } else {
-            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str, right_str });
+            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str.str, right_str.str });
             defer self.allocator.free(result);
             return Value.initStringWithManager(&self.memory_manager, result);
         }
@@ -3484,6 +3518,12 @@ pub const VM = struct {
             },
             .lock_stmt => {
                 return self.evaluateLockStatement(ast_node.data.lock_stmt);
+            },
+            .global_stmt => {
+                return self.evaluateGlobalStatement(ast_node.data.global_stmt);
+            },
+            .go_stmt => {
+                return self.evaluateGoStatement(ast_node.data.go_stmt);
             },
             .static_method_call => {
                 return self.evaluateStaticMethodCall(ast_node.data.static_method_call);
@@ -3873,35 +3913,30 @@ pub const VM = struct {
             std.mem.eql(u8, name, "RWLock") or std.mem.eql(u8, name, "SharedData") or
             std.mem.eql(u8, name, "Channel"))
         {
-            if (self.global.get(name)) |constructor_value| {
-                if (constructor_value.getTag() == .native_function) {
-                    // Call the builtin constructor
-                    var args = std.ArrayList(Value){};
-                    defer {
-                        for (args.items) |arg| {
-                            self.releaseValue(arg);
-                        }
-                        args.deinit(self.allocator);
-                    }
-
-                    try args.ensureTotalCapacity(self.allocator, instantiation_data.args.len);
-                    for (instantiation_data.args) |arg_idx| {
-                        try args.append(self.allocator, try self.eval(arg_idx));
-                    }
-
-                    // Call the constructor directly based on the class name
-                    if (std.mem.eql(u8, name, "Mutex")) {
-                        return builtin_concurrency.mutexConstructor(self, args.items);
-                    } else if (std.mem.eql(u8, name, "Atomic")) {
-                        return builtin_concurrency.atomicConstructor(self, args.items);
-                    } else if (std.mem.eql(u8, name, "RWLock")) {
-                        return builtin_concurrency.rwlockConstructor(self, args.items);
-                    } else if (std.mem.eql(u8, name, "SharedData")) {
-                        return builtin_concurrency.sharedDataConstructor(self, args.items);
-                    } else if (std.mem.eql(u8, name, "Channel")) {
-                        return builtin_concurrency.channelConstructor(self, args.items);
-                    }
+            // Call the builtin constructor directly based on the class name
+            var args = std.ArrayListUnmanaged(Value){};
+            defer {
+                for (args.items) |arg| {
+                    self.releaseValue(arg);
                 }
+                args.deinit(self.allocator);
+            }
+
+            try args.ensureTotalCapacity(self.allocator, instantiation_data.args.len);
+            for (instantiation_data.args) |arg_idx| {
+                try args.append(self.allocator, try self.eval(arg_idx));
+            }
+
+            if (std.mem.eql(u8, name, "Mutex")) {
+                return builtin_concurrency.mutexConstructor(self, args.items);
+            } else if (std.mem.eql(u8, name, "Atomic")) {
+                return builtin_concurrency.atomicConstructor(self, args.items);
+            } else if (std.mem.eql(u8, name, "RWLock")) {
+                return builtin_concurrency.rwlockConstructor(self, args.items);
+            } else if (std.mem.eql(u8, name, "SharedData")) {
+                return builtin_concurrency.sharedDataConstructor(self, args.items);
+            } else if (std.mem.eql(u8, name, "Channel")) {
+                return builtin_concurrency.channelConstructor(self, args.items);
             }
         }
 
@@ -3991,7 +4026,7 @@ pub const VM = struct {
         defer php_class_name.release(self.allocator);
 
         const php_class_ptr = try self.allocator.create(types.PHPClass);
-        
+
         // Initialize the class
         php_class_ptr.* = try types.PHPClass.init(self.allocator, php_class_name);
 
@@ -5238,6 +5273,146 @@ pub const VM = struct {
         // self.global_mutex.unlock();
     }
 
+    /// Evaluate global statement - imports variables from global scope
+    fn evaluateGlobalStatement(self: *VM, global_stmt: anytype) !Value {
+        // For each variable in global statement, import it from global scope
+        for (global_stmt.vars) |var_idx| {
+            const var_node = self.context.nodes.items[var_idx];
+
+            // Get the variable name (should be a simple variable node)
+            if (var_node.tag == .variable) {
+                const name_id = var_node.data.variable.name;
+                const name = self.context.string_pool.keys()[name_id];
+
+                // Get the value from global scope
+                if (self.global.get(name)) |value| {
+                    // Set it in current local scope
+                    try self.setVariable(name, value.retain());
+                } else {
+                    // Variable doesn't exist in global scope, initialize to null
+                    // in both global and local scope
+                    try self.global.set(name, Value.initNull());
+                    try self.setVariable(name, Value.initNull());
+                }
+
+                // Track that this is a global variable so we can write back
+                // For now, we'll use a special prefix in the local scope
+                // This is a simplified implementation
+                if (self.call_stack.items.len > 0) {
+                    const current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
+                    // Store metadata that this is a global variable
+                    _ = current_frame;
+                    // In a full implementation, we would track this in a separate set
+                }
+            }
+        }
+
+        return Value.initNull();
+    }
+
+    /// Evaluate go statement - spawn a coroutine
+    fn evaluateGoStatement(self: *VM, go_stmt: anytype) !Value {
+        // Get or create coroutine manager
+        const cm = try self.getCoroutineManager();
+
+        // Extract the function to call and arguments
+        const call_idx = go_stmt.call;
+        const call_node = self.context.nodes.items[call_idx];
+
+        var callback_value: Value = undefined;
+        var args: []const Value = &.{};
+
+        if (call_node.tag == .function_call) {
+            const func_call = call_node.data.function_call;
+            const name_node = self.context.nodes.items[func_call.name];
+
+            // Get the function value
+            if (name_node.tag == .variable) {
+                const name_id = name_node.data.variable.name;
+                const name = self.context.string_pool.keys()[name_id];
+                callback_value = try self.getVariableValue(name);
+            } else if (name_node.tag == .literal_string) {
+                const name_id = name_node.data.literal_string.value;
+                const name = self.context.string_pool.keys()[name_id];
+                // Create a closure from the function name
+                callback_value = try self.createClosureFromName(name);
+            } else {
+                // Try to evaluate as a callable expression
+                callback_value = try self.eval(func_call.name);
+            }
+
+            // Evaluate arguments
+            var args_list = std.ArrayListUnmanaged(Value){};
+            defer args_list.deinit(self.allocator);
+            for (func_call.args) |arg_idx| {
+                const arg_value = try self.eval(arg_idx);
+                try args_list.append(self.allocator, arg_value);
+            }
+            args = try self.allocator.dupe(Value, args_list.items);
+        } else if (call_node.tag == .method_call) {
+            // For method calls, create a closure that calls the method
+            const method_call = call_node.data.method_call;
+            const target_value = try self.eval(method_call.target);
+            defer self.releaseValue(target_value);
+
+            const method_name = self.context.string_pool.keys()[method_call.method_name];
+
+            // Create a closure that calls the method
+            var args_list = std.ArrayListUnmanaged(Value){};
+            for (method_call.args) |arg_idx| {
+                const arg_value = try self.eval(arg_idx);
+                try args_list.append(self.allocator, arg_value);
+            }
+
+            // Create a wrapper function that calls the method
+            const wrapper_name = try types.PHPString.init(self.allocator, "go_wrapper");
+            var user_func = types.UserFunction.init(wrapper_name);
+            user_func.parameters = &[_]types.Method.Parameter{};
+            user_func.body = null; // Will be set dynamically
+
+            var closure = types.Closure.init(self.allocator, user_func);
+            try closure.captureVariable("target", target_value.retain());
+            try closure.captureVariable("method", Value.initString(self.allocator, method_name) catch Value.initNull());
+            for (args_list.items, 0..) |arg, i| {
+                try closure.captureVariable(try std.fmt.allocPrint(self.allocator, "arg{d}", .{i}), arg);
+            }
+
+            const box = try self.memory_manager.allocClosure(closure);
+            callback_value = Value.fromBox(box, Value.TYPE_CLOSURE);
+            args = &.{};
+        } else {
+            // Try to evaluate as a general expression
+            callback_value = try self.eval(call_idx);
+            args = &.{};
+        }
+
+        // Spawn the coroutine
+        const coroutine_id = try cm.spawn(callback_value, args);
+
+        // Return coroutine ID immediately (async behavior)
+        return Value.initInt(@intCast(coroutine_id));
+    }
+
+    /// Get a variable value without throwing an exception
+    fn getVariableValue(self: *VM, name: []const u8) !Value {
+        if (self.getVariable(name)) |value| {
+            return value.retain();
+        }
+        return Value.initNull();
+    }
+
+    /// Create a closure from a function name
+    fn createClosureFromName(self: *VM, name: []const u8) !Value {
+        // This is a simplified implementation
+        // In a full implementation, we would look up the function and create a proper closure
+        const closure_name = try types.PHPString.init(self.allocator, name);
+        var user_func = types.UserFunction.init(closure_name);
+        user_func.body = null;
+
+        const closure = types.Closure.init(self.allocator, user_func);
+        const box = try self.memory_manager.allocClosure(closure);
+        return Value.fromBox(box, Value.TYPE_CLOSURE);
+    }
     fn evaluateBinaryOp(self: *VM, op: Token.Tag, left: Value, right: Value) !Value {
         switch (op) {
             .plus => return self.evaluateAddition(left, right),
@@ -5371,7 +5546,7 @@ pub const VM = struct {
         if ((left_tag == .integer or left_tag == .float) and (right_tag == .integer or right_tag == .float)) {
             const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
             const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
-            
+
             return switch (op) {
                 .less => if (l < r) 1 else 0,
                 .less_equal => if (l <= r) 1 else 0,
@@ -6071,12 +6246,12 @@ pub const VM = struct {
                                     if (exception_class) |cls| {
                                         const exc_obj = try self.allocator.create(types.PHPObject);
                                         exc_obj.* = try types.PHPObject.init(self.allocator, cls);
-                                        
+
                                         // Create message string and set property, then release our reference
                                         const message_value = try Value.initString(self.allocator, exc.message.data);
                                         try exc_obj.setProperty(self.allocator, "message", message_value);
                                         message_value.release(self.allocator); // setProperty retains, so release our ref
-                                        
+
                                         try exc_obj.setProperty(self.allocator, "code", Value.initInt(exc.code));
 
                                         const box = try self.allocator.create(types.gc.Box(*types.PHPObject));
@@ -6217,10 +6392,12 @@ pub const VM = struct {
             const capture_node = self.context.nodes.items[capture_idx];
             var var_name: []const u8 = undefined;
             var should_capture = false;
+            var is_reference = false;
 
             if (capture_node.tag == .variable) {
                 var_name = self.context.string_pool.keys()[capture_node.data.variable.name];
                 should_capture = true;
+                is_reference = false;
             } else if (capture_node.tag == .unary_expr and capture_node.data.unary_expr.op == .ampersand) {
                 // Reference capture: use (&$var)
                 // Peel off the ampersand and get the variable
@@ -6229,19 +6406,20 @@ pub const VM = struct {
                 if (expr_node.tag == .variable) {
                     var_name = self.context.string_pool.keys()[expr_node.data.variable.name];
                     should_capture = true;
+                    is_reference = true;
                 }
             }
 
             if (should_capture) {
                 // Only capture if variable exists in current scope
                 if (self.getVariable(var_name)) |var_value| {
-                    try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value });
+                    try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value, .is_reference = is_reference });
                 }
                 // If variable doesn't exist, skip it
             }
         }
 
-        return self.createClosure(user_function, captured_vars_list.items);
+        return self.createClosureWithRefs(user_function, captured_vars_list.items);
     }
 
     fn evaluateStaticMethodCall(self: *VM, static_call_data: anytype) !Value {
