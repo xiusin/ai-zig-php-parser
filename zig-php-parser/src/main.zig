@@ -308,6 +308,7 @@ pub fn main() !void {
     vm_instance.setExecutionMode(execution_mode);
     if (php_file) |filename| {
         vm_instance.current_file = filename;
+        vm_instance.current_source = php_code; // Set source code for line number calculation
     }
     defer vm_instance.deinit();
 

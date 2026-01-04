@@ -874,6 +874,7 @@ pub const VM = struct {
     error_handler: ErrorHandler,
     current_file: []const u8,
     current_line: u32,
+    current_source: []const u8, // Store source code for line number calculation
     try_catch_stack: std.ArrayList(TryCatchContext),
     stdlib: StandardLibrary,
     reflection_system: ReflectionSystem,
@@ -927,6 +928,7 @@ pub const VM = struct {
             .error_handler = ErrorHandler.init(allocator),
             .current_file = "unknown",
             .current_line = 0,
+            .current_source = "",
             .try_catch_stack = std.ArrayList(TryCatchContext){},
             .stdlib = try StandardLibrary.init(allocator),
             .reflection_system = undefined, // Will be initialized after VM creation
@@ -1532,6 +1534,24 @@ pub const VM = struct {
     pub fn setCurrentLocation(self: *VM, file: []const u8, line: u32) void {
         self.current_file = file;
         self.current_line = line;
+    }
+
+    pub fn setCurrentSource(self: *VM, source: []const u8) void {
+        self.current_source = source;
+    }
+
+    /// Calculate line number from byte position in source code
+    fn getLineFromPos(self: *VM, pos: usize) u32 {
+        if (pos >= self.current_source.len) return 0;
+        
+        var line: u32 = 1;
+        var i: usize = 0;
+        while (i < pos and i < self.current_source.len) : (i += 1) {
+            if (self.current_source[i] == '\n') {
+                line += 1;
+            }
+        }
+        return line;
     }
 
     // Enhanced error handling with better context
@@ -3119,12 +3139,8 @@ pub const VM = struct {
         const ast_node = self.context.nodes.items[node];
 
         // Update current line for error reporting
-        // We can approximate line number from token location if we had source map
-        // For now, let's just use what we have if we can map it, but we don't have line info in Token yet?
-        // Token has loc.start/end. We need to map that to line number.
-        // Assuming we don't have easy line mapping yet, we skip this or implement it later.
-        // But wait, ExceptionFactory takes line number.
-        // Let's assume we can't easily get it right now without scanning source.
+        // main_token is a Token struct, not an index
+        self.current_line = self.getLineFromPos(ast_node.main_token.loc.start);
 
         switch (ast_node.tag) {
             .root => {
@@ -4667,14 +4683,17 @@ pub const VM = struct {
 
         // Save and restore current file and syntax config
         const old_file = self.current_file;
+        const old_source = self.current_source;
         const old_syntax_config = self.syntax_config;
         self.current_file = file_path;
+        self.current_source = source; // Store source for line number calculation
         // Update syntax config for error reporting in the included file
         if (directive_result.found and directive_result.mode != null) {
             self.syntax_config = SyntaxConfig.init(file_syntax_mode);
         }
         defer {
             self.current_file = old_file;
+            self.current_source = old_source;
             self.syntax_config = old_syntax_config;
         }
 
