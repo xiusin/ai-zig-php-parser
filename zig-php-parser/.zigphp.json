@@ -2,6 +2,9 @@
     "syntax": "php",
     "extensions": [],
     "include_paths": ["./lib"],
-    "error_reporting": 32767
+    "error_reporting": 32767,
+    "security": {
+        "allow_unsafe_paths": false
+    }
 }
 

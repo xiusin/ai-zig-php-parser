@@ -6,6 +6,7 @@ const PHPArray = types.PHPArray;
 const ArrayKey = types.ArrayKey;
 const exceptions = @import("exceptions.zig");
 const ExceptionFactory = exceptions.ExceptionFactory;
+const builtin_io = @import("builtin_io.zig");
 
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
@@ -241,22 +242,45 @@ pub const StandardLibrary = struct {
         }
     }
 
-    // File System Functions
+    // File Functions
     pub fn registerFileFunctions(self: *StandardLibrary) !void {
         const file_functions = [_]*const BuiltinFunction{
-            &.{ .name = "file_get_contents", .min_args = 1, .max_args = 5, .handler = fileGetContentsFn },
-            &.{ .name = "file_put_contents", .min_args = 2, .max_args = 4, .handler = filePutContentsFn },
-            &.{ .name = "file_exists", .min_args = 1, .max_args = 1, .handler = fileExistsFn },
-            &.{ .name = "is_file", .min_args = 1, .max_args = 1, .handler = isFileFn },
-            &.{ .name = "is_dir", .min_args = 1, .max_args = 1, .handler = isDirFn },
-            &.{ .name = "filesize", .min_args = 1, .max_args = 1, .handler = filesizeFn },
-            &.{ .name = "basename", .min_args = 1, .max_args = 2, .handler = basenameFn },
-            &.{ .name = "dirname", .min_args = 1, .max_args = 2, .handler = dirnameFn },
-            &.{ .name = "fopen", .min_args = 2, .max_args = 3, .handler = fopenFn },
-            &.{ .name = "fread", .min_args = 2, .max_args = 2, .handler = freadFn },
-            &.{ .name = "fclose", .min_args = 1, .max_args = 1, .handler = fcloseFn },
-            &.{ .name = "feof", .min_args = 1, .max_args = 1, .handler = feofFn },
-            &.{ .name = "fwrite", .min_args = 2, .max_args = 3, .handler = fwriteFn },
+            // Basic file operations
+            &.{ .name = "file_get_contents", .min_args = 1, .max_args = 5, .handler = builtin_io.fileGetContentsFn },
+            &.{ .name = "file_put_contents", .min_args = 2, .max_args = 4, .handler = builtin_io.filePutContentsFn },
+            &.{ .name = "file_exists", .min_args = 1, .max_args = 1, .handler = builtin_io.fileExistsFn },
+            &.{ .name = "is_file", .min_args = 1, .max_args = 1, .handler = builtin_io.isFileFn },
+            &.{ .name = "is_dir", .min_args = 1, .max_args = 1, .handler = builtin_io.isDirFn },
+            &.{ .name = "filesize", .min_args = 1, .max_args = 1, .handler = builtin_io.filesizeFn },
+            &.{ .name = "filemtime", .min_args = 1, .max_args = 1, .handler = builtin_io.filemtimeFn },
+
+            // File management
+            &.{ .name = "unlink", .min_args = 1, .max_args = 1, .handler = builtin_io.unlinkFn },
+            &.{ .name = "rename", .min_args = 2, .max_args = 2, .handler = builtin_io.renameFn },
+            &.{ .name = "copy", .min_args = 2, .max_args = 3, .handler = builtin_io.copyFn },
+
+            // Directory operations
+            &.{ .name = "mkdir", .min_args = 1, .max_args = 3, .handler = builtin_io.mkdirFn },
+            &.{ .name = "rmdir", .min_args = 1, .max_args = 2, .handler = builtin_io.rmdirFn },
+            &.{ .name = "scandir", .min_args = 1, .max_args = 2, .handler = builtin_io.scandirFn },
+
+            // Path functions
+            &.{ .name = "basename", .min_args = 1, .max_args = 2, .handler = builtin_io.basenameFn },
+            &.{ .name = "dirname", .min_args = 1, .max_args = 2, .handler = builtin_io.dirnameFn },
+            &.{ .name = "realpath", .min_args = 1, .max_args = 1, .handler = builtin_io.realpathFn },
+
+            // File stream operations
+            &.{ .name = "fopen", .min_args = 2, .max_args = 3, .handler = builtin_io.fopenFn },
+            &.{ .name = "fclose", .min_args = 1, .max_args = 1, .handler = builtin_io.fcloseFn },
+            &.{ .name = "fread", .min_args = 2, .max_args = 2, .handler = builtin_io.freadFn },
+            &.{ .name = "fwrite", .min_args = 2, .max_args = 3, .handler = builtin_io.fwriteFn },
+            &.{ .name = "feof", .min_args = 1, .max_args = 1, .handler = builtin_io.feofFn },
+            &.{ .name = "fseek", .min_args = 2, .max_args = 3, .handler = builtin_io.fseekFn },
+            &.{ .name = "ftell", .min_args = 1, .max_args = 1, .handler = builtin_io.ftellFn },
+            &.{ .name = "fgets", .min_args = 1, .max_args = 2, .handler = builtin_io.fgetsFn },
+            &.{ .name = "fgetc", .min_args = 1, .max_args = 1, .handler = builtin_io.fgetcFn },
+            &.{ .name = "rewind", .min_args = 1, .max_args = 1, .handler = builtin_io.rewindFn },
+            &.{ .name = "fflush", .min_args = 1, .max_args = 1, .handler = builtin_io.fflushFn },
         };
 
         for (file_functions) |func| {

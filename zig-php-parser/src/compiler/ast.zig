@@ -58,6 +58,7 @@ pub const Node = struct {
         throw_stmt,
         method_call,
         property_access,
+        safe_property_access, // 安全导航操作符 ?-> 或 ?.
         array_access,
         function_call,
         function_decl,
@@ -147,6 +148,7 @@ pub const Node = struct {
         match_arm: struct { conditions: []const Index, body: Index },
         method_call: struct { target: Index, method_name: StringId, args: []const Index },
         property_access: struct { target: Index, property_name: StringId },
+        safe_property_access: struct { target: Index, property_name: StringId },
         array_access: struct { target: Index, index: ?Index },
         static_method_call: struct { class_name: StringId, method_name: StringId, args: []const Index },
         static_property_access: struct { class_name: StringId, property_name: StringId },
