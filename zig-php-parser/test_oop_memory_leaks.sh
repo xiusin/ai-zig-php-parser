@@ -24,6 +24,14 @@ TEST_FILES=(
     "test_oop_iterators.php"
     "test_oop_namespaces.php"
     "test_oop_closures.php"
+    "test_oop_polymorphism.php"
+    "test_oop_serialization.php"
+    "test_oop_method_chaining.php"
+    "test_oop_trait_conflicts.php"
+    "test_oop_deep_inheritance.php"
+    "test_oop_multiple_interfaces.php"
+    "test_oop_advanced_closures.php"
+    "test_oop_composite_pattern.php"
 )
 
 echo "=== OOP Memory Leak Testing Started ===" | tee "$LOG_FILE"
