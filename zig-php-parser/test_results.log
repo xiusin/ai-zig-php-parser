@@ -1,0 +1,3350 @@
+=== aot_arrays.php ===
+Numbers: 1 2 3 4 5 
+Person: Alice, 30 years old, from New York
+Fruits: date, banana, cherry
+Matrix diagonal: 1 5 9 
+Sum of numbers: 15
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 18961000ns
+Peak memory usage: 0 bytes
+String intern pool size: 17
+Call stack depth: 0
+===============================================
+
+=== aot_classes.php ===
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/aot_classes.php:0
+Stack trace:
+#0 examples/aot_classes.php(0): main
+#1 examples/aot_classes.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3341000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== aot_functions.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/aot_functions.php:0
+Stack trace:
+#0 examples/aot_functions.php(0): main
+#1 examples/aot_functions.php(0): greet
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 4742000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== aot_hello.php ===
+Hello from AOT-compiled PHP!
+Hello, World!
+Sum of 10 and 20 is 30
+Welcome to AOT PHP
+AOT compilation successful!
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 7240000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== aot_strings.php ===
+Hello, World!
+Welcome to PHP version 8.5
+Length of 'AOT Compilation': 15
+Original: The quick brown fox jumps over the lazy dog
+Uppercase: THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG
+Lowercase: the quick brown fox jumps over the lazy dog
+Substring (4, 5): quick
+Replaced: The quick brown cat jumps over the lazy dog
+Built string: 1-2-3-4-5
+Multi-line:
+Line 1
+Line 2
+Line 3
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 24951000ns
+Peak memory usage: 0 bytes
+String intern pool size: 23
+Call stack depth: 0
+===============================================
+
+=== arrays.php ===
+Numbers: 1, 2, 3, 4, 5
+Person: John Doe, Age: 30, City: New York
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/arrays.php:0
+Stack trace:
+#0 examples/arrays.php(0): main
+#1 examples/arrays.php(0): closure
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 11161000ns
+Peak memory usage: 0 bytes
+String intern pool size: 10
+Call stack depth: 0
+===============================================
+
+=== benchmark.php ===
+DEBUG: parseStatement failed with error: error.InvalidExpression at token: .equal (=)
+DEBUG: parseStatement failed with error: error.InvalidExpression at token: .r_brace (})
+=== PHP Interpreter Performance Benchmark ===
+Arithmetic operations (10k): 21.614789962768555ms
+String concatenation (1k): -0.8203983306884766ms
+Array append (5k): 17.1968936920166ms
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/benchmark.php:0
+Stack trace:
+#0 examples/benchmark.php(0): main
+#1 examples/benchmark.php(0): testFunction
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 160901000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== concurrent_demo.php ===
+=== PHP 并发编程示例 (Go 风格) ===
+
+【示例1】生产者-消费者模式
+Uncaught UndefinedVariableError: Undefined variable: $count in examples/concurrent_demo.php:0
+Stack trace:
+#0 examples/concurrent_demo.php(0): main
+#1 examples/concurrent_demo.php(0): producer
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 3
+GC collections: 0
+Execution time: 3266000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== empty_struct.php ===
+Struct defined successfully!
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 241000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== error_handling.php ===
+Validation failed: Undefined variable: $data
+Errors:
+File error: Undefined variable: $filename
+Division error: Undefined variable: $b
+Triggering a warning...
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 3
+Memory allocations: 0
+GC collections: 0
+Execution time: 19660000ns
+Peak memory usage: 0 bytes
+String intern pool size: 6
+Call stack depth: 0
+===============================================
+
+=== functions.php ===
+Uncaught UndefinedVariableError: Undefined variable: $greeting in examples/functions.php:0
+Stack trace:
+#0 examples/functions.php(0): main
+#1 examples/functions.php(0): greet
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 4519000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== go_syntax_demo.php ===
+Error: File declares Go mode (// @syntax: go) but contains PHP-style variables ($var). Syntax mixing is not allowed.
+
+=== hello.php ===
+Hello, World!
+Welcome to PHP 8.5 Interpreter!
+Sum: 30
+Hello, World!
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 4660000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== http_server_complete.php ===
+=== 高性能协程安全 HTTP 服务器示例 ===
+
+【示例1】基础 HTTP 服务器
+```php
+$server = new HttpServer([
+    'host' => '127.0.0.1',
+    'port' => 8080,
+    'enable_coroutines' => true,  // 启用协程处理
+    'max_connections' => 1024,
+]);
+
+// 设置请求处理器（每个请求在独立协程中执行）
+$server->handle(function($request, $response) {
+    // $request 和 $response 是请求独立的对象
+    // 协程间不会相互污染
+    
+    $response->status(200);
+    $response->header('Content-Type', 'text/html; charset=utf-8');
+    $response->html('<h1>Hello from Zig-PHP!</h1>');
+});
+
+echo "服务器启动在 http://127.0.0.1:8080
+";
+$server->listen();
+
+```
+
+【示例2】路由系统
+```php
+$router = new Router();
+
+// GET 路由
+$router->get('/hello', function($req, $res) {
+    $res->json(['message' => 'Hello World']);
+});
+
+// POST 路由
+$router->post('/users', function($req, $res) {
+    $body = $req->json();
+    $res->status(201)->json([
+        'success' => true,
+        'data' => $body,
+    ]);
+});
+
+// 带参数的路由
+$router->get('/users/:id', function($req, $res) {
+    $id = $req->param('id');
+    $res->json([
+        'user_id' => $id,
+        'name' => '用户' . $id,
+    ]);
+});
+
+// 查询参数
+$router->get('/search', function($req, $res) {
+    $keyword = $req->query('q');
+    $page = $req->query('page') ?? 1;
+    
+    $res->json([
+        'keyword' => $keyword,
+        'page' => $page,
+        'results' => [],
+    ]);
+});
+
+$server->use($router);
+
+```
+
+【示例3】中间件系统
+```php
+// 日志中间件
+$router->use(function($req, $res, $next) {
+    $start = microtime(true);
+    echo "[{$req->method()}] {$req->path()}
+";
+    
+    $next();  // 调用下一个中间件或处理器
+    
+    $duration = (microtime(true) - $start) * 1000;
+    echo "完成 - {$duration}ms
+";
+});
+
+// 认证中间件
+$router->use(function($req, $res, $next) {
+    $token = $req->header('Authorization');
+    
+    if (!$token) {
+        $res->status(401)->json(['error' => 'Unauthorized']);
+        return;
+    }
+    
+    // 验证 token...
+    $next();
+});
+
+// CORS 中间件
+$router->use(function($req, $res, $next) {
+    $res->header('Access-Control-Allow-Origin', '*');
+    $res->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+    $res->header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
+    if ($req->method() === 'OPTIONS') {
+        $res->status(204)->text('');
+        return;
+    }
+    
+    $next();
+});
+
+```
+
+【示例4】协程安全 - 变量隔离
+```php
+// 每个请求都有独立的上下文
+$router->get('/counter', function($req, $res) {
+    // 这个变量是请求局部的，不会被其他请求影响
+    static $counter = 0;
+    $counter++;
+    
+    // 模拟异步操作
+    sleep(1);
+    
+    $res->json([
+        'request_id' => $req->id(),
+        'counter' => $counter,
+        'note' => '每个请求的 counter 都是独立的',
+    ]);
+});
+
+// 并发测试：同时发送多个请求
+// curl http://localhost:8080/counter &
+// curl http://localhost:8080/counter &
+// curl http://localhost:8080/counter &
+// 每个请求的 counter 都是独立的，不会相互影响
+
+```
+
+【示例5】Request 对象完整 API
+```php
+$router->post('/api/test', function($req, $res) {
+    // 请求方法
+    $method = $req->method();  // "POST"
+    
+    // 请求路径
+    $path = $req->path();  // "/api/test"
+    
+    // 请求体
+    $body = $req->body();  // 原始请求体
+    
+    // JSON 解析
+    $data = $req->json();  // 自动解析 JSON
+    
+    // 请求头
+    $contentType = $req->header('Content-Type');
+    $allHeaders = $req->headers();
+    
+    // 查询参数
+    $page = $req->query('page');
+    $allQuery = $req->queries();
+    
+    // 路由参数
+    $id = $req->param('id');
+    $allParams = $req->params();
+    
+    // 请求 ID（唯一标识）
+    $requestId = $req->id();
+    
+    // 客户端信息
+    $ip = $req->ip();
+    $userAgent = $req->header('User-Agent');
+    
+    $res->json([
+        'method' => $method,
+        'path' => $path,
+        'request_id' => $requestId,
+        'data' => $data,
+    ]);
+});
+
+```
+
+【示例6】Response 对象完整 API
+```php
+$router->get('/api/response', function($req, $res) {
+    // 设置状态码
+    $res->status(200);
+    
+    // 设置响应头
+    $res->header('X-Custom-Header', 'value');
+    
+    // 发送文本响应
+    $res->text('Hello, World!');
+    
+    // 发送 JSON 响应
+    $res->json(['message' => 'Success']);
+    
+    // 发送 HTML 响应
+    $res->html('<h1>Hello</h1>');
+    
+    // 发送重定向
+    $res->redirect('/new-path', 302);
+    
+    // 链式调用
+    $res->status(201)
+        ->header('Content-Type', 'application/json')
+        ->json(['created' => true]);
+});
+
+```
+
+【示例7】HTTP 客户端
+```php
+$client = new HttpClient([
+    'timeout' => 30000,
+    'follow_redirects' => true,
+]);
+
+// GET 请求
+$response = $client->get('http://api.example.com/users');
+echo "状态码: {$response->status()}
+";
+echo "响应体: {$response->body()}
+";
+
+// POST 请求
+$response = $client->post('http://api.example.com/users', [
+    'name' => '张三',
+    'age' => 25,
+]);
+
+// 设置请求头
+$client->header('Authorization', 'Bearer token123');
+$response = $client->get('http://api.example.com/profile');
+
+// 并发请求（在协程中）
+go(function() use ($client) {
+    $res = $client->get('http://api1.example.com/data');
+    echo "API1: {$res->body()}
+";
+});
+
+go(function() use ($client) {
+    $res = $client->get('http://api2.example.com/data');
+    echo "API2: {$res->body()}
+";
+});
+
+```
+
+【示例8】完整的 RESTful API
+```php
+$server = new HttpServer(['port' => 8080]);
+$router = new Router();
+
+// 模拟数据库
+$users = [];
+$nextId = 1;
+
+// 列出所有用户
+$router->get('/api/users', function($req, $res) use (&$users) {
+    $res->json($users);
+});
+
+// 获取单个用户
+$router->get('/api/users/:id', function($req, $res) use (&$users) {
+    $id = (int)$req->param('id');
+    
+    foreach ($users as $user) {
+        if ($user['id'] === $id) {
+            $res->json($user);
+            return;
+        }
+    }
+    
+    $res->status(404)->json(['error' => 'User not found']);
+});
+
+// 创建用户
+$router->post('/api/users', function($req, $res) use (&$users, &$nextId) {
+    $data = $req->json();
+    
+    $user = [
+        'id' => $nextId++,
+        'name' => $data['name'] ?? '',
+        'email' => $data['email'] ?? '',
+        'created_at' => date('Y-m-d H:i:s'),
+    ];
+    
+    $users[] = $user;
+    
+    $res->status(201)->json($user);
+});
+
+// 更新用户
+$router->put('/api/users/:id', function($req, $res) use (&$users) {
+    $id = (int)$req->param('id');
+    $data = $req->json();
+    
+    foreach ($users as &$user) {
+        if ($user['id'] === $id) {
+            $user['name'] = $data['name'] ?? $user['name'];
+            $user['email'] = $data['email'] ?? $user['email'];
+            $user['updated_at'] = date('Y-m-d H:i:s');
+            
+            $res->json($user);
+            return;
+        }
+    }
+    
+    $res->status(404)->json(['error' => 'User not found']);
+});
+
+// 删除用户
+$router->delete('/api/users/:id', function($req, $res) use (&$users) {
+    $id = (int)$req->param('id');
+    
+    foreach ($users as $index => $user) {
+        if ($user['id'] === $id) {
+            array_splice($users, $index, 1);
+            $res->status(204)->text('');
+            return;
+        }
+    }
+    
+    $res->status(404)->json(['error' => 'User not found']);
+});
+
+$server->use($router);
+echo "RESTful API 服务器启动在 http://127.0.0.1:8080
+";
+$server->listen();
+
+```
+
+【示例9】性能优化特性
+```php
+$server = new HttpServer([
+    'port' => 8080,
+    'enable_coroutines' => true,      // 协程处理
+    'max_connections' => 10000,       // 最大连接数
+    'keep_alive_timeout' => 5000,     // Keep-Alive 超时（毫秒）
+    'request_timeout' => 30000,       // 请求超时
+    'context_pool_size' => 1000,      // 上下文池大小
+    'worker_count' => 4,              // 工作线程数（0=自动）
+]);
+
+// 获取服务器状态
+$stats = $server->stats();
+echo "活跃请求: {$stats['active_requests']}
+";
+echo "总请求数: {$stats['total_requests']}
+";
+echo "平均响应时间: {$stats['avg_response_time']}ms
+";
+
+```
+
+=== 核心特性总结 ===
+
+✅ **协程安全**：每个请求独立的 Request/Response 对象
+✅ **高性能**：对象池、零拷贝、协程调度
+✅ **内存安全**：引用计数、自动资源管理
+✅ **易用性**：简洁的 API，链式调用
+✅ **完整功能**：路由、中间件、HTTP 客户端
+
+注意：以上示例展示了完整的 API 设计
+实际实现需要在 VM 中注册这些类和函数
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 5471000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== http_server_demo.php ===
+=== 高性能协程安全 HTTP 服务器完整示例 ===
+
+【测试1】协程上下文隔离演示
+  上下文 1: counter=1, data=context_1
+  上下文 2: counter=1, data=context_2
+  上下文 3: counter=1, data=context_3
+  上下文 4: counter=1, data=context_4
+  上下文 5: counter=1, data=context_5
+✅ 上下文隔离测试通过
+
+【测试2】路由系统演示
+已注册路由:
+  GET /counter
+  GET /api/users
+  POST /api/users
+✅ 路由系统测试通过
+
+【测试3】请求处理模拟
+模拟请求1: GET /counter
+Uncaught UndefinedVariableError: Undefined variable: $counter_val in examples/http_server_demo.php:0
+Stack trace:
+#0 examples/http_server_demo.php(0): main
+#1 examples/http_server_demo.php(0): handleCounter
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 70596000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== minimal_test.php ===
+Hello World
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 138000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== oop.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/oop.php:0
+Stack trace:
+#0 examples/oop.php(0): main
+#1 examples/oop.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 2765000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== reproduce_ref.php ===
+Reference assignment done
+$b = 1 $a = 1
+sadasda
+
+s$a
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 2900000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== reproduce_unary.php ===
+Negative: -1
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1307000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== required.php ===
+Included!
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 206000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== router.php ===
+DEBUG: require path='examples/http_server_demo.php', current_file='examples/router.php'
+=== 高性能协程安全 HTTP 服务器完整示例 ===
+
+【测试1】协程上下文隔离演示
+  上下文 1: counter=1, data=context_1
+  上下文 2: counter=1, data=context_2
+  上下文 3: counter=1, data=context_3
+  上下文 4: counter=1, data=context_4
+  上下文 5: counter=1, data=context_5
+✅ 上下文隔离测试通过
+
+【测试2】路由系统演示
+已注册路由:
+  GET /counter
+  GET /api/users
+  POST /api/users
+✅ 路由系统测试通过
+
+【测试3】请求处理模拟
+模拟请求1: GET /counter
+Uncaught UndefinedVariableError: Undefined variable: $counter_val in examples/http_server_demo.php:0
+Stack trace:
+#0 examples/http_server_demo.php(0): main
+#1 examples/http_server_demo.php(0): handleCounter
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 65343000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== simple_struct.php ===
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/simple_struct.php:0
+Stack trace:
+#0 examples/simple_struct.php(0): main
+#1 examples/simple_struct.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 3142000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== simple_test.php ===
+42
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 24000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== simple_variable_test.php ===
+Testing is_null: true
+Testing empty: true
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 768000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== test_array_debug.php ===
+=== 测试关联数组 ===
+数组内容: Array
+(
+    [name] => 张三
+    [age] => 25
+)
+foreach遍历:
+  name => 张三
+  age => 25
+直接访问:
+  name: 张三
+  age: 25
+
+数值数组: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)
+foreach数值数组:
+  0 => 1
+  1 => 2
+  2 => 3
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 20238000ns
+Peak memory usage: 0 bytes
+String intern pool size: 8
+Call stack depth: 0
+===============================================
+
+=== test_array_map.php ===
+测试array_map
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/test_array_map.php:0
+Stack trace:
+#0 examples/test_array_map.php(0): main
+#1 examples/test_array_map.php(0): closure
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 2910000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_array_methods_complete.php ===
+=== Array方法测试 ===
+
+1. 创建数组:
+原始数组: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)
+2. array_push测试:
+原始: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)添加4,5后: Array
+(
+    [0] => 4
+    [1] => 5
+    [2] => 3
+)
+3. array_pop测试:
+原始: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+)弹出: 4
+弹出后: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)
+4. array_reverse测试:
+原始: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)反转: Array
+(
+    [0] => 5
+    [1] => 4
+    [2] => 3
+    [3] => 2
+    [4] => 1
+)
+5. array_keys测试:
+原始: Array
+(
+    [0] => 10
+    [1] => 20
+    [2] => 30
+)键: Array
+(
+    [0] => 0
+    [1] => 1
+    [2] => 2
+)
+6. array_values测试:
+原始: Array
+(
+    [0] => 10
+    [1] => 20
+    [2] => 30
+)值: Array
+(
+    [0] => 10
+    [1] => 20
+    [2] => 30
+)
+7. count测试:
+数组: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)长度: 5
+
+8. array_merge测试:
+数组1: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)数组2: Array
+(
+    [0] => 4
+    [1] => 5
+    [2] => 6
+)合并: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+    [5] => 6
+)
+=== Array方法测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 7604000ns
+Peak memory usage: 0 bytes
+String intern pool size: 13
+Call stack depth: 0
+===============================================
+
+=== test_array_methods_simple.php ===
+=== Array方法测试（简化版）===
+
+1. 创建数组:
+原始数组: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)
+2. count测试:
+数组长度: 5
+
+3. array_reverse测试:
+原始: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)反转: Array
+(
+    [0] => 5
+    [1] => 4
+    [2] => 3
+    [3] => 2
+    [4] => 1
+)
+4. array_keys测试:
+键: Array
+(
+    [0] => 0
+    [1] => 1
+    [2] => 2
+)
+5. array_values测试:
+值: Array
+(
+    [0] => 10
+    [1] => 20
+    [2] => 30
+)
+6. array_merge测试:
+合并: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+    [5] => 6
+)
+=== Array方法测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 4608000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== test_array_methods.php ===
+=== 测试Array方法调用 ===
+原始数组: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)添加后: Array
+(
+    [0] => 6
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)弹出: 5
+弹出后: Array
+(
+    [0] => 6
+    [1] => 2
+    [2] => 3
+    [3] => 4
+)反转: Array
+(
+    [0] => 4
+    [1] => 3
+    [2] => 2
+    [3] => 6
+)键: Array
+(
+    [0] => 0
+    [1] => 1
+    [2] => 2
+    [3] => 3
+)值: Array
+(
+    [0] => 6
+    [1] => 2
+    [2] => 3
+    [3] => 4
+)长度: 4
+合并: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+    [5] => 6
+)Uncaught UndefinedVariableError: Undefined variable: $n in examples/test_array_methods.php:0
+Stack trace:
+#0 examples/test_array_methods.php(0): main
+#1 examples/test_array_methods.php(0): closure
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 7210000ns
+Peak memory usage: 0 bytes
+String intern pool size: 9
+Call stack depth: 0
+===============================================
+
+=== test_array_wrapper.php ===
+=== 测试Array包装类 ===
+原始数组: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+)
+=== Array包装类测试完成 ===
+注意: 带注释的代码需要在VM中实现Array类方法支持
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1203000ns
+Peak memory usage: 0 bytes
+String intern pool size: 5
+Call stack depth: 0
+===============================================
+
+=== test_arrow_function.php ===
+测试箭头函数
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/test_arrow_function.php:0
+Stack trace:
+#0 examples/test_arrow_function.php(0): main
+#1 examples/test_arrow_function.php(0): closure
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 2197000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_assign.php ===
+30
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 38000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_assoc_array.php ===
+=== 测试关联数组 ===
+创建成功
+Array
+(
+    [name] => 张三
+    [age] => 25
+)
+测试2: foreach遍历
+name => 张三
+age => 25
+
+完成
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 5741000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== test_assoc_simple.php ===
+=== 测试关联数组 ===
+变量赋值: 张三
+数值数组: Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)foreach测试:
+0 => 1
+1 => 2
+2 => 3
+
+完成
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 8685000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== test_basic_features.php ===
+=== PHP基础功能测试 ===
+
+1. 变量和运算测试
+10 + 20 = 30
+
+2. 字符串操作测试
+Hello World
+
+3. 条件语句测试
+x 大于 10
+
+4. 循环测试
+循环 1
+循环 2
+循环 3
+
+5. 数组测试
+数组第一个元素: 10
+
+=== 基础功能测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 11230000ns
+Peak memory usage: 0 bytes
+String intern pool size: 6
+Call stack depth: 0
+===============================================
+
+=== test_break_continue_debug.php ===
+测试 continue:
+i = 0
+i = 1
+跳过 i=2
+i = 3
+i = 4
+
+测试 break:
+n = 1
+n = 2
+n = 3
+退出循环
+循环结束，n = 3
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 11978000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_channel.php ===
+=== Channel 通道测试 ===
+
+【测试1】基本发送和接收
+Runtime error: UndefinedMethod
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 467000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_class_full.php ===
+Base
+Derived
+self::$foo => foo
+self::$bar => bartest
+$obj::$foo => footest
+Derived::$foo => foo
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 7006000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_closure_simple.php ===
+Testing simple closure
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/test_closure_simple.php:0
+Stack trace:
+#0 examples/test_closure_simple.php(0): main
+#1 examples/test_closure_simple.php(0): closure
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 2650000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_concurrency_complete.php ===
+=== 并发安全类完整功能测试 ===
+
+【测试1】Mutex 互斥锁测试
+Mutex Success
+Runtime error: UndefinedMethod
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 626000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_concurrency_final.php ===
+=== 并发安全类完整功能测试 ===
+
+【测试1】Mutex 互斥锁测试
+✅ Mutex 实例化成功
+Runtime error: UndefinedMethod
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 405000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_concurrency_simple.php ===
+=== 并发安全类基础测试 ===
+
+【测试1】Mutex 类实例化
+✅ Mutex 实例化成功
+对象类型: Mutex
+
+【测试2】Atomic 类实例化
+✅ Atomic 实例化成功
+对象类型: Atomic
+
+【测试3】RWLock 类实例化
+✅ RWLock 实例化成功
+对象类型: RWLock
+
+【测试4】SharedData 类实例化
+✅ SharedData 实例化成功
+对象类型: SharedData
+
+=== 测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 4
+GC collections: 0
+Execution time: 11445000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_coroutine.php ===
+=== 测试协程系统 ===
+
+=== 协程通信（Channel）===
+
+=== WaitGroup示例 ===
+
+=== 协程上下文隔离 ===
+
+=== 协程互斥锁 ===
+
+=== 协程测试完成 ===
+注意: 带注释的代码需要在VM中实现协程支持
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 773000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_debug_closure.php ===
+Step 1: Define closure
+Step 2: Call closure
+Uncaught UndefinedVariableError: Undefined variable: $x in examples/test_debug_closure.php:0
+Stack trace:
+#0 examples/test_debug_closure.php(0): main
+#1 examples/test_debug_closure.php(0): closure
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 3307000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_debug.php ===
+创建 Mutex
+Mutex 类型: Mutex
+完成
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 1
+GC collections: 0
+Execution time: 1680000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_direct_break.php ===
+测试直接 break:
+i = 0
+i = 1
+i = 2
+循环结束
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 4727000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_echo_break.php ===
+Before: i = 0
+After if: i = 0
+Before: i = 1
+After if: i = 1
+Before: i = 2
+Breaking at i = 2
+Loop ended
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 8900000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_echo_fix.php ===
+Hello World
+This should be on a new line without automatic newline
+Another line - continued
+Final test: no auto newline - works correctly
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1952000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== test_echo_function.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .comma (,)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .comma (,)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .comma (,)
+Hello from echo function!
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 254000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_echo_multi.php ===
+Hello World
+Multiple parameters work!
+Numbers: 1, 2, 3
+Mixed: string, 42, true
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1305000ns
+Peak memory usage: 0 bytes
+String intern pool size: 10
+Call stack depth: 0
+===============================================
+
+=== test_echo_only.php ===
+Test 1
+Test 2
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 387000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_echo.php ===
+Hello World
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 132000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_escape_debug.php ===
+Test 1: Alice
+Test 2: $name
+Test 3: \Alice
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 2382000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_comprehensive.php ===
+=== PHP 文件操作函数全面测试 ===
+
+1. 基础文件操作
+------------------
+Uncaught UndefinedVariableError: Undefined variable: $result in examples/test_file_operations_comprehensive.php:0
+Stack trace:
+#0 examples/test_file_operations_comprehensive.php(0): main
+#1 examples/test_file_operations_comprehensive.php(0): test_result
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3291000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_config_detailed.php ===
+=== 文件操作安全配置测试（详细版本）===
+
+测试 1: 尝试访问上级目录的文件
+结果: ✓ 安全检查生效 - 访问被拒绝
+说明: allow_unsafe_paths = false
+
+测试 2: 尝试使用绝对路径
+结果: ✓ 安全检查生效 - 访问被拒绝
+说明: allow_unsafe_paths = false
+
+测试 3: 尝试创建上级目录
+结果: ✓ 安全检查生效 - 创建被拒绝
+说明: allow_unsafe_paths = false
+
+=== 配置测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 2854000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_config_final.php ===
+=== 文件操作安全配置测试（最终版本）===
+
+测试 1: 尝试创建上级目录
+结果: ✓ 安全检查生效 - 创建被拒绝
+说明: allow_unsafe_paths = false
+
+测试 2: 尝试创建绝对路径目录
+结果: ✓ 安全检查生效 - 创建被拒绝
+说明: allow_unsafe_paths = false
+
+测试 3: 尝试删除上级目录
+结果: ✓ 安全检查生效 - 删除被拒绝
+说明: allow_unsafe_paths = false
+
+测试 4: 尝试扫描上级目录
+结果: ✓ 安全检查生效 - 扫描被拒绝
+说明: allow_unsafe_paths = false
+
+=== 配置测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 3173000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_config.php ===
+=== 文件操作安全配置测试 ===
+
+测试: 尝试访问上级目录的文件
+结果: ✓ 安全检查生效 - 访问被拒绝
+说明: allow_unsafe_paths = false (默认)
+
+=== 配置测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1057000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_core.php ===
+=== PHP 文件操作函数核心测试 ===
+
+1. 基础文件操作
+------------------
+✓ file_put_contents: 写入  字节
+✓ file_get_contents: 内容不一致
+✓ file_exists (存在): false
+✓ file_exists (不存在): false
+✓ is_file (文件): false
+✓ is_file (目录): false
+✓ is_dir (文件): false
+✓ is_dir (目录): true
+✓ filesize:  字节
+✓ filemtime: 
+✓ basename: zigphp_core_test.txt
+✓ dirname: /tmp
+
+2. 文件管理操作
+------------------
+✓ copy: 文件复制成功
+✓ rename: 文件重命名成功
+✓ unlink: 文件删除成功
+
+3. 目录操作
+------------------
+✓ mkdir: 目录创建成功
+✓ is_dir (新建目录): false
+✓ rmdir: 目录删除成功
+
+4. 文件流操作
+------------------
+✓ fopen (r): 文件打开成功
+Uncaught TypeError: fread() expects parameter 1 to be resource and parameter 2 to be integer in builtin:0
+Stack trace:
+#0 examples/test_file_operations_core.php(0): main
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 21163000ns
+Peak memory usage: 0 bytes
+String intern pool size: 25
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_final.php ===
+=== PHP 文件操作函数全面测试 ===
+
+1. 基础文件操作
+------------------
+✓ file_put_contents: 写入  字节
+✓ file_get_contents: 读取成功
+✓ file_exists: false
+✓ file_exists (不存在的文件): false
+✓ is_file: false
+✓ is_file (目录): false
+✓ is_dir (文件): false
+✓ is_dir (目录): true
+✓ filesize:  字节
+✓ filemtime: 
+✓ basename: zigphp_comprehensive_test.txt
+✓ basename (带路径): test.txt
+✓ dirname: /tmp
+✓ dirname (深层): /tmp/a/b
+
+2. 文件管理操作
+------------------
+✓ copy: 文件复制成功
+✓ rename: 文件重命名成功
+✓ unlink: 文件删除成功
+
+3. 目录操作
+------------------
+✓ mkdir: 目录创建成功
+✓ scandir: 找到 1 个条目
+✓ rmdir: 目录删除成功
+
+4. 文件流操作
+------------------
+✓ fopen (r): 文件打开成功
+Uncaught TypeError: fread() expects parameter 1 to be resource and parameter 2 to be integer in builtin:0
+Stack trace:
+#0 examples/test_file_operations_final.php(0): main
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 25494000ns
+Peak memory usage: 0 bytes
+String intern pool size: 29
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_security.php ===
+=== 文件操作安全测试 ===
+
+1. 正常文件操作
+------------------
+✓ 正常写入文件成功
+✓ 正常读取文件成功: Safe content
+✓ 文件存在: true
+✓ 是文件: true
+
+2. 目录遍历攻击防护测试
+------------------
+测试 1: 使用 "../" 尝试访问上级目录
+结果: ✓ 防御成功 - 返回 false
+
+测试 2: 使用绝对路径
+结果: ✓ 防御成功 - 返回 false
+
+测试 3: 使用 Windows 风格路径
+结果: ✓ 防御成功 - 返回 false
+
+测试 4: 使用嵌套的 "../"
+结果: ✓ 防御成功 - 返回 false
+
+3. 文件操作安全测试
+------------------
+测试 5: 尝试删除上级目录的文件
+结果: ✓ 防御成功 - 返回 false
+
+测试 6: 尝试复制到上级目录
+结果: ✓ 防御成功 - 返回 false
+
+测试 7: 尝试重命名到上级目录
+结果: ✓ 防御成功 - 返回 false
+
+4. 目录操作安全测试
+------------------
+测试 8: 尝试创建上级目录
+结果: ✓ 防御成功 - 返回 false
+
+测试 9: 尝试扫描上级目录
+结果: ✓ 防御成功 - 返回 false
+
+测试 10: 尝试删除上级目录
+结果: ✓ 防御成功 - 返回 false
+
+5. 文件流操作安全测试
+------------------
+测试 11: 尝试打开上级目录的文件
+结果: ✓ 防御成功 - 返回 false
+
+测试 12: 尝试打开绝对路径文件
+结果: ✓ 防御成功 - 返回 false
+
+6. 清理
+------------------
+✓ 测试文件已清理
+
+=== 安全测试完成 ===
+✓ 所有目录遍历攻击已被成功防护！
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 32683000ns
+Peak memory usage: 0 bytes
+String intern pool size: 17
+Call stack depth: 0
+===============================================
+
+=== test_file_operations_simple.php ===
+=== 简化文件操作测试 ===
+
+1. 基础文件操作
+内容: 文件存在: false
+文件大小:  字节
+文件已删除
+
+2. 目录操作
+目录创建成功
+是目录: false
+目录已删除
+
+=== 测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 5366000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== test_file_operations.php ===
+=== PHP 文件操作函数测试 ===
+
+1. 基础文件操作
+------------------
+写入文件:  字节
+读取文件内容:
+文件大小:  字节
+文件修改时间: 
+文件名: zigphp_test_file.txt
+目录名: /tmp
+
+2. 文件管理操作
+------------------
+
+3. 目录操作
+------------------
+是目录: true
+目录内容:
+Uncaught TypeError: Foreach can only iterate over arrays in examples/test_file_operations.php:0
+Stack trace:
+#0 examples/test_file_operations.php(0): main
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 9199000ns
+Peak memory usage: 0 bytes
+String intern pool size: 11
+Call stack depth: 0
+===============================================
+
+=== test_fn_keyword.php ===
+Uncaught UndefinedVariableError: Undefined variable: $a in examples/test_fn_keyword.php:0
+Stack trace:
+#0 examples/test_fn_keyword.php(0): main
+#1 examples/test_fn_keyword.php(0): add
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 3081000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_for_range.php ===
+=== for range语法测试 ===
+
+1. for range 10:
+* * * * * * * * * * 
+
+2. for $i range 10:
+0 1 2 3 4 5 6 7 8 9 
+
+3. for $i range 5:
+[0] [1] [2] [3] [4] 
+
+4. 嵌套for range:
+行0: 0 1 2 3 
+行1: 0 1 2 3 
+行2: 0 1 2 3 
+
+5. for range中使用变量:
+0的平方: 0
+1的平方: 1
+2的平方: 4
+3的平方: 9
+4的平方: 16
+
+=== for range语法测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 48761000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== test_foreach_debug.php ===
+开始测试
+数组创建成功
+数组长度: 3
+开始foreach
+值: 1
+值: 2
+值: 3
+foreach结束
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 6916000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_foreach_key_value.php ===
+测试foreach键值对
+数组: Array
+(
+    [0] => 10
+    [1] => 20
+    [2] => 30
+)
+只有值:
+值: 10
+值: 20
+值: 30
+
+键值对:
+键: 0, 值: 10
+键: 1, 值: 20
+键: 2, 值: 30
+
+完成
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 16516000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== test_go_assignment.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .r_paren ())
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .t_go_identifier (getName)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .r_brace (})
+World
+Uncaught UndefinedVariableError: Undefined variable: $person in examples/test_go_assignment.php:0
+Stack trace:
+#0 examples/test_go_assignment.php(0): main
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 2035000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_go_class_simple.php ===
+Alice
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 490000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_go_debug.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .t_go_identifier (name)
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 0ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_go_minimal.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .k_echo (echo)
+Test
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 130000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_go_simple.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .k_echo (echo)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .r_paren ())
+Test 1: Variable Assignment
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 129000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_http_basic.php ===
+=== HTTP基础功能测试 ===
+
+1. 测试HTTP响应函数:
+调用handleRequest:
+HTTP/1.1 200 OK
+Content-Type: text/plain
+
+Hello from PHP HTTP Server!
+
+2. 测试JSON响应:
+调用jsonResponse:
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+Uncaught UndefinedVariableError: Undefined variable: $data in examples/test_http_basic.php:0
+Stack trace:
+#0 examples/test_http_basic.php(0): main
+#1 examples/test_http_basic.php(0): jsonResponse
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 2
+Memory allocations: 0
+GC collections: 0
+Execution time: 5601000ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================
+
+=== test_http_functionality.php ===
+=== HTTP 服务器和客户端功能测试 ===
+
+【测试1】测试HTTP类是否正确注册
+测试 HttpServer 类...
+HttpServer 类存在: ✅ 是
+HttpServer 方法数量: 0
+HttpServer 方法列表: 
+测试 HttpClient 类...
+HttpClient 类存在: ✅ 是
+HttpClient 方法数量: 0
+HttpClient 方法列表: 
+✅ HTTP类注册成功
+
+=== 测试完成 ===
+🎉 HTTP 服务器和客户端类注册测试通过！
+📊 注册的类: HttpServer, HttpClient
+📝 注意: 对象实例化功能需要进一步实现
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 13129000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== test_http_server.php ===
+=== 测试HTTP服务器 ===
+
+=== HTTP客户端测试 ===
+
+=== HTTP测试完成 ===
+注意: 带注释的代码需要在VM中实现HTTP服务器和客户端支持
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 468000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_if_condition.php ===
+i = 0
+i is 0
+i = 1
+i is 1
+i = 2
+i is 2
+i = 3
+i = 4
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 7969000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_increment.php ===
+After increment: 2
+After pre-increment: 3
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 2297000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_integration.php ===
+Result: 30Uncaught UndefinedVariableError: Undefined variable: $a in examples/test_integration.php:0
+Stack trace:
+#0 examples/test_integration.php(0): main
+#1 examples/test_integration.php(0): test_func
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 3876000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_interpolation_comprehensive.php ===
+User: Admin
+UserID: 123
+Info: Admin has ID 123!
+Welcome Admin to the system.
+Empty: End
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 6577000ns
+Peak memory usage: 0 bytes
+String intern pool size: 8
+Call stack depth: 0
+===============================================
+
+=== test_interpolation.php ===
+Hello World!Hello World!
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1799000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_ir_dump.php ===
+Uncaught UndefinedVariableError: Undefined variable: $a in examples/test_ir_dump.php:0
+Stack trace:
+#0 examples/test_ir_dump.php(0): main
+#1 examples/test_ir_dump.php(0): add
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 2914000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_json_array.php ===
+Name: John
+Age: 30
+User name: Alice
+Theme: dark
+First item: 1
+Count: 3
+Empty object created
+PHP style in braces: value
+All JSON array tests passed!
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 9793000ns
+Peak memory usage: 0 bytes
+String intern pool size: 23
+Call stack depth: 0
+===============================================
+
+=== test_loops.php ===
+=== 测试循环功能 ===
+
+测试 1: for 无限循环 (带 break)
+循环次数: 1
+循环次数: 2
+循环次数: 3
+循环结束，总次数: 3
+
+测试 2: for range 循环
+执行一次
+执行一次
+执行一次
+执行一次
+执行一次
+
+测试 3: for range 带索引变量
+索引: 0
+索引: 1
+索引: 2
+索引: 3
+索引: 4
+
+测试 4: break 提前退出
+i = 0
+i = 1
+i = 2
+
+测试 5: continue 跳过偶数
+i = 0
+i = 1
+i = 3
+i = 5
+
+测试 6: 嵌套循环
+i=0, j=0
+i=0, j=1
+i=1, j=0
+i=1, j=1
+i=2, j=0
+i=2, j=1
+
+测试 7: while 循环控制流
+n = 1
+n = 3
+
+测试 8: 标准 for 循环
+x = 0
+x = 1
+x = 3
+x = 4
+
+=== 所有测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 62635000ns
+Peak memory usage: 0 bytes
+String intern pool size: 8
+Call stack depth: 0
+===============================================
+
+=== test_minimal_break.php ===
+开始
+结束
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 243000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_minimal.php ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 158000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_mixed_escape.php ===
+$b = 2
+$a = 1 and $b = 2
+Value: $var = 1
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 4975000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_mutex_only.php ===
+测试 Mutex 类
+Mutex 创建成功
+Runtime error: UndefinedMethod
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 311000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_new_builtins.php ===
+Testing Array Functions:
+count: 3
+array_key_exists(1, $arr): true
+array_key_exists(5, $arr): false
+array_slice: Array
+(
+    [0] => 2
+)array_reverse: Array
+(
+    [0] => 3
+    [1] => 2
+    [2] => 1
+)
+Testing String Functions:
+strrev: olleh
+str_split: Array
+(
+    [0] => he
+    [1] => ll
+    [2] => o
+)stripos('Hello World', 'world'): 6
+
+Testing Hash/Encoding Functions:
+bin2hex('ABC'): 414243
+hex2bin('414243'): ABC
+base64_encode('Hello'): SGVsbG8=
+base64_decode('SGVsbG8='): Hello
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 16004000ns
+Peak memory usage: 0 bytes
+String intern pool size: 18
+Call stack depth: 0
+===============================================
+
+=== test_no_closure.php ===
+Test without closure
+x = 10
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1243000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_parent_class_only.php ===
+Classes defined
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 639000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_parent_concat.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_concat.php:0
+Stack trace:
+#0 examples/test_parent_concat.php(0): main
+#1 examples/test_parent_concat.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 2986000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_parent_create.php ===
+Before creating object
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_create.php:0
+Stack trace:
+#0 examples/test_parent_create.php(0): main
+#1 examples/test_parent_create.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3143000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_parent_exact.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_exact.php:0
+Stack trace:
+#0 examples/test_parent_exact.php(0): main
+#1 examples/test_parent_exact.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3198000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_parent_interpolation.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_interpolation.php:0
+Stack trace:
+#0 examples/test_parent_interpolation.php(0): main
+#1 examples/test_parent_interpolation.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3023000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_parent_interpolation2.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_interpolation2.php:0
+Stack trace:
+#0 examples/test_parent_interpolation2.php(0): main
+#1 examples/test_parent_interpolation2.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3607000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_parent_interpolation3.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_interpolation3.php:0
+Stack trace:
+#0 examples/test_parent_interpolation3.php(0): main
+#1 examples/test_parent_interpolation3.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3104000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_parent_method.php ===
+Uncaught UndefinedVariableError: Undefined variable: $n in examples/test_parent_method.php:0
+Stack trace:
+#0 examples/test_parent_method.php(0): main
+#1 examples/test_parent_method.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 2960000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_parent_no_base_this.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_no_base_this.php:0
+Stack trace:
+#0 examples/test_parent_no_base_this.php(0): main
+#1 examples/test_parent_no_base_this.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3126000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_parent_no_this.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_no_this.php:0
+Stack trace:
+#0 examples/test_parent_no_this.php(0): main
+#1 examples/test_parent_no_this.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3344000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_parent_private.php ===
+Uncaught UndefinedVariableError: Undefined variable: $n in examples/test_parent_private.php:0
+Stack trace:
+#0 examples/test_parent_private.php(0): main
+#1 examples/test_parent_private.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 2729000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_parent_simple.php ===
+Uncaught UndefinedVariableError: Undefined variable: $v in examples/test_parent_simple.php:0
+Stack trace:
+#0 examples/test_parent_simple.php(0): main
+#1 examples/test_parent_simple.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 2760000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_parent_two_props.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_two_props.php:0
+Stack trace:
+#0 examples/test_parent_two_props.php(0): main
+#1 examples/test_parent_two_props.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3037000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_parent_two_strings.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_two_strings.php:0
+Stack trace:
+#0 examples/test_parent_two_strings.php(0): main
+#1 examples/test_parent_two_strings.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3141000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_parent_typed.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_typed.php:0
+Stack trace:
+#0 examples/test_parent_typed.php(0): main
+#1 examples/test_parent_typed.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3116000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_parent_typed2.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_typed2.php:0
+Stack trace:
+#0 examples/test_parent_typed2.php(0): main
+#1 examples/test_parent_typed2.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 2979000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_parent_typed3.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_typed3.php:0
+Stack trace:
+#0 examples/test_parent_typed3.php(0): main
+#1 examples/test_parent_typed3.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 2985000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_parent_typed4.php ===
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_parent_typed4.php:0
+Stack trace:
+#0 examples/test_parent_typed4.php(0): main
+#1 examples/test_parent_typed4.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3294000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_php_syntax.php ===
+=== PHP语法测试开始 ===
+
+全局常量测试:
+APP_NAME: Zig-PHP-Parser
+VERSION: 1.0.0
+DEBUG: true
+
+全局变量测试:
+global_counter: 0
+global_data initialized: true
+
+递归函数测试:
+Uncaught UndefinedVariableError: Undefined variable: $n in examples/test_php_syntax.php:0
+Stack trace:
+#0 examples/test_php_syntax.php(0): main
+#1 examples/test_php_syntax.php(0): factorial
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 13778000ns
+Peak memory usage: 0 bytes
+String intern pool size: 20
+Call stack depth: 0
+===============================================
+
+=== test_recursion.php ===
+Uncaught UndefinedVariableError: Undefined variable: $n in examples/test_recursion.php:0
+Stack trace:
+#0 examples/test_recursion.php(0): main
+#1 examples/test_recursion.php(0): fact
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 4033000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_safe_navigation_go.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .k_class (class)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .t_go_identifier (__construct)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .comma (,)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .r_brace (})
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 0ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_safe_navigation_minimal.php ===
+=== 安全导航操作符最小测试 ===
+
+测试 1: 对象存在，属性存在
+Uncaught UndefinedVariableError: Undefined variable: $city in examples/test_safe_navigation_minimal.php:0
+Stack trace:
+#0 examples/test_safe_navigation_minimal.php(0): main
+#1 examples/test_safe_navigation_minimal.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3037000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_safe_navigation_simple_go.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .k_class (class)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .t_go_identifier (__construct)
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .r_paren ())
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 0ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_safe_navigation.php ===
+=== 安全导航操作符测试（PHP 模式）===
+
+测试 1: 对象存在，属性存在
+Uncaught UndefinedVariableError: Undefined variable: $city in examples/test_safe_navigation.php:0
+Stack trace:
+#0 examples/test_safe_navigation.php(0): main
+#1 examples/test_safe_navigation.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 3150000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_scoping_functions.php ===
+Global val before: 5
+Uncaught UndefinedVariableError: Undefined variable: $a in examples/test_scoping_functions.php:0
+Stack trace:
+#0 examples/test_scoping_functions.php(0): main
+#1 examples/test_scoping_functions.php(0): add
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 4997000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_set_debug.php ===
+创建成功
+Runtime error: UndefinedMethod
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 222000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_shared_only.php ===
+测试 SharedData
+SharedData 创建成功
+Runtime error: UndefinedMethod
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 474000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_simple_array.php ===
+DEBUG: parseStatement failed with error: error.UnexpectedToken at token: .t_variable ($n)
+DEBUG: parseStatement failed with error: error.InvalidExpression at token: .r_brace (})
+数组元素: 
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 315000ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================
+
+=== test_simple_break.php ===
+测试简单 break:
+i = 0
+循环结束
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1895000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_simple_class.php ===
+Hello from method
+42
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 739000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_simple_var.php ===
+x = 10
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1120000ns
+Peak memory usage: 0 bytes
+String intern pool size: 1
+Call stack depth: 0
+===============================================
+
+=== test_simple.php ===
+Hello World
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 137000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_simple2.php ===
+Hello World
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 134000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_string_complete.php ===
+=== 字符串功能完整测试 ===
+
+【测试1】双引号字符串变量插值:
+姓名: 张三
+年龄: 25 岁
+混合: 用户 张三 今年 25 岁
+
+【测试2】双引号字符串转义:
+转义美元符号: $name 应该显示 $name
+价格标签: $price = 100 元
+反斜杠: \ 显示一个反斜杠
+换行符: 第一行
+第二行
+制表符: 列1	列2	列3
+双引号: "引用内容"
+
+【测试3】单引号字符串:
+变量不插值: $name 保持原样
+转义测试: ' 单引号 和 \ 反斜杠
+其他转义不生效: \n \t \$ 保持原样
+
+【测试4】反引号多行字符串:
+这是一个
+多行的
+原始字符串
+变量不插值: $name $age
+转义不生效: \n \t \\ \$ \"
+特殊字符: @#$%^&*()
+
+【测试5】混合使用:
+双引号结果: 双引号: 张三
+单引号结果: 单引号: $name
+反引号结果: 反引号: $name
+
+【测试6】边界情况:
+连续转义: \\张三 显示 \\张三
+美元符号后非变量: $123 和 $@ 保持原样
+空字符串: "" 和 '' 和 ``
+
+=== 所有测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 17540000ns
+Peak memory usage: 0 bytes
+String intern pool size: 12
+Call stack depth: 0
+===============================================
+
+=== test_string_escape.php ===
+=== 测试字符串转义序列 ===
+第一行
+第二行
+第三行
+列1	列2	列3
+他说:"你好"
+路径: C:\Users\test\file.txt
+Windows换行
+Unix换行
+姓名: 张三, 年龄: 25
+欢迎 李四 登录系统
+
+=== 测试反引号多行字符串 ===
+这是一个
+多行字符串
+包含\n和\t等字符
+但不会被转义
+双引号: 包含
+转义
+反引号: 包含\n不转义
+
+=== 测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 7450000ns
+Peak memory usage: 0 bytes
+String intern pool size: 9
+Call stack depth: 0
+===============================================
+
+=== test_string_final.php ===
+=== 字符串转义完整测试 ===
+
+【测试1】基本变量插值:
+姓名: 张三
+值: 100
+
+【测试2】转义的美元符号:
+$name 应该显示 $name
+$value = 100
+价格: $100 元
+
+【测试3】混合使用转义和插值:
+$name = 张三
+$value = 100 元
+变量 $name 的值是 张三，$value 的值是 100
+
+【测试4】连续转义:
+\张三 = 张三
+\$name = 张三
+\\张三 = 张三
+
+【测试5】其他转义序列:
+换行:
+第二行
+制表:	列2	列3
+反斜杠: \ 单个反斜杠
+双引号: "引用" 内容
+
+【测试6】反引号原始字符串:
+原始: $name \$value \n \t
+
+【测试7】单引号字符串:
+变量不插值: $name $value
+转义: ' 和 \
+
+=== 所有测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 17616000ns
+Peak memory usage: 0 bytes
+String intern pool size: 5
+Call stack depth: 0
+===============================================
+
+=== test_string_interpolation.php ===
+=== 测试双引号字符串变量插值 ===
+姓名: 张三
+年龄: 25
+转义测试: $name 应该输出 张三
+价格: $100
+用户 张三 的年龄是 25 岁
+
+=== 测试反引号多行字符串 ===
+这是一个
+多行字符串
+可以包含 $name 和 $age
+但不会被解析
+原始字符串: \n \t $var
+
+=== 测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 6650000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== test_string_methods_complete.php ===
+=== String方法测试 ===
+
+1. toUpper测试:
+原始: hello world
+大写: HELLO WORLD
+
+2. toLower测试:
+原始: HELLO WORLD
+小写: hello world
+
+3. trim测试:
+原始: '  hello world  '
+去空白: 'hello world'
+
+4. length测试:
+字符串: hello
+长度: 5
+
+5. replace测试:
+原始: hello world
+替换后: hello PHP
+
+6. substring测试:
+原始: hello world
+子串(0,5): hello
+
+7. indexOf测试:
+字符串: hello world
+world的位置: 6
+
+8. split测试:
+原始: apple,banana,orange
+分割结果: Array
+(
+    [0] => apple
+    [1] => banana
+    [2] => orange
+)
+=== String方法测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 18222000ns
+Peak memory usage: 0 bytes
+String intern pool size: 19
+Call stack depth: 0
+===============================================
+
+=== test_string_methods.php ===
+=== 测试String方法调用 ===
+原始字符串: hello world
+大写: HELLO WORLD
+小写: hello world
+去空白: 'hello world'
+替换: hello PHP
+长度: 11
+子串: hello
+位置: 6
+分割结果:
+Array
+(
+    [0] => apple
+    [1] => banana
+    [2] => orange
+)
+=== String方法测试完成 ===
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 10404000ns
+Peak memory usage: 0 bytes
+String intern pool size: 16
+Call stack depth: 0
+===============================================
+
+=== test_string_wrapper.php ===
+=== 测试String包装类 ===
+原始: hello world
+
+=== String包装类测试完成 ===
+注意: 带注释的代码需要在VM中实现String类方法支持
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1831000ns
+Peak memory usage: 0 bytes
+String intern pool size: 7
+Call stack depth: 0
+===============================================
+
+=== test_struct_full.php ===
+Uncaught UndefinedVariableError: Undefined variable: $w in examples/test_struct_full.php:0
+Stack trace:
+#0 examples/test_struct_full.php(0): main
+#1 examples/test_struct_full.php(0): __construct
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 2872000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_this.php ===
+1
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 673000ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
+
+=== test_variable_assignment.php ===
+初始值: 1
+重新赋值后: 123
+浮点数赋值: 45.67
+布尔值赋值: true
+数组长度: 3
+变量交换测试 - x: hello, y: 10
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 1723000ns
+Peak memory usage: 0 bytes
+String intern pool size: 10
+Call stack depth: 0
+===============================================
+
+=== test_variable_func.php ===
+Variable function test:
+Uncaught UndefinedVariableError: Undefined variable: $name in examples/test_variable_func.php:0
+Stack trace:
+#0 examples/test_variable_func.php(0): main
+#1 examples/test_variable_func.php(0): closure
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 3452000ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================
+
+=== test_variable_functions.php ===
+=== Testing PHP Variable Functions ===
+
+--- Testing is_null() ---
+is_null(null): true
+is_null(42): false
+is_null('hello'): false
+is_null(''): false
+
+--- Testing empty() ---
+empty(null): true
+empty(false): true
+empty(true): false
+empty(0): true
+empty(123): false
+empty(0.0): true
+empty(3.14): false
+empty(''): true
+empty('0'): true
+empty('hello'): false
+empty([]): true
+empty([1,2,3]): false
+
+--- Testing unset() ---
+Before unset: $test_var = 'I will be unset'
+After unset: is_null($test_var) = false
+
+--- Testing unset() with arrays ---
+Before unset: array has 3 elements
+After unset($test_array['b']): array has 3 elements
+
+--- Practical Examples ---
+Form validation results:
+Uncaught UndefinedVariableError: Undefined variable: $data in examples/test_variable_functions.php:0
+Stack trace:
+#0 examples/test_variable_functions.php(0): main
+#1 examples/test_variable_functions.php(0): validateForm
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 0
+GC collections: 0
+Execution time: 30217000ns
+Peak memory usage: 0 bytes
+String intern pool size: 26
+Call stack depth: 0
+===============================================
+

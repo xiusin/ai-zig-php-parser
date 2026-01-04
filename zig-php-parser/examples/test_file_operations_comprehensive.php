@@ -8,8 +8,8 @@ echo "=== PHP 文件操作函数全面测试 ===\n\n";
 class TestRunner {
     public $success_count = 0;
     public $fail_count = 0;
-    
-    public function $test->test_result($name, $result, $expected = true) {
+
+    public function test_result($name, $result, $expected = true) {
         if ($result === $expected) {
             echo "✓ {$name}: 通过\n";
             $this->success_count++;

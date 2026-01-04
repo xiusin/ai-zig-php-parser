@@ -325,7 +325,11 @@ pub const Parser = struct {
     fn parseContainerWithModifiers(self: *Parser, tag: ast.Node.Tag, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {
         const token = self.curr;
         self.nextToken();
-        const name_tok = try self.eat(.t_string);
+        // In Go mode, class names can be t_go_identifier
+        const name_tok = if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier)
+            try self.eat(.t_go_identifier)
+        else
+            try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         var extends: ?ast.Node.Index = null;
         if (self.curr.tag == .k_extends) {
@@ -635,7 +639,11 @@ pub const Parser = struct {
     fn parseContainer(self: *Parser, tag: ast.Node.Tag, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
         const token = self.curr;
         self.nextToken();
-        const name_tok = try self.eat(.t_string);
+        // In Go mode, class names can be t_go_identifier
+        const name_tok = if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier)
+            try self.eat(.t_go_identifier)
+        else
+            try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         var extends: ?ast.Node.Index = null;
         if (self.curr.tag == .k_extends) {
@@ -718,7 +726,8 @@ pub const Parser = struct {
         var type_node: ?ast.Node.Index = null;
         // Handle type declarations including nullable (?type), array, callable, etc.
         // t_string covers user types and built-in types like int, float, string, bool
-        if (self.curr.tag == .t_string or self.curr.tag == .question or
+        // In Go mode, t_go_identifier can also be a type name
+        if (self.curr.tag == .t_string or self.curr.tag == .t_go_identifier or self.curr.tag == .question or
             self.curr.tag == .k_array or self.curr.tag == .k_callable or
             self.curr.tag == .k_static or self.curr.tag == .k_self or self.curr.tag == .k_parent or
             self.curr.tag == .k_void or self.curr.tag == .k_mixed or self.curr.tag == .k_never or
@@ -737,8 +746,21 @@ pub const Parser = struct {
             is_variadic = true;
             self.nextToken();
         }
-        const name_tok = try self.eat(.t_variable);
-        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        // In Go mode, parameter names can be t_go_identifier (without $ prefix)
+        var name_tok: Token = undefined;
+        var name_str: []const u8 = undefined;
+        if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
+            name_tok = try self.eat(.t_go_identifier);
+            name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+        } else {
+            name_tok = try self.eat(.t_variable);
+            name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            // Strip leading '$' from PHP-style variable
+            if (name_str.len > 0 and name_str[0] == '$') {
+                name_str = name_str[1..];
+            }
+        }
+        const name_id = try self.context.intern(name_str);
 
         var default_value: ?ast.Node.Index = null;
         if (self.curr.tag == .equal) {
@@ -1668,7 +1690,15 @@ pub const Parser = struct {
             return self.createNode(.{ .tag = .anonymous_class, .main_token = token, .data = .{ .anonymous_class = .{ .attributes = &.{}, .extends = null, .implements = &.{}, .members = &.{body}, .args = &.{} } } });
         }
 
-        const class_name = try self.parsePrimary();
+        // In Go mode, class names are t_go_identifier (without $ prefix)
+        // We parse it directly to avoid adding $ prefix that parsePrimary would add
+        const class_name = if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) try blk: {
+            const name_tok = try self.eat(.t_go_identifier);
+            const name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            const name_id = try self.context.intern(name_str);
+            break :blk self.createNode(.{ .tag = .variable, .main_token = name_tok, .data = .{ .variable = .{ .name = name_id } } });
+        } else try self.parsePrimary();
+        
         var args = std.ArrayListUnmanaged(ast.Node.Index){};
 
         if (self.curr.tag == .l_paren) {
@@ -1935,8 +1965,8 @@ pub const Parser = struct {
         // But NOT reference parameter: int &$var (ampersand followed by variable)
         if (self.curr.tag == .ampersand) {
             // Use peek to see if next token is a variable (reference parameter case)
-            // If so, don't parse as intersection type - let parseParameter handle it
-            if (self.peek.tag == .t_variable or self.peek.tag == .ellipsis) {
+            // In Go mode, check for both t_variable and t_go_identifier
+            if (self.peek.tag == .t_variable or self.peek.tag == .t_go_identifier or self.peek.tag == .ellipsis) {
                 return left;
             }
 
@@ -1945,7 +1975,7 @@ pub const Parser = struct {
 
             while (self.curr.tag == .ampersand) {
                 // Check peek: if next is variable or ellipsis, stop parsing intersection
-                if (self.peek.tag == .t_variable or self.peek.tag == .ellipsis) {
+                if (self.peek.tag == .t_variable or self.peek.tag == .t_go_identifier or self.peek.tag == .ellipsis) {
                     break;
                 }
                 self.nextToken();
@@ -1976,7 +2006,8 @@ pub const Parser = struct {
             const type_node = try self.parseType();
             _ = try self.eat(.r_paren);
             return type_node;
-        } else if (self.curr.tag == .t_string or self.curr.tag == .k_array or
+        } else if (self.curr.tag == .t_string or self.curr.tag == .t_go_identifier or
+            self.curr.tag == .k_array or
             self.curr.tag == .k_callable or self.curr.tag == .k_static or
             self.curr.tag == .k_self or self.curr.tag == .k_parent or
             self.curr.tag == .k_void or self.curr.tag == .k_mixed or
@@ -1985,6 +2016,7 @@ pub const Parser = struct {
             self.curr.tag == .k_true or self.curr.tag == .k_false)
         {
             // Handle built-in type keywords and user-defined types
+            // In Go mode, both t_string and t_go_identifier can be type names
             const type_name_tok = self.curr;
             self.nextToken();
             const type_name_id = try self.context.intern(self.lexer.buffer[type_name_tok.loc.start..type_name_tok.loc.end]);

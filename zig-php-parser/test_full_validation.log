@@ -1,0 +1,597 @@
+========================================
+PHP 脚本测试报告
+========================================
+
+测试: aot_arrays.php
+----------------------------------------
+✓ 通过
+
+测试: aot_classes.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x102920380 leaked: 
+error(gpa): memory address 0x1029e2ac0 leaked: 
+
+测试: aot_functions.php
+----------------------------------------
+✓ 通过
+
+测试: aot_hello.php
+----------------------------------------
+✓ 通过
+
+测试: aot_strings.php
+----------------------------------------
+✓ 通过
+
+测试: arrays.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104e033c0 leaked: 
+
+测试: benchmark.php
+----------------------------------------
+✓ 通过
+
+测试: concurrent_demo.php
+----------------------------------------
+✓ 通过
+
+测试: empty_struct.php
+----------------------------------------
+✓ 通过
+
+测试: error_handling.php
+----------------------------------------
+✓ 通过
+
+测试: functions.php
+----------------------------------------
+✓ 通过
+
+测试: go_syntax_demo.php
+----------------------------------------
+✓ 通过
+
+测试: hello.php
+----------------------------------------
+✓ 通过
+
+测试: http_server_complete.php
+----------------------------------------
+✓ 通过
+
+测试: http_server_demo.php
+----------------------------------------
+✓ 通过
+
+测试: minimal_test.php
+----------------------------------------
+✓ 通过
+
+测试: oop.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x102b40350 leaked: 
+error(gpa): memory address 0x102c027c0 leaked: 
+
+测试: reproduce_ref.php
+----------------------------------------
+✓ 通过
+
+测试: reproduce_unary.php
+----------------------------------------
+✓ 通过
+
+测试: required.php
+----------------------------------------
+✓ 通过
+
+测试: router.php
+----------------------------------------
+✓ 通过
+
+测试: simple_struct.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x101440340 leaked: 
+error(gpa): memory address 0x1014e26c0 leaked: 
+error(gpa): memory address 0x1015a3300 leaked: 
+
+测试: simple_test.php
+----------------------------------------
+✓ 通过
+
+测试: simple_variable_test.php
+----------------------------------------
+✓ 通过
+
+测试: test_array_debug.php
+----------------------------------------
+✓ 通过
+
+测试: test_array_map.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x100882600 leaked: 
+
+测试: test_array_methods_complete.php
+----------------------------------------
+✓ 通过
+
+测试: test_array_methods_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_array_methods.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x1010c2dc0 leaked: 
+
+测试: test_array_wrapper.php
+----------------------------------------
+✓ 通过
+
+测试: test_arrow_function.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x100c22600 leaked: 
+
+测试: test_assign.php
+----------------------------------------
+✓ 通过
+
+测试: test_assoc_array.php
+----------------------------------------
+✓ 通过
+
+测试: test_assoc_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_basic_features.php
+----------------------------------------
+✓ 通过
+
+测试: test_break_continue_debug.php
+----------------------------------------
+✓ 通过
+
+测试: test_channel.php
+----------------------------------------
+✓ 通过
+
+测试: test_class_full.php
+----------------------------------------
+✓ 通过
+
+测试: test_closure_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_concurrency_complete.php
+----------------------------------------
+✓ 通过
+
+测试: test_concurrency_final.php
+----------------------------------------
+✓ 通过
+
+测试: test_concurrency_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_coroutine.php
+----------------------------------------
+✓ 通过
+
+测试: test_debug_closure.php
+----------------------------------------
+✓ 通过
+
+测试: test_debug.php
+----------------------------------------
+✓ 通过
+
+测试: test_direct_break.php
+----------------------------------------
+✓ 通过
+
+测试: test_echo_break.php
+----------------------------------------
+✓ 通过
+
+测试: test_echo_fix.php
+----------------------------------------
+✓ 通过
+
+测试: test_echo_function.php
+----------------------------------------
+✓ 通过
+
+测试: test_echo_multi.php
+----------------------------------------
+✓ 通过
+
+测试: test_echo_only.php
+----------------------------------------
+✓ 通过
+
+测试: test_echo.php
+----------------------------------------
+✓ 通过
+
+测试: test_escape_debug.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_comprehensive.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_config_detailed.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_config_final.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_config.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_core.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_final.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_security.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_file_operations.php
+----------------------------------------
+✓ 通过
+
+测试: test_fn_keyword.php
+----------------------------------------
+✓ 通过
+
+测试: test_for_range.php
+----------------------------------------
+✓ 通过
+
+测试: test_foreach_debug.php
+----------------------------------------
+✓ 通过
+
+测试: test_foreach_key_value.php
+----------------------------------------
+✓ 通过
+
+测试: test_go_assignment.php
+----------------------------------------
+✓ 通过
+
+测试: test_go_class_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_go_debug.php
+----------------------------------------
+✓ 通过
+
+测试: test_go_minimal.php
+----------------------------------------
+✓ 通过
+
+测试: test_go_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_http_basic.php
+----------------------------------------
+✓ 通过
+
+测试: test_http_functionality.php
+----------------------------------------
+✓ 通过
+
+测试: test_http_server.php
+----------------------------------------
+✓ 通过
+
+测试: test_if_condition.php
+----------------------------------------
+✓ 通过
+
+测试: test_increment.php
+----------------------------------------
+✓ 通过
+
+测试: test_integration.php
+----------------------------------------
+✓ 通过
+
+测试: test_interpolation_comprehensive.php
+----------------------------------------
+✓ 通过
+
+测试: test_interpolation.php
+----------------------------------------
+✓ 通过
+
+测试: test_ir_dump.php
+----------------------------------------
+✓ 通过
+
+测试: test_json_array.php
+----------------------------------------
+✓ 通过
+
+测试: test_loops.php
+----------------------------------------
+✓ 通过
+
+测试: test_minimal_break.php
+----------------------------------------
+✓ 通过
+
+测试: test_minimal.php
+----------------------------------------
+✓ 通过
+
+测试: test_mixed_escape.php
+----------------------------------------
+✓ 通过
+
+测试: test_mutex_only.php
+----------------------------------------
+✓ 通过
+
+测试: test_new_builtins.php
+----------------------------------------
+✓ 通过
+
+测试: test_no_closure.php
+----------------------------------------
+✓ 通过
+
+测试: test_parent_class_only.php
+----------------------------------------
+✓ 通过
+
+测试: test_parent_concat.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x100a60350 leaked: 
+error(gpa): memory address 0x100b02840 leaked: 
+
+测试: test_parent_create.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104ca0360 leaked: 
+error(gpa): memory address 0x104d42880 leaked: 
+
+测试: test_parent_exact.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x102b00350 leaked: 
+error(gpa): memory address 0x102ba2980 leaked: 
+
+测试: test_parent_interpolation.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x102c40350 leaked: 
+error(gpa): memory address 0x102ce2880 leaked: 
+
+测试: test_parent_interpolation2.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x1049e0350 leaked: 
+error(gpa): memory address 0x104a82900 leaked: 
+
+测试: test_parent_interpolation3.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x100860350 leaked: 
+error(gpa): memory address 0x100902840 leaked: 
+
+测试: test_parent_method.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x103240350 leaked: 
+error(gpa): memory address 0x1032e27c0 leaked: 
+
+测试: test_parent_no_base_this.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104d20350 leaked: 
+error(gpa): memory address 0x104dc28c0 leaked: 
+
+测试: test_parent_no_this.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x101160350 leaked: 
+error(gpa): memory address 0x1012028c0 leaked: 
+
+测试: test_parent_private.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104f20350 leaked: 
+error(gpa): memory address 0x104fc27c0 leaked: 
+
+测试: test_parent_simple.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x102dc0350 leaked: 
+error(gpa): memory address 0x102e82740 leaked: 
+
+测试: test_parent_two_props.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104d20350 leaked: 
+error(gpa): memory address 0x104da28c0 leaked: 
+
+测试: test_parent_two_strings.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104a20350 leaked: 
+error(gpa): memory address 0x104aa28c0 leaked: 
+
+测试: test_parent_typed.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x101140350 leaked: 
+error(gpa): memory address 0x101262900 leaked: 
+
+测试: test_parent_typed2.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x102f60350 leaked: 
+error(gpa): memory address 0x1030027c0 leaked: 
+
+测试: test_parent_typed3.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x100640350 leaked: 
+error(gpa): memory address 0x1006e2880 leaked: 
+
+测试: test_parent_typed4.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x101000350 leaked: 
+error(gpa): memory address 0x1010a2840 leaked: 
+
+测试: test_php_syntax.php
+----------------------------------------
+✓ 通过
+
+测试: test_recursion.php
+----------------------------------------
+✓ 通过
+
+测试: test_safe_navigation_go.php
+----------------------------------------
+✓ 通过
+
+测试: test_safe_navigation_minimal.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x100d80370 leaked: 
+error(gpa): memory address 0x100e42980 leaked: 
+
+测试: test_safe_navigation_simple_go.php
+----------------------------------------
+✓ 通过
+
+测试: test_safe_navigation.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x1033a0370 leaked: 
+error(gpa): memory address 0x103482a00 leaked: 
+
+测试: test_scoping_functions.php
+----------------------------------------
+✓ 通过
+
+测试: test_set_debug.php
+----------------------------------------
+✓ 通过
+
+测试: test_shared_only.php
+----------------------------------------
+✓ 通过
+
+测试: test_simple_array.php
+----------------------------------------
+✓ 通过
+
+测试: test_simple_break.php
+----------------------------------------
+✓ 通过
+
+测试: test_simple_class.php
+----------------------------------------
+✓ 通过
+
+测试: test_simple_var.php
+----------------------------------------
+✓ 通过
+
+测试: test_simple.php
+----------------------------------------
+✓ 通过
+
+测试: test_simple2.php
+----------------------------------------
+✓ 通过
+
+测试: test_string_complete.php
+----------------------------------------
+✓ 通过
+
+测试: test_string_escape.php
+----------------------------------------
+✓ 通过
+
+测试: test_string_final.php
+----------------------------------------
+✓ 通过
+
+测试: test_string_interpolation.php
+----------------------------------------
+✓ 通过
+
+测试: test_string_methods_complete.php
+----------------------------------------
+✓ 通过
+
+测试: test_string_methods.php
+----------------------------------------
+✓ 通过
+
+测试: test_string_wrapper.php
+----------------------------------------
+✓ 通过
+
+测试: test_struct_full.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104d40350 leaked: 
+error(gpa): memory address 0x104de2740 leaked: 
+error(gpa): memory address 0x104f83300 leaked: 
+
+测试: test_this.php
+----------------------------------------
+✓ 通过
+
+测试: test_variable_assignment.php
+----------------------------------------
+✓ 通过
+
+测试: test_variable_func.php
+----------------------------------------
+✓ 通过
+
+测试: test_variable_functions.php
+----------------------------------------
+✓ 通过
+
+========================================
+测试总结
+========================================
+总测试数: 133
+通过: 106
+失败: 27
+内存泄露: 27
+覆盖率: 79%
+========================================
