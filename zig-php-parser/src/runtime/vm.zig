@@ -207,12 +207,19 @@ fn callUserFuncArrayFn(vm: *VM, args: []const Value) !Value {
     // Convert array to argument list
     const php_array = params_array.getAsArray().data;
     var func_args = try vm.allocator.alloc(Value, php_array.count());
-    defer vm.allocator.free(func_args);
+    defer {
+        // Release all arguments and free the array
+        for (func_args) |arg| {
+            vm.releaseValue(arg);
+        }
+        vm.allocator.free(func_args);
+    }
 
     var i: usize = 0;
     var iterator = php_array.elements.iterator();
     while (iterator.next()) |entry| {
         func_args[i] = entry.value_ptr.*;
+        vm.retainValue(func_args[i]);  // Retain each argument
         i += 1;
     }
 
@@ -2093,55 +2100,197 @@ pub const VM = struct {
     }
 
     fn callPDOQuery(self: *VM, pdo_value: Value, args: []const Value) !Value {
-        _ = pdo_value;
         if (args.len != 1 or args[0].getTag() != .string) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::query() expects exactly 1 parameter, string given", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        // Similar to exec, but returns a PDOStatement
-        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::query() not implemented yet", self.current_file, self.current_line);
-        return self.throwException(exception);
+        const sql = args[0].getAsString().data.data;
+        const pdo_object = pdo_value.getAsObject().data;
+
+        // Get the stored PDO connection
+        const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+
+        if (connection_prop.getTag() != .integer) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
+        const stmt = try pdo_ptr.query(sql);
+
+        if (stmt == null) {
+            return Value.initNull();
+        }
+
+        // Create PDOStatement object to wrap the statement
+        const statement_class = self.getClass("PDOStatement") orelse {
+            const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, "PDOStatement", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+        const statement_object = try self.allocator.create(types.PHPObject);
+        statement_object.* = try types.PHPObject.init(self.allocator, statement_class);
+        try (@constCast(statement_object)).setProperty(self.allocator, "_pdo_statement", Value.initInt(@as(i64, @intCast(@intFromPtr(stmt)))));
+
+        return try Value.initObjectWithObject(&self.memory_manager, statement_object);
     }
 
     fn callPDOPrepare(self: *VM, pdo_value: Value, args: []const Value) !Value {
-        _ = pdo_value;
         if (args.len != 1 or args[0].getTag() != .string) {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::prepare() expects exactly 1 parameter, string given", self.current_file, self.current_line);
             return self.throwException(exception);
         }
 
-        // Return a PDOStatement object
-        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::prepare() not implemented yet", self.current_file, self.current_line);
-        return self.throwException(exception);
+        const sql = args[0].getAsString().data.data;
+        const pdo_object = pdo_value.getAsObject().data;
+
+        // Get the stored PDO connection
+        const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+
+        if (connection_prop.getTag() != .integer) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
+        const stmt = try pdo_ptr.prepare(sql);
+
+        // Create PDOStatement object to wrap the statement
+        const statement_class = self.getClass("PDOStatement") orelse {
+            const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, "PDOStatement", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+        const statement_object = try self.allocator.create(types.PHPObject);
+        statement_object.* = try types.PHPObject.init(self.allocator, statement_class);
+        try (@constCast(statement_object)).setProperty(self.allocator, "_pdo_statement", Value.initInt(@as(i64, @intCast(@intFromPtr(stmt)))));
+
+        return try Value.initObjectWithObject(&self.memory_manager, statement_object);
     }
 
     fn callPDOBeginTransaction(self: *VM, pdo_value: Value, args: []const Value) !Value {
-        _ = pdo_value;
-        _ = args;
-        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::beginTransaction() not implemented yet", self.current_file, self.current_line);
-        return self.throwException(exception);
+        if (args.len != 0) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::beginTransaction() expects no parameters", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_object = pdo_value.getAsObject().data;
+
+        // Get the stored PDO connection
+        const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+
+        if (connection_prop.getTag() != .integer) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
+        const result = try pdo_ptr.beginTransaction();
+        return Value.initBool(result);
     }
 
     fn callPDOCommit(self: *VM, pdo_value: Value, args: []const Value) !Value {
-        _ = pdo_value;
-        _ = args;
-        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::commit() not implemented yet", self.current_file, self.current_line);
-        return self.throwException(exception);
+        if (args.len != 0) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::commit() expects no parameters", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_object = pdo_value.getAsObject().data;
+
+        // Get the stored PDO connection
+        const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+
+        if (connection_prop.getTag() != .integer) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
+        const result = try pdo_ptr.commit();
+        return Value.initBool(result);
     }
 
     fn callPDORollBack(self: *VM, pdo_value: Value, args: []const Value) !Value {
-        _ = pdo_value;
-        _ = args;
-        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::rollBack() not implemented yet", self.current_file, self.current_line);
-        return self.throwException(exception);
-    }
+
+            if (args.len != 0) {
+
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::rollBack() expects no parameters", self.current_file, self.current_line);
+
+                return self.throwException(exception);
+
+            }
+
+    
+
+            const pdo_object = pdo_value.getAsObject().data;
+
+    
+
+            // Get the stored PDO connection
+
+            const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+
+                return self.throwException(exception);
+
+            };
+
+    
+
+            if (connection_prop.getTag() != .integer) {
+
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+
+                return self.throwException(exception);
+
+            }
+
+    
+
+            const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
+
+            const result = try pdo_ptr.rollBack();
+
+            return Value.initBool(result);
+
+        }
 
     fn callPDOLastInsertId(self: *VM, pdo_value: Value, args: []const Value) !Value {
-        _ = pdo_value;
-        _ = args;
-        const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::lastInsertId() not implemented yet", self.current_file, self.current_line);
-        return self.throwException(exception);
+        if (args.len > 1) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO::lastInsertId() expects at most 1 parameter", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_object = pdo_value.getAsObject().data;
+
+        // Get the stored PDO connection
+        const connection_prop = pdo_object.getProperty("_pdo_connection") catch {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "PDO connection not initialized", self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+
+        if (connection_prop.getTag() != .integer) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid PDO connection", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const pdo_ptr = @as(*database.PDO, @ptrFromInt(@as(usize, @intCast(connection_prop.asInt()))));
+
+        // Get last insert ID
+        const result = try pdo_ptr.lastInsertId();
+        return Value.initInt(result);
     }
 
     fn callPDOQuote(self: *VM, pdo_value: Value, args: []const Value) !Value {
@@ -2185,6 +2334,20 @@ pub const VM = struct {
         }
 
         const object = object_value.getAsObject().data;
+
+        // Check if property has a get hook
+        if (object.class.properties.get(property_name)) |property| {
+            if (property.hasGetHook()) {
+                // Execute get hook
+                for (property.hooks) |hook| {
+                    if (hook.type == .get and hook.body != null) {
+                        const hook_body = @as(ast.Node.Index, @truncate(@intFromPtr(hook.body)));
+                        return self.eval(hook_body);
+                    }
+                }
+            }
+        }
+
         const value = object.getProperty(property_name) catch |err| switch (err) {
             error.MagicMethodCall => {
                 const name_val = try Value.initString(self.allocator, property_name);
@@ -2210,6 +2373,23 @@ pub const VM = struct {
         }
 
         const object = object_value.getAsObject().data;
+
+        // Check if property has a set hook
+        if (object.class.properties.get(property_name)) |property| {
+            for (property.hooks) |hook| {
+                if (hook.type == .set and hook.body != null) {
+                    const hook_body = @as(ast.Node.Index, @truncate(@intFromPtr(hook.body)));
+                    // Execute set hook - ignore errors
+                    const result: anyerror!Value = self.eval(hook_body);
+                    _ = result catch {
+                        // Ignore errors from hook execution
+                        return;
+                    };
+                    return; // Set hook executed, don't use default behavior
+                }
+            }
+        }
+
         object.setProperty(self.allocator, property_name, value) catch |err| switch (err) {
             error.ReadonlyPropertyModification => {
                 const exception = try ExceptionFactory.createReadonlyPropertyError(self.allocator, object.class.name.data, property_name, self.current_file, self.current_line);
@@ -4008,6 +4188,10 @@ pub const VM = struct {
 
     fn evaluateArrayInit(self: *VM, array_data: anytype) !Value {
         const php_array_value = try Value.initArrayWithManager(&self.memory_manager);
+        errdefer {
+            // 确保在异常发生时释放数组
+            php_array_value.release(self.allocator);
+        }
         const php_array = php_array_value.getAsArray().data;
 
         // Pre-allocate capacity for better performance
@@ -5375,18 +5559,29 @@ pub const VM = struct {
         }
 
         // Process property hooks if present
+        var hooks = try std.ArrayList(types.PropertyHook).initCapacity(self.allocator, property_data.hooks.len);
+        defer hooks.deinit(self.allocator);
+
         for (property_data.hooks) |hook_idx| {
             const hook_node = self.context.nodes.items[hook_idx];
             if (hook_node.tag == .property_hook) {
                 const hook_data = hook_node.data.property_hook;
                 const hook_name = self.context.string_pool.keys()[hook_data.name];
 
+                // Convert u32 body index to pointer for storage
+                const body_ptr: ?*anyopaque = if (hook_data.body != 0) @ptrFromInt(hook_data.body) else null;
+
                 if (std.mem.eql(u8, hook_name, "get")) {
-                    // Property hooks not implemented yet - skip
+                    hooks.appendAssumeCapacity(types.PropertyHook{ .type = .get, .body = body_ptr });
                 } else if (std.mem.eql(u8, hook_name, "set")) {
-                    // Property hooks not implemented yet - skip
+                    hooks.appendAssumeCapacity(types.PropertyHook{ .type = .set, .body = body_ptr });
                 }
             }
+        }
+
+        // Store hooks in property
+        if (hooks.items.len > 0) {
+            property.hooks = try self.allocator.dupe(types.PropertyHook, hooks.items);
         }
 
         // Add property to class (simplified - just store in properties map)
