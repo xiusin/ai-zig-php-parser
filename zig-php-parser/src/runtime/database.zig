@@ -86,7 +86,7 @@ pub const PDO = struct {
         stmt.* = try PDOStatement.init(self.allocator, self.connection.?, sql);
 
         // Execute the query
-        try stmt.execute(&[_]Value{});
+        _ = try stmt.execute(&[_]Value{});
 
         return stmt;
     }
@@ -293,7 +293,9 @@ pub const PDOStatement = struct {
     }
 
     fn buildSQL(self: *PDOStatement) ![]const u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
+        var result = try std.ArrayList(u8).initCapacity(self.allocator, self.sql.len);
+        defer result.deinit(self.allocator);
+
         var i: usize = 0;
         var param_index: usize = 1;
 
@@ -306,7 +308,7 @@ pub const PDOStatement = struct {
                 if (self.bound_params.get(key)) |value| {
                     const str = try self.valueToSQL(value);
                     defer self.allocator.free(str);
-                    try result.appendSlice(str);
+                    try result.appendSlice(self.allocator, str);
                 }
                 param_index += 1;
             } else if (self.sql[i] == ':') {
@@ -320,26 +322,26 @@ pub const PDOStatement = struct {
                 if (self.bound_params.get(param_name)) |value| {
                     const str = try self.valueToSQL(value);
                     defer self.allocator.free(str);
-                    try result.appendSlice(str);
+                    try result.appendSlice(self.allocator, str);
                 }
                 i = j;
                 continue;
             } else {
-                try result.append(self.sql[i]);
+                try result.append(self.allocator, self.sql[i]);
             }
             i += 1;
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     fn valueToSQL(self: *PDOStatement, value: Value) ![]const u8 {
-        return switch (value.tag) {
+        return switch (value.getTag()) {
             .null => try self.allocator.dupe(u8, "NULL"),
-            .boolean => try self.allocator.dupe(u8, if (value.data.boolean) "1" else "0"),
-            .integer => try std.fmt.allocPrint(self.allocator, "{d}", .{value.data.integer}),
-            .float => try std.fmt.allocPrint(self.allocator, "{d}", .{value.data.float}),
-            .string => try std.fmt.allocPrint(self.allocator, "'{s}'", .{value.data.string.data.data}),
+            .boolean => try self.allocator.dupe(u8, if (value.asBool()) "1" else "0"),
+            .integer => try std.fmt.allocPrint(self.allocator, "{d}", .{value.asInt()}),
+            .float => try std.fmt.allocPrint(self.allocator, "{d}", .{value.asFloat()}),
+            .string => try std.fmt.allocPrint(self.allocator, "'{s}'", .{value.getAsString().data.data}),
             else => try self.allocator.dupe(u8, "NULL"),
         };
     }
@@ -554,9 +556,10 @@ pub const ResultSet = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator) ResultSet {
+        const rows = std.ArrayList(Row).initCapacity(allocator, 0) catch unreachable;
         return ResultSet{
             .allocator = allocator,
-            .rows = std.ArrayList(Row).init(allocator),
+            .rows = rows,
             .columns = &[_][]const u8{},
             .current_row = 0,
             .column_count = 0,
@@ -949,19 +952,23 @@ pub const MemoryDatabase = struct {
         // Expected format: SELECT * FROM table_name
         const trimmed = std.mem.trim(u8, sql, " \t\n\r");
 
-        if (!std.mem.startsWith(u8, std.ascii.lowerString(trimmed, &[_]u8{}), "select")) {
+        // Check if it's a SELECT query
+        const trimmed_lower = try std.ascii.allocLowerString(self.allocator, trimmed);
+        defer self.allocator.free(trimmed_lower);
+
+        if (!std.mem.startsWith(u8, trimmed_lower, "select")) {
             return null;
         }
 
         // Find table name after FROM
-        const from_pos = std.mem.indexOf(u8, std.ascii.lowerString(trimmed, &[_]u8{}), "from");
+        const from_pos = std.mem.indexOf(u8, trimmed_lower, "from");
         if (from_pos == null) {
             const rs = try self.allocator.create(ResultSet);
             rs.* = ResultSet.init(self.allocator);
             return rs;
         }
 
-        const from_clause = trimmed[from_pos + 4 ..];
+        const from_clause = trimmed[from_pos.? + 4 ..];
         const table_name_end = std.mem.indexOfAny(u8, from_clause, " \t\n\r;") orelse from_clause.len;
         const table_name = std.mem.trim(u8, from_clause[0..table_name_end], " \t\n\r");
 

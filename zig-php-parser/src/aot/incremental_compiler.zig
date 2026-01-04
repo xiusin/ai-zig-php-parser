@@ -28,6 +28,7 @@ const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const SourceLocation = Diagnostics.SourceLocation;
 const IR = @import("ir.zig");
 const Module = IR.Module;
+const CompilerMod = @import("compiler.zig");
 const SymbolTable = @import("symbol_table.zig").SymbolTable;
 
 // ============================================================================
@@ -537,11 +538,32 @@ pub const IncrementalCompiler = struct {
 
     /// 实际编译文件
     fn doCompileFile(self: *IncrementalCompiler, file_path: []const u8) !*Module {
-        // 这里调用实际的编译器
-        // 暂时返回null，实际实现需要集成AOT编译器
-        _ = self;
-        _ = file_path;
-        return error.NotImplemented;
+        // 创建AOT编译器选项
+        const aot_options = CompilerMod.CompileOptions{
+            .input_file = file_path,
+            .output_file = null,
+            .target = .native(),
+            .optimize_level = .debug,
+            .static_link = false,
+            .debug_info = true,
+            .dump_ir = false,
+            .dump_ast = false,
+            .verbose = false,
+            .syntax_mode = .php,
+        };
+
+        // 创建AOT编译器
+        var aot_compiler = try CompilerMod.AOTCompiler.init(self.allocator, aot_options);
+        defer aot_compiler.deinit();
+
+        // 编译到IR
+        const ir_module = try aot_compiler.compileToIR();
+
+        if (ir_module == null) {
+            return error.CompilationFailed;
+        }
+
+        return ir_module.?;
     }
 
     /// 构建依赖信息
