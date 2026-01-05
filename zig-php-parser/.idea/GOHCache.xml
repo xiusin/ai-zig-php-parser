@@ -59,6 +59,13 @@
             </set>
           </value>
         </entry>
+        <entry key="UserStats">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/handler/workWechat.go" />
+            </set>
+          </value>
+        </entry>
         <entry key="WsRequestData">
           <value>
             <set>
@@ -87,10 +94,30 @@
             </set>
           </value>
         </entry>
+        <entry key="workWechatHandler">
+          <value>
+            <set>
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/handler/workWechat.go" />
+            </set>
+          </value>
+        </entry>
       </map>
     </option>
     <option name="scannedPathMapping">
       <map>
+        <entry key="file://$USER_HOME$/products/fansnewgo/internal/handler/workWechat.go">
+          <value>
+            <ScannedPath>
+              <option name="lastModified" value="1767598175699" />
+              <option name="schema">
+                <list>
+                  <option value="workWechatHandler" />
+                  <option value="UserStats" />
+                </list>
+              </option>
+            </ScannedPath>
+          </value>
+        </entry>
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/checklogin.go">
           <value>
             <ScannedPath>
@@ -145,7 +172,7 @@
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/counter.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767519727500" />
+              <option name="lastModified" value="1767601059577" />
               <option name="schema">
                 <list>
                   <option value="WsRequestData" />
@@ -185,6 +212,8 @@
         <entry key="options" value="options" />
         <entry key="personal_wechat" value="PersonalWechat" />
         <entry key="personal_wechat_counter" value="PersonalWechatCounter" />
+        <entry key="user_stats" value="UserStats" />
+        <entry key="work_wechat_handler" value="workWechatHandler" />
         <entry key="ws_request_data" value="WsRequestData" />
         <entry key="ws_resp_data" value="WsRespData" />
       </map>

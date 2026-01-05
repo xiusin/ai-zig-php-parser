@@ -2,3 +2,4 @@ ai_*.md
 
 *.o
 *.dSYM
+.DS_Store
