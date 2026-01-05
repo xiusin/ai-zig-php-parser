@@ -15,81 +15,11 @@ const request_arena = @import("request_arena.zig");
 const RequestArena = request_arena.RequestArena;
 const RequestArenaPool = request_arena.RequestArenaPool;
 
-const Session = struct {
-    id: []const u8,
-    data: std.StringHashMap(Value),
-    last_access: i64,
-
-    pub fn init(allocator: std.mem.Allocator, id: []const u8) Session {
-        return .{
-            .id = id,
-            .data = std.StringHashMap(Value).init(allocator),
-            .last_access = std.time.timestamp(),
-        };
-    }
-
-    pub fn deinit(self: *Session) void {
-        var it = self.data.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.release(self.data.allocator);
-        }
-        self.data.deinit();
-        self.data.allocator.free(self.id);
-    }
-};
-
-const SessionManager = struct {
-    allocator: std.mem.Allocator,
-    sessions: std.StringHashMap(*Session),
-    mutex: std.Thread.Mutex,
-
-    pub fn init(allocator: std.mem.Allocator) SessionManager {
-        return .{
-            .allocator = allocator,
-            .sessions = std.StringHashMap(*Session).init(allocator),
-            .mutex = .{},
-        };
-    }
-
-    pub fn deinit(self: *SessionManager) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        var it = self.sessions.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.deinit();
-            self.allocator.destroy(entry.value_ptr);
-        }
-        self.sessions.deinit();
-    }
-
-    pub fn createSession(self: *SessionManager) !*Session {
-        var random_bytes: [16]u8 = undefined;
-        try std.crypto.random.bytes(&random_bytes);
-
-        const id = try std.fmt.allocPrint(self.allocator, "{x}", .{std.fmt.fmtSliceHexLower(&random_bytes)});
-
-        const session = try self.allocator.create(Session);
-        session.* = Session.init(self.allocator, id);
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try self.sessions.put(id, session);
-
-        return session;
-    }
-
-    pub fn getSession(self: *SessionManager, id: []const u8) ?*Session {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.sessions.get(id)) |session| {
-            session.last_access = std.time.timestamp();
-            return session;
-        }
-        return null;
-    }
-};
+const cookie = @import("cookie.zig");
+const session = @import("session.zig");
+const Session = session.Session;
+const SessionManager = session.SessionManager;
+const Cookie = cookie.Cookie;
 
 
 /// PHP内置HTTP服务器
@@ -431,6 +361,7 @@ pub const HttpServer = struct {
         const request_obj = try vm_instance.createObject(PHPRequest, .{
             ctx.request,
             ctx,
+            vm_instance.allocator,
         });
         defer request_obj.release(vm_instance.allocator);
 
@@ -642,24 +573,6 @@ pub const HttpResponse = struct {
     headers: std.StringHashMap([]const u8),
     body: std.ArrayList(u8),
     cookies: std.ArrayList(Cookie),
-
-    pub const Cookie = struct {
-        name: []const u8,
-        value: []const u8,
-        expires: ?i64 = null,
-        max_age: ?u64 = null,
-        path: ?[]const u8 = null,
-        domain: ?[]const u8 = null,
-        secure: bool = false,
-        http_only: bool = false,
-        same_site: ?SameSite = null,
-
-        pub const SameSite = enum {
-            Strict,
-            Lax,
-            None,
-        };
-    };
 
     pub fn init(allocator: std.mem.Allocator) HttpResponse {
         return HttpResponse{
@@ -944,17 +857,18 @@ pub const Router = struct {
 pub const PHPRequest = struct {
     request: *const HttpRequest,
     ctx: *HttpServer.RequestContext,
+    params: std.StringHashMap([]const u8),
 
-    pub fn init(request: *const HttpRequest, ctx: *HttpServer.RequestContext) PHPRequest {
+    pub fn init(request: *const HttpRequest, ctx: *HttpServer.RequestContext, allocator: std.mem.Allocator) PHPRequest {
         return PHPRequest{
             .request = request,
             .ctx = ctx,
+            .params = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *PHPRequest) void {
-        // No longer owns resources that need deinitialization
-        _ = self;
+        self.params.deinit();
     }
 
     /// 获取请求方法
@@ -1020,7 +934,7 @@ pub const PHPRequest = struct {
         self.ctx.session = new_session;
 
         // Set the session ID cookie on the response
-        const cookie = HttpResponse.Cookie{
+        const cookie = Cookie{
             .name = "kiro_session_id",
             .value = new_session.id,
             .http_only = true,
@@ -1029,6 +943,16 @@ pub const PHPRequest = struct {
         try self.ctx.response.?.setCookie(cookie);
 
         return vm_instance.createObject(PHPSession, .{new_session});
+    }
+
+    /// 获取路由参数
+    pub fn getParam(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.params.get(name);
+    }
+
+    /// 设置路由参数
+    pub fn setParam(self: *PHPRequest, name: []const u8, value: []const u8) !void {
+        try self.params.put(name, value);
     }
 };
 
@@ -1081,7 +1005,7 @@ pub const PHPResponse = struct {
         allocator: std.mem.Allocator,
     ) !void {
         _ = allocator;
-        var cookie = HttpResponse.Cookie{
+        var cookie = Cookie{
             .name = name,
             .value = value,
         };
@@ -1182,10 +1106,38 @@ pub const PHPSession = struct {
 };
 
 /// PHP HTTP服务器函数绑定
-pub fn registerHttpFunctions(stdlib: anytype) !void {
-    _ = std.testing.allocator;
-    // 注册 http_server_create, http_server_start 等函数
-    // 注册 Request, Response, Router 类
+pub fn registerHttpFunctions(vm: *anyopaque) !void {
+    const VM = @import("vm.zig").VM;
+    const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+
+    // Register Request class
+    const request_class = try vm_instance.createBuiltinClass("Request");
+    try vm_instance.registerMethod(request_class, "getMethod", PHPRequest.getMethod);
+    try vm_instance.registerMethod(request_class, "getPath", PHPRequest.getPath);
+    try vm_instance.registerMethod(request_class, "getBody", PHPRequest.getBody);
+    try vm_instance.registerMethod(request_class, "getHeader", PHPRequest.getHeader);
+    try vm_instance.registerMethod(request_class, "getQuery", PHPRequest.getQuery);
+    try vm_instance.registerMethod(request_class, "getCookie", PHPRequest.getCookie);
+    try vm_instance.registerMethod(request_class, "session", PHPRequest.session);
+    try vm_instance.registerMethod(request_class, "getParam", PHPRequest.getParam);
+
+    // Register Response class
+    const response_class = try vm_instance.createBuiltinClass("Response");
+    try vm_instance.registerMethod(response_class, "setStatus", PHPResponse.setStatus);
+    try vm_instance.registerMethod(response_class, "setHeader", PHPResponse.setHeader);
+    try vm_instance.registerMethod(response_class, "setBody", PHPResponse.setBody);
+    try vm_instance.registerMethod(response_class, "json", PHPResponse.json);
+    try vm_instance.registerMethod(response_class, "html", PHPResponse.html);
+    try vm_instance.registerMethod(response_class, "redirect", PHPResponse.redirect);
+    try vm_instance.registerMethod(response_class, "text", PHPResponse.text);
+    try vm_instance.registerMethod(response_class, "setCookie", PHPResponse.setCookie);
+
+    // Register Session class
+    const session_class = try vm_instance.createBuiltinClass("Session");
+    try vm_instance.registerMethod(session_class, "get", PHPSession.get);
+    try vm_instance.registerMethod(session_class, "set", PHPSession.set);
+    try vm_instance.registerMethod(session_class, "has", PHPSession.has);
+    try vm_instance.registerMethod(session_class, "destroy", PHPSession.destroy);
 }
 
 test "http request parsing" {
