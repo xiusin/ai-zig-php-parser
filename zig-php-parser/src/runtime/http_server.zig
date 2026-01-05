@@ -15,6 +15,83 @@ const request_arena = @import("request_arena.zig");
 const RequestArena = request_arena.RequestArena;
 const RequestArenaPool = request_arena.RequestArenaPool;
 
+const Session = struct {
+    id: []const u8,
+    data: std.StringHashMap(Value),
+    last_access: i64,
+
+    pub fn init(allocator: std.mem.Allocator, id: []const u8) Session {
+        return .{
+            .id = id,
+            .data = std.StringHashMap(Value).init(allocator),
+            .last_access = std.time.timestamp(),
+        };
+    }
+
+    pub fn deinit(self: *Session) void {
+        var it = self.data.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.release(self.data.allocator);
+        }
+        self.data.deinit();
+        self.data.allocator.free(self.id);
+    }
+};
+
+const SessionManager = struct {
+    allocator: std.mem.Allocator,
+    sessions: std.StringHashMap(*Session),
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: std.mem.Allocator) SessionManager {
+        return .{
+            .allocator = allocator,
+            .sessions = std.StringHashMap(*Session).init(allocator),
+            .mutex = .{},
+        };
+    }
+
+    pub fn deinit(self: *SessionManager) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var it = self.sessions.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit();
+            self.allocator.destroy(entry.value_ptr);
+        }
+        self.sessions.deinit();
+    }
+
+    pub fn createSession(self: *SessionManager) !*Session {
+        var random_bytes: [16]u8 = undefined;
+        try std.crypto.random.bytes(&random_bytes);
+
+        const id = try std.fmt.allocPrint(self.allocator, "{x}", .{std.fmt.fmtSliceHexLower(&random_bytes)});
+
+        const session = try self.allocator.create(Session);
+        session.* = Session.init(self.allocator, id);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.sessions.put(id, session);
+
+        return session;
+    }
+
+    pub fn getSession(self: *SessionManager, id: []const u8) ?*Session {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.sessions.get(id)) |session| {
+            session.last_access = std.time.timestamp();
+            return session;
+        }
+        return null;
+    }
+};
+
+
 /// PHP内置HTTP服务器
 /// 提供类似Bun的高性能HTTP服务能力
 pub const HttpServer = struct {
@@ -24,6 +101,7 @@ pub const HttpServer = struct {
     running: std.atomic.Value(bool),
     handler: ?Value,
     vm: *anyopaque,
+    session_manager: SessionManager,
     worker_threads: std.ArrayList(Thread),
     max_connections: u32,
     keep_alive_timeout: u64,
@@ -45,6 +123,7 @@ pub const HttpServer = struct {
         context_pool_size: u32 = 100, // 上下文池大小
         enable_request_arena: bool = true, // 启用请求级Arena内存管理
         arena_pool_size: u32 = 50, // Arena池大小
+        session_cookie_name: []const u8 = "kiro_session_id",
     };
 
     /// 请求上下文 - 每个请求独立的上下文，防止数据串扰
@@ -57,6 +136,7 @@ pub const HttpServer = struct {
         allocator: std.mem.Allocator,
         parent_vm: *anyopaque,
         coroutine_id: ?u64,
+        session: ?*Session,
         /// 请求级Arena - 用于请求内的快速内存分配 (Requirements: 4.1, 4.2)
         arena: ?*RequestArena,
 
@@ -70,6 +150,7 @@ pub const HttpServer = struct {
                 .allocator = allocator,
                 .parent_vm = parent_vm,
                 .coroutine_id = null,
+                .session = null,
                 .arena = null,
             };
         }
@@ -94,6 +175,7 @@ pub const HttpServer = struct {
             self.response = null;
             self.start_time = std.time.milliTimestamp();
             self.coroutine_id = null;
+            self.session = null;
             // Arena会在acquireContext时重新分配
             self.arena = null;
         }
@@ -128,6 +210,7 @@ pub const HttpServer = struct {
             .running = std.atomic.Value(bool).init(false),
             .handler = null,
             .vm = vm,
+            .session_manager = SessionManager.init(allocator),
             .worker_threads = .empty,
             .max_connections = config.max_connections,
             .keep_alive_timeout = config.keep_alive_timeout,
@@ -163,6 +246,7 @@ pub const HttpServer = struct {
 
     pub fn deinit(self: *HttpServer) void {
         self.stop();
+        self.session_manager.deinit();
         self.worker_threads.deinit(self.allocator);
         if (self.handler) |h| {
             h.release(self.allocator);
@@ -269,7 +353,7 @@ pub const HttpServer = struct {
                 try cm.run(self.vm);
             } else {
                 // 直接处理
-                try self.invokeHandler(handler, &request, &response);
+                try self.invokeHandler(handler, ctx);
             }
         } else {
             response.setStatus(404);
@@ -340,114 +424,23 @@ pub const HttpServer = struct {
     }
 
     /// 调用PHP处理器
-    fn invokeHandler(self: *HttpServer, handler: Value, request: *const HttpRequest, response: *HttpResponse) !void {
+    fn invokeHandler(self: *HttpServer, handler: Value, ctx: *RequestContext) !void {
         const VM = @import("vm.zig").VM;
         const vm_instance = @as(*VM, @ptrCast(@alignCast(self.vm)));
 
-        // 创建Request对象
-        const req_value = try self.createRequestValue(vm_instance, request);
-        defer req_value.release(self.allocator);
+        const request_obj = try vm_instance.createObject(PHPRequest, .{
+            ctx.request,
+            ctx,
+        });
+        defer request_obj.release(vm_instance.allocator);
 
-        // 创建Response对象
-        const res_value = try self.createResponseValue(vm_instance, response);
-        defer res_value.release(self.allocator);
+        const response_obj = try vm_instance.createObject(PHPResponse, .{
+            ctx.response,
+        });
+        defer response_obj.release(vm_instance.allocator);
 
-        // 调用处理器
-        const args = [_]Value{ req_value, res_value };
+        const args = [_]Value{ request_obj, response_obj };
         _ = try self.callHandler(vm_instance, handler, &args);
-    }
-
-    /// 创建Request Value对象
-    fn createRequestValue(self: *HttpServer, vm_instance: anytype, request: *const HttpRequest) !Value {
-        const result = try Value.initArrayWithManager(&vm_instance.memory_manager);
-        const arr = result.data.array.data;
-
-        // method
-        const method_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "method") };
-        const method_str = switch (request.method) {
-            .GET => "GET",
-            .POST => "POST",
-            .PUT => "PUT",
-            .DELETE => "DELETE",
-            .PATCH => "PATCH",
-            .HEAD => "HEAD",
-            .OPTIONS => "OPTIONS",
-            .TRACE => "TRACE",
-            .CONNECT => "CONNECT",
-        };
-        const method_val = try Value.initStringWithManager(&vm_instance.memory_manager, method_str);
-        try arr.set(self.allocator, method_key, method_val);
-        method_key.string.release(self.allocator);
-
-        // path
-        const path_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "path") };
-        const path_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.path);
-        try arr.set(self.allocator, path_key, path_val);
-        path_key.string.release(self.allocator);
-
-        // body
-        const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
-        const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, request.body);
-        try arr.set(self.allocator, body_key, body_val);
-        body_key.string.release(self.allocator);
-
-        // headers
-        const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
-        const headers_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
-        const headers_arr = headers_val.data.array.data;
-
-        var header_iter = request.headers.iterator();
-        while (header_iter.next()) |entry| {
-            const h_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
-            const h_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
-            try headers_arr.set(self.allocator, h_key, h_val);
-            h_key.string.release(self.allocator);
-        }
-        try arr.set(self.allocator, headers_key, headers_val);
-        headers_key.string.release(self.allocator);
-
-        // query
-        const query_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "query") };
-        const query_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
-        const query_arr = query_val.data.array.data;
-
-        var query_iter = request.query_params.iterator();
-        while (query_iter.next()) |entry| {
-            const q_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, entry.key_ptr.*) };
-            const q_val = try Value.initStringWithManager(&vm_instance.memory_manager, entry.value_ptr.*);
-            try query_arr.set(self.allocator, q_key, q_val);
-            q_key.string.release(self.allocator);
-        }
-        try arr.set(self.allocator, query_key, query_val);
-        query_key.string.release(self.allocator);
-
-        return result;
-    }
-
-    /// 创建Response Value对象
-    fn createResponseValue(self: *HttpServer, vm_instance: anytype, response: *HttpResponse) !Value {
-        _ = response;
-        const result = try Value.initArrayWithManager(&vm_instance.memory_manager);
-        const arr = result.data.array.data;
-
-        // status
-        const status_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "status") };
-        try arr.set(self.allocator, status_key, Value.initInt(200));
-        status_key.string.release(self.allocator);
-
-        // headers
-        const headers_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "headers") };
-        const headers_val = try Value.initArrayWithManager(&vm_instance.memory_manager);
-        try arr.set(self.allocator, headers_key, headers_val);
-        headers_key.string.release(self.allocator);
-
-        // body
-        const body_key = types.ArrayKey{ .string = try types.PHPString.init(self.allocator, "body") };
-        const body_val = try Value.initStringWithManager(&vm_instance.memory_manager, "");
-        try arr.set(self.allocator, body_key, body_val);
-        body_key.string.release(self.allocator);
-
-        return result;
     }
 
     /// 调用处理器回调
@@ -495,6 +488,7 @@ pub const HttpRequest = struct {
     headers: std.StringHashMap([]const u8),
     body: []const u8,
     query_params: std.StringHashMap([]const u8),
+    cookies: std.StringHashMap([]const u8),
 
     pub const Method = enum {
         GET,
@@ -537,6 +531,7 @@ pub const HttpRequest = struct {
             .headers = std.StringHashMap([]const u8).init(allocator),
             .body = "",
             .query_params = std.StringHashMap([]const u8).init(allocator),
+            .cookies = std.StringHashMap([]const u8).init(allocator),
         };
 
         var lines = std.mem.splitSequence(u8, data, "\r\n");
@@ -578,6 +573,10 @@ pub const HttpRequest = struct {
                     const key = line[0..colon_pos];
                     const value = line[colon_pos + 2 ..];
                     try request.headers.put(key, value);
+
+                    if (std.ascii.eqlIgnoreCase(key, "Cookie")) {
+                        try request.parseCookies(value);
+                    }
                 }
             } else {
                 // Body部分
@@ -586,6 +585,18 @@ pub const HttpRequest = struct {
         }
 
         return request;
+    }
+
+    fn parseCookies(self: *HttpRequest, cookie_string: []const u8) !void {
+        var cookies = std.mem.splitScalar(u8, cookie_string, ';');
+        while (cookies.next()) |cookie| {
+            const trimmed_cookie = std.mem.trim(u8, cookie, " \t");
+            if (std.mem.indexOf(u8, trimmed_cookie, "=")) |eq_pos| {
+                const key = trimmed_cookie[0..eq_pos];
+                const value = trimmed_cookie[eq_pos + 1 ..];
+                try self.cookies.put(key, value);
+            }
+        }
     }
 
     fn parseQueryParams(self: *HttpRequest, query_string: []const u8) !void {
@@ -604,6 +615,7 @@ pub const HttpRequest = struct {
         // StringHashMap中的字符串来自原始buffer，不需要单独释放
         @constCast(&self.headers).deinit();
         @constCast(&self.query_params).deinit();
+        @constCast(&self.cookies).deinit();
     }
 
     /// 获取头部值
@@ -615,6 +627,11 @@ pub const HttpRequest = struct {
     pub fn getQueryParam(self: *const HttpRequest, name: []const u8) ?[]const u8 {
         return self.query_params.get(name);
     }
+
+    /// 获取Cookie值
+    pub fn getCookie(self: *const HttpRequest, name: []const u8) ?[]const u8 {
+        return self.cookies.get(name);
+    }
 };
 
 /// HTTP响应
@@ -624,6 +641,25 @@ pub const HttpResponse = struct {
     status_text: []const u8,
     headers: std.StringHashMap([]const u8),
     body: std.ArrayList(u8),
+    cookies: std.ArrayList(Cookie),
+
+    pub const Cookie = struct {
+        name: []const u8,
+        value: []const u8,
+        expires: ?i64 = null,
+        max_age: ?u64 = null,
+        path: ?[]const u8 = null,
+        domain: ?[]const u8 = null,
+        secure: bool = false,
+        http_only: bool = false,
+        same_site: ?SameSite = null,
+
+        pub const SameSite = enum {
+            Strict,
+            Lax,
+            None,
+        };
+    };
 
     pub fn init(allocator: std.mem.Allocator) HttpResponse {
         return HttpResponse{
@@ -632,12 +668,14 @@ pub const HttpResponse = struct {
             .status_text = "OK",
             .headers = std.StringHashMap([]const u8).init(allocator),
             .body = .empty,
+            .cookies = .empty,
         };
     }
 
     pub fn deinit(self: *HttpResponse) void {
         self.headers.deinit();
         self.body.deinit(self.allocator);
+        self.cookies.deinit(self.allocator);
     }
 
     /// 设置状态码
@@ -649,6 +687,11 @@ pub const HttpResponse = struct {
     /// 设置头部
     pub fn setHeader(self: *HttpResponse, name: []const u8, value: []const u8) !void {
         try self.headers.put(name, value);
+    }
+
+    /// 设置Cookie
+    pub fn setCookie(self: *HttpResponse, cookie: Cookie) !void {
+        try self.cookies.append(self.allocator, cookie);
     }
 
     /// 设置响应体
@@ -676,6 +719,40 @@ pub const HttpResponse = struct {
         var header_iter = self.headers.iterator();
         while (header_iter.next()) |entry| {
             try result.writer(self.allocator).print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        }
+
+        // Cookies
+        for (self.cookies.items) |cookie| {
+            try result.writer(self.allocator).print("Set-Cookie: {s}={s}", .{ cookie.name, cookie.value });
+            if (cookie.expires) |expires| {
+                const datetime = std.time.epoch.from(expires);
+                var buf: [std.time.fmt.RFC1123.len]u8 = undefined;
+                _ = std.time.fmt.format(datetime, .RFC1123, .{ .utc = true }, &buf) catch {};
+                try result.writer(self.allocator).print("; Expires={s}", .{&buf});
+            }
+            if (cookie.max_age) |max_age| {
+                try result.writer(self.allocator).print("; Max-Age={d}", .{max_age});
+            }
+            if (cookie.path) |path| {
+                try result.writer(self.allocator).print("; Path={s}", .{path});
+            }
+            if (cookie.domain) |domain| {
+                try result.writer(self.allocator).print("; Domain={s}", .{domain});
+            }
+            if (cookie.secure) {
+                try result.writer(self.allocator).print("; Secure", .{});
+            }
+            if (cookie.http_only) {
+                try result.writer(self.allocator).print("; HttpOnly", .{});
+            }
+            if (cookie.same_site) |same_site| {
+                switch (same_site) {
+                    .Strict => try result.writer(self.allocator).print("; SameSite=Strict", .{}),
+                    .Lax => try result.writer(self.allocator).print("; SameSite=Lax", .{}),
+                    .None => try result.writer(self.allocator).print("; SameSite=None", .{}),
+                }
+            }
+            try result.appendSlice(self.allocator, "\r\n");
         }
 
         // 空行分隔
@@ -866,19 +943,18 @@ pub const Router = struct {
 /// PHP 内置 Request 类
 pub const PHPRequest = struct {
     request: *const HttpRequest,
-    allocator: std.mem.Allocator,
-    params: std.StringHashMap([]const u8),
+    ctx: *HttpServer.RequestContext,
 
-    pub fn init(allocator: std.mem.Allocator, request: *const HttpRequest) PHPRequest {
+    pub fn init(request: *const HttpRequest, ctx: *HttpServer.RequestContext) PHPRequest {
         return PHPRequest{
             .request = request,
-            .allocator = allocator,
-            .params = std.StringHashMap([]const u8).init(allocator),
+            .ctx = ctx,
         };
     }
 
     pub fn deinit(self: *PHPRequest) void {
-        self.params.deinit();
+        // No longer owns resources that need deinitialization
+        _ = self;
     }
 
     /// 获取请求方法
@@ -916,14 +992,43 @@ pub const PHPRequest = struct {
         return self.request.getQueryParam(name);
     }
 
-    /// 获取路由参数
-    pub fn getParam(self: *const PHPRequest, name: []const u8) ?[]const u8 {
-        return self.params.get(name);
+    /// 获取Cookie
+    pub fn getCookie(self: *const PHPRequest, name: []const u8) ?[]const u8 {
+        return self.request.getCookie(name);
     }
 
-    /// 设置路由参数
-    pub fn setParam(self: *PHPRequest, name: []const u8, value: []const u8) !void {
-        try self.params.put(name, value);
+    /// 获取或创建Session
+    pub fn session(self: *PHPRequest, vm: *anyopaque) !Value {
+        const VM = @import("vm.zig").VM;
+        const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
+
+        if (self.ctx.session) |sess| {
+            return vm_instance.createObject(PHPSession, .{sess});
+        }
+
+        const server = @fieldParentPtr(HttpServer, "request_context_pool", self.ctx);
+        const session_id = self.request.getCookie("kiro_session_id");
+
+        if (session_id) |id| {
+            if (server.session_manager.getSession(id)) |sess| {
+                self.ctx.session = sess;
+                return vm_instance.createObject(PHPSession, .{sess});
+            }
+        }
+
+        const new_session = try server.session_manager.createSession();
+        self.ctx.session = new_session;
+
+        // Set the session ID cookie on the response
+        const cookie = HttpResponse.Cookie{
+            .name = "kiro_session_id",
+            .value = new_session.id,
+            .http_only = true,
+            .path = "/",
+        };
+        try self.ctx.response.?.setCookie(cookie);
+
+        return vm_instance.createObject(PHPSession, .{new_session});
     }
 };
 
@@ -967,6 +1072,69 @@ pub const PHPResponse = struct {
         try self.response.redirect(url, code);
     }
 
+    // setCookie
+    pub fn setCookie(
+        self: *PHPResponse,
+        name: []const u8,
+        value: []const u8,
+        options: ?Value,
+        allocator: std.mem.Allocator,
+    ) !void {
+        _ = allocator;
+        var cookie = HttpResponse.Cookie{
+            .name = name,
+            .value = value,
+        };
+
+        if (options) |opts| {
+            if (opts.isPartialArray()) {
+                const arr = opts.data.partial_array;
+                if (arr.get("expires")) |expires| {
+                    if (expires.isInt()) {
+                        cookie.expires = expires.data.integer;
+                    }
+                }
+                if (arr.get("max_age")) |max_age| {
+                    if (max_age.isInt()) {
+                        cookie.max_age = @intCast(max_age.data.integer);
+                    }
+                }
+                if (arr.get("path")) |path| {
+                    if (path.isString()) {
+                        cookie.path = path.data.string.ptr;
+                    }
+                }
+                if (arr.get("domain")) |domain| {
+                    if (domain.isString()) {
+                        cookie.domain = domain.data.string.ptr;
+                    }
+                }
+                if (arr.get("secure")) |secure| {
+                    if (secure.isBool()) {
+                        cookie.secure = secure.data.boolean;
+                    }
+                }
+                if (arr.get("http_only")) |http_only| {
+                    if (http_only.isBool()) {
+                        cookie.http_only = http_only.data.boolean;
+                    }
+                }
+                if (arr.get("same_site")) |same_site| {
+                    if (same_site.isString()) {
+                        if (std.ascii.eqlIgnoreCase(same_site.data.string.ptr, "Strict")) {
+                            cookie.same_site = .Strict;
+                        } else if (std.ascii.eqlIgnoreCase(same_site.data.string.ptr, "Lax")) {
+                            cookie.same_site = .Lax;
+                        } else if (std.ascii.eqlIgnoreCase(same_site.data.string.ptr, "None")) {
+                            cookie.same_site = .None;
+                        }
+                    }
+                }
+            }
+        }
+        try self.response.setCookie(cookie);
+    }
+
     /// 发送文本响应
     pub fn text(self: *PHPResponse, content: []const u8) !void {
         try self.response.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -974,9 +1142,48 @@ pub const PHPResponse = struct {
     }
 };
 
+/// PHP 内置 Session 类
+pub const PHPSession = struct {
+    session: *Session,
+
+    pub fn init(session: *Session) PHPSession {
+        return PHPSession{
+            .session = session,
+        };
+    }
+
+    /// 获取session数据
+    pub fn get(self: *const PHPSession, key: []const u8) ?Value {
+        return self.session.data.get(key);
+    }
+
+    /// 设置session数据
+    pub fn set(self: *PHPSession, key: []const u8, value: Value) !void {
+        if (self.session.data.get(key)) |old_value| {
+            old_value.release(self.session.data.allocator);
+        }
+        _ = value.retain();
+        try self.session.data.put(key, value);
+    }
+
+    /// 检查session中是否存在key
+    pub fn has(self: *const PHPSession, key: []const u8) bool {
+        return self.session.data.contains(key);
+    }
+
+    /// 清空session数据
+    pub fn destroy(self: *PHPSession) void {
+        var it = self.session.data.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.release(self.session.data.allocator);
+        }
+        self.session.data.clearRetainingCapacity();
+    }
+};
+
 /// PHP HTTP服务器函数绑定
 pub fn registerHttpFunctions(stdlib: anytype) !void {
-    _ = stdlib;
+    _ = std.testing.allocator;
     // 注册 http_server_create, http_server_start 等函数
     // 注册 Request, Response, Router 类
 }
