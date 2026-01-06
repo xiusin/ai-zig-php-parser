@@ -92,6 +92,9 @@ pub fn build(b: *std.Build) void {
         "src/aot/root.zig",
         "src/aot/diagnostics.zig",
         "src/aot/ir_generator.zig",
+        "src/runtime/coroutine_error_handling.zig",
+        "src/runtime/coroutine_debugging.zig",
+        "src/runtime/test_error_handling_property.zig",
     };
     
     // Add all test files
