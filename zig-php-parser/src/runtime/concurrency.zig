@@ -1,10 +1,42 @@
+//! ============================================================================
+//! PHP并发API (PHP Concurrency API)
+//! ============================================================================
+//!
+//! 功能：为PHP提供高级并发编程接口
+//!
+//! 与 coroutine.zig 的关系：
+//! - coroutine.zig: 协程引擎底层实现（状态机、栈管理、上下文切换）
+//! - concurrency.zig: PHP层面的并发API封装（本文件）
+//!
+//! 提供的组件：
+//! - PHPMutex: PHP互斥锁，协程感知的锁机制
+//! - PHPAtomic: PHP原子整数，无锁并发计数
+//! - PHPRWLock: PHP读写锁，支持多读单写
+//! - PHPSharedData: 并发安全的共享数据容器
+//! - PHPSemaphore: PHP信号量
+//! - PHPBarrier: PHP屏障同步
+//! - PHPCondition: PHP条件变量
+//!
+//! 使用场景：
+//! - 协程间数据共享和同步
+//! - 并发计数器和状态管理
+//! - 生产者-消费者模式
+//! - 读写分离的数据访问
+//!
+//! 需求：9.1-9.12（并发原语需求）
+//! ============================================================================
+
 const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
 const coroutine = @import("coroutine.zig");
 const CoMutex = coroutine.CoMutex;
 
-/// PHP 互斥锁 - 用于协程间的同步
+/// PHP互斥锁 - 协程感知的锁机制
+/// 特性：
+/// - 支持协程ID追踪，防止死锁
+/// - 支持tryLock非阻塞尝试
+/// - 记录锁计数和所有者信息
 pub const PHPMutex = struct {
     comutex: CoMutex,
     allocator: std.mem.Allocator,
@@ -442,9 +474,9 @@ test "PHPMutex basic operations" {
 
     try std.testing.expect(mutex.getLockCount() == 0);
 
-    mutex.lock();
+    mutex.lock(1); // Use coroutine ID 1 for test
     try std.testing.expect(mutex.getLockCount() == 1);
-    try std.testing.expect(mutex.isLockedByCurrentThread());
+    try std.testing.expect(mutex.isLockedByCoroutine(1));
 
     mutex.unlock();
     try std.testing.expect(mutex.getLockCount() == 0);
