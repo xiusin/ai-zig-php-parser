@@ -354,7 +354,7 @@ pub const Coroutine = struct {
 
 ### 10. Channel Implementation
 
-**File**: `src/runtime/channel_new.zig`
+**File**: `src/runtime/channel.zig`
 
 Go-compatible channel implementation with select support.
 
@@ -427,7 +427,7 @@ pub const Select = struct {
 
 ### 12. Synchronization Primitives
 
-**File**: `src/runtime/sync_new.zig`
+**File**: `src/runtime/sync.zig`
 
 Coroutine-aware synchronization primitives.
 

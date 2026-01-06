@@ -17,6 +17,8 @@ const stdlib = @import("stdlib.zig");
 const StandardLibrary = stdlib.StandardLibrary;
 const reflection = @import("reflection.zig");
 const builtin_classes = @import("builtin_classes.zig");
+const builtin_registry = @import("builtin_registry.zig");
+const BuiltinRegistry = builtin_registry.BuiltinRegistry;
 const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
 const string_utils = @import("string_utils.zig");
@@ -917,6 +919,9 @@ pub const VM = struct {
     // Anonymous class counter for generating unique names
     anonymous_class_counter: u64 = 0,
 
+    // Builtin function registry with category-based organization
+    builtin_registry: BuiltinRegistry,
+
     pub fn init(allocator: std.mem.Allocator) !*VM {
         return initWithSyntaxConfig(allocator, SyntaxConfig{});
     }
@@ -958,6 +963,8 @@ pub const VM = struct {
             .syntax_config = config,
             // Extension registry - initialized lazily or via setExtensionRegistry
             .extension_registry = null,
+            // Initialize builtin function registry
+            .builtin_registry = BuiltinRegistry.init(allocator),
         };
 
         vm.global.* = Environment.init(allocator);
@@ -981,6 +988,9 @@ pub const VM = struct {
         }
         // Only deinit the hashmap container, not the class objects
         builtin_class_manager.classes.deinit();
+
+        // Initialize builtin function registry with core functions
+        try vm.initializeBuiltinRegistry();
 
         // Register built-in functions with optimized registration
         try vm.registerBuiltinFunctions();
@@ -1054,6 +1064,9 @@ pub const VM = struct {
 
         // 5. Clean up standard library
         self.stdlib.deinit();
+
+        // 5.5. Clean up builtin function registry
+        self.builtin_registry.deinit();
 
         // 6. Clean up classes, interfaces, traits, structs
         // Must be done after global (objects destroyed) but before strings
@@ -1335,6 +1348,29 @@ pub const VM = struct {
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+    }
+
+    /// Initialize the builtin function registry with core functions
+    pub fn initializeBuiltinRegistry(self: *VM) !void {
+        // Register core builtin functions from the registry module
+        for (&builtin_registry.BUILTIN_FUNCTIONS) |*func| {
+            try self.builtin_registry.register(func);
+        }
+    }
+
+    /// Call a builtin function through the registry
+    pub fn callBuiltinFunction(self: *VM, name: []const u8, args: []const Value) !Value {
+        return self.builtin_registry.call(@as(*anyopaque, @ptrCast(self)), name, args);
+    }
+
+    /// Check if a builtin function exists
+    pub fn hasBuiltinFunction(self: *VM, name: []const u8) bool {
+        return self.builtin_registry.exists(name);
+    }
+
+    /// Get builtin functions by category
+    pub fn getBuiltinFunctionsByCategory(self: *VM, category: builtin_registry.Category) []const *const builtin_registry.BuiltinFunction {
+        return self.builtin_registry.getFunctionsByCategory(category);
     }
 
     // Performance monitoring and optimization methods
