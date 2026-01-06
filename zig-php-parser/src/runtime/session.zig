@@ -77,3 +77,42 @@ pub const SessionManager = struct {
         return null;
     }
 };
+
+/// PHP 内置 Session 类
+pub const PHPSession = struct {
+    session: *Session,
+
+    pub fn init(session: *Session) PHPSession {
+        return PHPSession{
+            .session = session,
+        };
+    }
+
+    /// 获取session数据
+    pub fn get(self: *const PHPSession, key: []const u8) ?Value {
+        return self.session.data.get(key);
+    }
+
+    /// 设置session数据
+    pub fn set(self: *PHPSession, key: []const u8, value: Value) !void {
+        if (self.session.data.get(key)) |old_value| {
+            old_value.release(self.session.data.allocator);
+        }
+        _ = value.retain();
+        try self.session.data.put(key, value);
+    }
+
+    /// 检查session中是否存在key
+    pub fn has(self: *const PHPSession, key: []const u8) bool {
+        return self.session.data.contains(key);
+    }
+
+    /// 清空session数据
+    pub fn destroy(self: *PHPSession) void {
+        var it = self.session.data.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.release(self.session.data.allocator);
+        }
+        self.session.data.clearRetainingCapacity();
+    }
+};
