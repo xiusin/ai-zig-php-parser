@@ -95,6 +95,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime/coroutine_error_handling.zig",
         "src/runtime/coroutine_debugging.zig",
         "src/runtime/test_error_handling_property.zig",
+        "src/test_comprehensive_concurrency.zig",
     };
     
     // Add all test files

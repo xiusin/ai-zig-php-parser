@@ -81,16 +81,15 @@ pub const WaitQueue = struct {
     pub fn wakeOne(self: *WaitQueue) ?u64 {
         if (self.waiters.items.len > 0) {
             const waiter = self.waiters.orderedRemove(0);
-            waiter.ready.store(true, .seq_cst);
+            // Note: waiter.ready is a copy, but we don't need to update it
+            // since the waiter is being removed from the queue
             return waiter.coroutine_id;
         }
         return null;
     }
     
     pub fn wakeAll(self: *WaitQueue) void {
-        for (self.waiters.items) |*waiter| {
-            waiter.ready.store(true, .seq_cst);
-        }
+        // Note: We don't need to update ready flags since waiters are being removed
         self.waiters.clearRetainingCapacity();
     }
     

@@ -42,8 +42,8 @@ pub const HttpResponse = struct {
     }
 
     /// 设置Cookie
-    pub fn setCookie(self: *HttpResponse, cookie: Cookie) !void {
-        try self.cookies.append(self.allocator, cookie);
+    pub fn setCookie(self: *HttpResponse, new_cookie: Cookie) !void {
+        try self.cookies.append(self.allocator, new_cookie);
     }
 
     /// 设置响应体
@@ -74,30 +74,28 @@ pub const HttpResponse = struct {
         }
 
         // Cookies
-        for (self.cookies.items) |cookie| {
-            try result.writer(self.allocator).print("Set-Cookie: {s}={s}", .{ cookie.name, cookie.value });
-            if (cookie.expires) |expires| {
-                const datetime = std.time.epoch.from(expires);
-                var buf: [std.time.fmt.RFC1123.len]u8 = undefined;
-                _ = std.time.fmt.format(datetime, .RFC1123, .{ .utc = true }, &buf) catch {};
-                try result.writer(self.allocator).print("; Expires={s}", .{&buf});
+        for (self.cookies.items) |c| {
+            try result.writer(self.allocator).print("Set-Cookie: {s}={s}", .{ c.name, c.value });
+            if (c.expires) |expires| {
+                // Output expires as Unix timestamp (simplified for compatibility)
+                try result.writer(self.allocator).print("; Expires={d}", .{expires});
             }
-            if (cookie.max_age) |max_age| {
+            if (c.max_age) |max_age| {
                 try result.writer(self.allocator).print("; Max-Age={d}", .{max_age});
             }
-            if (cookie.path) |path| {
+            if (c.path) |path| {
                 try result.writer(self.allocator).print("; Path={s}", .{path});
             }
-            if (cookie.domain) |domain| {
+            if (c.domain) |domain| {
                 try result.writer(self.allocator).print("; Domain={s}", .{domain});
             }
-            if (cookie.secure) {
+            if (c.secure) {
                 try result.writer(self.allocator).print("; Secure", .{});
             }
-            if (cookie.http_only) {
+            if (c.http_only) {
                 try result.writer(self.allocator).print("; HttpOnly", .{});
             }
-            if (cookie.same_site) |same_site| {
+            if (c.same_site) |same_site| {
                 switch (same_site) {
                     .Strict => try result.writer(self.allocator).print("; SameSite=Strict", .{}),
                     .Lax => try result.writer(self.allocator).print("; SameSite=Lax", .{}),
@@ -218,7 +216,7 @@ pub const PHPResponse = struct {
         value: []const u8,
         options: ?Value,
     ) !void {
-        var cookie = Cookie{
+        var new_cookie = Cookie{
             .name = name,
             .value = value,
         };
@@ -228,48 +226,48 @@ pub const PHPResponse = struct {
                 const arr = opts.data.partial_array;
                 if (arr.get("expires")) |expires| {
                     if (expires.isInt()) {
-                        cookie.expires = expires.data.integer;
+                        new_cookie.expires = expires.data.integer;
                     }
                 }
                 if (arr.get("max_age")) |max_age| {
                     if (max_age.isInt()) {
-                        cookie.max_age = @intCast(max_age.data.integer);
+                        new_cookie.max_age = @intCast(max_age.data.integer);
                     }
                 }
                 if (arr.get("path")) |path| {
                     if (path.isString()) {
-                        cookie.path = path.data.string.ptr;
+                        new_cookie.path = path.data.string.ptr;
                     }
                 }
                 if (arr.get("domain")) |domain| {
                     if (domain.isString()) {
-                        cookie.domain = domain.data.string.ptr;
+                        new_cookie.domain = domain.data.string.ptr;
                     }
                 }
                 if (arr.get("secure")) |secure| {
                     if (secure.isBool()) {
-                        cookie.secure = secure.data.boolean;
+                        new_cookie.secure = secure.data.boolean;
                     }
                 }
                 if (arr.get("http_only")) |http_only| {
                     if (http_only.isBool()) {
-                        cookie.http_only = http_only.data.boolean;
+                        new_cookie.http_only = http_only.data.boolean;
                     }
                 }
                 if (arr.get("same_site")) |same_site| {
                     if (same_site.isString()) {
                         if (std.ascii.eqlIgnoreCase(same_site.data.string.ptr, "Strict")) {
-                            cookie.same_site = .Strict;
+                            new_cookie.same_site = .Strict;
                         } else if (std.ascii.eqlIgnoreCase(same_site.data.string.ptr, "Lax")) {
-                            cookie.same_site = .Lax;
+                            new_cookie.same_site = .Lax;
                         } else if (std.ascii.eqlIgnoreCase(same_site.data.string.ptr, "None")) {
-                            cookie.same_site = .None;
+                            new_cookie.same_site = .None;
                         }
                     }
                 }
             }
         }
-        try self.response.setCookie(cookie);
+        try self.response.setCookie(new_cookie);
     }
 
     /// 发送文本响应

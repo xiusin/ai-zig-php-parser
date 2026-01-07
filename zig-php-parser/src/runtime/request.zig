@@ -6,6 +6,8 @@ const Session = session.Session;
 const PHPSession = session.PHPSession;
 const HttpServer = @import("http_server.zig").HttpServer;
 const HttpResponse = @import("response.zig").HttpResponse;
+const cookie_mod = @import("cookie.zig");
+const Cookie = cookie_mod.Cookie;
 
 /// HTTP请求
 pub const HttpRequest = struct {
@@ -228,8 +230,8 @@ pub const PHPRequest = struct {
             return vm_instance.createObject(PHPSession, .{sess});
         }
 
-        const server = @fieldParentPtr(HttpServer, "request_context_pool", self.ctx);
-        const session_id = self.request.getCookie(server.config.session_cookie_name);
+        const server = self.ctx.parent_server orelse return error.NoParentServer;
+        const session_id = self.request.getCookie("kiro_session_id");
 
         if (session_id) |id| {
             if (server.session_manager.getSession(id)) |sess| {
@@ -242,13 +244,13 @@ pub const PHPRequest = struct {
         self.ctx.session = new_session;
 
         // Set the session ID cookie on the response
-        const cookie = HttpResponse.Cookie{
-            .name = server.config.session_cookie_name,
+        const new_cookie = Cookie{
+            .name = "kiro_session_id",
             .value = new_session.id,
             .http_only = true,
             .path = "/",
         };
-        try self.ctx.response.?.setCookie(cookie);
+        try self.ctx.response.?.setCookie(new_cookie);
 
         return vm_instance.createObject(PHPSession, .{new_session});
     }

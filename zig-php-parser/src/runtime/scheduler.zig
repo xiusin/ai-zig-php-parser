@@ -49,7 +49,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
 const Coroutine = @import("coroutine.zig").Coroutine;
-const CoroutinePool = @import("coroutine.zig").CoroutinePool;
+const OptimizedCoroutine = @import("coroutine.zig").OptimizedCoroutine;
 const Processor = @import("processor.zig").Processor;
 const Worker = @import("worker.zig").Worker;
 const WorkerPool = @import("worker.zig").WorkerPool;
@@ -74,8 +74,10 @@ pub const Scheduler = struct {
     global_queue: GlobalQueue,
     timer_wheel: TimerWheel,
     netpoller: NetPoller,
-    coroutine_pool: CoroutinePool,
     allocator: std.mem.Allocator,
+    
+    // Active coroutines tracking for cleanup
+    active_coroutines_list: std.ArrayList(*Coroutine),
     
     // Scheduler state
     running: std.atomic.Value(bool),
@@ -368,6 +370,8 @@ pub const Scheduler = struct {
         total_coroutines_spawned: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         total_coroutines_completed: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         active_coroutines: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+        parked_coroutines: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+        context_switches: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         global_queue_operations: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         work_steal_attempts: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         work_steal_successes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -398,9 +402,6 @@ pub const Scheduler = struct {
         // Initialize worker pool
         const worker_pool = try WorkerPool.init(allocator, undefined, config.num_workers); // scheduler will be set later
         
-        // Initialize coroutine pool
-        const coroutine_pool = try CoroutinePool.initDefault(allocator);
-        
         var scheduler = Scheduler{
             .config = config,
             .processors = processors,
@@ -408,8 +409,8 @@ pub const Scheduler = struct {
             .global_queue = GlobalQueue.init(allocator, config.max_global_queue_size),
             .timer_wheel = TimerWheel.init(allocator),
             .netpoller = NetPoller.init(allocator),
-            .coroutine_pool = coroutine_pool,
             .allocator = allocator,
+            .active_coroutines_list = .{},
             .running = std.atomic.Value(bool).init(false),
             .next_coroutine_id = std.atomic.Value(u64).init(1),
             .vm = vm,
@@ -443,7 +444,13 @@ pub const Scheduler = struct {
         self.global_queue.deinit(self.allocator);
         self.timer_wheel.deinit();
         self.netpoller.deinit();
-        self.coroutine_pool.deinit();
+        
+        // Clean up active coroutines
+        for (self.active_coroutines_list.items) |coro| {
+            coro.deinit();
+            self.allocator.destroy(coro);
+        }
+        self.active_coroutines_list.deinit(self.allocator);
     }
     
     /// Start scheduler
@@ -492,8 +499,12 @@ pub const Scheduler = struct {
     pub fn spawn(self: *Scheduler, callback: Value, args: []Value) !u64 {
         const coroutine_id = self.next_coroutine_id.fetchAdd(1, .monotonic);
         
-        // Get coroutine from pool
-        const coroutine = try self.coroutine_pool.acquire(coroutine_id, callback, args);
+        // Create coroutine directly
+        const coroutine = try self.allocator.create(Coroutine);
+        coroutine.* = try Coroutine.init(self.allocator, coroutine_id, callback, args);
+        
+        // Track for cleanup
+        try self.active_coroutines_list.append(self.allocator, coroutine);
         
         // Add to least loaded processor
         const processor = self.getLeastLoadedProcessor();
@@ -510,28 +521,72 @@ pub const Scheduler = struct {
     }
     
     /// Yield current coroutine
+    /// Moves the coroutine from running to ready state and reschedules it
     pub fn yield(self: *Scheduler, coroutine_id: u64) void {
-        _ = self;
-        _ = coroutine_id;
-        // Implementation would find the coroutine and yield it
-        // For now, this is a placeholder
+        // Find the coroutine in active list
+        for (self.active_coroutines_list.items) |coro| {
+            if (coro.id == coroutine_id) {
+                // Change state to yielded
+                coro.state = .yielded;
+                
+                // Re-add to processor queue for rescheduling
+                const processor = self.getLeastLoadedProcessor();
+                processor.addCoroutine(coro) catch {
+                    // If we can't add to processor, add to global queue
+                    self.global_queue.enqueue(self.allocator, coro) catch {};
+                };
+                
+                // Update statistics
+                _ = self.stats.context_switches.fetchAdd(1, .monotonic);
+                break;
+            }
+        }
     }
     
     /// Park coroutine (block it)
+    /// Moves the coroutine to waiting state with a specific reason
     pub fn park(self: *Scheduler, coroutine_id: u64, reason: ParkReason) void {
-        _ = self;
-        _ = coroutine_id;
-        _ = reason;
-        // Implementation would find the coroutine and park it
-        // For now, this is a placeholder
+        // Find the coroutine in active list
+        for (self.active_coroutines_list.items) |coro| {
+            if (coro.id == coroutine_id) {
+                // Change state to waiting
+                coro.state = .waiting;
+                
+                // Store park reason for later unparking
+                // The coroutine will be re-added to queue when unparked
+                _ = reason;
+                
+                // Update statistics
+                _ = self.stats.parked_coroutines.fetchAdd(1, .monotonic);
+                break;
+            }
+        }
     }
     
     /// Unpark coroutine (make it ready)
+    /// Moves the coroutine from waiting to ready state
     pub fn unpark(self: *Scheduler, coroutine_id: u64) void {
-        _ = self;
-        _ = coroutine_id;
-        // Implementation would find the coroutine and unpark it
-        // For now, this is a placeholder
+        // Find the coroutine in active list
+        for (self.active_coroutines_list.items) |coro| {
+            if (coro.id == coroutine_id and coro.state == .waiting) {
+                // Change state to ready
+                coro.state = .ready;
+                
+                // Re-add to processor queue
+                const processor = self.getLeastLoadedProcessor();
+                processor.addCoroutine(coro) catch {
+                    // If we can't add to processor, add to global queue
+                    self.global_queue.enqueue(self.allocator, coro) catch {};
+                };
+                
+                // Update statistics
+                _ = self.stats.parked_coroutines.fetchSub(1, .monotonic);
+                
+                // Wake up workers to process the unparked coroutine
+                self.worker_pool.wakeUpAll();
+                break;
+            }
+        }
     }
     
     /// Get work from global queue
@@ -545,9 +600,17 @@ pub const Scheduler = struct {
         _ = self.stats.global_queue_operations.fetchAdd(1, .monotonic);
     }
     
-    /// Return completed coroutine to pool
+    /// Return completed coroutine (cleanup)
     pub fn returnCoroutine(self: *Scheduler, coro: *Coroutine) void {
-        self.coroutine_pool.release(coro);
+        // Remove from active list and cleanup
+        for (self.active_coroutines_list.items, 0..) |item, i| {
+            if (item == coro) {
+                _ = self.active_coroutines_list.orderedRemove(i);
+                break;
+            }
+        }
+        coro.deinit();
+        self.allocator.destroy(coro);
         _ = self.stats.total_coroutines_completed.fetchAdd(1, .monotonic);
         _ = self.stats.active_coroutines.fetchSub(1, .monotonic);
     }
@@ -564,7 +627,6 @@ pub const Scheduler = struct {
     
     /// Get comprehensive scheduler status
     pub fn getStatus(self: *Scheduler) SchedulerStatus {
-        const pool_stats = self.coroutine_pool.getStats();
         const global_stats = self.global_queue.getStats();
         
         return SchedulerStatus{
@@ -575,8 +637,8 @@ pub const Scheduler = struct {
             .total_spawned = self.stats.total_coroutines_spawned.load(.monotonic),
             .total_completed = self.stats.total_coroutines_completed.load(.monotonic),
             .global_queue_size = global_stats.size,
-            .pool_available = pool_stats.available_count,
-            .pool_active = pool_stats.active_count,
+            .pool_available = 0, // No pool, direct allocation
+            .pool_active = self.active_coroutines_list.items.len,
             .work_steal_ratio = self.stats.getWorkStealRatio(),
             .worker_utilization = self.worker_pool.getUtilization(),
         };
@@ -728,19 +790,21 @@ test "global queue operations" {
     var global_queue = Scheduler.GlobalQueue.init(allocator, 100);
     defer global_queue.deinit(allocator);
     
-    // Create test coroutines
+    // Create test coroutines (heap allocated)
     const callback = Value.initNull();
     const args = [_]Value{};
     
-    const coro1 = try Coroutine.init(allocator, 1, callback, &args);
+    const coro1 = try allocator.create(Coroutine);
+    coro1.* = try Coroutine.init(allocator, 1, callback, &args);
     defer {
-        coro1.deinit(allocator);
+        coro1.deinit();
         allocator.destroy(coro1);
     }
     
-    const coro2 = try Coroutine.init(allocator, 2, callback, &args);
+    const coro2 = try allocator.create(Coroutine);
+    coro2.* = try Coroutine.init(allocator, 2, callback, &args);
     defer {
-        coro2.deinit(allocator);
+        coro2.deinit();
         allocator.destroy(coro2);
     }
     
@@ -781,16 +845,14 @@ test "timer wheel operations" {
     // Add timer that should not expire yet
     try timer_wheel.addTimer(2, 1_000_000_000, null); // 1 second
     
-    // Process expired timers
+    // Process expired timers (returns slice from stack buffer, don't free)
     const expired = try timer_wheel.processExpired();
-    defer allocator.free(expired);
     
     try std.testing.expectEqual(@as(usize, 1), expired.len);
     try std.testing.expectEqual(@as(u64, 1), expired[0]);
     
     // Process again - should be empty
     const expired2 = try timer_wheel.processExpired();
-    defer allocator.free(expired2);
     
     try std.testing.expectEqual(@as(usize, 0), expired2.len);
 }

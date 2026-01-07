@@ -44,8 +44,8 @@ pub const SessionManager = struct {
 
         var it = self.sessions.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.deinit();
-            self.allocator.destroy(entry.value_ptr);
+            entry.value_ptr.*.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
         }
         self.sessions.deinit();
     }

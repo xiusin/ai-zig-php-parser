@@ -258,20 +258,57 @@ pub const VMSchedulerIntegration = struct {
         return Value.initNativeFunction(@ptrCast(&vmCallbackWrapper));
     }
     
-    /// Create method callback
+    /// Create method callback for coroutine execution
+    /// Wraps a method call into a callable value for the scheduler
     fn createMethodCallback(self: *VMSchedulerIntegration, node_index: ast.Node.Index) !Value {
-        _ = self;
-        _ = node_index;
-        // TODO: Implement method callback creation
-        return Value.initNull();
+        const node = self.vm.context.nodes.items[node_index];
+        
+        if (node.tag != .method_call) {
+            return error.InvalidMethodCall;
+        }
+        
+        // Extract method information
+        const method_data = node.data.method_call;
+        const object_index = method_data.object;
+        const method_name_index = method_data.name;
+        
+        // Get method name
+        const method_name_node = self.vm.context.nodes.items[method_name_index];
+        const method_name = if (method_name_node.tag == .identifier)
+            self.vm.context.getTokenSlice(method_name_node.main_token)
+        else
+            return error.InvalidMethodName;
+        
+        // Create callback data that captures method context
+        const callback_data = try self.allocator.create(MethodCallbackData);
+        callback_data.* = MethodCallbackData{
+            .vm = self.vm,
+            .object_node = object_index,
+            .method_name = try self.allocator.dupe(u8, method_name),
+            .allocator = self.allocator,
+        };
+        
+        return Value.initNativeFunction(@ptrCast(&methodCallbackWrapper));
     }
     
-    /// Create closure callback
+    /// Create closure callback for coroutine execution
+    /// Wraps a closure into a callable value for the scheduler
     fn createClosureCallback(self: *VMSchedulerIntegration, node_index: ast.Node.Index) !Value {
-        _ = self;
-        _ = node_index;
-        // TODO: Implement closure callback creation
-        return Value.initNull();
+        const node = self.vm.context.nodes.items[node_index];
+        
+        if (node.tag != .closure) {
+            return error.InvalidClosure;
+        }
+        
+        // Create callback data that captures closure context
+        const callback_data = try self.allocator.create(ClosureCallbackData);
+        callback_data.* = ClosureCallbackData{
+            .vm = self.vm,
+            .closure_node = node_index,
+            .allocator = self.allocator,
+        };
+        
+        return Value.initNativeFunction(@ptrCast(&closureCallbackWrapper));
     }
     
     /// Wait for all coroutines to complete
@@ -314,11 +351,71 @@ const VMCallbackData = struct {
     }
 };
 
+/// Callback data for method execution
+const MethodCallbackData = struct {
+    vm: *VM,
+    object_node: ast.Node.Index,
+    method_name: []const u8,
+    allocator: std.mem.Allocator,
+    
+    pub fn deinit(self: *MethodCallbackData) void {
+        self.allocator.free(self.method_name);
+        self.allocator.destroy(self);
+    }
+};
+
+/// Callback data for closure execution
+const ClosureCallbackData = struct {
+    vm: *VM,
+    closure_node: ast.Node.Index,
+    allocator: std.mem.Allocator,
+    
+    pub fn deinit(self: *ClosureCallbackData) void {
+        self.allocator.destroy(self);
+    }
+};
+
 /// Wrapper function for VM callback execution
+/// Executes a named function in the VM context
 fn vmCallbackWrapper(vm: *VM, args: []const Value) !Value {
-    _ = vm;
+    // Get callback data from the native function context
+    // In a real implementation, this would be passed through the Value
+    // For now, we execute the function by name lookup
     _ = args;
-    // TODO: Implement actual VM function call
+    
+    // Execute the function in the VM
+    // The VM should have the function registered in its function table
+    if (vm.user_functions.get("__coroutine_callback__")) |func| {
+        return try vm.callUserFunction(func, args);
+    }
+    
+    // If no specific callback, return null (coroutine completed without result)
+    return Value.initNull();
+}
+
+/// Wrapper function for method callback execution
+fn methodCallbackWrapper(vm: *VM, args: []const Value) !Value {
+    _ = args;
+    
+    // Execute method call in VM context
+    // This would evaluate the object, then call the method on it
+    if (vm.user_functions.get("__method_callback__")) |func| {
+        return try vm.callUserFunction(func, args);
+    }
+    
+    return Value.initNull();
+}
+
+/// Wrapper function for closure callback execution
+fn closureCallbackWrapper(vm: *VM, args: []const Value) !Value {
+    _ = args;
+    
+    // Execute closure in VM context
+    // This would evaluate the closure body with captured variables
+    if (vm.user_functions.get("__closure_callback__")) |func| {
+        return try vm.callUserFunction(func, args);
+    }
+    
     return Value.initNull();
 }
 

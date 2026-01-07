@@ -22,9 +22,9 @@ const SessionManager = session.SessionManager;
 const Cookie = cookie.Cookie;
 const request = @import("request.zig");
 const response = @import("response.zig");
-const HttpRequest = request.HttpRequest;
+pub const HttpRequest = request.HttpRequest;
 const PHPRequest = request.PHPRequest;
-const HttpResponse = response.HttpResponse;
+pub const HttpResponse = response.HttpResponse;
 const PHPResponse = response.PHPResponse;
 
 
@@ -71,6 +71,7 @@ pub const HttpServer = struct {
         start_time: i64,
         allocator: std.mem.Allocator,
         parent_vm: *anyopaque,
+        parent_server: ?*HttpServer,
         coroutine_id: ?u64,
         session: ?*Session,
         /// 请求级Arena - 用于请求内的快速内存分配 (Requirements: 4.1, 4.2)
@@ -85,6 +86,7 @@ pub const HttpServer = struct {
                 .start_time = std.time.milliTimestamp(),
                 .allocator = allocator,
                 .parent_vm = parent_vm,
+                .parent_server = null,
                 .coroutine_id = null,
                 .session = null,
                 .arena = null,
@@ -112,6 +114,7 @@ pub const HttpServer = struct {
             self.start_time = std.time.milliTimestamp();
             self.coroutine_id = null;
             self.session = null;
+            // parent_server is set by acquireContext
             // Arena会在acquireContext时重新分配
             self.arena = null;
         }
@@ -269,16 +272,16 @@ pub const HttpServer = struct {
         if (bytes_read == 0) return;
 
         // 解析HTTP请求
-        var request = try HttpRequest.parse(self.allocator, buffer[0..bytes_read]);
-        defer request.deinit(self.allocator);
+        var http_req = try HttpRequest.parse(self.allocator, buffer[0..bytes_read]);
+        defer http_req.deinit(self.allocator);
 
         // 创建响应
-        var response = HttpResponse.init(self.allocator);
-        defer response.deinit();
+        var http_resp = HttpResponse.init(self.allocator);
+        defer http_resp.deinit();
 
         // 绑定到上下文
-        ctx.request = &request;
-        ctx.response = &response;
+        ctx.request = &http_req;
+        ctx.response = &http_resp;
 
         // 调用处理器（在协程上下文中）
         if (self.handler) |handler| {
@@ -292,12 +295,12 @@ pub const HttpServer = struct {
                 try self.invokeHandler(handler, ctx);
             }
         } else {
-            response.setStatus(404);
-            try response.setBody("Not Found");
+            http_resp.setStatus(404);
+            try http_resp.setBody("Not Found");
         }
 
         // 发送响应
-        const response_bytes = try response.toBytes();
+        const response_bytes = try http_resp.toBytes();
         defer self.allocator.free(response_bytes);
         _ = try connection.stream.write(response_bytes);
     }
@@ -318,6 +321,9 @@ pub const HttpServer = struct {
             ctx = self.allocator.create(RequestContext) catch unreachable;
             ctx.* = RequestContext.init(self.allocator, self.generateContextId(), self.vm);
         }
+
+        // Set parent server reference
+        ctx.parent_server = self;
 
         // 为请求分配Arena (Requirements: 4.1, 4.2)
         if (self.arena_pool) |pool| {
@@ -578,25 +584,25 @@ test "http request parsing" {
 
     const raw_request = "GET /test?foo=bar HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\n\r\n";
 
-    const request = try HttpRequest.parse(allocator, raw_request);
-    defer request.deinit(allocator);
+    const parsed_request = try HttpRequest.parse(allocator, raw_request);
+    defer parsed_request.deinit(allocator);
 
-    try std.testing.expect(request.method == .GET);
-    try std.testing.expectEqualStrings("/test", request.path);
-    try std.testing.expectEqualStrings("bar", request.getQueryParam("foo").?);
+    try std.testing.expect(parsed_request.method == .GET);
+    try std.testing.expectEqualStrings("/test", parsed_request.path);
+    try std.testing.expectEqualStrings("bar", parsed_request.getQueryParam("foo").?);
 }
 
 test "http response building" {
     const allocator = std.testing.allocator;
 
-    var response = HttpResponse.init(allocator);
-    defer response.deinit();
+    var http_response = HttpResponse.init(allocator);
+    defer http_response.deinit();
 
-    response.setStatus(200);
-    try response.setHeader("Content-Type", "text/plain");
-    try response.setBody("Hello, World!");
+    http_response.setStatus(200);
+    try http_response.setHeader("Content-Type", "text/plain");
+    try http_response.setBody("Hello, World!");
 
-    const bytes = try response.toBytes();
+    const bytes = try http_response.toBytes();
     defer allocator.free(bytes);
 
     try std.testing.expect(std.mem.indexOf(u8, bytes, "200 OK") != null);

@@ -526,15 +526,25 @@ test "worker parking and unparking" {
     worker.unpark();
     try std.testing.expect(!worker.parked.load(.monotonic));
     
-    // Test park/unpark cycle
+    // Test park/unpark cycle with proper synchronization
+    // Use should_stop to control the test flow instead of relying on timing
     const park_thread = try std.Thread.spawn(.{}, struct {
         fn parkWorker(w: *Worker) void {
-            std.Thread.sleep(10_000_000); // 10ms
-            w.park();
+            // Brief delay to ensure main thread is ready
+            std.Thread.sleep(1_000_000); // 1ms
+            
+            // Only park if not already signaled to stop
+            if (!w.should_stop.load(.monotonic)) {
+                w.park();
+            }
         }
     }.parkWorker, .{&worker});
     
+    // Give the thread time to start and enter park
     std.Thread.sleep(5_000_000); // 5ms
+    
+    // Signal stop and unpark to ensure thread exits
+    worker.should_stop.store(true, .monotonic);
     worker.unpark();
     
     park_thread.join();

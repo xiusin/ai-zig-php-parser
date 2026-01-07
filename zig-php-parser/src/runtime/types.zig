@@ -2312,12 +2312,19 @@ pub const Closure = struct {
         }
 
         // Bind $this if object is provided
-        if (object) |_| {
-            const this_value = Value.fromBox(@as(*anyopaque, @ptrFromInt(0xDEADBEEF)), Value.TYPE_OBJECT); // Placeholder address for dummy object
+        if (object) |obj| {
+            // Create a proper object value from the PHPObject pointer
+            const obj_box = try allocator.create(gc.Box(*PHPObject));
+            obj_box.* = .{
+                .ref_count = 1,
+                .gc_info = .{},
+                .data = obj,
+            };
+            const this_value = Value.fromBox(obj_box, Value.TYPE_OBJECT);
             try new_closure.captured_vars.put("this", this_value);
         }
 
-        _ = scope; // Would be used for scope binding
+        _ = scope; // Would be used for scope binding in full implementation
         return new_closure;
     }
 };

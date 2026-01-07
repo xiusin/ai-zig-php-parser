@@ -362,7 +362,7 @@ pub const Processor = struct {
     
     /// Add coroutine to local queue
     pub fn addCoroutine(self: *Processor, coro: *Coroutine) !void {
-        try self.local_queue.push(coro, coro.priority);
+        try self.local_queue.push(coro, @intFromEnum(coro.priority));
     }
     
     /// Get processor statistics
