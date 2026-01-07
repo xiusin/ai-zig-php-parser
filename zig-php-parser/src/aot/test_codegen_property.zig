@@ -471,7 +471,6 @@ test "Instruction coverage: Control flow operations" {
 
     // Merge block with phi
     const phi_incoming = try allocator.alloc(IR.Instruction.PhiIncoming, 2);
-    defer allocator.free(phi_incoming);
     phi_incoming[0] = .{ .value = then_val, .block = then_block };
     phi_incoming[1] = .{ .value = else_val, .block = else_block };
 

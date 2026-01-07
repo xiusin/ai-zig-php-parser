@@ -232,8 +232,9 @@ pub const Function = struct {
 
     /// Create a new basic block
     pub fn createBlock(self: *Self, label: []const u8) !*BasicBlock {
+        const label_copy = try self.allocator.dupe(u8, label);
         const block = try self.allocator.create(BasicBlock);
-        block.* = BasicBlock.init(self.allocator, label);
+        block.* = BasicBlock.init(self.allocator, label_copy);
         try self.blocks.append(self.allocator, block);
         return block;
     }
@@ -306,7 +307,9 @@ pub const BasicBlock = struct {
 
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
+        self.allocator.free(self.label);
         for (self.instructions.items) |inst| {
+            inst.deinit(self.allocator);
             self.allocator.destroy(inst);
         }
         self.instructions.deinit(self.allocator);
@@ -505,6 +508,19 @@ pub const Instruction = struct {
     op: Op,
     /// Source location for debugging
     location: SourceLocation,
+
+    /// Deinitialize instruction and free resources
+    pub fn deinit(self: *Instruction, allocator: Allocator) void {
+        switch (self.op) {
+            .call => |op| allocator.free(op.args),
+            .call_indirect => |op| allocator.free(op.args),
+            .method_call => |op| allocator.free(op.args),
+            .new_object => |op| allocator.free(op.args),
+            .phi => |op| allocator.free(op.incoming),
+            .interpolate => |op| allocator.free(op.parts),
+            else => {},
+        }
+    }
 
     /// Instruction operations
     pub const Op = union(enum) {
@@ -1548,7 +1564,6 @@ test "IR serialization with function calls" {
 
     // Call instruction
     const args = try allocator.alloc(Register, 1);
-    defer allocator.free(args);
     args[0] = arg1;
 
     const call_result = func.newRegister(.php_value);

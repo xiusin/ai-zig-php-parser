@@ -1098,6 +1098,9 @@ pub const VM = struct {
 
     // Syntax mode configuration for multi-syntax support
     syntax_config: SyntaxConfig = SyntaxConfig{},
+    
+    // Recursion depth tracking
+    recursion_depth: u32 = 0,
 
     // Extension system registry for third-party extensions
     extension_registry: ?*ExtensionRegistry = null,
@@ -1154,6 +1157,7 @@ pub const VM = struct {
             .extension_registry = null,
             // Initialize builtin function registry
             .builtin_registry = BuiltinRegistry.init(allocator),
+            .recursion_depth = 0,
         };
 
         vm.global.* = Environment.init(allocator);
@@ -1879,6 +1883,11 @@ pub const VM = struct {
     }
 
     pub fn pushCallFrame(self: *VM, function_name: []const u8, file: []const u8, line: u32) !void {
+        if (self.call_stack.items.len >= 1000) {
+            const exception = try ExceptionFactory.createError(self.allocator, "Maximum function nesting level of '1000' reached, aborting!", self.current_file, self.current_line);
+            _ = try self.throwException(exception);
+            return error.StackOverflow; // Ensure we return an error to stop execution
+        }
         const frame = CallFrame.init(self.allocator, function_name, file, line);
         try self.call_stack.append(self.allocator, frame);
     }
@@ -3398,13 +3407,16 @@ pub const VM = struct {
     }
 
     pub fn eval(self: *VM, node: ast.Node.Index) !Value {
-        const start_time = std.time.nanoTimestamp();
-        defer {
-            const end_time = std.time.nanoTimestamp();
-            self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+        if (self.recursion_depth >= 1000) {
+            const exception = try ExceptionFactory.createError(self.allocator, "Maximum function nesting level of '1000' reached, aborting!", self.current_file, self.current_line);
+            _ = try self.throwException(exception);
+            return error.StackOverflow;
         }
+        self.recursion_depth += 1;
+        defer self.recursion_depth -= 1;
+        // std.debug.print("Depth: {}\n", .{self.recursion_depth});
 
-        const ast_node = self.context.nodes.items[node];
+        const ast_node = &self.context.nodes.items[node];
 
         // Update current line for error reporting
         // main_token is a Token struct, not an index

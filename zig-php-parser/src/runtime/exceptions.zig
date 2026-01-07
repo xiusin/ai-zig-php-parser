@@ -496,6 +496,10 @@ pub const ErrorRecovery = struct {
 
 /// Utility functions for creating common exceptions
 pub const ExceptionFactory = struct {
+    pub fn createError(allocator: std.mem.Allocator, message: []const u8, file: []const u8, line: u32) !*PHPException {
+        return PHPException.init(allocator, .fatal_error, message, file, line);
+    }
+
     pub fn createParseError(allocator: std.mem.Allocator, message: []const u8, file: []const u8, line: u32) !*PHPException {
         return PHPException.init(allocator, .parse_error, message, file, line);
     }

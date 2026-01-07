@@ -484,9 +484,7 @@ pub const IRGenerator = struct {
         const label = std.fmt.bufPrint(&buf, "{s}_{d}", .{ prefix, self.block_counter }) catch prefix;
         self.block_counter += 1;
 
-        // Duplicate the label string
-        const label_copy = try self.allocator.dupe(u8, label);
-        return func.createBlock(label_copy);
+        return func.createBlock(label);
     }
 
     /// Set the current block

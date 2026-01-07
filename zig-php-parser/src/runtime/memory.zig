@@ -266,8 +266,9 @@ pub const StringInterner = struct {
         if (self.strings.getPtr(str)) |entry| {
             if (entry.ref_count > 0) entry.ref_count -= 1;
             if (entry.ref_count == 0) {
-                self.allocator.free(@constCast(entry.data));
+                const data_to_free = entry.data;
                 _ = self.strings.remove(str);
+                self.allocator.free(@constCast(data_to_free));
                 self.total_strings -= 1;
                 self.total_bytes -= str.len;
             }

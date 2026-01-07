@@ -450,7 +450,7 @@ test "worker initialization and basic operations" {
     const allocator = std.testing.allocator;
 
     // Mock scheduler for testing
-    var mock_scheduler = struct {
+    var mock_scheduler align(8) = struct {
         pub fn getProcessors(self: @This()) []Processor {
             _ = self;
             return &[_]Processor{};
@@ -613,7 +613,7 @@ test "worker processor handoff" {
     const allocator = std.testing.allocator;
 
     // Mock scheduler
-    var mock_scheduler = struct {
+    var mock_scheduler align(8) = struct {
         pub fn getProcessors(self: @This()) []Processor {
             _ = self;
             return &[_]Processor{};

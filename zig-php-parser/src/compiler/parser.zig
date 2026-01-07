@@ -96,7 +96,7 @@ pub const Parser = struct {
     }
 
     pub fn deinit(self: *Parser) void {
-        _ = self;
+        self.all_tokens.deinit(self.allocator);
     }
 
     fn nextToken(self: *Parser) void {
