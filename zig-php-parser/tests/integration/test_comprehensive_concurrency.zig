@@ -214,12 +214,12 @@ test "stress test: waitgroup synchronization" {
     const task_count = 100;
     
     // Add tasks
-    wg.add(task_count);
+    try wg.add(task_count);
     try testing.expectEqual(@as(i32, task_count), wg.getCount());
     
     // Complete tasks
     for (0..task_count) |_| {
-        wg.done();
+        try wg.done();
     }
     
     try testing.expect(wg.isDone());
@@ -383,8 +383,8 @@ test "memory leak: synchronization primitives" {
         
         // Create and destroy waitgroup
         var wg = WaitGroup.init(allocator);
-        wg.add(1);
-        wg.done();
+        try wg.add(1);
+        try wg.done();
         wg.deinit();
     }
     
@@ -749,7 +749,7 @@ test "integration: synchronization primitives coordination" {
     var counter: i64 = 0;
     const task_count = 10;
     
-    wg.add(task_count);
+    try wg.add(task_count);
     
     for (0..task_count) |i| {
         const coroutine_id: u64 = @intCast(i + 1);
@@ -758,7 +758,7 @@ test "integration: synchronization primitives coordination" {
         counter += 1;
         mutex.unlock(coroutine_id);
         
-        wg.done();
+        try wg.done();
     }
     
     try testing.expect(wg.isDone());
@@ -818,7 +818,7 @@ test "integration: high load simulation" {
     
     // Simulate 100 concurrent tasks
     const task_count = 100;
-    wg.add(task_count);
+    try wg.add(task_count);
     
     var completed_tasks: i64 = 0;
     
@@ -844,7 +844,7 @@ test "integration: high load simulation" {
         coro.state = .completed;
         pool.release(coro);
         
-        wg.done();
+        try wg.done();
     }
     
     try testing.expect(wg.isDone());
@@ -910,7 +910,7 @@ test "edge case: waitgroup zero add" {
     defer wg.deinit();
     
     // Adding zero should be safe
-    wg.add(0);
+    try wg.add(0);
     try testing.expect(wg.isDone());
     try testing.expectEqual(@as(i32, 0), wg.getCount());
 }

@@ -259,7 +259,7 @@ pub const HttpServer = struct {
         defer connection.stream.close();
 
         // 获取或创建请求上下文
-        const ctx = self.acquireContext();
+        const ctx = try self.acquireContext();
         defer self.releaseContext(ctx);
 
         _ = self.active_requests.fetchAdd(1, .seq_cst);
@@ -306,7 +306,7 @@ pub const HttpServer = struct {
     }
 
     /// 获取请求上下文（从池中获取或新建）
-    fn acquireContext(self: *HttpServer) *RequestContext {
+    fn acquireContext(self: *HttpServer) !*RequestContext {
         var ctx: *RequestContext = undefined;
 
         if (self.request_context_pool.items.len > 0) {
@@ -314,11 +314,17 @@ pub const HttpServer = struct {
                 ctx = c;
                 ctx.reset(self.generateContextId());
             } else {
-                ctx = self.allocator.create(RequestContext) catch unreachable;
+                ctx = self.allocator.create(RequestContext) catch |err| {
+                    std.log.err("Failed to create RequestContext: {}", .{err});
+                    return error.OutOfMemory;
+                };
                 ctx.* = RequestContext.init(self.allocator, self.generateContextId(), self.vm);
             }
         } else {
-            ctx = self.allocator.create(RequestContext) catch unreachable;
+            ctx = self.allocator.create(RequestContext) catch |err| {
+                std.log.err("Failed to create RequestContext: {}", .{err});
+                return error.OutOfMemory;
+            };
             ctx.* = RequestContext.init(self.allocator, self.generateContextId(), self.vm);
         }
 

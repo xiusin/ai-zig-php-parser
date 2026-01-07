@@ -156,21 +156,21 @@ pub const PDO = struct {
     /// 转义字符串
     pub fn quote(self: *PDO, string: []const u8) ![]const u8 {
         // 简单的转义实现
-        var result = std.ArrayList(u8).init(self.allocator);
-        try result.append('\'');
+        var result = std.ArrayListUnmanaged(u8){};
+        try result.append(self.allocator, '\'');
 
         for (string) |c| {
             if (c == '\'') {
-                try result.appendSlice("''");
+                try result.appendSlice(self.allocator, "''");
             } else if (c == '\\') {
-                try result.appendSlice("\\\\");
+                try result.appendSlice(self.allocator, "\\\\");
             } else {
-                try result.append(c);
+                try result.append(self.allocator, c);
             }
         }
 
-        try result.append('\'');
-        return result.toOwnedSlice();
+        try result.append(self.allocator, '\'');
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// 设置属性
@@ -293,7 +293,8 @@ pub const PDOStatement = struct {
     }
 
     fn buildSQL(self: *PDOStatement) ![]const u8 {
-        var result = try std.ArrayList(u8).initCapacity(self.allocator, self.sql.len);
+        var result = std.ArrayListUnmanaged(u8){};
+        try result.ensureTotalCapacity(self.allocator, self.sql.len);
         defer result.deinit(self.allocator);
 
         var i: usize = 0;
@@ -544,7 +545,7 @@ pub const Connection = struct {
 /// 结果集
 pub const ResultSet = struct {
     allocator: std.mem.Allocator,
-    rows: std.ArrayList(Row),
+    rows: std.ArrayListUnmanaged(Row),
     columns: [][]const u8,
     current_row: usize,
     column_count: usize,
@@ -556,10 +557,9 @@ pub const ResultSet = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator) ResultSet {
-        const rows = std.ArrayList(Row).initCapacity(allocator, 0) catch unreachable;
         return ResultSet{
             .allocator = allocator,
-            .rows = rows,
+            .rows = .{},
             .columns = &[_][]const u8{},
             .current_row = 0,
             .column_count = 0,
@@ -574,7 +574,7 @@ pub const ResultSet = struct {
             }
             self.allocator.free(row.values);
         }
-        self.rows.deinit();
+        self.rows.deinit(self.allocator);
     }
 
     pub fn fetchRow(self: *ResultSet) ?*Row {
@@ -643,8 +643,8 @@ pub fn parseDSN(allocator: std.mem.Allocator, dsn: []const u8) !ParsedDSN {
 pub const Table = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
-    columns: std.ArrayList(Column),
-    rows: std.ArrayList(Row),
+    columns: std.ArrayListUnmanaged(Column),
+    rows: std.ArrayListUnmanaged(Row),
     auto_increment: i64,
 
     pub const Column = struct {
@@ -656,15 +656,15 @@ pub const Table = struct {
     };
 
     pub const Row = struct {
-        values: std.ArrayList(Value),
+        values: std.ArrayListUnmanaged(Value),
     };
 
-    pub fn init(allocator: std.mem.Allocator, name: []const u8) Table {
+    pub fn init(allocator: std.mem.Allocator, name: []const u8) !Table {
         return Table{
             .allocator = allocator,
-            .name = allocator.dupe(u8, name) catch unreachable,
-            .columns = std.ArrayList(Column){},
-            .rows = std.ArrayList(Row){},
+            .name = try allocator.dupe(u8, name),
+            .columns = .{},
+            .rows = .{},
             .auto_increment = 1,
         };
     }
@@ -698,7 +698,7 @@ pub const Table = struct {
     }
 
     pub fn insertRow(self: *Table, values: []Value) !i64 {
-        var row = Row{ .values = std.ArrayList(Value){} };
+        var row = Row{ .values = .{} };
 
         // Copy values and handle auto-increment
         for (values, 0..) |val, i| {
@@ -749,7 +749,7 @@ pub const MemoryDatabase = struct {
 
     pub fn createTable(self: *MemoryDatabase, table_name: []const u8) !*Table {
         const table = try self.allocator.create(Table);
-        table.* = Table.init(self.allocator, table_name);
+        table.* = try Table.init(self.allocator, table_name);
         try self.tables.put(table_name, table);
         return table;
     }
@@ -875,7 +875,7 @@ pub const MemoryDatabase = struct {
         i += 1; // Skip '('
 
         // Parse values (simplified - assumes string values)
-        var values = std.ArrayList(Value){};
+        var values = std.ArrayListUnmanaged(Value){};
         defer values.deinit(self.allocator);
 
         var val_start = i;
@@ -1084,21 +1084,21 @@ pub const MySQLi = struct {
 
     /// 转义字符串
     pub fn realEscapeString(self: *MySQLi, string: []const u8) ![]const u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
+        var result = std.ArrayListUnmanaged(u8){};
 
         for (string) |c| {
             switch (c) {
-                0 => try result.appendSlice("\\0"),
-                '\n' => try result.appendSlice("\\n"),
-                '\r' => try result.appendSlice("\\r"),
-                '\\' => try result.appendSlice("\\\\"),
-                '\'' => try result.appendSlice("\\'"),
-                '"' => try result.appendSlice("\\\""),
-                else => try result.append(c),
+                0 => try result.appendSlice(self.allocator, "\\0"),
+                '\n' => try result.appendSlice(self.allocator, "\\n"),
+                '\r' => try result.appendSlice(self.allocator, "\\r"),
+                '\\' => try result.appendSlice(self.allocator, "\\\\"),
+                '\'' => try result.appendSlice(self.allocator, "\\'"),
+                '"' => try result.appendSlice(self.allocator, "\\\""),
+                else => try result.append(self.allocator, c),
             }
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// 关闭连接
@@ -1172,7 +1172,7 @@ pub const MySQLiStmt = struct {
     allocator: std.mem.Allocator,
     connection: *Connection,
     sql: []const u8,
-    bound_params: std.ArrayList(Value),
+    bound_params: std.ArrayListUnmanaged(Value),
     result: ?*MySQLiResult,
 
     pub fn init(allocator: std.mem.Allocator, connection: *Connection, sql: []const u8) !MySQLiStmt {
@@ -1180,7 +1180,7 @@ pub const MySQLiStmt = struct {
             .allocator = allocator,
             .connection = connection,
             .sql = try allocator.dupe(u8, sql),
-            .bound_params = std.ArrayList(Value).init(allocator),
+            .bound_params = .{},
             .result = null,
         };
     }
@@ -1190,7 +1190,7 @@ pub const MySQLiStmt = struct {
         for (self.bound_params.items) |*param| {
             param.release(self.allocator);
         }
-        self.bound_params.deinit();
+        self.bound_params.deinit(self.allocator);
         if (self.result) |r| {
             r.deinit();
             self.allocator.destroy(r);
@@ -1198,7 +1198,7 @@ pub const MySQLiStmt = struct {
     }
 
     pub fn bindParam(self: *MySQLiStmt, value: Value) !void {
-        try self.bound_params.append(value.retain());
+        try self.bound_params.append(self.allocator, value.retain());
     }
 
     pub fn execute(self: *MySQLiStmt) !bool {

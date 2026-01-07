@@ -441,7 +441,7 @@ pub const WaitGroup = struct {
     
     /// Add delta to the WaitGroup counter
     /// Requirements: 8.9
-    pub fn add(self: *WaitGroup, delta: i32) void {
+    pub fn add(self: *WaitGroup, delta: i32) !void {
         const prev = self.counter.fetchAdd(delta, .seq_cst);
         const new_value = prev + delta;
         
@@ -452,16 +452,18 @@ pub const WaitGroup = struct {
             self.wait_queue.wakeAll();
         }
         
-        // Panic if counter goes negative
+        // Return error if counter goes negative
         if (new_value < 0) {
-            @panic("WaitGroup counter went negative");
+            // Restore the counter to prevent inconsistent state
+            _ = self.counter.fetchSub(delta, .seq_cst);
+            return error.WaitGroupCounterNegative;
         }
     }
     
     /// Decrement the WaitGroup counter by 1
     /// Requirements: 8.10
-    pub fn done(self: *WaitGroup) void {
-        self.add(-1);
+    pub fn done(self: *WaitGroup) !void {
+        try self.add(-1);
     }
     
     /// Block until the WaitGroup counter is zero
@@ -600,18 +602,18 @@ test "WaitGroup basic operations" {
     try std.testing.expectEqual(@as(i32, 0), wg.getCount());
     
     // Add some work
-    wg.add(3);
+    try wg.add(3);
     try std.testing.expect(!wg.isDone());
     try std.testing.expectEqual(@as(i32, 3), wg.getCount());
     
     // Mark work as done
-    wg.done();
+    try wg.done();
     try std.testing.expectEqual(@as(i32, 2), wg.getCount());
     
-    wg.done();
+    try wg.done();
     try std.testing.expectEqual(@as(i32, 1), wg.getCount());
     
-    wg.done();
+    try wg.done();
     try std.testing.expect(wg.isDone());
     try std.testing.expectEqual(@as(i32, 0), wg.getCount());
 }

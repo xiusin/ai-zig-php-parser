@@ -1641,7 +1641,7 @@ pub const VM = struct {
         // 2. Generate optimized machine code for hot paths
         // 3. Replace interpreted execution with compiled code
         self.execution_stats.function_calls += 1;
-        
+
         // Mark function as JIT candidate if called frequently
         // The actual JIT compilation would happen when call count exceeds threshold
         _ = function;
