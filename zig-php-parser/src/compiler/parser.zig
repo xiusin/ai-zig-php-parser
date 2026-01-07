@@ -806,10 +806,8 @@ pub const Parser = struct {
         } else {
             name_tok = try self.eat(.t_variable);
             name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
-            // Strip leading '$' from PHP-style variable
-            if (name_str.len > 0 and name_str[0] == '$') {
-                name_str = name_str[1..];
-            }
+            // Keep the '$' prefix for PHP-style variables so that parameter names
+            // match variable lookups in the function body (e.g., $name -> $name)
         }
         const name_id = try self.context.intern(name_str);
 
