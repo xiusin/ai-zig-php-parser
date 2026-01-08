@@ -1,5 +1,5 @@
 <?php
-// Debug with closure instead of arrow function
+// Debug with interface but no describeAll
 interface Shape {
     public function area(): float;
 }
@@ -18,19 +18,13 @@ class Calculator {
     public function getShapes(): array {
         return [new Circle(5), new Circle(10)];
     }
-    
-    public function describeAll(array $shapes): array {
-        // Use closure
-        return array_map(function($s) { return 42; }, $shapes);
-    }
 }
 
 $calc = new Calculator();
 
-// Call describeAll
-echo "About to call describeAll\n";
-$result = $calc->describeAll([new Circle(1)]);
-echo "describeAll done\n";
+// Just create an array with interface type
+$arr = [new Circle(1)];
+echo "Array created\n";
 
 // Now call getShapes
 echo "About to call getShapes\n";

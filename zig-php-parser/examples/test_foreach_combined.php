@@ -1,5 +1,5 @@
 <?php
-// Debug with closure instead of arrow function
+// Test combining multiple features
 interface Shape {
     public function area(): float;
 }
@@ -19,22 +19,17 @@ class Calculator {
         return [new Circle(5), new Circle(10)];
     }
     
-    public function describeAll(array $shapes): array {
-        // Use closure
-        return array_map(function($s) { return 42; }, $shapes);
+    public function sumAreas(array $shapes): float {
+        $total = 0;
+        foreach ($shapes as $shape) {
+            $total += $shape->area();
+        }
+        return $total;
     }
 }
 
 $calc = new Calculator();
-
-// Call describeAll
-echo "About to call describeAll\n";
-$result = $calc->describeAll([new Circle(1)]);
-echo "describeAll done\n";
-
-// Now call getShapes
-echo "About to call getShapes\n";
 $shapes = $calc->getShapes();
-echo "Got shapes\n";
-
+echo "Total: " . $calc->sumAreas($shapes) . "\n";
 echo "Done\n";
+

@@ -2240,8 +2240,34 @@ pub const Closure = struct {
     is_static: bool,
 
     pub fn init(allocator: std.mem.Allocator, function: UserFunction) Closure {
+        // 复制 function.name 的数据，因为 function 可能是临时变量
+        // 当 function 被释放后，原始的 name 指针会变成悬挂指针
+        var copied_name = function.name;
+        const should_release_original = function.name.data.len > 0;
+        if (should_release_original) {
+            copied_name = PHPString.init(allocator, function.name.data) catch function.name;
+        }
+
+        // 如果成功复制了 name，需要释放原始指针
+        // 如果复制失败，使用原始指针（caller 负责释放）
+        if (should_release_original and copied_name != function.name) {
+            function.name.release(allocator);
+        }
+
+        // 暂时共享 parameters，后续再深拷贝
+        const copied_params = function.parameters;
+
         return Closure{
-            .function = function,
+            .function = .{
+                .name = copied_name,
+                .parameters = copied_params,
+                .return_type = function.return_type,
+                .attributes = function.attributes,
+                .body = function.body,
+                .is_variadic = function.is_variadic,
+                .min_args = function.min_args,
+                .max_args = function.max_args,
+            },
             .captured_vars = std.StringHashMap(Value).init(allocator),
             .is_static = false,
         };
@@ -2293,7 +2319,9 @@ pub const Closure = struct {
     }
 
     pub fn captureVariable(self: *Closure, name: []const u8, value: Value) !void {
-        try self.captured_vars.put(name, value);
+        // Retain the value before storing to prevent premature release
+        const retained = value.retain();
+        try self.captured_vars.put(name, retained);
     }
 
     pub fn captureByReference(self: *Closure, name: []const u8, value: Value) !void {
@@ -2353,6 +2381,11 @@ pub const ArrowFunction = struct {
         }
         if (self.parameters.len > 0) {
             allocator.free(self.parameters);
+        }
+        // 释放 captured_vars 中的 Value
+        var iter = self.captured_vars.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
         }
         self.captured_vars.deinit();
     }

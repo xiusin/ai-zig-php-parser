@@ -2,17 +2,16 @@
 
 class Test {
     public function method() {
-        $fn = fn() => 42;
-        $result = $fn();
+        $result = $this->other();
         echo "Result: $result\n";
     }
-}
 
-function other() {
-    return 42;
+    public function other() {
+        return 42;
+    }
 }
 
 $obj = new Test();
 $obj->method();
-other();
 echo "Done\n";
+

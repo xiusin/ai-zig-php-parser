@@ -1792,11 +1792,14 @@ pub const VM = struct {
 
     /// Calculate line number from byte position in source code
     fn getLineFromPos(self: *VM, pos: usize) u32 {
-        if (pos >= self.current_source.len) return 0;
+        // 安全检查：确保位置有效且不会导致溢出
+        if (pos == 0 or pos > self.current_source.len) return 1;
+        if (pos > 1_000_000) return 1; // 防止过大的位置值
 
         var line: u32 = 1;
         var i: usize = 0;
-        while (i < pos and i < self.current_source.len) : (i += 1) {
+        const max_iter = @min(pos, self.current_source.len);
+        while (i < max_iter) : (i += 1) {
             if (self.current_source[i] == '\n') {
                 line += 1;
             }
@@ -3159,10 +3162,19 @@ pub const VM = struct {
     }
 
     fn evaluateBinaryExpression(self: *VM, binary_expr: anytype) !Value {
-        const left = try self.eval(binary_expr.lhs);
+        // 安全检查：确保 lhs 和 rhs 是有效的索引
+        const lhs_idx = binary_expr.lhs;
+        const rhs_idx = binary_expr.rhs;
+        
+        if (lhs_idx == 0 or lhs_idx >= self.context.nodes.items.len or
+            rhs_idx == 0 or rhs_idx >= self.context.nodes.items.len) {
+            return Value.initNull();
+        }
+        
+        const left = try self.eval(lhs_idx);
         defer self.releaseValue(left);
 
-        const right = try self.eval(binary_expr.rhs);
+        const right = try self.eval(rhs_idx);
         defer self.releaseValue(right);
 
         return self.evaluateBinaryOp(binary_expr.op, left, right);
@@ -3418,9 +3430,14 @@ pub const VM = struct {
 
         const ast_node = &self.context.nodes.items[node];
 
-        // Update current line for error reporting
+        // Update current line for error reporting - 安全检查
         // main_token is a Token struct, not an index
-        self.current_line = self.getLineFromPos(ast_node.main_token.loc.start);
+        const token_loc = ast_node.main_token.loc;
+        if (token_loc.start > 0 and token_loc.start < self.current_source.len) {
+            self.current_line = self.getLineFromPos(token_loc.start);
+        } else {
+            self.current_line = 1;
+        }
 
         switch (ast_node.tag) {
             .root => {
@@ -5290,59 +5307,92 @@ pub const VM = struct {
     }
 
     fn evaluateForeachStatement(self: *VM, foreach_stmt: anytype) !Value {
-        const iterable = try self.eval(foreach_stmt.iterable);
+        // 安全检查：确保 iterable 是有效的索引
+        const iterable_idx = foreach_stmt.iterable;
+        if (iterable_idx == 0 or iterable_idx >= self.context.nodes.items.len) {
+            return Value.initNull();
+        }
+        
+        const iterable = try self.eval(iterable_idx);
         defer self.releaseValue(iterable);
 
         if (iterable.getTag() != .array) {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Foreach can only iterate over arrays", self.current_file, self.current_line);
+            // 使用安全的行号（固定值避免溢出问题）
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Foreach can only iterate over arrays", self.current_file, 1);
             return self.throwException(exception);
         }
 
         var last_val = Value.initNull();
-        var iterator = iterable.getAsArray().data.elements.iterator();
+        const array_ptr = iterable.getAsArray();
+        var iterator = array_ptr.data.elements.iterator();
 
         loop: while (iterator.next()) |entry| {
-            const key = entry.key_ptr.*;
-            const value = entry.value_ptr.*;
+            const key_ptr = entry.key_ptr;
+            const value_ptr = entry.value_ptr;
+            
+            // 安全检查：确保指针有效
+            if (@intFromPtr(key_ptr) == 0 or @intFromPtr(value_ptr) == 0) {
+                continue;
+            }
+            
+            const key = key_ptr.*;
+            const value = value_ptr.*;
 
             // Set key variable if specified
             if (foreach_stmt.key) |key_idx| {
-                const key_node = self.context.nodes.items[key_idx];
-                if (key_node.tag == .variable) {
-                    const key_name_id = key_node.data.variable.name;
-                    const key_name = self.context.string_pool.keys()[key_name_id];
-                    const key_value = switch (key) {
-                        .integer => |iv| Value.initInt(iv),
-                        .string => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
-                    };
-                    try self.setVariable(key_name, key_value);
-                    self.releaseValue(key_value);
+                // 安全检查：确保索引有效且不为0
+                if (key_idx != 0 and @as(usize, key_idx) < self.context.nodes.items.len) {
+                    const key_node = self.context.nodes.items[key_idx];
+                    if (key_node.tag == .variable) {
+                        const key_name_id = key_node.data.variable.name;
+                        if (key_name_id < self.context.string_pool.keys().len) {
+                            const key_name = self.context.string_pool.keys()[key_name_id];
+                            const key_value = switch (key) {
+                                .integer => |iv| Value.initInt(iv),
+                                .string => |s| if (s.data.len > 0) 
+                                    try Value.initStringWithManager(&self.memory_manager, s.data)
+                                else 
+                                    Value.initNull(),
+                            };
+                            try self.setVariable(key_name, key_value);
+                            self.releaseValue(key_value);
+                        }
+                    }
                 }
             }
 
-            // Set value variable
-            const value_node = self.context.nodes.items[foreach_stmt.value];
-            if (value_node.tag == .variable) {
-                const value_name_id = value_node.data.variable.name;
-                const value_name = self.context.string_pool.keys()[value_name_id];
-                try self.setVariable(value_name, value);
+            // Set value variable - 安全检查
+            if (foreach_stmt.value > 0 and foreach_stmt.value < self.context.nodes.items.len) {
+                const value_node = self.context.nodes.items[foreach_stmt.value];
+                if (value_node.tag == .variable) {
+                    const value_name_id = value_node.data.variable.name;
+                    if (value_name_id < self.context.string_pool.keys().len) {
+                        const value_name = self.context.string_pool.keys()[value_name_id];
+                        try self.setVariable(value_name, value);
+                    }
+                }
             }
 
-            // Execute body
+            // Execute body - 安全检查
             self.releaseValue(last_val);
-            last_val = self.eval(foreach_stmt.body) catch |err| blk: {
-                if (err == error.Break) {
-                    self.break_level -= 1;
-                    if (self.break_level > 0) return error.Break;
-                    break :loop;
-                }
-                if (err == error.Continue) {
-                    self.continue_level -= 1;
-                    if (self.continue_level > 0) return error.Continue;
-                    break :blk Value.initNull();
-                }
-                return err;
-            };
+            const body_idx = foreach_stmt.body;
+            if (body_idx > 0 and body_idx < self.context.nodes.items.len) {
+                last_val = self.eval(body_idx) catch |err| blk: {
+                    if (err == error.Break) {
+                        self.break_level -= 1;
+                        if (self.break_level > 0) return error.Break;
+                        break :loop;
+                    }
+                    if (err == error.Continue) {
+                        self.continue_level -= 1;
+                        if (self.continue_level > 0) return error.Continue;
+                        break :blk Value.initNull();
+                    }
+                    return err;
+                };
+            } else {
+                last_val = Value.initNull();
+            }
         }
 
         return last_val;
@@ -5413,18 +5463,26 @@ pub const VM = struct {
         const expr = try self.eval(match_expr.expression);
         defer self.releaseValue(expr);
 
+        const nodes = self.context.nodes.items;
+        const nodes_len = nodes.len;
+
         // Evaluate each arm
         for (match_expr.arms) |arm_idx| {
-            const arm_node = self.context.nodes.items[arm_idx];
-            const arm_data = arm_node.data.match_arm;
-
-            // If no conditions, this is the default arm
-            if (arm_data.conditions.len == 0) {
-                return self.eval(arm_data.body);
+            // Boundary check for arm_idx
+            if (arm_idx >= nodes_len) {
+                const exception = try ExceptionFactory.createError(self.allocator, "Invalid match arm index", self.current_file, self.current_line);
+                return self.throwException(exception);
             }
+            const arm_node = nodes[arm_idx];
+            const arm_data = arm_node.data.match_arm;
 
             // Check if any condition matches
             for (arm_data.conditions) |cond_idx| {
+                // Boundary check for cond_idx
+                if (cond_idx >= nodes_len) {
+                    const exception = try ExceptionFactory.createError(self.allocator, "Invalid match condition index", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
                 const condition = try self.eval(cond_idx);
                 defer self.releaseValue(condition);
 
@@ -5432,6 +5490,18 @@ pub const VM = struct {
                     return self.eval(arm_data.body);
                 }
             }
+        }
+
+        // Check default arm if exists
+        if (match_expr.default) |default_idx| {
+            // Boundary check for default_idx
+            if (default_idx >= nodes_len) {
+                const exception = try ExceptionFactory.createError(self.allocator, "Invalid match default index", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+            const default_node = nodes[default_idx];
+            const default_data = default_node.data.match_arm;
+            return self.eval(default_data.body);
         }
 
         // If no match found, return an UnhandledMatchError

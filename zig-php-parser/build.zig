@@ -4,13 +4,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Use ReleaseSafe for main exe to work around Zig 0.15.2 LLVM Debug mode bug
+    // The bug causes "Instruction does not dominate all uses" LLVM error in Debug mode
+    const exe_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
+
     // Main executable
     const exe = b.addExecutable(.{
         .name = "php-interpreter",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = exe_optimize,
         }),
     });
     exe.linkLibC();
@@ -26,7 +30,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    
+
     // Allow LSP to import files from src/ as if it were in the root
     lsp.root_module.addImport("project_root", b.createModule(.{
         .root_source_file = b.path("src/compiler/root.zig"), // Expose compiler root
@@ -34,14 +38,14 @@ pub fn build(b: *std.Build) void {
     // We also need raw access to files for relative imports if we want to mimic src structure
     // But since Zig modules are strict, let's expose specific submodules or the compiler root.
     // The previous analysis showed compiler/root.zig exposes PHPContext.
-    
+
     // Let's verify imports in main.zig:
     // const parser = @import("compiler/parser.zig");
     // This implies main.zig relies on file system structure relative to itself.
-    
+
     // For the LSP, living in tool/lsp/main.zig, to import "compiler/parser.zig",
     // we would need to map "compiler" to "src/compiler".
-    
+
     lsp.root_module.addImport("compiler", b.createModule(.{
         .root_source_file = b.path("src/compiler/root.zig"),
     }));
@@ -74,7 +78,7 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests
     const test_step = b.step("test", "Run unit tests");
-    
+
     // List of all test files
     const test_files = [_][]const u8{
         "src/test_enhanced_types.zig",
@@ -97,7 +101,7 @@ pub fn build(b: *std.Build) void {
         "src/runtime/test_error_handling_property.zig",
         "src/test_comprehensive_concurrency.zig",
     };
-    
+
     // Add all test files
     for (test_files) |test_file| {
         const test_exe = b.addTest(.{
@@ -108,7 +112,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         test_exe.linkLibC();
-        
+
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);
     }
@@ -134,7 +138,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     docs_exe.linkLibC();
-    
+
     const docs_cmd = b.addRunArtifact(docs_exe);
     docs_cmd.addArg("--help");
     docs_step.dependOn(&docs_cmd.step);
@@ -150,7 +154,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     bench_exe.linkLibC();
-    
+
     const bench_cmd = b.addRunArtifact(bench_exe);
     bench_cmd.addArg("examples/hello.php");
     bench_step.dependOn(&bench_cmd.step);
@@ -166,7 +170,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     leak_check_exe.linkLibC();
-    
+
     const leak_check_cmd = b.addRunArtifact(leak_check_exe);
     leak_check_cmd.addArg("examples/hello.php");
     leak_check_step.dependOn(&leak_check_cmd.step);

@@ -8,11 +8,7 @@ class Test {
     }
 }
 
-function other() {
-    return 42;
-}
-
 $obj = new Test();
 $obj->method();
-other();
 echo "Done\n";
+

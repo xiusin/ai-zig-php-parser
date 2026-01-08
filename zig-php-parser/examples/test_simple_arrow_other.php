@@ -6,13 +6,13 @@ class Test {
         $result = $fn();
         echo "Result: $result\n";
     }
-}
 
-function other() {
-    return 42;
+    public function other() {
+        return 42;
+    }
 }
 
 $obj = new Test();
 $obj->method();
-other();
+$obj->other();
 echo "Done\n";

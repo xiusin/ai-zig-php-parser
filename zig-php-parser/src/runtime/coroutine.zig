@@ -8,25 +8,25 @@ const Thread = std.Thread;
 /// Merged from coroutine_new.zig for performance optimization
 pub const OptimizedCoroutine = struct {
     // ========== Hot fields (frequently accessed) - first cache line ==========
-    id: u64,                    // 8 bytes - unique coroutine identifier
-    state: State,               // 1 byte - current execution state
-    priority: u8,               // 1 byte - scheduling priority (0=highest, 4=lowest)
-    _padding1: [6]u8,          // 6 bytes padding to align to 16 bytes
-    
+    id: u64, // 8 bytes - unique coroutine identifier
+    state: State, // 1 byte - current execution state
+    priority: u8, // 1 byte - scheduling priority (0=highest, 4=lowest)
+    _padding1: [6]u8, // 6 bytes padding to align to 16 bytes
+
     // ========== Second cache line - execution context ==========
-    stack: Stack,               // 32 bytes - stack management
-    context: ExecutionContext,  // 32 bytes - CPU context (registers, IP)
-    
+    stack: Stack, // 32 bytes - stack management
+    context: ExecutionContext, // 32 bytes - CPU context (registers, IP)
+
     // ========== Third cache line - scheduling data ==========
-    created_at: i64,           // 8 bytes - creation timestamp
-    scheduled_count: u64,      // 8 bytes - number of times scheduled
-    callback: Value,           // 16 bytes - function to execute
-    
+    created_at: i64, // 8 bytes - creation timestamp
+    scheduled_count: u64, // 8 bytes - number of times scheduled
+    callback: Value, // 16 bytes - function to execute
+
     // ========== Cold fields (less frequently accessed) ==========
-    args: []Value,             // 16 bytes - function arguments
-    result: ?Value,            // 17 bytes - execution result (optional)
+    args: []Value, // 16 bytes - function arguments
+    result: ?Value, // 17 bytes - execution result (optional)
     allocator: std.mem.Allocator, // 16 bytes - memory allocator
-    
+
     pub const State = enum(u8) {
         created = 0,
         ready = 1,
@@ -36,19 +36,19 @@ pub const OptimizedCoroutine = struct {
         completed = 5,
         cancelled = 6,
     };
-    
+
     /// Optimized stack structure with configurable size
     pub const Stack = struct {
-        data: []u8,             // Stack memory
-        size: usize,            // Total stack size
-        sp: usize,              // Stack pointer (current position)
-        bp: usize,              // Base pointer (frame start)
-        
+        data: []u8, // Stack memory
+        size: usize, // Total stack size
+        sp: usize, // Stack pointer (current position)
+        bp: usize, // Base pointer (frame start)
+
         pub fn init(allocator: std.mem.Allocator, size: usize) !Stack {
             // Align stack size to page boundary for better performance
             const aligned_size = std.mem.alignForward(usize, size, 4096);
             const data = try allocator.alloc(u8, aligned_size);
-            
+
             return Stack{
                 .data = data,
                 .size = aligned_size,
@@ -56,11 +56,11 @@ pub const OptimizedCoroutine = struct {
                 .bp = aligned_size,
             };
         }
-        
+
         pub fn deinit(self: *Stack, allocator: std.mem.Allocator) void {
             allocator.free(self.data);
         }
-        
+
         pub fn push(self: *Stack, value: Value) !void {
             if (self.sp < @sizeOf(Value)) {
                 return error.StackOverflow;
@@ -69,7 +69,7 @@ pub const OptimizedCoroutine = struct {
             const value_ptr: *Value = @ptrCast(@alignCast(&self.data[self.sp]));
             value_ptr.* = value;
         }
-        
+
         pub fn pop(self: *Stack) ?Value {
             if (self.sp >= self.size) {
                 return null;
@@ -79,29 +79,29 @@ pub const OptimizedCoroutine = struct {
             self.sp += @sizeOf(Value);
             return value;
         }
-        
+
         pub fn reset(self: *Stack) void {
             self.sp = self.size;
             self.bp = self.size;
         }
-        
+
         pub fn getUsedSize(self: *Stack) usize {
             return self.size - self.sp;
         }
-        
+
         pub fn getRemainingSize(self: *Stack) usize {
             return self.sp;
         }
     };
-    
+
     /// CPU context for context switching
     pub const ExecutionContext = struct {
-        ip: usize,              // Instruction pointer
-        registers: [16]Value,   // General purpose registers
+        ip: usize, // Instruction pointer
+        registers: [16]Value, // General purpose registers
         locals: std.StringHashMap(Value), // Local variables
         current_file: []const u8 = "",
         current_line: usize = 0,
-        
+
         pub fn init(allocator: std.mem.Allocator) ExecutionContext {
             return ExecutionContext{
                 .ip = 0,
@@ -109,7 +109,7 @@ pub const OptimizedCoroutine = struct {
                 .locals = std.StringHashMap(Value).init(allocator),
             };
         }
-        
+
         pub fn deinit(self: *ExecutionContext) void {
             // Release all local variables
             var iter = self.locals.iterator();
@@ -118,14 +118,14 @@ pub const OptimizedCoroutine = struct {
             }
             self.locals.deinit();
         }
-        
+
         /// Save current VM state to context
         pub fn save(self: *ExecutionContext, vm: *anyopaque) !void {
             const vm_ptr = @as(*@import("vm.zig").VM, @ptrCast(@alignCast(vm)));
-            
+
             // Save current execution state
             self.ip = vm_ptr.current_line;
-            
+
             // Save global variables (first 8 most commonly used)
             var global_iter = vm_ptr.global.variables.iterator();
             var i: usize = 0;
@@ -134,36 +134,36 @@ pub const OptimizedCoroutine = struct {
                 self.registers[i] = entry.value_ptr.*.retain();
                 i += 1;
             }
-            
+
             // Clear remaining registers
             while (i < 8) {
                 self.registers[i] = Value.initNull();
                 i += 1;
             }
-            
+
             // Save current file and line for debugging
             self.current_file = try vm_ptr.allocator.dupe(u8, vm_ptr.current_file);
             self.current_line = vm_ptr.current_line;
         }
-        
+
         /// Restore context to VM
         pub fn restore(self: *ExecutionContext, vm: *anyopaque) !void {
             const vm_ptr = @as(*@import("vm.zig").VM, @ptrCast(@alignCast(vm)));
-            
+
             // Restore execution state
             vm_ptr.current_line = self.ip;
             vm_ptr.current_file = self.current_file;
-            
+
             // Note: Global variable restoration would require more complex state management
             // For now, we preserve the current approach to avoid breaking existing functionality
         }
-        
+
         pub fn reset(self: *ExecutionContext) void {
             self.ip = 0;
             for (&self.registers) |*reg| {
                 reg.* = Value.initNull();
             }
-            
+
             // Clear locals but keep the hashmap allocated
             var iter = self.locals.iterator();
             while (iter.next()) |entry| {
@@ -172,24 +172,24 @@ pub const OptimizedCoroutine = struct {
             self.locals.clearRetainingCapacity();
         }
     };
-    
+
     /// Initialize a new optimized coroutine
     pub fn init(allocator: std.mem.Allocator, id: u64, callback: Value, args: []Value) !*OptimizedCoroutine {
         return initWithStackSize(allocator, id, callback, args, 64 * 1024); // 64KB default
     }
-    
+
     /// Initialize coroutine with specific stack size
     pub fn initWithStackSize(allocator: std.mem.Allocator, id: u64, callback: Value, args: []Value, stack_size: usize) !*OptimizedCoroutine {
         const coroutine = try allocator.create(OptimizedCoroutine);
         errdefer allocator.destroy(coroutine);
-        
+
         // Copy arguments
         const args_copy = try allocator.alloc(Value, args.len);
         errdefer allocator.free(args_copy);
         for (args, 0..) |arg, i| {
             args_copy[i] = arg.retain();
         }
-        
+
         coroutine.* = OptimizedCoroutine{
             .id = id,
             .state = .created,
@@ -204,68 +204,68 @@ pub const OptimizedCoroutine = struct {
             .result = null,
             .allocator = allocator,
         };
-        
+
         return coroutine;
     }
-    
+
     /// Clean up coroutine resources
     pub fn deinit(self: *OptimizedCoroutine, allocator: std.mem.Allocator) void {
         // Release callback
         self.callback.release(allocator);
-        
+
         // Release arguments
         for (self.args) |*arg| {
             arg.release(allocator);
         }
         allocator.free(self.args);
-        
+
         // Release result if present
         if (self.result) |*result| {
             result.release(allocator);
         }
-        
+
         // Clean up stack and context
         self.stack.deinit(allocator);
         self.context.deinit();
     }
-    
+
     /// Execute the coroutine
     pub fn execute(self: *OptimizedCoroutine, vm: *anyopaque) !void {
         if (self.state == .cancelled) {
             return;
         }
-        
+
         self.state = .running;
         self.scheduled_count += 1;
-        
+
         // Save current context if resuming
         if (self.scheduled_count > 1) {
             try self.context.restore(vm);
         }
-        
+
         // Execute the callback
         const result = try self.invokeCallback(vm);
-        
+
         // Store result and mark as completed if not yielded
         if (self.state == .running) {
             self.result = result;
             self.state = .completed;
         }
     }
-    
+
     /// Yield execution back to scheduler
     pub fn yield(self: *OptimizedCoroutine) void {
         if (self.state == .running) {
             self.state = .yielded;
         }
     }
-    
+
     /// Mark coroutine as completed with result
     pub fn complete(self: *OptimizedCoroutine, result: Value) void {
         self.result = result;
         self.state = .completed;
     }
-    
+
     /// Reset coroutine for reuse (used by coroutine pool)
     pub fn reset(self: *OptimizedCoroutine, id: u64, callback: Value, args: []Value) !void {
         // Clean up old state
@@ -276,7 +276,7 @@ pub const OptimizedCoroutine = struct {
         if (self.result) |*result| {
             result.release(self.allocator);
         }
-        
+
         // Set new state
         self.id = id;
         self.state = .created;
@@ -284,24 +284,24 @@ pub const OptimizedCoroutine = struct {
         self.created_at = @intCast(std.time.nanoTimestamp());
         self.scheduled_count = 0;
         self.callback = callback.retain();
-        
+
         // Reallocate args if size changed
         if (self.args.len != args.len) {
             self.allocator.free(self.args);
             self.args = try self.allocator.alloc(Value, args.len);
         }
-        
+
         for (args, 0..) |arg, i| {
             self.args[i] = arg.retain();
         }
-        
+
         self.result = null;
-        
+
         // Reset stack and context
         self.stack.reset();
         self.context.reset();
     }
-    
+
     /// Get memory usage of this coroutine
     pub fn getMemoryUsage(self: *OptimizedCoroutine) usize {
         var total: usize = @sizeOf(OptimizedCoroutine);
@@ -309,22 +309,22 @@ pub const OptimizedCoroutine = struct {
         total += self.args.len * @sizeOf(Value);
         return total;
     }
-    
+
     /// Check if coroutine is ready to run
     pub fn isReady(self: *OptimizedCoroutine) bool {
         return self.state == .ready or self.state == .created;
     }
-    
+
     /// Check if coroutine is finished
     pub fn isFinished(self: *OptimizedCoroutine) bool {
         return self.state == .completed or self.state == .cancelled;
     }
-    
+
     /// Set coroutine priority (0=highest, 4=lowest)
     pub fn setPriority(self: *OptimizedCoroutine, priority: u8) void {
         self.priority = @min(priority, 4);
     }
-    
+
     /// Get execution time in nanoseconds
     pub fn getExecutionTime(self: *OptimizedCoroutine) i64 {
         if (self.state == .completed or self.state == .cancelled) {
@@ -332,17 +332,17 @@ pub const OptimizedCoroutine = struct {
         }
         return 0;
     }
-    
+
     // Private helper method for callback invocation
     // Executes the coroutine's callback function with its arguments
     fn invokeCallback(self: *OptimizedCoroutine, vm: *anyopaque) !Value {
         _ = vm; // VM pointer for future use
-        
+
         // Check if callback is a valid callable
         if (self.callback.getTag() == .null) {
             return Value.initNull();
         }
-        
+
         // For now, return the callback value itself
         // Full implementation would execute the callback through the VM
         // This is sufficient for the coroutine system to function
@@ -363,21 +363,21 @@ pub const OptimizedCoroutinePool = struct {
     total_destroyed: u64,
     stack_size: usize,
     mutex: std.Thread.Mutex,
-    
+
     // Pool configuration
     config: PoolConfig,
-    
+
     // Monitoring and statistics
     peak_usage: usize,
     last_cleanup: i64,
     memory_usage: std.atomic.Value(usize),
     active_coroutines: std.atomic.Value(usize),
-    
+
     // Performance tracking
     allocation_time_ns: u64,
     reuse_time_ns: u64,
     cleanup_count: u64,
-    
+
     pub const PoolConfig = struct {
         /// Maximum number of coroutines to keep in pool
         max_pool_size: usize = 1000,
@@ -396,7 +396,7 @@ pub const OptimizedCoroutinePool = struct {
         /// Enable performance tracking
         enable_performance_tracking: bool = true,
     };
-    
+
     pub const PoolStats = struct {
         available_count: usize,
         ready_count: usize,
@@ -413,7 +413,7 @@ pub const OptimizedCoroutinePool = struct {
         avg_reuse_time_ns: u64,
         cleanup_count: u64,
     };
-    
+
     pub fn init(allocator: std.mem.Allocator, config: PoolConfig) !OptimizedCoroutinePool {
         var pool = OptimizedCoroutinePool{
             .allocator = allocator,
@@ -434,61 +434,61 @@ pub const OptimizedCoroutinePool = struct {
             .reuse_time_ns = 0,
             .cleanup_count = 0,
         };
-        
+
         // Pre-allocate capacity to avoid reallocations
         pool.available.ensureTotalCapacity(allocator, config.max_pool_size) catch {};
         pool.ready_queue.ensureTotalCapacity(allocator, config.max_pool_size) catch {};
-        
+
         // Warm up the pool if requested
         if (config.warmup_size > 0) {
             try pool.warmUp(config.warmup_size);
         }
-        
+
         return pool;
     }
-    
+
     /// Initialize with default configuration
     pub fn initDefault(allocator: std.mem.Allocator) !OptimizedCoroutinePool {
         return init(allocator, PoolConfig{});
     }
-    
+
     pub fn deinit(self: *OptimizedCoroutinePool) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         // Clean up all pooled coroutines
         for (self.available.items) |coroutine| {
             self.destroyCoroutine(coroutine);
         }
         self.available.deinit(self.allocator);
-        
+
         // Clean up ready queue
         for (self.ready_queue.items) |coroutine| {
             self.destroyCoroutine(coroutine);
         }
         self.ready_queue.deinit(self.allocator);
     }
-    
+
     /// Get a coroutine from the pool or create a new one
     pub fn acquire(self: *OptimizedCoroutinePool, id: u64, callback: Value, args: []Value) !*OptimizedCoroutine {
         const start_time = if (self.config.enable_performance_tracking) std.time.nanoTimestamp() else 0;
-        
+
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         // Perform automatic cleanup if enabled
         if (self.config.enable_auto_cleanup) {
             self.performCleanupIfNeeded();
         }
-        
+
         var coroutine: *OptimizedCoroutine = undefined;
-        
+
         if (self.available.items.len > 0) {
             // Reuse existing coroutine
             coroutine = self.available.pop().?;
             try coroutine.reset(id, callback, args);
             self.total_reused += 1;
-            
+
             if (self.config.enable_performance_tracking) {
                 const elapsed = std.time.nanoTimestamp() - start_time;
                 self.reuse_time_ns = @as(u64, @intCast(@divTrunc(@as(i128, self.reuse_time_ns) + elapsed, 2))); // Running average
@@ -497,36 +497,36 @@ pub const OptimizedCoroutinePool = struct {
             // Create new coroutine
             coroutine = try OptimizedCoroutine.initWithStackSize(self.allocator, id, callback, args, self.stack_size);
             self.total_created += 1;
-            
+
             if (self.config.enable_performance_tracking) {
                 const elapsed = std.time.nanoTimestamp() - start_time;
                 self.allocation_time_ns = @as(u64, @intCast(@divTrunc(@as(i128, self.allocation_time_ns) + elapsed, 2))); // Running average
             }
         }
-        
+
         // Update monitoring counters
         _ = self.active_coroutines.fetchAdd(1, .monotonic);
         if (self.config.enable_monitoring) {
             self.updateMemoryUsage();
         }
-        
+
         return coroutine;
     }
-    
+
     /// Return a coroutine to the pool
     pub fn release(self: *OptimizedCoroutinePool, coroutine: *OptimizedCoroutine) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         // Update active counter
         _ = self.active_coroutines.fetchSub(1, .monotonic);
-        
+
         // Reset coroutine state for reuse
         coroutine.state = .created;
         coroutine.result = null;
         coroutine.stack.reset();
         coroutine.context.reset();
-        
+
         if (self.available.items.len < self.max_size) {
             // Add to pool for reuse
             self.available.append(self.allocator, coroutine) catch {
@@ -534,7 +534,7 @@ pub const OptimizedCoroutinePool = struct {
                 self.destroyCoroutine(coroutine);
                 return;
             };
-            
+
             // Update peak usage
             if (self.available.items.len > self.peak_usage) {
                 self.peak_usage = self.available.items.len;
@@ -543,37 +543,37 @@ pub const OptimizedCoroutinePool = struct {
             // Pool is full, destroy the coroutine
             self.destroyCoroutine(coroutine);
         }
-        
+
         if (self.config.enable_monitoring) {
             self.updateMemoryUsage();
         }
     }
-    
+
     /// Add ready coroutine to ready queue (Requirement 6.8)
     pub fn addReady(self: *OptimizedCoroutinePool, coroutine: *OptimizedCoroutine) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         coroutine.state = .ready;
         try self.ready_queue.append(self.allocator, coroutine);
     }
-    
+
     /// Get next ready coroutine (Requirement 6.8)
     pub fn getReady(self: *OptimizedCoroutinePool) ?*OptimizedCoroutine {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         if (self.ready_queue.items.len > 0) {
             return self.ready_queue.orderedRemove(0);
         }
         return null;
     }
-    
+
     /// Get comprehensive pool statistics
     pub fn getStats(self: *OptimizedCoroutinePool) PoolStats {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         return PoolStats{
             .available_count = self.available.items.len,
             .ready_count = self.ready_queue.items.len,
@@ -584,52 +584,54 @@ pub const OptimizedCoroutinePool = struct {
             .total_destroyed = self.total_destroyed,
             .peak_usage = self.peak_usage,
             .memory_usage = self.memory_usage.load(.monotonic),
-            .reuse_ratio = if (self.total_created > 0) 
+            .reuse_ratio = if (self.total_created > 0)
                 @as(f64, @floatFromInt(self.total_reused)) / @as(f64, @floatFromInt(self.total_created))
-                else 0.0,
+            else
+                0.0,
             .efficiency = if (self.total_created + self.total_reused > 0)
                 @as(f64, @floatFromInt(self.total_reused)) / @as(f64, @floatFromInt(self.total_created + self.total_reused))
-                else 0.0,
+            else
+                0.0,
             .avg_allocation_time_ns = self.allocation_time_ns,
             .avg_reuse_time_ns = self.reuse_time_ns,
             .cleanup_count = self.cleanup_count,
         };
     }
-    
+
     /// Warm up the pool by pre-allocating coroutines
     pub fn warmUp(self: *OptimizedCoroutinePool, count: usize) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         const target_count = @min(count, self.max_size);
         const callback = Value.initNull();
         const args = [_]Value{};
-        
+
         while (self.available.items.len < target_count) {
             const coroutine = try OptimizedCoroutine.initWithStackSize(self.allocator, 0, callback, &args, self.stack_size);
             try self.available.append(self.allocator, coroutine);
             self.total_created += 1;
         }
-        
+
         if (self.config.enable_monitoring) {
             self.updateMemoryUsage();
         }
     }
-    
+
     /// Get current memory usage of the pool
     pub fn getMemoryUsage(self: *OptimizedCoroutinePool) usize {
         return self.memory_usage.load(.monotonic);
     }
-    
+
     // Private helper methods
-    
+
     /// Destroy a coroutine and update counters
     fn destroyCoroutine(self: *OptimizedCoroutinePool, coroutine: *OptimizedCoroutine) void {
         coroutine.deinit(self.allocator);
         self.allocator.destroy(coroutine);
         self.total_destroyed += 1;
     }
-    
+
     /// Perform cleanup if needed based on time interval
     fn performCleanupIfNeeded(self: *OptimizedCoroutinePool) void {
         const now = @as(i64, @intCast(std.time.milliTimestamp()));
@@ -638,7 +640,7 @@ pub const OptimizedCoroutinePool = struct {
             self.last_cleanup = now;
         }
     }
-    
+
     /// Perform actual cleanup
     fn performCleanup(self: *OptimizedCoroutinePool) void {
         // Simple cleanup: remove half of available coroutines if pool is large
@@ -652,31 +654,31 @@ pub const OptimizedCoroutinePool = struct {
             }
             self.cleanup_count += 1;
         }
-        
+
         if (self.config.enable_monitoring) {
             self.updateMemoryUsage();
         }
     }
-    
+
     /// Update memory usage statistics
     fn updateMemoryUsage(self: *OptimizedCoroutinePool) void {
         var total_memory: usize = 0;
-        
+
         // Calculate memory for available coroutines
         for (self.available.items) |coroutine| {
             total_memory += coroutine.getMemoryUsage();
         }
-        
+
         // Calculate memory for ready coroutines
         for (self.ready_queue.items) |coroutine| {
             total_memory += coroutine.getMemoryUsage();
         }
-        
+
         // Add overhead for the pool itself
         total_memory += @sizeOf(OptimizedCoroutinePool);
         total_memory += self.available.capacity * @sizeOf(*OptimizedCoroutine);
         total_memory += self.ready_queue.capacity * @sizeOf(*OptimizedCoroutine);
-        
+
         self.memory_usage.store(total_memory, .monotonic);
     }
 };
@@ -1086,7 +1088,7 @@ pub const CoroutineManager = struct {
         // 加入优先级队列
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         switch (self.scheduling_policy) {
             .fifo => try self.ready_queue.append(self.allocator, coroutine),
             .priority, .weighted_fair => try self.priority_queue.enqueue(coroutine),
@@ -1157,14 +1159,14 @@ pub const CoroutineManager = struct {
                 };
                 const has_sleeping = self.sleeping_queue.items.len > 0;
                 const has_io_waiting = self.io_waiting_queue.items.len > 0;
-                
+
                 if (!has_ready and !has_sleeping and !has_io_waiting) {
                     // 没有任何等待中的协程，退出调度器
                     self.scheduler_running.store(false, .seq_cst);
                     self.mutex.unlock();
                     break;
                 }
-                
+
                 // 如果有IO等待的协程，使用较短的等待时间以便及时响应IO事件
                 const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000; // 0.1ms or 1ms
                 self.cond.timedWait(&self.mutex, wait_time) catch {};
@@ -1390,7 +1392,7 @@ pub const CoroutineManager = struct {
 
         if (self.current_coroutine) |co| {
             try self.io_reactor.?.registerFd(fd, event_type, co, timeout_ms);
-            
+
             // 将协程加入IO等待队列
             self.mutex.lock();
             try self.io_waiting_queue.append(self.allocator, co);
@@ -1406,7 +1408,7 @@ pub const CoroutineManager = struct {
 
         if (self.current_coroutine) |co| {
             try self.io_reactor.?.registerTimer(co, delay_ms, null);
-            
+
             // 将协程加入IO等待队列
             self.mutex.lock();
             try self.io_waiting_queue.append(self.allocator, co);
@@ -1424,19 +1426,19 @@ pub const CoroutineManager = struct {
     /// 轮询IO事件并唤醒就绪的协程
     fn pollIOEvents(self: *CoroutineManager) !void {
         if (self.io_reactor == null) return;
-        
+
         const reactor = self.io_reactor.?;
-        
+
         // 非阻塞轮询
         const events = try reactor.poll(0);
         defer self.allocator.free(events);
-        
+
         // 将就绪的协程从IO等待队列移到就绪队列
         for (events) |event| {
             if (event.coroutine_id) |co_id| {
                 if (self.coroutines.get(co_id)) |co| {
                     self.mutex.lock();
-                    
+
                     // 从IO等待队列移除
                     for (self.io_waiting_queue.items, 0..) |waiting_co, i| {
                         if (waiting_co.id == co_id) {
@@ -1444,7 +1446,7 @@ pub const CoroutineManager = struct {
                             break;
                         }
                     }
-                    
+
                     // 加入就绪队列
                     if (co.state == .ready) {
                         switch (self.scheduling_policy) {
@@ -1452,7 +1454,7 @@ pub const CoroutineManager = struct {
                             .priority, .weighted_fair => self.priority_queue.enqueue(co) catch {},
                         }
                     }
-                    
+
                     self.mutex.unlock();
                 }
             }
@@ -1809,7 +1811,7 @@ pub fn GenericChannel(comptime T: type) type {
         const Self = @This();
         inner: *Channel,
         allocator: std.mem.Allocator,
-        
+
         pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             const inner = try Channel.initWithCapacity(allocator, capacity);
             return Self{
@@ -1817,16 +1819,16 @@ pub fn GenericChannel(comptime T: type) type {
                 .allocator = allocator,
             };
         }
-        
+
         pub fn deinit(self: *Self) void {
             self.inner.deinit();
         }
-        
+
         pub fn send(self: *Self, value: T) !void {
             const wrapped_value = try self.wrapValue(value);
             _ = try self.inner.sendWithTimeout(wrapped_value, 0, null);
         }
-        
+
         pub fn recv(self: *Self) !T {
             const result = try self.inner.recvWithTimeout(0, null);
             if (result) |value| {
@@ -1834,12 +1836,12 @@ pub fn GenericChannel(comptime T: type) type {
             }
             return error.ChannelClosed;
         }
-        
+
         pub fn trySend(self: *Self, value: T) bool {
             const wrapped_value = self.wrapValue(value) catch return false;
             return self.inner.trySend(wrapped_value);
         }
-        
+
         pub fn tryRecv(self: *Self) ?T {
             const result = self.inner.tryRecv();
             if (result) |value| {
@@ -1847,19 +1849,19 @@ pub fn GenericChannel(comptime T: type) type {
             }
             return null;
         }
-        
+
         pub fn close(self: *Self) void {
             self.inner.close();
         }
-        
+
         pub fn isClosed(self: *Self) bool {
             return self.inner.isClosed();
         }
-        
+
         pub fn len(self: *Self) usize {
             return self.inner.getSize();
         }
-        
+
         // 辅助方法：将T类型包装为Value
         fn wrapValue(self: *Self, value: T) !Value {
             switch (T) {
@@ -1870,7 +1872,7 @@ pub fn GenericChannel(comptime T: type) type {
                 else => @compileError("Unsupported type for GenericChannel: " ++ @typeName(T)),
             }
         }
-        
+
         // 辅助方法：将Value解包为T类型
         fn unwrapValue(self: *Self, value: Value) !T {
             _ = self;
@@ -2143,22 +2145,22 @@ pub const IOWaitEntry = struct {
 /// 在macOS上使用kqueue，在Linux上使用epoll
 pub const AsyncIOReactor = struct {
     allocator: std.mem.Allocator,
-    
+
     /// 平台特定的事件队列句柄
     event_fd: i32,
-    
+
     /// 等待IO的协程映射 (fd -> IOWaitEntry)
     waiting_coroutines: std.AutoHashMap(i32, IOWaitEntry),
-    
+
     /// 定时器等待队列
     timer_queue: std.ArrayListUnmanaged(TimerEntry),
-    
+
     /// 互斥锁保护共享状态
     mutex: Thread.Mutex,
-    
+
     /// 是否正在运行
     running: std.atomic.Value(bool),
-    
+
     /// 统计信息
     stats: IOStats,
 
@@ -2192,7 +2194,7 @@ pub const AsyncIOReactor = struct {
     /// 初始化异步IO反应器
     pub fn init(allocator: std.mem.Allocator) IOError!AsyncIOReactor {
         const event_fd = createEventQueue() catch return IOError.KqueueCreateFailed;
-        
+
         return AsyncIOReactor{
             .allocator = allocator,
             .event_fd = event_fd,
@@ -2207,12 +2209,12 @@ pub const AsyncIOReactor = struct {
     /// 清理资源
     pub fn deinit(self: *AsyncIOReactor) void {
         self.running.store(false, .seq_cst);
-        
+
         // 关闭事件队列
         if (self.event_fd >= 0) {
             std.posix.close(@intCast(self.event_fd));
         }
-        
+
         self.waiting_coroutines.deinit();
         self.timer_queue.deinit(self.allocator);
     }
@@ -2265,7 +2267,7 @@ pub const AsyncIOReactor = struct {
         defer self.mutex.unlock();
 
         const deadline = std.time.milliTimestamp() + @as(i64, @intCast(delay_ms));
-        
+
         self.timer_queue.append(self.allocator, TimerEntry{
             .coroutine = coroutine,
             .deadline_ms = deadline,
@@ -2283,7 +2285,7 @@ pub const AsyncIOReactor = struct {
         // 检查定时器
         const now = std.time.milliTimestamp();
         self.mutex.lock();
-        
+
         var i: usize = 0;
         while (i < self.timer_queue.items.len) {
             const timer = self.timer_queue.items[i];
@@ -2305,11 +2307,11 @@ pub const AsyncIOReactor = struct {
                 i += 1;
             }
         }
-        
+
         // 检查超时的IO等待
         var to_remove: std.ArrayListUnmanaged(i32) = .{};
         defer to_remove.deinit(self.allocator);
-        
+
         var iter = self.waiting_coroutines.iterator();
         while (iter.next()) |entry| {
             const wait_entry = entry.value_ptr;
@@ -2323,23 +2325,23 @@ pub const AsyncIOReactor = struct {
                 }
             }
         }
-        
+
         for (to_remove.items) |fd| {
             _ = self.waiting_coroutines.remove(fd);
             self.removeFromEventQueue(fd) catch {};
         }
-        
+
         self.mutex.unlock();
 
         // 轮询内核事件
         const kernel_events = try self.pollKernelEvents(timeout_ms);
-        
+
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         for (kernel_events) |kevent| {
             if (event_count >= events_buf.len) break;
-            
+
             if (self.waiting_coroutines.get(kevent.fd)) |wait_entry| {
                 events_buf[event_count] = IOEvent{
                     .fd = kevent.fd,
@@ -2348,7 +2350,7 @@ pub const AsyncIOReactor = struct {
                     .coroutine_id = wait_entry.coroutine.id,
                 };
                 event_count += 1;
-                
+
                 // 更新统计
                 switch (kevent.event_type) {
                     .read => self.stats.read_events += 1,
@@ -2356,18 +2358,18 @@ pub const AsyncIOReactor = struct {
                     .err => self.stats.errors += 1,
                     else => {},
                 }
-                
+
                 // 唤醒协程
                 wait_entry.coroutine.state = .ready;
-                
+
                 // 移除等待条目
                 _ = self.waiting_coroutines.remove(kevent.fd);
                 self.removeFromEventQueue(kevent.fd) catch {};
             }
         }
-        
+
         self.stats.total_events_processed += event_count;
-        
+
         // 返回事件切片
         const result = try self.allocator.alloc(IOEvent, event_count);
         @memcpy(result, events_buf[0..event_count]);
@@ -2377,19 +2379,19 @@ pub const AsyncIOReactor = struct {
     /// 运行事件循环（阻塞直到所有IO完成或超时）
     pub fn runEventLoop(self: *AsyncIOReactor, manager: *CoroutineManager, timeout_ms: i32) !void {
         self.running.store(true, .seq_cst);
-        
+
         while (self.running.load(.seq_cst)) {
             // 检查是否还有等待的协程
             self.mutex.lock();
             const has_waiting = self.waiting_coroutines.count() > 0 or self.timer_queue.items.len > 0;
             self.mutex.unlock();
-            
+
             if (!has_waiting) break;
-            
+
             // 轮询事件
             const events = try self.poll(timeout_ms);
             defer self.allocator.free(events);
-            
+
             // 将就绪的协程加入调度队列
             for (events) |event| {
                 if (event.coroutine_id) |co_id| {
@@ -2405,7 +2407,7 @@ pub const AsyncIOReactor = struct {
                     }
                 }
             }
-            
+
             // 如果没有事件，短暂休眠避免忙等待
             if (events.len == 0) {
                 std.Thread.sleep(1_000_000); // 1ms
@@ -2463,7 +2465,7 @@ pub const AsyncIOReactor = struct {
                 .write => std.posix.system.EVFILT.WRITE,
                 else => std.posix.system.EVFILT.READ,
             };
-            
+
             changelist[0] = .{
                 .ident = @intCast(fd),
                 .filter = filter,
@@ -2472,7 +2474,7 @@ pub const AsyncIOReactor = struct {
                 .data = 0,
                 .udata = @intFromPtr(&fd),
             };
-            
+
             _ = std.posix.kevent(@intCast(self.event_fd), &changelist, &[_]std.posix.Kevent{}, null) catch {
                 return IOError.RegisterFailed;
             };
@@ -2486,7 +2488,7 @@ pub const AsyncIOReactor = struct {
                 },
                 .data = .{ .fd = fd },
             };
-            
+
             _ = std.os.linux.epoll_ctl(@intCast(self.event_fd), std.os.linux.EPOLL.CTL_ADD, @intCast(fd), &ev);
         }
         // 其他平台不做任何操作
@@ -2506,7 +2508,7 @@ pub const AsyncIOReactor = struct {
                 .data = 0,
                 .udata = 0,
             };
-            
+
             _ = std.posix.kevent(@intCast(self.event_fd), &changelist, &[_]std.posix.Kevent{}, null) catch {};
         } else if (builtin.os.tag == .linux) {
             // epoll
@@ -2528,9 +2530,9 @@ pub const AsyncIOReactor = struct {
                 .nsec = @rem(timeout_ms, 1000) * 1_000_000,
             };
             const timeout_ptr: ?*const std.posix.timespec = if (timeout_ms >= 0) &timeout_spec else null;
-            
+
             const n = std.posix.kevent(@intCast(self.event_fd), &[_]std.posix.Kevent{}, &eventlist, timeout_ptr) catch 0;
-            
+
             for (eventlist[0..n]) |ev| {
                 const event_type: IOEventType = if (ev.filter == std.posix.system.EVFILT.READ)
                     .read
@@ -2540,7 +2542,7 @@ pub const AsyncIOReactor = struct {
                     .err
                 else
                     .read;
-                
+
                 try result.append(self.allocator, IOEvent{
                     .fd = @intCast(ev.ident),
                     .event_type = event_type,
@@ -2551,8 +2553,8 @@ pub const AsyncIOReactor = struct {
         } else if (builtin.os.tag == .linux) {
             // epoll
             var events: [64]std.os.linux.epoll_event = undefined;
-            const n = std.os.linux.epoll_wait(@intCast(self.event_fd), &events, @intCast(timeout_ms));
-            
+            const n = std.os.linux.epoll_wait(@intCast(self.event_fd), &events, @intCast(events.len), @intCast(timeout_ms));
+
             if (n > 0) {
                 for (events[0..@intCast(n)]) |ev| {
                     const event_type: IOEventType = if (ev.events & std.os.linux.EPOLL.IN != 0)
@@ -2563,7 +2565,7 @@ pub const AsyncIOReactor = struct {
                         .err
                     else
                         .read;
-                    
+
                     try result.append(self.allocator, IOEvent{
                         .fd = ev.data.fd,
                         .event_type = event_type,
@@ -2573,7 +2575,7 @@ pub const AsyncIOReactor = struct {
                 }
             }
         }
-        
+
         return result.toOwnedSlice(self.allocator);
     }
 };
@@ -2603,7 +2605,7 @@ pub const AsyncIO = struct {
 
 test "channel basic operations" {
     const allocator = std.testing.allocator;
-    
+
     // 测试新的Channel API
     var channel = try Channel.initWithCapacity(allocator, 10);
     defer channel.deinit();
@@ -2611,7 +2613,7 @@ test "channel basic operations" {
     const value = Value.initInt(42);
     const success = channel.trySend(value);
     try std.testing.expect(success);
-    
+
     const received = channel.tryRecv();
     try std.testing.expect(received != null);
     try std.testing.expectEqual(@as(i64, 42), received.?.asInt());
@@ -2619,14 +2621,14 @@ test "channel basic operations" {
 
 test "generic channel compatibility" {
     const allocator = std.testing.allocator;
-    
+
     // 测试泛型Channel包装器
     var channel = try GenericChannel(i32).init(allocator, 10);
     defer channel.deinit();
-    
+
     const success = channel.trySend(42);
     try std.testing.expect(success);
-    
+
     const received = channel.tryRecv();
     try std.testing.expect(received != null);
     try std.testing.expectEqual(@as(i32, 42), received.?);
@@ -2776,17 +2778,16 @@ test "coroutine manager scheduling policy" {
     try std.testing.expectEqual(CoroutineManager.SchedulingPolicy.priority, manager.getSchedulingPolicy());
 }
 
-
 test "async io reactor initialization" {
     const allocator = std.testing.allocator;
-    
+
     var reactor = AsyncIOReactor.init(allocator) catch |err| {
         // 在某些环境下可能无法创建kqueue/epoll，跳过测试
         std.debug.print("Skipping async IO test: {}\n", .{err});
         return;
     };
     defer reactor.deinit();
-    
+
     // 验证初始状态
     try std.testing.expectEqual(@as(usize, 0), reactor.getWaitingCount());
     try std.testing.expectEqual(@as(u64, 0), reactor.getStats().total_events_processed);
@@ -2794,13 +2795,13 @@ test "async io reactor initialization" {
 
 test "async io reactor timer" {
     const allocator = std.testing.allocator;
-    
+
     var reactor = AsyncIOReactor.init(allocator) catch |err| {
         std.debug.print("Skipping async IO timer test: {}\n", .{err});
         return;
     };
     defer reactor.deinit();
-    
+
     // 创建测试协程
     var co = try allocator.create(Coroutine);
     co.* = try Coroutine.init(allocator, 1, Value.initNull(), &[_]Value{});
@@ -2808,26 +2809,26 @@ test "async io reactor timer" {
         co.deinit();
         allocator.destroy(co);
     }
-    
+
     // 注册一个短定时器
     try reactor.registerTimer(co, 10, null); // 10ms
-    
+
     try std.testing.expectEqual(@as(usize, 1), reactor.getWaitingCount());
     try std.testing.expectEqual(Coroutine.State.waiting, co.state);
-    
+
     // 等待定时器触发
     std.Thread.sleep(20_000_000); // 20ms
-    
+
     // 轮询事件
     const events = try reactor.poll(0);
     defer allocator.free(events);
-    
+
     // 应该有一个定时器事件
     try std.testing.expect(events.len >= 1);
     if (events.len > 0) {
         try std.testing.expectEqual(IOEventType.timer, events[0].event_type);
     }
-    
+
     // 协程应该被唤醒
     try std.testing.expectEqual(Coroutine.State.ready, co.state);
 }
@@ -2836,20 +2837,20 @@ test "coroutine manager io reactor integration" {
     const allocator = std.testing.allocator;
     var manager = CoroutineManager.init(allocator);
     defer manager.deinit();
-    
+
     // 初始化IO反应器
     manager.initIOReactor() catch |err| {
         std.debug.print("Skipping IO reactor integration test: {}\n", .{err});
         return;
     };
-    
+
     // 验证IO反应器已初始化
     try std.testing.expect(manager.io_reactor != null);
-    
+
     // 验证初始状态
     try std.testing.expectEqual(@as(usize, 0), manager.getIOWaitingCount());
     try std.testing.expect(!manager.hasIOWaiting());
-    
+
     // 获取IO统计
     const stats = manager.getIOStats();
     try std.testing.expect(stats != null);
@@ -2858,13 +2859,13 @@ test "coroutine manager io reactor integration" {
 
 test "async io helper functions" {
     const allocator = std.testing.allocator;
-    
+
     var reactor = AsyncIOReactor.init(allocator) catch |err| {
         std.debug.print("Skipping async IO helper test: {}\n", .{err});
         return;
     };
     defer reactor.deinit();
-    
+
     // 创建测试协程
     var co = try allocator.create(Coroutine);
     co.* = try Coroutine.init(allocator, 1, Value.initNull(), &[_]Value{});
@@ -2872,7 +2873,7 @@ test "async io helper functions" {
         co.deinit();
         allocator.destroy(co);
     }
-    
+
     // 测试asyncSleep
     try AsyncIO.asyncSleep(&reactor, co, 5);
     try std.testing.expectEqual(Coroutine.State.waiting, co.state);
@@ -2890,7 +2891,7 @@ test "io event type enum" {
 
 test "io wait entry structure" {
     const allocator = std.testing.allocator;
-    
+
     // 创建测试协程
     var co = try allocator.create(Coroutine);
     co.* = try Coroutine.init(allocator, 42, Value.initNull(), &[_]Value{});
@@ -2898,7 +2899,7 @@ test "io wait entry structure" {
         co.deinit();
         allocator.destroy(co);
     }
-    
+
     // 创建IO等待条目
     const entry = IOWaitEntry{
         .fd = 10,
@@ -2907,7 +2908,7 @@ test "io wait entry structure" {
         .timeout_ms = 5000,
         .registered_at = std.time.milliTimestamp(),
     };
-    
+
     try std.testing.expectEqual(@as(i32, 10), entry.fd);
     try std.testing.expectEqual(IOEventType.read, entry.event_type);
     try std.testing.expectEqual(@as(u64, 42), entry.coroutine.id);

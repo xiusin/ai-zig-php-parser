@@ -2,7 +2,7 @@
 
 class Test {
     public function test() {
-        $fn = null; // 不创建闭包
+        $fn = fn() => 1;
         return 10;
     }
 }

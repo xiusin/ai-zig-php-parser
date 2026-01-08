@@ -1726,6 +1726,8 @@ pub const Parser = struct {
         _ = try self.eat(.l_brace);
         var arms = std.ArrayListUnmanaged(ast.Node.Index){};
         var default_arm: ?ast.Node.Index = null;
+        const arena = self.context.arena.allocator();
+
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             if (self.curr.tag == .k_default) {
                 self.nextToken();
@@ -1736,13 +1738,15 @@ pub const Parser = struct {
                 const cond = try self.parseExpression(0);
                 _ = try self.eat(.fat_arrow);
                 const body = try self.parseExpression(0);
-                const arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{cond}, .body = body } } });
+                // Use arena to allocate conditions array to avoid dangling pointer
+                const conditions = try arena.alloc(ast.Node.Index, 1);
+                conditions[0] = cond;
+                const arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = conditions, .body = body } } });
                 try arms.append(self.allocator, arm);
             }
             if (self.curr.tag == .comma) self.nextToken();
         }
         _ = try self.eat(.r_brace);
-        const arena = self.context.arena.allocator();
         const arms_slice = try arena.dupe(ast.Node.Index, arms.items);
         arms.deinit(self.allocator);
         return self.createNode(.{ .tag = .match_expr, .main_token = token, .data = .{ .match_expr = .{ .expression = expr, .arms = arms_slice, .default = default_arm } } });

@@ -200,7 +200,7 @@ pub fn main() !void {
         }
     else
         loader.loadDefault() catch |err| {
-            std.debug.print("Error loading default config: {s}\n", .{@errorName(err) });
+            std.debug.print("Error loading default config: {s}\n", .{@errorName(err)});
             return;
         };
     defer file_config.deinit(allocator);
@@ -236,9 +236,7 @@ pub fn main() !void {
     }
 
     // Regular interpreter mode
-    var php_code: [:0]const u8 = undefined;
-
-    if (php_file) |filename| {
+    const php_code: [:0]const u8 = if (php_file) |filename| blk: {
         // Read PHP file from command line argument
         const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
             std.debug.print("Error opening file '{s}': {s}\n", .{ filename, @errorName(err) });
@@ -246,15 +244,21 @@ pub fn main() !void {
         };
         defer file.close();
 
-        const file_size = try file.getEndPos();
-        const contents = try arena_allocator.allocSentinel(u8, file_size, 0);
+        const file_size = file.getEndPos() catch |err| {
+            std.debug.print("Error getting file size: {s}\n", .{@errorName(err)});
+            return;
+        };
+        const contents = arena_allocator.allocSentinel(u8, file_size, 0) catch |err| {
+            std.debug.print("Error allocating memory: {s}\n", .{@errorName(err)});
+            return;
+        };
 
-        _ = try file.readAll(contents);
-        php_code = contents;
-    } else {
-        // Default code if no file specified
-        php_code = "<?php echo 42;";
-    }
+        _ = file.readAll(contents) catch |err| {
+            std.debug.print("Error reading file: {s}\n", .{@errorName(err)});
+            return;
+        };
+        break :blk contents;
+    } else "<?php echo 42;";
 
     // Detect syntax directive in the source code
     const syntax_mode_module = @import("compiler/syntax_mode.zig");
@@ -331,7 +335,7 @@ pub fn main() !void {
 
     // Release the final result to prevent memory leak
     result.release(allocator);
-    
+
     // Clean up global variables to prevent memory leak warnings
     vm_instance.cleanupGlobalVariables();
 }

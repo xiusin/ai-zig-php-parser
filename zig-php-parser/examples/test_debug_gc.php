@@ -1,5 +1,5 @@
 <?php
-// Debug with closure instead of arrow function
+// Test with gc_collect_cycles
 interface Shape {
     public function area(): float;
 }
@@ -20,21 +20,26 @@ class Calculator {
     }
     
     public function describeAll(array $shapes): array {
-        // Use closure
-        return array_map(function($s) { return 42; }, $shapes);
+        return array_map(fn($s) => $s->area(), $shapes);
     }
 }
 
+echo "Start\n";
 $calc = new Calculator();
 
-// Call describeAll
-echo "About to call describeAll\n";
 $result = $calc->describeAll([new Circle(1)]);
-echo "describeAll done\n";
+echo "describeAll returned\n";
 
-// Now call getShapes
-echo "About to call getShapes\n";
+unset($result);
+echo "result unset\n";
+
+// Force garbage collection
+if (function_exists('gc_collect_cycles')) {
+    gc_collect_cycles();
+    echo "gc_collect_cycles called\n";
+}
+
 $shapes = $calc->getShapes();
-echo "Got shapes\n";
+echo "getShapes returned\n";
 
 echo "Done\n";

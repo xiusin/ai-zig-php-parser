@@ -1,5 +1,5 @@
 <?php
-// Debug with closure instead of arrow function
+// Test without arrow function - should not crash on exit
 interface Shape {
     public function area(): float;
 }
@@ -20,21 +20,17 @@ class Calculator {
     }
     
     public function describeAll(array $shapes): array {
-        // Use closure
-        return array_map(function($s) { return 42; }, $shapes);
+        return array_map(function($s) { return $s->area(); }, $shapes);
     }
 }
 
+echo "Start\n";
 $calc = new Calculator();
 
-// Call describeAll
-echo "About to call describeAll\n";
 $result = $calc->describeAll([new Circle(1)]);
-echo "describeAll done\n";
+echo "describeAll returned\n";
 
-// Now call getShapes
-echo "About to call getShapes\n";
 $shapes = $calc->getShapes();
-echo "Got shapes\n";
+echo "getShapes returned\n";
 
 echo "Done\n";

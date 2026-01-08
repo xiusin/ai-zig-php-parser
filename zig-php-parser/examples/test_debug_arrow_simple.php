@@ -1,5 +1,5 @@
 <?php
-// Debug with closure instead of arrow function
+// Debug with simple arrow function (no method call)
 interface Shape {
     public function area(): float;
 }
@@ -20,8 +20,8 @@ class Calculator {
     }
     
     public function describeAll(array $shapes): array {
-        // Use closure
-        return array_map(function($s) { return 42; }, $shapes);
+        // Use arrow function without method call
+        return array_map(fn($s) => $s->radius, $shapes);
     }
 }
 

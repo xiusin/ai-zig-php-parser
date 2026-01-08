@@ -92,20 +92,12 @@ pub fn Box(comptime T: type) type {
                     allocator.destroy(self.data);
                 },
                 *Closure => {
-                    // Decrease reference count for captured variables
-                    var iterator = self.data.captured_vars.iterator();
-                    while (iterator.next()) |entry| {
-                        decrementValueRefCount(entry.value_ptr.*, allocator);
-                    }
+                    // Closure.deinit will handle releasing captured_vars
                     self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },
                 *ArrowFunction => {
-                    // Decrease reference count for captured variables
-                    var iterator = self.data.captured_vars.iterator();
-                    while (iterator.next()) |entry| {
-                        decrementValueRefCount(entry.value_ptr.*, allocator);
-                    }
+                    // ArrowFunction.deinit will handle releasing captured_vars
                     self.data.deinit(allocator);
                     allocator.destroy(self.data);
                 },

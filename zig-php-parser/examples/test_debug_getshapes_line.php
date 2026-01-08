@@ -1,5 +1,5 @@
 <?php
-// Debug with closure instead of arrow function
+// Find exact line that crashes
 interface Shape {
     public function area(): float;
 }
@@ -16,25 +16,27 @@ class Circle implements Shape {
 
 class Calculator {
     public function getShapes(): array {
+        echo "Line A: getShapes called\n";
         return [new Circle(5), new Circle(10)];
     }
     
     public function describeAll(array $shapes): array {
-        // Use closure
-        return array_map(function($s) { return 42; }, $shapes);
+        echo "Line B: describeAll called\n";
+        return array_map(fn($s) => $s->area(), $shapes);
     }
 }
 
+echo "Line 1: Start\n";
 $calc = new Calculator();
+echo "Line 2: Calculator created\n";
 
-// Call describeAll
-echo "About to call describeAll\n";
+echo "Line 3: About to call describeAll\n";
 $result = $calc->describeAll([new Circle(1)]);
-echo "describeAll done\n";
+echo "Line 4: describeAll returned\n";
 
-// Now call getShapes
-echo "About to call getShapes\n";
+echo "Line 5: About to call getShapes\n";
 $shapes = $calc->getShapes();
-echo "Got shapes\n";
+echo "Line 6: getShapes returned\n";
 
-echo "Done\n";
+echo "Line 7: Done\n";
+

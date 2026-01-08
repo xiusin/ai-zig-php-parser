@@ -1,5 +1,5 @@
 <?php
-// Debug with closure instead of arrow function
+// Test array_map result only
 interface Shape {
     public function area(): float;
 }
@@ -20,21 +20,18 @@ class Calculator {
     }
     
     public function describeAll(array $shapes): array {
-        // Use closure
-        return array_map(function($s) { return 42; }, $shapes);
+        return array_map(fn($s) => $s->area(), $shapes);
     }
 }
 
 $calc = new Calculator();
-
-// Call describeAll
-echo "About to call describeAll\n";
-$result = $calc->describeAll([new Circle(1)]);
-echo "describeAll done\n";
-
-// Now call getShapes
-echo "About to call getShapes\n";
 $shapes = $calc->getShapes();
-echo "Got shapes\n";
+$described = $calc->describeAll($shapes);
+
+echo "Described: ";
+foreach ($described as $area) {
+    echo $area . " ";
+}
+echo "\n";
 
 echo "Done\n";
