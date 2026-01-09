@@ -27,6 +27,7 @@ const builtin_concurrency = @import("builtin_concurrency.zig");
 const builtin_http = @import("builtin_http.zig");
 const builtin_io = @import("builtin_io.zig");
 const coroutine = @import("coroutine.zig");
+const gc = @import("gc.zig");
 const syntax_mode = @import("../compiler/syntax_mode.zig");
 pub const SyntaxMode = syntax_mode.SyntaxMode;
 pub const SyntaxConfig = syntax_mode.SyntaxConfig;
@@ -44,6 +45,59 @@ const bytecode_generator = @import("../bytecode/generator.zig");
 const BytecodeGenerator = bytecode_generator.BytecodeGenerator;
 
 const CapturedVar = struct { name: []const u8, value: Value, is_reference: bool = false };
+
+/// Generator状态 - 用于跟踪yield语句的执行状态
+pub const GeneratorState = struct {
+    allocator: std.mem.Allocator,
+    values: std.ArrayListUnmanaged(Value),
+    keys: std.ArrayListUnmanaged(Value),
+    current_index: usize,
+    function_body: ?ast.Node.Index,
+    captured_vars: ?[]const CapturedVar,
+    generator_object: ?Value, // Store the Generator object created for this state
+    current_value: ?Value, // Value to return on current iteration
+    is_exhausted: bool, // Whether the generator has finished executing
+    has_started: bool, // Whether the generator has started executing
+    this_context: ?Value, // Store $this context for method generators
+    locals: std.StringHashMap(Value), // Store local variables between resumptions
+
+    pub fn init(allocator: std.mem.Allocator) GeneratorState {
+        return GeneratorState{
+            .allocator = allocator,
+            .values = .{},
+            .keys = .{},
+            .current_index = 0,
+            .function_body = null,
+            .captured_vars = null,
+            .generator_object = null,
+            .current_value = null,
+            .is_exhausted = false,
+            .has_started = false,
+            .this_context = null,
+            .locals = std.StringHashMap(Value).init(allocator),
+        };
+    }
+
+    fn deinit(self: *GeneratorState) void {
+        if (self.this_context) |this_ctx| {
+            this_ctx.release(self.allocator);
+        }
+        // Cleanup locals
+        var locals_iter = self.locals.iterator();
+        while (locals_iter.next()) |entry| {
+            entry.value_ptr.release(self.allocator);
+        }
+        self.locals.deinit();
+        for (self.values.items) |v| v.release(self.allocator);
+        self.values.deinit(self.allocator);
+        for (self.keys.items) |k| k.release(self.allocator);
+        self.keys.deinit(self.allocator);
+        if (self.generator_object) |gen_obj| {
+            gen_obj.release(self.allocator);
+        }
+        self.allocator.destroy(self);
+    }
+};
 
 /// 执行模式枚举 - 支持树遍历和字节码两种执行方式
 pub const ExecutionMode = enum {
@@ -1108,6 +1162,9 @@ pub const VM = struct {
     // Coroutine system for concurrent execution
     coroutine_manager: ?*coroutine.CoroutineManager = null,
 
+    // Generator state for tracking yield execution
+    generator_state: ?*GeneratorState = null,
+
     // Anonymous class counter for generating unique names
     anonymous_class_counter: u64 = 0,
 
@@ -1196,6 +1253,9 @@ pub const VM = struct {
 
         // Register HTTP classes (HttpServer, HttpClient, Router)
         try builtin_http.registerHttpClasses(vm);
+
+        // Initialize predefined constants
+        try vm.initializePredefinedConstants();
 
         // Initialize performance monitoring
         vm.execution_stats.reset();
@@ -1541,6 +1601,43 @@ pub const VM = struct {
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+    }
+
+    /// Initialize predefined constants
+    pub fn initializePredefinedConstants(self: *VM) !void {
+        // Core PHP constants
+        try self.global.set("PHP_VERSION", try Value.initString(self.allocator, "8.5.0-dev"));
+        try self.global.set("PHP_EOL", try Value.initString(self.allocator, "\n"));
+        try self.global.set("PHP_INT_MAX", Value.initInt(std.math.maxInt(i64)));
+        try self.global.set("PHP_INT_MIN", Value.initInt(std.math.minInt(i64)));
+        try self.global.set("PHP_INT_SIZE", Value.initInt(@sizeOf(i64)));
+
+        // Common true/false/null variants
+        try self.global.set("true", Value.initBool(true));
+        try self.global.set("false", Value.initBool(false));
+        try self.global.set("null", Value.initNull());
+
+        // Common constants
+        try self.global.set("E_ERROR", Value.initInt(1));
+        try self.global.set("E_WARNING", Value.initInt(2));
+        try self.global.set("E_PARSE", Value.initInt(4));
+        try self.global.set("E_NOTICE", Value.initInt(8));
+        try self.global.set("E_CORE_ERROR", Value.initInt(16));
+        try self.global.set("E_CORE_WARNING", Value.initInt(32));
+        try self.global.set("E_COMPILE_ERROR", Value.initInt(64));
+        try self.global.set("E_COMPILE_WARNING", Value.initInt(128));
+        try self.global.set("E_USER_ERROR", Value.initInt(256));
+        try self.global.set("E_USER_WARNING", Value.initInt(512));
+        try self.global.set("E_USER_NOTICE", Value.initInt(1024));
+        try self.global.set("E_STRICT", Value.initInt(2048));
+        try self.global.set("E_RECOVERABLE_ERROR", Value.initInt(4096));
+        try self.global.set("E_DEPRECATED", Value.initInt(8192));
+        try self.global.set("E_USER_DEPRECATED", Value.initInt(16384));
+        try self.global.set("E_ALL", Value.initInt(32767));
+
+        // System constants
+        try self.global.set("DIRECTORY_SEPARATOR", try Value.initString(self.allocator, "/"));
+        try self.global.set("PATH_SEPARATOR", try Value.initString(self.allocator, ":"));
     }
 
     /// Initialize the builtin function registry with core functions
@@ -2670,6 +2767,174 @@ pub const VM = struct {
         return self.callUserFunctionWithNamedAndRefs(function, positional_args, named_args, null);
     }
 
+    // Helper function to check if a body contains yield
+    pub fn bodyContainsYield(self: *VM, body_node: ast.Node.Index) bool {
+        if (body_node == 0) return false;
+
+        const node = self.context.nodes.items[body_node];
+        if (node.tag == .yield_expr) return true;
+
+        // Check child nodes recursively based on tag
+        return self.nodeOrChildrenContainYield(node);
+    }
+
+    fn nodeOrChildrenContainYield(self: *VM, node: ast.Node) bool {
+        if (node.tag == .yield_expr) return true;
+
+        // Check different node types for children
+        switch (node.tag) {
+            .block => {
+                const data = node.data.block;
+                for (data.stmts) |child| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[child])) {
+                        return true;
+                    }
+                }
+            },
+            .if_stmt => {
+                const data = node.data.if_stmt;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.condition])) return true;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.then_branch])) return true;
+                if (data.else_branch) |else_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[else_node])) return true;
+                }
+            },
+            .while_stmt => {
+                const data = node.data.while_stmt;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.condition])) return true;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+            },
+            .for_stmt => {
+                const data = node.data.for_stmt;
+                if (data.init) |init_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[init_node])) return true;
+                }
+                if (data.condition) |cond_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[cond_node])) return true;
+                }
+                if (data.loop) |loop_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[loop_node])) return true;
+                }
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+            },
+            .foreach_stmt => {
+                const data = node.data.foreach_stmt;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.iterable])) return true;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+            },
+            .function_decl => {
+                const data = node.data.function_decl;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+            },
+            .method_decl => {
+                const data = node.data.method_decl;
+                if (data.body) |body_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[body_node])) return true;
+                }
+            },
+            .class_decl => {
+                const data = node.data.container_decl;
+                for (data.members) |member| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[member])) return true;
+                }
+            },
+            .echo_stmt => {
+                const data = node.data.echo_stmt;
+                for (data.exprs) |expr| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[expr])) return true;
+                }
+            },
+            .assignment => {
+                const data = node.data.assignment;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.value])) return true;
+            },
+            .binary_expr => {
+                const data = node.data.binary_expr;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.lhs])) return true;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.rhs])) return true;
+            },
+            .unary_expr => {
+                const data = node.data.unary_expr;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.expr])) return true;
+            },
+            .return_stmt => {
+                const data = node.data.return_stmt;
+                if (data.expr) |expr_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[expr_node])) return true;
+                }
+            },
+            .function_call => {
+                const data = node.data.function_call;
+                for (data.args) |arg| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[arg])) return true;
+                }
+            },
+            .method_call => {
+                const data = node.data.method_call;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.target])) return true;
+                for (data.args) |arg| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[arg])) return true;
+                }
+            },
+            .property_access => {
+                const data = node.data.property_access;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.target])) return true;
+            },
+            .array_access => {
+                const data = node.data.array_access;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.target])) return true;
+                if (data.index) |idx| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[idx])) return true;
+                }
+            },
+            .object_instantiation => {
+                const data = node.data.object_instantiation;
+                for (data.args) |arg| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[arg])) return true;
+                }
+            },
+            .ternary_expr => {
+                const data = node.data.ternary_expr;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.cond])) return true;
+                if (data.then_expr) |then_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[then_node])) return true;
+                }
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.else_expr])) return true;
+            },
+            .array_init => {
+                const data = node.data.array_init;
+                for (data.elements) |elem| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[elem])) return true;
+                }
+            },
+            .array_pair => {
+                const data = node.data.array_pair;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.key])) return true;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.value])) return true;
+            },
+            .arrow_function => {
+                const data = node.data.arrow_function;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+            },
+            .closure => {
+                const data = node.data.closure;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+            },
+            .try_stmt => {
+                const data = node.data.try_stmt;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+                for (data.catch_clauses) |catch_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[catch_node])) return true;
+                }
+                if (data.finally_clause) |finally_node| {
+                    if (self.nodeOrChildrenContainYield(self.context.nodes.items[finally_node])) return true;
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
     pub fn callUserFunctionWithNamedAndRefs(self: *VM, function: *types.UserFunction, positional_args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.function_calls += 1;
@@ -2677,7 +2942,7 @@ pub const VM = struct {
         // Push call frame for better error reporting
         try self.pushCallFrame(function.name.data, self.current_file, self.current_line);
 
-        // For named args, we need to count total args differently
+        // For named args, we need to count different
         const total_args = positional_args.len + if (named_args) |na| na.count() else 0;
         _ = total_args;
 
@@ -2693,24 +2958,60 @@ pub const VM = struct {
             try current_frame.locals.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
-        // Execute body
+        // Check if this is a generator function (contains yield)
         var result = Value.initNull();
-        var had_error: ?anyerror = null;
+
         if (function.body) |body_ptr| {
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
-            result = self.eval(body_node) catch |err| blk: {
-                if (err == error.Return) {
-                    if (self.return_value) |val| {
-                        break :blk val;
-                    }
-                    break :blk Value.initNull();
+
+            // Check if body contains yield
+            if (self.bodyContainsYield(body_node)) {
+                // This is a generator function - create generator state and return Generator object
+                const generator_state = try self.allocator.create(GeneratorState);
+                generator_state.* = GeneratorState.init(self.allocator);
+
+                // Store function body
+                generator_state.function_body = body_node;
+
+                // Save $this context if available
+                const this_value = if (current_frame.locals.get("$this")) |*this_val| this_val.retain() else null;
+                generator_state.this_context = this_value;
+
+                self.generator_state = generator_state;
+
+                // Create and return Generator object immediately
+                const generator_value = try self.createGeneratorObject(generator_state);
+                
+                // Store generator value in state for later reference
+                generator_state.generator_object = generator_value;
+
+                // Cleanup for generator function
+                var cleanup_it = bound_args.iterator();
+                while (cleanup_it.next()) |entry| {
+                    self.releaseValue(entry.value_ptr.*);
                 }
-                had_error = err;
-                break :blk Value.initNull();
-            };
-            if (self.return_value) |val| {
-                result = val;
-                self.return_value = null;
+                bound_args.deinit();
+                self.popCallFrame();
+
+                const end_time = std.time.nanoTimestamp();
+                self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+
+                return generator_value;
+            } else {
+                // Normal function - execute body
+                result = self.eval(body_node) catch |err| blk: {
+                    if (err == error.Return) {
+                        if (self.return_value) |val| {
+                            break :blk val;
+                        }
+                        break :blk Value.initNull();
+                    }
+                    return err;
+                };
+                if (self.return_value) |val| {
+                    result = val;
+                    self.return_value = null;
+                }
             }
         }
 
@@ -2741,9 +3042,6 @@ pub const VM = struct {
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
-        if (had_error) |err| {
-            return err;
-        }
         return result;
     }
 
@@ -2838,6 +3136,33 @@ pub const VM = struct {
 
         const box = try self.memory_manager.allocClosure(closure);
         return Value.fromBox(box, Value.TYPE_CLOSURE);
+    }
+
+    /// Create a Generator object that wraps the generator state
+    pub fn createGeneratorObject(self: *VM, state: *GeneratorState) !Value {
+        // Create a PHPObject for the Generator
+        const generator_class = self.getClass("Generator") orelse {
+            return Value.initNull();
+        };
+
+        const generator_obj = try self.allocator.create(types.PHPObject);
+        generator_obj.* = try types.PHPObject.init(self.allocator, generator_class);
+
+        // Store the generator state pointer using a special encoding
+        // Since Value can only store 32-bit integers, we store the pointer as a string
+        const state_ptr_int = @intFromPtr(state);
+        const ptr_str = try std.fmt.allocPrint(self.allocator, "{}", .{state_ptr_int});
+        defer self.allocator.free(ptr_str);
+        const ptr_val = try types.Value.initString(self.allocator, ptr_str);
+        try generator_obj.setProperty(self.allocator, "__generator_state_ptr", ptr_val);
+
+        const obj_box = try self.memory_manager.wrapObject(generator_obj);
+        const generator_value = Value.fromBox(obj_box, Value.TYPE_OBJECT);
+
+        // Store the Generator object in the generator_state for yield to retrieve
+        state.generator_object = generator_value;
+
+        return generator_value;
     }
 
     pub fn createArrowFunction(self: *VM, parameters: []const types.Method.Parameter, body: ?*anyopaque) !Value {
@@ -3180,6 +3505,41 @@ pub const VM = struct {
         return self.evaluateBinaryOp(binary_expr.op, left, right);
     }
 
+    fn evaluateInstanceOf(self: *VM, left: Value, right: Value) !Value {
+        // right operand should be a class name or interface name (string)
+        if (right.getTag() != .string) {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Class name must be a string", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+
+        const name = right.getAsString().data.data;
+
+        // First check if it's an interface
+        if (self.getInterface(name)) |target_interface| {
+            // Check if left operand is an object that implements this interface
+            if (left.getTag() == .object) {
+                const object = left.getAsObject().data;
+                return Value.initBool(object.implementsInterface(target_interface));
+            }
+            return Value.initBool(false);
+        }
+
+        // Then check if it's a class
+        const target_class = self.getClass(name) orelse {
+            // Class/Interface doesn't exist, return false
+            return Value.initBool(false);
+        };
+
+        // Check if left operand is an object
+        if (left.getTag() == .object) {
+            const object = left.getAsObject().data;
+            return Value.initBool(object.isInstanceOf(target_class));
+        }
+
+        // For non-objects, return false
+        return Value.initBool(false);
+    }
+
     fn evaluateMagicConstant(self: *VM, kind: @import("../compiler/ast.zig").MagicConstantKind) !Value {
         return switch (kind) {
             .dir => blk: {
@@ -3495,6 +3855,33 @@ pub const VM = struct {
                     return value.retain();
                 } else {
                     const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            },
+            .self_expr => {
+                // self should resolve to the current class name
+                if (self.current_class) |class| {
+                    const class_name = try self.allocator.alloc(u8, class.name.data.len);
+                    @memcpy(class_name, class.name.data);
+                    return Value.initStringWithManager(&self.memory_manager, class_name);
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'self' outside of class scope", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            },
+            .parent_expr => {
+                // parent should resolve to the parent class name
+                if (self.current_class) |class| {
+                    if (class.parent) |parent| {
+                        const parent_name = try self.allocator.alloc(u8, parent.name.data.len);
+                        @memcpy(parent_name, parent.name.data);
+                        return Value.initStringWithManager(&self.memory_manager, parent_name);
+                    } else {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' in class that has no parent", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' outside of class scope", self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
             },
@@ -3875,6 +4262,35 @@ pub const VM = struct {
 
                 return self.executeIncluded(src, path_str, is_once);
             },
+            .yield_expr => {
+                // Generator support - collect yielded values and return Generator object
+                const yield_data = ast_node.data.yield_expr;
+
+                std.debug.print("DEBUG_YIELD: Got yield_expr, self.generator_state={?}\n", .{self.generator_state});
+
+                // Get the generator state for this execution context
+                const generator_state = if (self.generator_state) |state| state else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "yield outside of generator function", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                };
+
+                // Evaluate key and value
+                const key_value = if (yield_data.key) |key_node| try self.eval(key_node) else Value.initNull();
+                const yield_value = if (yield_data.value) |value_node| try self.eval(value_node) else Value.initNull();
+
+                // Store the yielded key-value pair
+                try generator_state.keys.append(self.allocator, key_value);
+                try generator_state.values.append(self.allocator, yield_value);
+
+                // Store the current value to be returned on iteration
+                generator_state.current_value = yield_value.retain();
+                generator_state.has_started = true;
+
+                std.debug.print("DEBUG_YIELD: Stored value, returning error\n", .{});
+
+                // Pause execution by throwing YieldOutsideGenerator
+                return error.YieldOutsideGenerator;
+            },
             .namespace_stmt, .use_stmt => {
                 // Namespace and use statements don't produce values
                 return Value.initNull();
@@ -4149,13 +4565,61 @@ pub const VM = struct {
 
     fn evaluateObjectInstantiation(self: *VM, instantiation_data: anytype) !Value {
         const class_name_node = self.context.nodes.items[instantiation_data.class_name];
-        if (class_name_node.tag != .variable) {
+
+        // Resolve class name from variable, self_expr, or parent_expr
+        var name: []const u8 = undefined;
+        if (class_name_node.tag == .variable) {
+            const name_id = class_name_node.data.variable.name;
+            const var_name = self.context.string_pool.keys()[name_id];
+
+            // Check if it's 'self' or 'parent' used as a class name
+            if (std.mem.eql(u8, var_name, "self")) {
+                if (self.current_class) |class| {
+                    name = class.name.data;
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'self' outside of class scope", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            } else if (std.mem.eql(u8, var_name, "parent")) {
+                if (self.current_class) |class| {
+                    if (class.parent) |parent| {
+                        name = parent.name.data;
+                    } else {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' in class that has no parent", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' outside of class scope", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            } else {
+                name = var_name;
+            }
+        } else if (class_name_node.tag == .self_expr) {
+            // Handle new self() - self_expr node from parser
+            if (self.current_class) |class| {
+                name = class.name.data;
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'self' outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        } else if (class_name_node.tag == .parent_expr) {
+            // Handle new parent()
+            if (self.current_class) |class| {
+                if (class.parent) |parent| {
+                    name = parent.name.data;
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' in class that has no parent", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        } else {
             const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid class name", self.current_file, self.current_line);
             return self.throwException(exception);
         }
-
-        const name_id = class_name_node.data.variable.name;
-        const name = self.context.string_pool.keys()[name_id];
 
         // Check if it's a struct
         if (self.getStruct(name)) |_| {
@@ -4869,6 +5333,85 @@ pub const VM = struct {
                     return current_val;
                 }
                 return Value.initNull();
+            } else if (expr_node.tag == .static_property_access) {
+                // Handle Class::$property++
+                const class_name = self.context.string_pool.keys()[expr_node.data.static_property_access.class_name];
+                const prop_name = self.context.string_pool.keys()[expr_node.data.static_property_access.property_name];
+
+                // Resolve class
+                const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+                    break :blk self.current_class orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+                    const curr_class = self.current_class orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                    break :blk curr_class.parent orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                } else blk: {
+                    break :blk self.getClass(class_name) orelse {
+                        const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                };
+
+                // Get current static property value
+                var current_val: Value = Value.initInt(0);
+                var found = false;
+
+                // Search in current class and parents
+                var search_class: ?*types.PHPClass = class;
+                while (search_class) |sc| {
+                    if (sc.properties.getPtr(prop_name)) |prop| {
+                        if (prop.modifiers.is_static) {
+                            if (prop.default_value) |val| {
+                                current_val = val;
+                                found = true;
+                            }
+                            break;
+                        }
+                    }
+                    search_class = sc.parent;
+                }
+
+                if (!found) {
+                    const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, class.name.data, prop_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+
+                // Retain current value
+                self.retainValue(current_val);
+
+                // Calculate new value
+                var new_val: Value = undefined;
+                if (postfix_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update static property
+                search_class = class;
+                while (search_class) |sc| {
+                    if (sc.properties.getPtr(prop_name)) |prop| {
+                        if (prop.modifiers.is_static) {
+                            if (prop.default_value) |old_val| {
+                                self.releaseValue(old_val);
+                            }
+                            self.retainValue(new_val);
+                            prop.default_value = new_val;
+                            break;
+                        }
+                    }
+                    search_class = sc.parent;
+                }
+
+                return current_val;
             } else {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables and properties", self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -5408,13 +5951,140 @@ pub const VM = struct {
         return last_val;
     }
 
+    /// 处理 Generator 对象的 foreach 遍历
+        /// 处理 Generator 对象的 foreach 遍历 - 急切收集所有值
+        fn evaluateGeneratorForeach(self: *VM, generator_value: Value, foreach_stmt: anytype) !Value {
+            var last_val = Value.initNull();
+    
+            const generator_obj = generator_value.getAsObject().data;
+    
+            // 获取 GeneratorState
+            const state_ptr_val = generator_obj.getProperty("__generator_state_ptr") catch Value.initNull();
+            defer state_ptr_val.release(self.allocator);
+    
+            const ptr_str = if (state_ptr_val.isString()) state_ptr_val.getAsString().data.data else "";
+            const state_ptr_int = std.fmt.parseInt(u64, ptr_str, 10) catch 0;
+    
+            if (state_ptr_int == 0) {
+                return Value.initNull();
+            }
+    
+            const state = @as(*GeneratorState, @ptrFromInt(state_ptr_int));
+    
+                    // 第一次迭代：收集所有值
+                    if (!state.has_started) {
+                        state.has_started = true;
+                        self.generator_state = state;
+            
+                        // 恢复 $this 上下文
+                        if (state.this_context) |this_val| {
+                            try self.setVariable("$this", this_val.retain());
+                        }
+            
+                                                // 执行整个函数体，收集所有 yield 的值
+                                                if (state.function_body) |body_node| {
+                                                    std.debug.print("DEBUG: body_node={}, nodes.len={}\n", .{body_node, self.context.nodes.items.len});
+                                                    const body_ast_node = self.context.nodes.items[body_node];
+                                                    std.debug.print("DEBUG: body_node.tag={}\n", .{body_ast_node.tag});
+                        
+                                                    while (true) {
+                                                        // 清除之前的值
+                                                        state.current_value = null;
+                        
+                                                        const result = self.eval(body_node) catch |err| {
+                                                            std.debug.print("DEBUG: eval returned err={}\n", .{err});
+                                                            if (err == error.YieldOutsideGenerator) {
+                                                                // Yield 已处理，current_value 应该被设置
+                                                                // 继续循环以收集更多值
+                                                                if (state.current_value == null) {
+                                                                    std.debug.print("DEBUG: No value after yield, generator exhausted\n", .{});
+                                                                    state.is_exhausted = true;
+                                                                    break;
+                                                                }
+                                                                continue;
+                                                            } else if (err == error.Return) {
+                                                                state.is_exhausted = true;
+                                                                break;
+                                                            } else if (err == error.Break) {
+                                                                self.break_level -= 1;
+                                                                state.is_exhausted = true;
+                                                                break;
+                                                            } else {
+                                                                return err;
+                                                            }
+                                                        };
+                                                        std.debug.print("DEBUG: result={}, current_value={?}\n", .{result, state.current_value});
+                        
+                                                        // 检查是否有值（正常返回的情况）
+                                                        if (state.current_value == null) {
+                                                            std.debug.print("DEBUG: No more values, breaking\n", .{});
+                                                            state.is_exhausted = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                } else {                            std.debug.print("DEBUG: No function_body!\n", .{});
+                        }
+                        state.is_exhausted = true;
+                        std.debug.print("DEBUG: Collection done, values.len={}\n", .{state.values.items.len});
+                    }    
+            // 迭代收集的值
+            loop: while (state.current_index < state.values.items.len) {
+                const key = state.keys.items[state.current_index];
+                const value = state.values.items[state.current_index];
+                state.current_index += 1;
+    
+                // 设置 key 变量
+                if (foreach_stmt.key) |key_idx| {
+                    const key_node = self.context.nodes.items[key_idx];
+                    if (key_node.tag == .variable) {
+                        const name_id = key_node.data.variable.name;
+                        const name = self.context.string_pool.keys()[name_id];
+                        try self.setVariable(name, key.retain());
+                    }
+                }
+    
+                // 设置 value 变量
+                if (foreach_stmt.value > 0 and foreach_stmt.value < self.context.nodes.items.len) {
+                    const value_node = self.context.nodes.items[foreach_stmt.value];
+                    if (value_node.tag == .variable) {
+                        const value_name_id = value_node.data.variable.name;
+                        const value_name = self.context.string_pool.keys()[value_name_id];
+                        try self.setVariable(value_name, value.retain());
+                    }
+                }
+    
+                // 执行循环体
+                self.releaseValue(last_val);
+                const body_idx = foreach_stmt.body;
+                if (body_idx > 0 and body_idx < self.context.nodes.items.len) {
+                    last_val = self.eval(body_idx) catch |err| {
+                        if (err == error.Break) {
+                            self.break_level -= 1;
+                            if (self.break_level > 0) return error.Break;
+                            break :loop;
+                        }
+                        if (err == error.Continue) {
+                            self.continue_level -= 1;
+                            if (self.continue_level > 0) return error.Continue;
+                            break :loop;
+                        }
+                        return err;
+                    };
+                } else {
+                    last_val = Value.initNull();
+                }
+            }
+    
+            return last_val;
+        }
+
     fn evaluateForeachStatement(self: *VM, foreach_stmt: anytype) !Value {
         // 安全检查：确保 iterable 是有效的索引
         const iterable_idx = foreach_stmt.iterable;
         if (iterable_idx == 0 or iterable_idx >= self.context.nodes.items.len) {
             return Value.initNull();
         }
-        
+
         const iterable = try self.eval(iterable_idx);
         defer self.releaseValue(iterable);
 
@@ -5422,11 +6092,17 @@ pub const VM = struct {
         if (iterable.isObject()) {
             const obj = iterable.getAsObject().data;
             const class_name = obj.class.name.data;
-            
+
+            // 检查是否是 Generator 对象
+            if (std.mem.eql(u8, class_name, "Generator")) {
+                // 直接迭代 Generator 的 yielded 值
+                return self.evaluateGeneratorForeach(iterable, foreach_stmt);
+            }
+
             // 检查是否是 Iterator 或实现了 Iterator 接口
-            const is_iterator = std.mem.eql(u8, class_name, "Iterator") or 
+            const is_iterator = std.mem.eql(u8, class_name, "Iterator") or
                 self.classImplementsInterface(obj.class, "Iterator");
-            
+
             if (is_iterator or std.mem.eql(u8, class_name, "IteratorAggregate")) {
                 return self.evaluateIteratorForeach(iterable, foreach_stmt);
             }
@@ -5868,6 +6544,7 @@ pub const VM = struct {
                 return right.retain();
             },
             .dot => return self.concatenateValues(left, right),
+            .k_instanceof => return self.evaluateInstanceOf(left, right),
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported binary operator", self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -6455,10 +7132,8 @@ pub const VM = struct {
         const const_name = self.context.string_pool.keys()[const_data.name];
         const const_value = try self.eval(const_data.value);
 
-        // Add constant to class (simplified - skip for now)
-        _ = class;
-        _ = const_name;
-        _ = const_value;
+        // Add constant to class
+        try class.constants.put(const_name, const_value);
     }
 
     fn evaluateStructDeclaration(self: *VM, struct_data: anytype) !Value {
@@ -6853,6 +7528,13 @@ pub const VM = struct {
                     try captured_vars_list.append(self.allocator, .{ .name = var_name, .value = var_value, .is_reference = is_reference });
                 }
                 // If variable doesn't exist, skip it
+            }
+        }
+
+        // Automatically capture $this if we're in a class method scope
+        if (self.current_class != null) {
+            if (self.getVariable("$this")) |this_value| {
+                try captured_vars_list.append(self.allocator, .{ .name = "$this", .value = this_value, .is_reference = false });
             }
         }
 

@@ -1700,10 +1700,34 @@ pub const PHPObject = struct {
         vm_instance.current_class = self.class;
         defer vm_instance.current_class = old_class;
 
-        // Execute body
+        // Check if this is a generator function (contains yield)
         if (method.?.body) |body_ptr| {
             const ast = @import("../compiler/ast.zig");
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+
+            // Check if body contains yield
+            const is_generator = vm_instance.bodyContainsYield(body_node);
+
+            if (is_generator) {
+                // This is a generator function - create generator state and return Generator object
+                const GeneratorState = @import("vm.zig").GeneratorState;
+                const generator_state = try vm_instance.allocator.create(GeneratorState);
+                generator_state.* = GeneratorState.init(vm_instance.allocator);
+
+                // Save $this context (object_value is $this)
+                generator_state.this_context = object_value.retain();
+                generator_state.function_body = body_node;
+
+                // Create and return Generator object immediately
+                const generator_value = try vm_instance.createGeneratorObject(generator_state);
+
+                // Store generator value in state for later reference
+                generator_state.generator_object = generator_value;
+
+                return generator_value;
+            }
+
+            // Normal function execution
             return @as(anyerror!Value, vm_instance.run(body_node)) catch |err| switch (err) {
                 error.Return => {
                     if (vm_instance.return_value) |val| {
@@ -2522,6 +2546,117 @@ pub const Closure = struct {
 
         _ = scope; // Would be used for scope binding in full implementation
         return new_closure;
+    }
+};
+
+/// Generator implementation - supports yield statement and Iterator interface
+pub const Generator = struct {
+    function: UserFunction,
+    captured_vars: std.StringHashMap(Value),
+    captured_refs: std.StringHashMap(void),
+    parent_frame_vars: std.StringHashMap(Value),
+    is_static: bool,
+    
+    // Generator state
+    current_value: Value,
+    current_key: Value,
+    is_started: bool,
+    is_valid: bool,
+    yielded: bool,
+    
+    pub fn init(allocator: std.mem.Allocator, function: UserFunction) Generator {
+        var copied_name = function.name;
+        const should_release_original = function.name.data.len > 0;
+        if (should_release_original) {
+            copied_name = PHPString.init(allocator, function.name.data) catch function.name;
+        }
+        if (should_release_original and copied_name != function.name) {
+            function.name.release(allocator);
+        }
+        const copied_params = function.parameters;
+
+        return Generator{
+            .function = .{
+                .name = copied_name,
+                .parameters = copied_params,
+                .return_type = function.return_type,
+                .attributes = function.attributes,
+                .body = function.body,
+                .is_variadic = function.is_variadic,
+                .min_args = function.min_args,
+                .max_args = function.max_args,
+            },
+            .captured_vars = std.StringHashMap(Value).init(allocator),
+            .captured_refs = std.StringHashMap(void).init(allocator),
+            .parent_frame_vars = std.StringHashMap(Value).init(allocator),
+            .is_static = false,
+            .current_value = Value.initNull(),
+            .current_key = Value.initNull(),
+            .is_started = false,
+            .is_valid = true,
+            .yielded = false,
+        };
+    }
+
+    pub fn deinit(self: *Generator, allocator: std.mem.Allocator) void {
+        self.function.deinit(allocator);
+        var iter = self.captured_vars.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
+        self.captured_vars.deinit();
+        self.captured_refs.deinit();
+        var parent_iter = self.parent_frame_vars.iterator();
+        while (parent_iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
+        self.parent_frame_vars.deinit();
+        self.current_value.release(allocator);
+        self.current_key.release(allocator);
+    }
+
+    /// Implement Iterator interface methods
+    pub fn rewind(self: *Generator, allocator: std.mem.Allocator) void {
+        self.is_started = false;
+        self.is_valid = true;
+        self.current_value.release(allocator);
+        self.current_value = Value.initNull();
+        self.current_key.release(allocator);
+        self.current_key = Value.initNull();
+    }
+
+    pub fn valid(self: *Generator) bool {
+        return self.is_valid and self.yielded;
+    }
+
+    pub fn current(self: *Generator) Value {
+        return self.current_value.retain();
+    }
+
+    pub fn key(self: *Generator) Value {
+        return self.current_key.retain();
+    }
+
+    pub fn next(self: *Generator) void {
+        self.is_started = true;
+        self.yielded = false;
+    }
+
+    pub fn send(self: *Generator, value: Value) Value {
+        _ = value;
+        self.is_started = true;
+        self.yielded = false;
+        return Value.initNull();
+    }
+
+    pub fn throw(self: *Generator, exception: Value, allocator: std.mem.Allocator) void {
+        _ = exception;
+        _ = allocator;
+        self.is_valid = false;
+    }
+
+    pub fn close(self: *Generator) void {
+        self.is_valid = false;
     }
 };
 

@@ -1300,7 +1300,20 @@ pub const Parser = struct {
                 const else_expr = try self.parseExpression(next_p);
                 left = try self.createNode(.{ .tag = .ternary_expr, .main_token = op, .data = .{ .ternary_expr = .{ .cond = left, .then_expr = then_expr, .else_expr = else_expr } } });
             } else if (tag == .k_instanceof) {
-                const right = try self.parseExpression(next_p);
+                // For instanceof, the right operand should be a class name (identifier or variable)
+                // If it's a simple identifier, create a class name literal
+                var right: ast.Node.Index = undefined;
+                if (self.curr.tag == .t_string) {
+                    // Class name is an identifier - create a string literal node
+                    const name_tok = self.curr;
+                    const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+                    self.nextToken();
+                    // Create a literal_string node for the class name
+                    right = try self.createNode(.{ .tag = .literal_string, .main_token = name_tok, .data = .{ .literal_string = .{ .value = name_id } } });
+                } else {
+                    // For variables or expressions, use normal parsing
+                    right = try self.parseExpression(next_p);
+                }
                 left = try self.createNode(.{ .tag = .binary_expr, .main_token = op, .data = .{ .binary_expr = .{ .lhs = left, .op = .k_instanceof, .rhs = right } } });
             } else if (tag == .plus_plus or tag == .minus_minus) {
                 left = try self.createNode(.{ .tag = .postfix_expr, .main_token = op, .data = .{ .postfix_expr = .{ .op = tag, .expr = left } } });

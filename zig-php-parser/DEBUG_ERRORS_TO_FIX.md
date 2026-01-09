@@ -288,7 +288,96 @@ grep -i "memory leak" oop_memory_leak_test_results.log
 
 ---
 
-## 八、相关文档
+## 九、已实现功能（2026-01-09）
+
+### 9.1 类常量（const）✅ 已实现
+
+**实现状态**: 2026-01-09 完成
+
+**功能说明**:
+- 支持类常量定义：`const VERSION = "1.0.0"`
+- 支持继承类常量访问：`SubClass::VERSION`
+- 支持类常量与静态成员对比
+
+**代码位置**:
+- 解析器: `src/compiler/parser.zig:1029-1037` (parseConst函数)
+- 运行时: `src/runtime/vm.zig:6478-6482` (processConstantDeclaration函数)
+- 访问: `src/runtime/vm.zig:7078-7115` (evaluateClassConstantAccess函数)
+
+**测试文件**:
+- `examples/test_class_const.php`
+
+---
+
+### 9.2 instanceof 操作符 ✅ 已实现
+
+**实现状态**: 2026-01-09 完成
+
+**功能说明**:
+- 支持基本instanceof检查：`$obj instanceof ClassName`
+- 支持父类instanceof检查：`$obj instanceof ParentClass`
+- 支持接口instanceof检查：`$obj instanceof InterfaceName`
+- 支持条件语句和循环中使用instanceof
+
+**代码位置**:
+- 解析器: `src/compiler/parser.zig:1304-1322` (instanceof解析)
+- 运行时: `src/runtime/vm.zig:3182-3201` (evaluateInstanceOf函数)
+- 运行时: `src/runtime/vm.zig:5868` (evaluateBinaryOp中的instanceof处理)
+
+**测试文件**:
+- `examples/test_instanceof.php`
+
+---
+
+### 9.3 静态属性自增/自减 ✅ 已实现
+
+**实现状态**: 2026-01-09 完成
+
+**功能说明**:
+- 支持静态属性自增：`Counter::$count++`
+- 支持静态属性自减：`Counter::$count--`
+- 支持self::语法：`self::$count++`
+- 支持前置和后置表达式
+
+**代码位置**:
+- 解析器: `src/compiler/parser.zig` (通过postfix_expr节点)
+- 运行时: `src/runtime/vm.zig:4947-5032` (evaluatePostfixExpression中的静态属性处理)
+
+**测试文件**:
+- `examples/test_static_property.php`
+
+**注意事项**:
+- 在PHP双引号字符串中，`$count`会被解析为变量插值
+- 使用单引号或转义：`'Counter::$count++: '` 或 `"Counter::\$count++: "`
+
+---
+
+### 9.4 预定义常量 ✅ 已实现
+
+**实现状态**: 2026-01-09 完成
+
+**功能说明**:
+- 核心常量: `PHP_VERSION`, `PHP_EOL`, `PHP_INT_MAX`, `PHP_INT_MIN`, `PHP_INT_SIZE`
+- 布尔常量: `true`, `false`, `null`
+- 错误常量: `E_ERROR`, `E_WARNING`, `E_PARSE`, `E_NOTICE`, `E_ALL`等
+- 系统常量: `DIRECTORY_SEPARATOR`, `PATH_SEPARATOR`
+
+**代码位置**:
+- `src/runtime/vm.zig:1549-1580` (initializePredefinedConstants函数)
+- `src/runtime/vm.zig:1201` (initWithSyntaxConfig中调用)
+
+**测试文件**:
+- `examples/test_predefined_constants.php`
+
+---
+
+### 9.5 待实现功能
+
+以下功能当前不支持：
+
+| 功能 | 优先级 | 说明 |
+|------|--------|------|
+| 构造函数属性提升 | 中 | `public function __construct(public $x) {}` |
 
 - PHP 8.4 Property Hooks: https://wiki.php.net/rfc/property-hooks
 - PHP spaceship operator: https://www.php.net/manual/en/language.operators.comparison.php#language.operators.comparison.spaceship
@@ -375,7 +464,15 @@ echo "Hello" . PHP_EOL;  // 不支持
 | 接口实现 | ✅ 支持 | `class Rect implements Shape` |
 | 多态 | ✅ 支持 | `function foo(Shape $shape)` |
 | self::访问静态成员 | ✅ 支持 | `self::$count + 1` |
-| **类常量** | ❌ 不支持 | `const VERSION = "1.0"` |
-| **instanceof** | ❌ 不支持 | `$obj instanceof Class` |
-| **静态属性++** | ❌ 不支持 | `self::$count++` |
-| **预定义常量** | ❌ 不支持 | `PHP_EOL`, `PHP_VERSION` |
+| 继承 | ✅ 支持 | `class Dog extends Animal` |
+| 方法覆盖 | ✅ 支持 | 子类重写父类方法 |
+| parent::调用 | ✅ 支持 | `parent::__construct()` |
+| 抽象类 | ✅ 支持 | `abstract class Vehicle` |
+| 抽象方法 | ✅ 支持 | `abstract public function start()` |
+| 组合模式 | ✅ 支持 | 对象注入 |
+| 工厂模式 | ✅ 支持 | 静态工厂方法 |
+| **类常量** | ✅ 支持 | `const VERSION = "1.0"` |
+| **instanceof** | ✅ 支持 | `$obj instanceof Class` |
+| **静态属性++** | ✅ 支持 | `self::$count++` |
+| **预定义常量** | ✅ 支持 | `PHP_EOL`, `PHP_VERSION` |
+| **构造函数属性提升** | ❌ 不支持 | `public function __construct(private $x)` |

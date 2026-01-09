@@ -173,6 +173,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "base64_decode", .min_args = 1, .max_args = 2, .handler = base64DecodeFn },
             &.{ .name = "md5", .min_args = 1, .max_args = 2, .handler = md5Fn },
             &.{ .name = "sha1", .min_args = 1, .max_args = 2, .handler = sha1Fn },
+            &.{ .name = "uniqid", .min_args = 0, .max_args = 2, .handler = uniqidFn },
             &.{ .name = "ord", .min_args = 1, .max_args = 1, .handler = ordFn },
             &.{ .name = "chr", .min_args = 1, .max_args = 1, .handler = chrFn },
             // Serialization functions
@@ -241,6 +242,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "tan", .min_args = 1, .max_args = 1, .handler = tanFn },
             &.{ .name = "log", .min_args = 1, .max_args = 2, .handler = logFn },
             &.{ .name = "exp", .min_args = 1, .max_args = 1, .handler = expFn },
+            &.{ .name = "pi", .min_args = 0, .max_args = 0, .handler = piFn },
         };
 
         for (math_functions) |func| {
@@ -2176,6 +2178,43 @@ fn sha1Fn(vm: *VM, args: []const Value) !Value {
     }
 }
 
+fn uniqidFn(vm: *VM, args: []const Value) !Value {
+    const prefix = if (args.len > 0 and args[0].getTag() == .string) args[0].getAsString().data.data else "";
+    const more_entropy = if (args.len > 1) args[1].toBool() else false;
+
+    // Get current time in microseconds
+    const timestamp = std.time.nanoTimestamp();
+    const now = @divTrunc(timestamp, 1000); // Convert to microseconds
+    const seconds = @as(u64, @intCast(@divTrunc(now, 1_000_000)));
+    const microseconds = @as(u64, @intCast(@rem(now, 1_000_000)));
+
+    // Build result string
+    var result_str: *PHPString = undefined;
+    if (more_entropy) {
+        var result_buf: [64]u8 = undefined;
+        // Format: prefix + seconds (13 hex) + microseconds (6 hex) + random (4 hex)
+        var rand_bytes: [2]u8 = undefined;
+        std.crypto.random.bytes(&rand_bytes);
+        const rand_val = @as(u16, rand_bytes[0]) * 256 + rand_bytes[1];
+        const formatted = try std.fmt.bufPrint(&result_buf, "{s}{x:0>13}{x:0>6}{x:0>4}", .{ prefix, seconds, microseconds, rand_val });
+        result_str = try PHPString.init(vm.allocator, formatted);
+    } else {
+        var result_buf: [64]u8 = undefined;
+        // Format: prefix + seconds (13 hex)
+        const formatted = try std.fmt.bufPrint(&result_buf, "{s}{x:0>13}", .{ prefix, seconds });
+        result_str = try PHPString.init(vm.allocator, formatted);
+    }
+
+    const box = try vm.allocator.create(types.gc.Box(*PHPString));
+    box.* = .{
+        .ref_count = 1,
+        .gc_info = .{},
+        .data = result_str,
+    };
+
+    return Value.fromBox(box, Value.TYPE_STRING);
+}
+
 fn sha256Fn(vm: *VM, args: []const Value) !Value {
     const str = args[0];
     const raw_output = if (args.len > 1) args[1].toBool() else false;
@@ -3526,6 +3565,12 @@ fn logFn(vm: *VM, args: []const Value) !Value {
 fn expFn(vm: *VM, args: []const Value) !Value {
     const num = try toFloat(vm, args[0]);
     return Value.initFloat(@exp(num));
+}
+
+fn piFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    return Value.initFloat(std.math.pi);
 }
 
 // 辅助函数：将 Value 转换为整数

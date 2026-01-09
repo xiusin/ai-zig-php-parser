@@ -280,6 +280,15 @@ pub const BuiltinClassManager = struct {
         try self.addProperty(array_iterator_class, "storage", .private, null);
         try self.addProperty(array_iterator_class, "position", .private, null);
         try self.classes.put("ArrayIterator", array_iterator_class);
+
+        // Generator类（用于yield语句）
+        const generator_name = try PHPString.init(self.allocator, "Generator");
+        const generator_class = try self.allocator.create(PHPClass);
+        generator_class.* = try PHPClass.init(self.allocator, generator_name);
+        generator_name.release(self.allocator);
+        generator_class.modifiers.is_final = true;
+        // Generator实现了Iterator接口
+        try self.classes.put("Generator", generator_class);
     }
 
     /// 注册ArrayAccess接口
