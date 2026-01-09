@@ -2430,7 +2430,51 @@ pub const Closure = struct {
         if (self.function.body) |body_ptr| {
             const ast = @import("../compiler/ast.zig");
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
-            return try vm_instance.eval(body_node);
+            const result = vm_instance.eval(body_node) catch |err| {
+                if (err == error.Return) {
+                    const ret_val = vm_instance.return_value orelse Value.initNull();
+                    vm_instance.return_value = null;
+
+                    // After execution, sync reference-captured variables back to parent_frame_vars
+                    // This is needed so subsequent calls see the modified values
+                    if (self.captured_refs.count() > 0) {
+                        var ref_iter = self.captured_refs.iterator();
+                        while (ref_iter.next()) |entry| {
+                            const var_name = entry.key_ptr.*;
+                            if (vm_instance.getVariable(var_name)) |current_value| {
+                                // Update parent_frame_vars with modified value
+                                // Release old value if exists
+                                if (self.parent_frame_vars.get(var_name)) |old_val| {
+                                    old_val.release(vm_instance.allocator);
+                                }
+                                try self.parent_frame_vars.put(var_name, current_value);
+                            }
+                        }
+                    }
+
+                    return ret_val;
+                }
+                return err;
+            };
+
+            // After execution, sync reference-captured variables back to parent_frame_vars
+            // This is needed so subsequent calls see the modified values
+            if (self.captured_refs.count() > 0) {
+                var ref_iter = self.captured_refs.iterator();
+                while (ref_iter.next()) |entry| {
+                    const var_name = entry.key_ptr.*;
+                    if (vm_instance.getVariable(var_name)) |current_value| {
+                        // Update parent_frame_vars with modified value
+                        // Release old value if exists
+                        if (self.parent_frame_vars.get(var_name)) |old_val| {
+                            old_val.release(vm_instance.allocator);
+                        }
+                        try self.parent_frame_vars.put(var_name, current_value);
+                    }
+                }
+            }
+
+            return result;
         }
 
         return Value.initNull();
@@ -2446,7 +2490,11 @@ pub const Closure = struct {
         // Store the variable name in captured_refs to indicate it's a reference
         try self.captured_refs.put(name, {});
         // Also store the initial value for fallback
-        try self.captured_vars.put(name, value);
+        // We need to retain the value before storing in captured_vars
+        const retained = value.retain();
+        try self.captured_vars.put(name, retained);
+        // Initialize parent_frame_vars with the value (for tracking changes across calls)
+        try self.parent_frame_vars.put(name, value);
     }
 
     pub fn bindTo(self: *Closure, allocator: std.mem.Allocator, object: ?*PHPObject, scope: ?*PHPClass) !*Closure {

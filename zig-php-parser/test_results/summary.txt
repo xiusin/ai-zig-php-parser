@@ -1,0 +1,158 @@
+========================================
+[1] 正在执行: aot_arrays.php
+[失败] aot_arrays.php (退出码: 127)
+  -> 失败
+[2] 正在执行: aot_classes.php
+[失败] aot_classes.php (退出码: 127)
+  -> 失败
+[3] 正在执行: aot_functions.php
+[失败] aot_functions.php (退出码: 127)
+  -> 失败
+[4] 正在执行: aot_hello.php
+[失败] aot_hello.php (退出码: 127)
+  -> 失败
+[5] 正在执行: aot_strings.php
+[失败] aot_strings.php (退出码: 127)
+  -> 失败
+[6] 正在执行: arrays.php
+[失败] arrays.php (退出码: 127)
+  -> 失败
+[7] 正在执行: basic_co.php
+[失败] basic_co.php (退出码: 127)
+  -> 失败
+[8] 正在执行: benchmark.php
+[失败] benchmark.php (退出码: 127)
+  -> 失败
+[9] 正在执行: concurrent_demo.php
+[失败] concurrent_demo.php (退出码: 127)
+  -> 失败
+[10] 正在执行: dynamic_features.php
+[失败] dynamic_features.php (退出码: 127)
+  -> 失败
+[11] 正在执行: empty_struct.php
+[失败] empty_struct.php (退出码: 127)
+  -> 失败
+[12] 正在执行: error_handling.php
+[失败] error_handling.php (退出码: 127)
+  -> 失败
+[13] 正在执行: functions.php
+[失败] functions.php (退出码: 127)
+  -> 失败
+[14] 正在执行: go_syntax_demo.php
+[失败] go_syntax_demo.php (退出码: 127)
+  -> 失败
+[15] 正在执行: hello.php
+[失败] hello.php (退出码: 127)
+  -> 失败
+[16] 正在执行: http_server_complete.php
+[失败] http_server_complete.php (退出码: 127)
+  -> 失败
+[17] 正在执行: http_server_demo.php
+[失败] http_server_demo.php (退出码: 127)
+  -> 失败
+[18] 正在执行: http_session_demo.php
+[失败] http_session_demo.php (退出码: 127)
+  -> 失败
+[19] 正在执行: minimal_test.php
+[失败] minimal_test.php (退出码: 127)
+  -> 失败
+[20] 正在执行: oop.php
+[失败] oop.php (退出码: 127)
+  -> 失败
+[21] 正在执行: reproduce_ref.php
+[失败] reproduce_ref.php (退出码: 127)
+  -> 失败
+[22] 正在执行: reproduce_unary.php
+[失败] reproduce_unary.php (退出码: 127)
+  -> 失败
+[23] 正在执行: required.php
+[失败] required.php (退出码: 127)
+  -> 失败
+[24] 正在执行: router.php
+[失败] router.php (退出码: 127)
+  -> 失败
+[25] 正在执行: simple_struct.php
+[失败] simple_struct.php (退出码: 127)
+  -> 失败
+[26] 正在执行: simple_test.php
+[失败] simple_test.php (退出码: 127)
+  -> 失败
+[27] 正在执行: simple_variable_test.php
+[失败] simple_variable_test.php (退出码: 127)
+  -> 失败
+[28] 正在执行: test_closure_assign.php
+[失败] test_closure_assign.php (退出码: 127)
+  -> 失败
+[29] 正在执行: test_closure_call_direct.php
+[失败] test_closure_call_direct.php (退出码: 127)
+  -> 失败
+[30] 正在执行: test_closure_capture.php
+[失败] test_closure_capture.php (退出码: 127)
+  -> 失败
+[31] 正在执行: test_closure_compare.php
+[失败] test_closure_compare.php (退出码: 127)
+  -> 失败
+[32] 正在执行: test_closure_debug.php
+[失败] test_closure_debug.php (退出码: 127)
+  -> 失败
+[33] 正在执行: test_closure_factory.php
+[失败] test_closure_factory.php (退出码: 127)
+  -> 失败
+[34] 正在执行: test_closure_no_capture.php
+[失败] test_closure_no_capture.php (退出码: 127)
+  -> 失败
+[35] 正在执行: test_closure_ref.php
+[失败] test_closure_ref.php (退出码: 127)
+  -> 失败
+[36] 正在执行: test_closure_return_value.php
+[失败] test_closure_return_value.php (退出码: 127)
+  -> 失败
+[37] 正在执行: test_closure_return.php
+[失败] test_closure_return.php (退出码: 127)
+  -> 失败
+[38] 正在执行: test_closure_simple_return.php
+[失败] test_closure_simple_return.php (退出码: 127)
+  -> 失败
+[39] 正在执行: test_closure_simple.php
+[失败] test_closure_simple.php (退出码: 127)
+  -> 失败
+[40] 正在执行: test_closure_store_call.php
+[失败] test_closure_store_call.php (退出码: 127)
+  -> 失败
+[41] 正在执行: test_closure_to_closure.php
+[失败] test_closure_to_closure.php (退出码: 127)
+  -> 失败
+[42] 正在执行: test_closure.php
+[失败] test_closure.php (退出码: 127)
+  -> 失败
+[43] 正在执行: test_func_return_closure.php
+[失败] test_func_return_closure.php (退出码: 127)
+  -> 失败
+[44] 正在执行: test_functions.php
+[失败] test_functions.php (退出码: 127)
+  -> 失败
+[45] 正在执行: test_minimal_closure.php
+[失败] test_minimal_closure.php (退出码: 127)
+  -> 失败
+[46] 正在执行: test_oop_advanced.php
+[失败] test_oop_advanced.php (退出码: 127)
+  -> 失败
+[47] 正在执行: test_oop_complex.php
+[失败] test_oop_complex.php (退出码: 127)
+  -> 失败
+[48] 正在执行: test_recursive.php
+[失败] test_recursive.php (退出码: 127)
+  -> 失败
+[49] 正在执行: test_ref_params.php
+[失败] test_ref_params.php (退出码: 127)
+  -> 失败
+
+========================================
+执行完成!
+总文件数: 49
+成功: 0
+失败: 49
+包含 DEBUG 信息的文件: 0
+========================================
+失败的文件列表已保存到: ./test_results/failed_files.txt
+

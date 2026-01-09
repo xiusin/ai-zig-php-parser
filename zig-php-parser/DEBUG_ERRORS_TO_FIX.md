@@ -293,3 +293,89 @@ grep -i "memory leak" oop_memory_leak_test_results.log
 - PHP 8.4 Property Hooks: https://wiki.php.net/rfc/property-hooks
 - PHP spaceship operator: https://www.php.net/manual/en/language.operators.comparison.php#language.operators.comparison.spaceship
 - PHP throw statement: https://www.php.net/manual/en/language.exceptions.php
+
+---
+
+## 九、OOP高级测试新发现的解析器限制（2026-01-09）
+
+### 9.1 类常量不支持
+
+**错误类型**: `error.UnexpectedToken at token: .k_const (const)`
+
+**影响代码**:
+```php
+class Config {
+    const VERSION = "1.0.0";  // 不支持
+}
+```
+
+**原因**: parser未实现类常量的解析逻辑
+
+**优先级**: 低
+
+---
+
+### 9.2 instanceof操作符不支持
+
+**错误类型**: `Undefined variable: $Rectangle`
+
+**影响代码**:
+```php
+$shape instanceof Rectangle;  // 不支持
+$obj instanceof Shape;        // 不支持
+```
+
+**原因**: parser未实现`instanceof`关键字的解析
+
+**优先级**: 中
+
+---
+
+### 9.3 静态属性自增/自减不支持
+
+**错误类型**: `TypeError: Increment/decrement only supports variables and properties`
+
+**影响代码**:
+```php
+self::$instanceCount++;  // 不支持
+self::$count = self::$count + 1;  // 支持
+```
+
+**原因**: VM未实现静态属性的`++/--`操作
+
+**优先级**: 低
+
+---
+
+### 9.4 预定义常量不支持
+
+**错误类型**: `Undefined variable: $PHP_EOL`
+
+**影响代码**:
+```php
+echo "Hello" . PHP_EOL;  // 不支持
+```
+
+**原因**: 未实现`PHP_EOL`等预定义常量
+
+**优先级**: 低
+
+---
+
+### 9.5 当前支持和不支持的OOP功能对比
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 类定义 | ✅ 支持 | `class ClassName { }` |
+| 构造函数 | ✅ 支持 | `public function __construct()` |
+| 访问修饰符 | ✅ 支持 | `private`, `protected`, `public` |
+| 静态成员变量 | ✅ 支持 | `private static $var` |
+| 静态方法 | ✅ 支持 | `public static function method()` |
+| 接口定义 | ✅ 支持 | `interface Shape { }` |
+| 接口实现 | ✅ 支持 | `class Rect implements Shape` |
+| 多态 | ✅ 支持 | `function foo(Shape $shape)` |
+| self::访问静态成员 | ✅ 支持 | `self::$count + 1` |
+| **类常量** | ❌ 不支持 | `const VERSION = "1.0"` |
+| **instanceof** | ❌ 不支持 | `$obj instanceof Class` |
+| **静态属性++** | ❌ 不支持 | `self::$count++` |
+| **预定义常量** | ❌ 不支持 | `PHP_EOL`, `PHP_VERSION` |
