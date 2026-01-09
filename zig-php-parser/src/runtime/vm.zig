@@ -4319,8 +4319,16 @@ pub const VM = struct {
                 const interface_node = self.context.nodes.items[interface_idx];
                 if (interface_node.tag == .variable) {
                     const interface_name = self.context.string_pool.keys()[interface_node.data.variable.name];
+                    // 首先尝试获取接口，如果找不到则尝试获取类（兼容内置接口）
                     if (self.getInterface(interface_name)) |interface_obj| {
                         interfaces[i] = interface_obj;
+                    } else if (self.getClass(interface_name)) |_| {
+                        // 创建一个伪接口对象用于类型检查
+                        const fake_interface = try self.allocator.create(types.PHPInterface);
+                        const name_str = try types.PHPString.init(self.allocator, interface_name);
+                        fake_interface.* = types.PHPInterface.init(self.allocator, name_str);
+                        name_str.release(self.allocator);
+                        interfaces[i] = fake_interface;
                     }
                 }
             }
@@ -4675,6 +4683,9 @@ pub const VM = struct {
                 auto_index += 1;
             }
         }
+
+        // 更新数组的next_index，以便后续push操作能正确工作
+        php_array.next_index = auto_index;
 
         return php_array_value;
     }
@@ -5306,6 +5317,97 @@ pub const VM = struct {
         return last_val;
     }
 
+    /// 检查类是否实现了指定接口
+    fn classImplementsInterface(self: *VM, class: *types.PHPClass, interface_name: []const u8) bool {
+        // 检查直接实现的接口
+        for (class.interfaces) |iface| {
+            if (std.mem.eql(u8, iface.name.data, interface_name)) {
+                return true;
+            }
+        }
+        // 检查父类
+        var parent = class.parent;
+        while (parent) |p| {
+            if (self.classImplementsInterface(p, interface_name)) {
+                return true;
+            }
+            parent = p.parent;
+        }
+        return false;
+    }
+
+    /// 处理 Iterator 对象的 foreach 遍历
+    fn evaluateIteratorForeach(self: *VM, iterator_value: Value, foreach_stmt: anytype) !Value {
+        var last_val = Value.initNull();
+
+        // 调用 rewind()
+        const obj = iterator_value.getAsObject().data;
+        _ = obj.callMethod(self, iterator_value, "rewind", &.{}) catch {};
+
+        loop: while (true) {
+            // 检查是否有效
+            const valid_result = obj.callMethod(self, iterator_value, "valid", &.{}) catch Value.initBool(false);
+            const is_valid = valid_result.asBool();
+            self.releaseValue(valid_result);
+
+            if (!is_valid) {
+                break;
+            }
+
+            // 获取 key（如果指定）
+            if (foreach_stmt.key) |key_idx| {
+                const key_result = obj.callMethod(self, iterator_value, "key", &.{}) catch Value.initNull();
+                defer self.releaseValue(key_result);
+
+                const key_node = self.context.nodes.items[key_idx];
+                if (key_node.tag == .variable) {
+                    const name_id = key_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    try self.setVariable(name, key_result.retain());
+                }
+            }
+
+            // 获取 value
+            if (foreach_stmt.value > 0 and foreach_stmt.value < self.context.nodes.items.len) {
+                const value_result = obj.callMethod(self, iterator_value, "current", &.{}) catch Value.initNull();
+                defer self.releaseValue(value_result);
+
+                const value_node = self.context.nodes.items[foreach_stmt.value];
+                if (value_node.tag == .variable) {
+                    const name_id = value_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    try self.setVariable(name, value_result.retain());
+                }
+            }
+
+            // 执行循环体
+            self.releaseValue(last_val);
+            const body_idx = foreach_stmt.body;
+            if (body_idx > 0 and body_idx < self.context.nodes.items.len) {
+                last_val = self.eval(body_idx) catch |err| blk: {
+                    if (err == error.Break) {
+                        self.break_level -= 1;
+                        if (self.break_level > 0) return error.Break;
+                        break :loop;
+                    }
+                    if (err == error.Continue) {
+                        self.continue_level -= 1;
+                        if (self.continue_level > 0) return error.Continue;
+                        break :blk Value.initNull();
+                    }
+                    return err;
+                };
+            } else {
+                last_val = Value.initNull();
+            }
+
+            // 调用 next()
+            _ = obj.callMethod(self, iterator_value, "next", &.{}) catch {};
+        }
+
+        return last_val;
+    }
+
     fn evaluateForeachStatement(self: *VM, foreach_stmt: anytype) !Value {
         // 安全检查：确保 iterable 是有效的索引
         const iterable_idx = foreach_stmt.iterable;
@@ -5316,9 +5418,24 @@ pub const VM = struct {
         const iterable = try self.eval(iterable_idx);
         defer self.releaseValue(iterable);
 
+        // 检查是否是 Iterator 或 IteratorAggregate 对象
+        if (iterable.isObject()) {
+            const obj = iterable.getAsObject().data;
+            const class_name = obj.class.name.data;
+            
+            // 检查是否是 Iterator 或实现了 Iterator 接口
+            const is_iterator = std.mem.eql(u8, class_name, "Iterator") or 
+                self.classImplementsInterface(obj.class, "Iterator");
+            
+            if (is_iterator or std.mem.eql(u8, class_name, "IteratorAggregate")) {
+                return self.evaluateIteratorForeach(iterable, foreach_stmt);
+            }
+        }
+
+        // 如果不是 Iterator，回退到数组遍历
         if (iterable.getTag() != .array) {
             // 使用安全的行号（固定值避免溢出问题）
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Foreach can only iterate over arrays", self.current_file, 1);
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Foreach can only iterate over arrays or Iterator objects", self.current_file, 1);
             return self.throwException(exception);
         }
 
@@ -6138,8 +6255,16 @@ pub const VM = struct {
                 const interface_node = self.context.nodes.items[interface_idx];
                 if (interface_node.tag == .variable) {
                     const interface_name = self.context.string_pool.keys()[interface_node.data.variable.name];
+                    // 首先尝试获取接口，如果找不到则尝试获取类（兼容内置接口）
                     if (self.getInterface(interface_name)) |interface_obj| {
                         interfaces[i] = interface_obj;
+                    } else if (self.getClass(interface_name)) |_| {
+                        // 创建一个伪接口对象用于类型检查
+                        const fake_interface = try self.allocator.create(types.PHPInterface);
+                        const name_str = try types.PHPString.init(self.allocator, interface_name);
+                        fake_interface.* = types.PHPInterface.init(self.allocator, name_str);
+                        name_str.release(self.allocator);
+                        interfaces[i] = fake_interface;
                     } else {
                         php_class.deinit(self.allocator);
                         const msg = try std.fmt.allocPrint(self.allocator, "Interface '{s}' not found", .{interface_name});

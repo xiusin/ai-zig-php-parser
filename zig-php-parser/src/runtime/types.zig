@@ -389,7 +389,7 @@ pub const PHPArray = struct {
     pub fn removeMultiDim(self: *PHPArray, allocator: std.mem.Allocator, key_path: []const ArrayKey) bool {
         if (key_path.len == 0) return false;
         if (key_path.len == 1) {
-            if (self.elements.fetchRemove(key_path[0])) |kv| {
+            if (self.elements.orderedRemove(key_path[0])) |kv| {
                 kv.value.release(allocator);
                 return true;
             }
@@ -405,11 +405,105 @@ pub const PHPArray = struct {
 
         if (current_value.getTag() != .array) return false;
         const parent_arr = current_value.getAsArray().data;
-        if (parent_arr.elements.fetchRemove(key_path[key_path.len - 1])) |kv| {
+        if (parent_arr.elements.orderedRemove(key_path[key_path.len - 1])) |kv| {
             kv.value.release(allocator);
             return true;
         }
         return false;
+    }
+
+    /// 移除指定范围的元素（用于array_splice）
+    /// 返回被移除的元素数量
+    pub fn removeRange(self: *PHPArray, allocator: std.mem.Allocator, start: i64, end: i64) usize {
+        if (start >= end) return 0;
+        
+        // 对于索引数组，需要重建数组以保持顺序
+        var removed_count: usize = 0;
+        var new_idx: i64 = 0;
+        
+        // 收集要保留的元素
+        var to_keep = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
+        defer {
+            for (to_keep.items) |item| {
+                item.value.release(allocator);
+            }
+            to_keep.deinit(allocator);
+        }
+        
+        var iter = self.elements.iterator();
+        var idx: i64 = 0;
+        while (iter.next()) |entry| {
+            if (idx >= start and idx < end) {
+                // 释放要移除的值
+                entry.value_ptr.release(allocator);
+                removed_count += 1;
+            } else {
+                // 保留元素
+                to_keep.append(allocator, .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* }) catch {};
+            }
+            idx += 1;
+        }
+        
+        // 清空当前数组
+        self.elements.clearRetainingCapacity();
+        
+        // 重新插入保留的元素，使用新的整数索引
+        for (to_keep.items) |item| {
+            // 释放旧的字符串键（如果有）
+            if (item.key == .string) {
+                item.key.string.release(allocator);
+            }
+            self.set(allocator, ArrayKey{ .integer = new_idx }, item.value) catch {};
+            new_idx += 1;
+        }
+        
+        return removed_count;
+    }
+
+    /// 插入元素到指定位置
+    pub fn insertAt(self: *PHPArray, allocator: std.mem.Allocator, index: i64, value: Value) !void {
+        // 简化方法：重建数组
+        var new_idx: i64 = 0;
+        
+        // 收集所有元素
+        var to_keep = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
+        defer {
+            for (to_keep.items) |item| {
+                item.value.release(allocator);
+            }
+            to_keep.deinit(allocator);
+        }
+        
+        var iter = self.elements.iterator();
+        while (iter.next()) |entry| {
+            to_keep.append(allocator, .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* }) catch {};
+        }
+        
+        // 清空并重建
+        self.elements.clearRetainingCapacity();
+        
+        // 重新插入，插入新元素
+        for (to_keep.items) |item| {
+            if (new_idx == index) {
+                // 在这个位置插入新值
+                if (item.key == .string) {
+                    item.key.string.release(allocator);
+                }
+                try self.set(allocator, ArrayKey{ .integer = new_idx }, value);
+                new_idx += 1;
+            }
+            // 插入原元素
+            if (item.key == .string) {
+                item.key.string.release(allocator);
+            }
+            try self.set(allocator, ArrayKey{ .integer = new_idx }, item.value);
+            new_idx += 1;
+        }
+        
+        // 如果插入位置在末尾
+        if (index == new_idx) {
+            try self.set(allocator, ArrayKey{ .integer = new_idx }, value);
+        }
     }
 
     pub fn getIterator(self: *PHPArray) @TypeOf(self.elements.iterator()) {
@@ -1056,18 +1150,18 @@ pub const InlineCache = struct {
 
     /// 使缓存失效
     pub fn invalidate(self: *InlineCache, shape_id: u32) void {
-        var to_remove = std.ArrayList(u64).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove = std.ArrayListUnmanaged(u64){};
+        defer to_remove.deinit(self.allocator);
 
         var iter = self.entries.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.shape_id == shape_id) {
-                to_remove.append(entry.key_ptr.*) catch {};
+                to_remove.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
 
         for (to_remove.items) |key| {
-            _ = self.entries.remove(key);
+            _ = self.entries.orderedRemove(key);
         }
     }
 };
@@ -2237,6 +2331,8 @@ pub const UserFunction = struct {
 pub const Closure = struct {
     function: UserFunction,
     captured_vars: std.StringHashMap(Value),
+    captured_refs: std.StringHashMap(void), // Track which vars are captured by reference
+    parent_frame_vars: std.StringHashMap(Value), // Store parent frame variables for reference captures
     is_static: bool,
 
     pub fn init(allocator: std.mem.Allocator, function: UserFunction) Closure {
@@ -2269,6 +2365,8 @@ pub const Closure = struct {
                 .max_args = function.max_args,
             },
             .captured_vars = std.StringHashMap(Value).init(allocator),
+            .captured_refs = std.StringHashMap(void).init(allocator),
+            .parent_frame_vars = std.StringHashMap(Value).init(allocator),
             .is_static = false,
         };
     }
@@ -2280,6 +2378,13 @@ pub const Closure = struct {
             entry.value_ptr.release(allocator);
         }
         self.captured_vars.deinit();
+        self.captured_refs.deinit();
+        // Release parent frame vars
+        var parent_iter = self.parent_frame_vars.iterator();
+        while (parent_iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
+        self.parent_frame_vars.deinit();
     }
 
     pub fn call(self: *Closure, vm: *anyopaque, args: []const Value) !Value {
@@ -2305,7 +2410,20 @@ pub const Closure = struct {
         // Set captured variables in current call frame
         var captured_iter = self.captured_vars.iterator();
         while (captured_iter.next()) |entry| {
-            try vm_instance.setVariable(entry.key_ptr.*, entry.value_ptr.*);
+            const var_name = entry.key_ptr.*;
+            // If this variable is captured by reference, use parent_frame_vars
+            if (self.captured_refs.contains(var_name)) {
+                // Get current value from parent_frame_vars (which we update after each call)
+                if (self.parent_frame_vars.get(var_name)) |current_value| {
+                    try vm_instance.setVariable(var_name, current_value);
+                } else {
+                    // First call: use the initial captured value
+                    try vm_instance.setVariable(var_name, entry.value_ptr.*);
+                }
+            } else {
+                // For non-reference captures, set in current call frame (local scope)
+                try vm_instance.setVariable(var_name, entry.value_ptr.*);
+            }
         }
 
         // Execute closure body
@@ -2325,7 +2443,9 @@ pub const Closure = struct {
     }
 
     pub fn captureByReference(self: *Closure, name: []const u8, value: Value) !void {
-        // In a real implementation, this would store a reference to the variable
+        // Store the variable name in captured_refs to indicate it's a reference
+        try self.captured_refs.put(name, {});
+        // Also store the initial value for fallback
         try self.captured_vars.put(name, value);
     }
 

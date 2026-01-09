@@ -116,6 +116,11 @@ pub const StandardLibrary = struct {
             &.{ .name = "count", .min_args = 1, .max_args = 2, .handler = countFn },
             &.{ .name = "sizeof", .min_args = 1, .max_args = 2, .handler = countFn },
             &.{ .name = "array_key_exists", .min_args = 2, .max_args = 2, .handler = arrayKeyExistsFn },
+            &.{ .name = "array_combine", .min_args = 2, .max_args = 2, .handler = arrayCombineFn },
+            &.{ .name = "array_intersect", .min_args = 2, .max_args = 255, .handler = arrayIntersectFn },
+            &.{ .name = "array_splice", .min_args = 2, .max_args = 4, .handler = arraySpliceFn },
+            &.{ .name = "array_walk", .min_args = 2, .max_args = 3, .handler = arrayWalkFn },
+    &.{ .name = "array_diff", .min_args = 2, .max_args = 255, .handler = arrayDiffFn },
             &.{ .name = "isset", .min_args = 1, .max_args = 255, .handler = issetFn },
         };
 
@@ -191,6 +196,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "is_object", .min_args = 1, .max_args = 1, .handler = isObjectFn },
             &.{ .name = "is_numeric", .min_args = 1, .max_args = 1, .handler = isNumericFn },
             &.{ .name = "is_scalar", .min_args = 1, .max_args = 1, .handler = isScalarFn },
+            &.{ .name = "is_resource", .min_args = 1, .max_args = 1, .handler = isResourceFn },
             &.{ .name = "isset", .min_args = 1, .max_args = 255, .handler = issetFn },
             // Cast functions
             &.{ .name = "intval", .min_args = 1, .max_args = 2, .handler = intvalFn },
@@ -3198,6 +3204,11 @@ fn isScalarFn(vm: *VM, args: []const Value) !Value {
     });
 }
 
+fn isResourceFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    return Value.initBool(args[0].getTag() == .resource);
+}
+
 fn issetFn(vm: *VM, args: []const Value) !Value {
     _ = vm;
     for (args) |arg| {
@@ -3735,6 +3746,351 @@ fn arrayKeyExistsFn(vm: *VM, args: []const Value) !Value {
     };
 
     return Value.initBool(exists);
+}
+
+// PHP array_combine() - Create array using one array for keys and another for values
+fn arrayCombineFn(vm: *VM, args: []const Value) !Value {
+    const keys = args[0];
+    const values = args[1];
+
+    if (keys.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_combine() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    if (values.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_combine() expects parameter 2 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const keys_array = keys.getAsArray().data;
+    const values_array = values.getAsArray().data;
+
+    if (keys_array.count() != values_array.count()) {
+        // array_combine(): Number of elements in key and value arrays don't match
+        // Note: This is a warning in PHP, continuing with result
+    }
+
+    const result = try Value.initArrayWithManager(&vm.memory_manager);
+    errdefer result.release(vm.allocator);
+
+    const result_arr = result.getAsArray().data;
+
+    var key_idx: i64 = 0;
+    var value_idx: i64 = 0;
+
+    while (true) {
+        const key_opt = keys_array.get(ArrayKey{ .integer = key_idx });
+        const value_opt = values_array.get(ArrayKey{ .integer = value_idx });
+
+        if (key_opt == null or value_opt == null) break;
+
+        const key_copy = key_opt.?.retain();
+        const value_copy = value_opt.?.retain();
+
+        const array_key = switch (key_copy.getTag()) {
+            .integer => ArrayKey{ .integer = key_copy.asInt() },
+            .string => ArrayKey{ .string = key_copy.getAsString().data },
+            else => ArrayKey{ .integer = key_idx },
+        };
+
+        result_arr.set(vm.allocator, array_key, value_copy) catch {};
+        key_idx += 1;
+        value_idx += 1;
+    }
+
+    return result;
+}
+
+// PHP array_intersect() - Returns the values of array1 that are present in all the arrays
+fn arrayIntersectFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 2) {
+        // array_intersect(): At least two parameters are required
+        // Return empty array for now
+        return Value.initArrayWithManager(&vm.memory_manager);
+    }
+
+    const array1 = args[0];
+    if (array1.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_intersect() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr1 = array1.getAsArray().data;
+
+    // Collect all values from all other arrays into a set
+    // Using a simple approach: for each value in arr1, check if it exists in all other arrays
+    const result = try Value.initArrayWithManager(&vm.memory_manager);
+    errdefer result.release(vm.allocator);
+
+    const result_arr = result.getAsArray().data;
+
+    // For each value in arr1, check if it exists in all other arrays
+    var iter1 = arr1.elements.iterator();
+    while (iter1.next()) |entry1| {
+        const value1 = entry1.value_ptr.*;
+
+        // Check if this value exists in all other arrays
+        var found_in_all = true;
+        for (args[1..]) |arg| {
+            if (arg.getTag() != .array) {
+                found_in_all = false;
+                break;
+            }
+
+            const arr = arg.getAsArray().data;
+            var found = false;
+            var iter = arr.elements.iterator();
+            while (iter.next()) |entry| {
+                const value = entry.value_ptr.*;
+
+                // Compare values
+                const equal = blk: {
+                    // Both integers
+                    if (value1.getTag() == .integer and value.getTag() == .integer) {
+                        break :blk value1.asInt() == value.asInt();
+                    }
+                    // Both floats
+                    if (value1.getTag() == .float and value.getTag() == .float) {
+                        break :blk value1.asFloat() == value.asFloat();
+                    }
+                    // Both strings
+                    if (value1.getTag() == .string and value.getTag() == .string) {
+                        const str1 = value1.getAsString().data.data;
+                        const str2 = value.getAsString().data.data;
+                        break :blk std.mem.eql(u8, str1, str2);
+                    }
+                    // Integer and float comparison
+                    if (value1.getTag() == .integer and value.getTag() == .float) {
+                        break :blk @as(f64, @floatFromInt(value1.asInt())) == value.asFloat();
+                    }
+                    if (value1.getTag() == .float and value.getTag() == .integer) {
+                        break :blk value1.asFloat() == @as(f64, @floatFromInt(value.asInt()));
+                    }
+                    break :blk false;
+                };
+
+                if (equal) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                found_in_all = false;
+                break;
+            }
+        }
+
+        if (found_in_all) {
+            const value_copy = value1.retain();
+            result_arr.set(vm.allocator, ArrayKey{ .integer = @as(i64, @intCast(result_arr.count())) }, value_copy) catch {};
+        }
+    }
+
+    return result;
+}
+
+// PHP array_diff() - Returns the values of array1 that are not present in the other arrays
+fn arrayDiffFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 2) {
+        // array_diff(): At least two parameters are required
+        return Value.initArrayWithManager(&vm.memory_manager);
+    }
+
+    const array1 = args[0];
+    if (array1.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_diff() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr1 = array1.getAsArray().data;
+
+    // Collect all values from all other arrays into a set
+    const result = try Value.initArrayWithManager(&vm.memory_manager);
+    errdefer result.release(vm.allocator);
+
+    const result_arr = result.getAsArray().data;
+
+    // For each value in arr1, check if it exists in any other array
+    var iter1 = arr1.elements.iterator();
+    while (iter1.next()) |entry1| {
+        const value1 = entry1.value_ptr.*;
+
+        // Check if this value exists in any other array
+        var found = false;
+        for (args[1..]) |arg| {
+            if (arg.getTag() != .array) continue;
+
+            const arr = arg.getAsArray().data;
+            var iter = arr.elements.iterator();
+            while (iter.next()) |entry| {
+                const value = entry.value_ptr.*;
+
+                // Compare values
+                const equal = blk: {
+                    // Both integers
+                    if (value1.getTag() == .integer and value.getTag() == .integer) {
+                        break :blk value1.asInt() == value.asInt();
+                    }
+                    // Both floats
+                    if (value1.getTag() == .float and value.getTag() == .float) {
+                        break :blk value1.asFloat() == value.asFloat();
+                    }
+                    // Both strings
+                    if (value1.getTag() == .string and value.getTag() == .string) {
+                        const str1 = value1.getAsString().data.data;
+                        const str2 = value.getAsString().data.data;
+                        break :blk std.mem.eql(u8, str1, str2);
+                    }
+                    // Integer and float comparison
+                    if (value1.getTag() == .integer and value.getTag() == .float) {
+                        break :blk @as(f64, @floatFromInt(value1.asInt())) == value.asFloat();
+                    }
+                    if (value1.getTag() == .float and value.getTag() == .integer) {
+                        break :blk value1.asFloat() == @as(f64, @floatFromInt(value.asInt()));
+                    }
+                    break :blk false;
+                };
+
+                if (equal) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (found) break;
+        }
+
+        if (!found) {
+            const value_copy = value1.retain();
+            result_arr.set(vm.allocator, ArrayKey{ .integer = @as(i64, @intCast(result_arr.count())) }, value_copy) catch {};
+        }
+    }
+
+    return result;
+}
+
+// PHP array_splice() - Remove a portion of the array and replace it
+fn arraySpliceFn(vm: *VM, args: []const Value) !Value {
+    const input_array = args[0];
+    const offset = args[1].asInt();
+
+    if (input_array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_splice() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const length = if (args.len > 2) args[2].asInt() else null;
+    const replacement = if (args.len > 3) args[3] else null;
+
+    const arr = input_array.getAsArray().data;
+    const arr_count = @as(i64, @intCast(arr.count()));
+
+    // Create result array (removed elements)
+    const result = try Value.initArrayWithManager(&vm.memory_manager);
+    errdefer result.release(vm.allocator);
+
+    const result_arr = result.getAsArray().data;
+
+    // Calculate actual start and end
+    const start = if (offset < 0) arr_count + offset else offset;
+    const end = if (length) |l| start + l else arr_count;
+
+    // Copy removed elements to result
+    var idx: i64 = 0;
+    var result_idx: i64 = 0;
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const value = entry.value_ptr.*;
+        if (idx >= start and idx < end) {
+            const value_copy = value.retain();
+            result_arr.set(vm.allocator, ArrayKey{ .integer = result_idx }, value_copy) catch {};
+            result_idx += 1;
+        }
+        idx += 1;
+    }
+
+    // Now actually modify the original array
+    // Remove the elements in the specified range
+    if (start >= 0 and start < arr_count) {
+        const actual_end = if (end > arr_count) arr_count else end;
+        _ = arr.removeRange(vm.allocator, start, actual_end);
+        
+        // Insert replacement elements if provided
+        if (replacement) |rep| {
+            if (rep.getTag() == .array) {
+                const rep_arr = rep.getAsArray().data;
+                var rep_iter = rep_arr.elements.iterator();
+                var insert_idx = start;
+                while (rep_iter.next()) |entry| {
+                    const rep_value = entry.value_ptr.*;
+                    try arr.insertAt(vm.allocator, insert_idx, rep_value.retain());
+                    insert_idx += 1;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+// PHP array_walk() - Apply a user function to every element of an array
+fn arrayWalkFn(vm: *VM, args: []const Value) !Value {
+    const array = args[0];
+    const callback = args[1];
+
+    if (array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_walk() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr = array.getAsArray().data;
+    const userdata = if (args.len > 2) args[2] else null;
+
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        const key_value = switch (key) {
+            .integer => Value.initInt(key.integer),
+            .string => Value.initStringWithManager(&vm.memory_manager, key.string.data) catch Value.initNull(),
+        };
+
+        // Build callback arguments
+        var callback_args = try std.ArrayList(Value).initCapacity(vm.allocator, 3);
+        defer callback_args.deinit(vm.allocator);
+        try callback_args.append(vm.allocator, value.retain());
+        try callback_args.append(vm.allocator, key_value);
+        if (userdata) |ud| {
+            try callback_args.append(vm.allocator, ud.retain());
+        }
+
+        const result_value = switch (callback.getTag()) {
+            .native_function => blk: {
+                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
+                break :blk try function(vm, callback_args.items);
+            },
+            .user_function => try vm.callUserFunction(callback.getAsUserFunc().data, callback_args.items),
+            .closure => try vm.callClosure(callback.getAsClosure().data, callback_args.items),
+            .arrow_function => try vm.callArrowFunction(callback.getAsArrowFunc().data, callback_args.items),
+            else => {
+                const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_walk() expects parameter 2 to be a valid callback", "builtin", 0);
+                _ = try vm.throwException(exception);
+                return error.InvalidArgumentType;
+            },
+        };
+        _ = result_value; // Ignore callback return value
+    }
+
+    return Value.initBool(true);
 }
 
 // bin2hex - Convert binary data to hexadecimal
