@@ -1649,6 +1649,9 @@ pub const PHPObject = struct {
                     std.mem.eql(u8, class_name, "TypeError") or
                     std.mem.eql(u8, class_name, "ArgumentCountError") or
                     std.mem.eql(u8, class_name, "DivisionByZeroError") or
+                    std.mem.eql(u8, class_name, "UnhandledMatchError") or
+                    std.mem.eql(u8, class_name, "ValueError") or
+                    std.mem.eql(u8, class_name, "UnhandledError") or
                     (self.class.parent != null and (std.mem.eql(u8, self.class.parent.?.name.data, "Exception") or
                         std.mem.eql(u8, self.class.parent.?.name.data, "Error")));
 
@@ -1660,6 +1663,10 @@ pub const PHPObject = struct {
                     // Set code from second argument if provided
                     if (args.len > 1) {
                         try self.setProperty(vm_instance.allocator, "code", args[1]);
+                    }
+                    // Set previous from third argument if provided
+                    if (args.len > 2) {
+                        try self.setProperty(vm_instance.allocator, "previous", args[2]);
                     }
                     return Value.initNull();
                 }

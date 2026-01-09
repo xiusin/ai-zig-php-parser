@@ -1,0 +1,74 @@
+========================================
+文件: ./examples/error_handling.php
+输出:
+Validation failed: Undefined variable: $FILTER_VALIDATE_EMAIL
+Errors:
+Opening file: nonexistent.txt
+File error: Could not open file: nonexistent.txt
+10 / 2 = 5
+10 / 0 = inf
+Triggering a warning...
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 5
+Memory allocations: 1
+GC collections: 0
+Execution time: 1527000ns
+Peak memory usage: 0 bytes
+String intern pool size: 8
+Call stack depth: 1
+===============================================
+error(gpa): memory address 0x107c00006 leaked: 
+
+error(gpa): memory address 0x107c00007 leaked: 
+
+error(gpa): memory address 0x107c00008 leaked: 
+
+error(gpa): memory address 0x107ba0030 leaked: 
+
+error(gpa): memory address 0x107ba0038 leaked: 
+
+error(gpa): memory address 0x107940168 leaked: 
+
+error(gpa): memory address 0x107960340 leaked: 
+
+error(gpa): memory address 0x107960350 leaked: 
+
+error(gpa): memory address 0x107960360 leaked: 
+
+error(gpa): memory address 0x107960370 leaked: 
+
+error(gpa): memory address 0x107960380 leaked: 
+
+error(gpa): memory address 0x1079603e0 leaked: 
+
+error(gpa): memory address 0x107960400 leaked: 
+
+error(gpa): memory address 0x107960430 leaked: 
+
+error(gpa): memory address 0x107960440 leaked: 
+
+error(gpa): memory address 0x107a42580 leaked: 
+
+error(gpa): memory address 0x107a425c0 leaked: 
+
+error(gpa): memory address 0x107a42600 leaked: 
+
+error(gpa): memory address 0x107a42640 leaked: 
+
+error(gpa): memory address 0x107a42900 leaked: 
+
+error(gpa): memory address 0x107a42940 leaked: 
+
+error(gpa): memory address 0x107a42980 leaked: 
+
+error(gpa): memory address 0x107a429c0 leaked: 
+
+error(gpa): memory address 0x107a42a00 leaked: 
+
+error(gpa): memory address 0x107a42a40 leaked: 
+
+error(gpa): memory address 0x107b63400 leaked: 
+
+error(gpa): memory address 0x107b63500 leaked: 
+

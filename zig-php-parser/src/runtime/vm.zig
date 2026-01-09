@@ -629,6 +629,51 @@ fn methodExistsFn(vm: *VM, args: []const Value) !Value {
     return Value.initBool(exists);
 }
 
+fn functionExistsFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "function_exists", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const function_name_val = args[0];
+    if (function_name_val.getTag() != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "function_exists() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const function_name = function_name_val.getAsString().data.data;
+
+    // Check builtin functions (stdlib)
+    if (vm.stdlib.getFunction(function_name) != null) {
+        return Value.initBool(true);
+    }
+
+    // Check builtin registry functions
+    if (vm.builtin_registry.exists(function_name)) {
+        return Value.initBool(true);
+    }
+
+    // Check extension functions
+    if (vm.extension_registry) |ext_reg| {
+        if (ext_reg.findFunction(function_name) != null) {
+            return Value.initBool(true);
+        }
+    }
+
+    // Check user-defined functions in global scope
+    if (vm.global.get(function_name)) |func_val| {
+        // Check if it's a user function, closure, arrow function, or native function
+        return Value.initBool(switch (func_val.getTag()) {
+            .user_function, .closure, .arrow_function, .native_function => true,
+            else => false,
+        });
+    }
+
+    return Value.initBool(false);
+}
+
 fn propertyExistsFn(vm: *VM, args: []const Value) !Value {
     if (args.len != 2) {
         const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 2, @intCast(args.len), "property_exists", "builtin", 0);
@@ -1141,6 +1186,7 @@ pub const VM = struct {
     return_value: ?Value = null,
     break_level: u32 = 0,
     continue_level: u32 = 0,
+    original_exception_value: ?Value = null,
     current_exception: ?*exceptions.PHPException = null,
 
     // Execution mode switching
@@ -1229,15 +1275,17 @@ pub const VM = struct {
         builtin_io.initFileHandles(allocator);
 
         // Initialize builtin classes
-        // The VM takes ownership of the class pointers, so we only deinit the hashmap
-        // container, not the classes themselves
-        var builtin_class_manager = try builtin_classes.BuiltinClassManager.init(allocator);
+        // Create manager on heap for proper cleanup, transfer classes to VM
+        var builtin_class_manager = try allocator.create(builtin_classes.BuiltinClassManager);
+        builtin_class_manager.* = try builtin_classes.BuiltinClassManager.init(allocator);
         var class_iter = builtin_class_manager.classes.iterator();
         while (class_iter.next()) |entry| {
             try vm.classes.put(entry.key_ptr.*, entry.value_ptr.*);
         }
-        // Only deinit the hashmap container, not the class objects
+        // Only deinit the hashmap container, classes are now owned by VM
         builtin_class_manager.classes.deinit();
+        // Clean up the manager struct itself
+        allocator.destroy(builtin_class_manager);
 
         // Initialize builtin function registry with core functions
         try vm.initializeBuiltinRegistry();
@@ -1355,22 +1403,28 @@ pub const VM = struct {
         }
         self.classes.deinit();
 
+        // 6.5. Clean up reflection system
+        self.reflection_system.deinit();
+
         // 7. Clean up error context and handlers
         self.error_context.deinit(self.allocator);
         self.try_catch_stack.deinit(self.allocator);
         self.error_handler.deinit();
 
-        // 8. Clean up included files tracking
+        // 8. Clean up file handles
+        builtin_io.deinitFileHandles();
+
+        // 9. Clean up included files tracking
         var included_iter = self.included_files.keyIterator();
         while (included_iter.next()) |key| {
             self.allocator.free(key.*);
         }
         self.included_files.deinit();
 
-        // 9. Clean up request arena
+        // 10. Clean up request arena
         self.request_arena.deinit();
 
-        // 10. Clean up string intern pool
+        // 11. Clean up string intern pool
         // Must be done LAST (before memory manager) as everything else uses these strings
         var string_iter = self.string_intern_pool.iterator();
         while (string_iter.next()) |entry| {
@@ -1383,10 +1437,10 @@ pub const VM = struct {
         }
         self.string_intern_pool.deinit();
 
-        // 11. Clean up memory manager
+        // 12. Clean up memory manager
         self.memory_manager.deinit();
 
-        // 12. Finally destroy the VM itself
+        // 13. Finally destroy the VM itself
         self.allocator.destroy(self);
     }
 
@@ -1552,6 +1606,7 @@ pub const VM = struct {
         try self.defineBuiltin("is_callable", isCallableFn);
         try self.defineBuiltin("class_exists", classExistsFn);
         try self.defineBuiltin("method_exists", methodExistsFn);
+        try self.defineBuiltin("function_exists", functionExistsFn);
         try self.defineBuiltin("property_exists", propertyExistsFn);
         try self.defineBuiltin("get_class", getClassFn);
         try self.defineBuiltin("get_class_methods", getClassMethodsFn);
@@ -4216,7 +4271,6 @@ pub const VM = struct {
                 }
 
                 const path_str = path_value.getAsString().data.data;
-                std.debug.print("DEBUG: require path='{s}', current_file='{s}'\n", .{ path_str, self.current_file });
 
                 // Try to open and read the file
                 const file = std.fs.cwd().openFile(path_str, .{}) catch |err| {
@@ -4533,8 +4587,9 @@ pub const VM = struct {
         defer self.releaseValue(target_value);
 
         if (target_value.getTag() != .array) {
-            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use value as array", self.current_file, self.current_line);
-            return self.throwException(exception);
+            // For nested access like $arr["a"]["b"], if inner returns non-array,
+            // we should return null
+            return Value.initNull();
         }
 
         const php_array = target_value.getAsArray().data;
@@ -4552,6 +4607,7 @@ pub const VM = struct {
             };
 
             if (php_array.get(key)) |val| {
+                // Always retain for the caller
                 self.retainValue(val);
                 return val;
             } else {
@@ -7351,27 +7407,49 @@ pub const VM = struct {
                             const var_node = self.context.nodes.items[var_idx];
                             if (var_node.tag == .variable) {
                                 const var_name = self.context.string_pool.keys()[var_node.data.variable.name];
-                                // Create an exception object from current_exception
-                                if (self.current_exception) |exc| {
-                                    // Create a PHP object to represent the exception
+                                
+                                // Use original exception object if available, otherwise create from current_exception
+                                if (self.original_exception_value) |orig_exc| {
+                                    // Clone the original exception object for the catch variable
+                                    const exc_value = orig_exc;
+                                    try self.setVariable(var_name, exc_value);
+                                    // setVariable retains the value, so release our ref
+                                    // Release our reference to original_exception_value
+                                    self.releaseValue(orig_exc);
+                                    // Also clean up current_exception (PHPException)
+                                    if (self.current_exception) |exc| {
+                                        exc.deinit(self.allocator);
+                                        self.current_exception = null;
+                                    }
+                                    self.original_exception_value = null;
+                                } else if (self.current_exception) |exc| {
+                                    // Create a PHP object to represent the exception (fallback)
                                     const exception_class = self.getClass("Exception") orelse self.getClass("RuntimeException");
                                     if (exception_class) |cls| {
                                         const exc_obj = try self.allocator.create(types.PHPObject);
+                                        errdefer self.allocator.destroy(exc_obj);
+
                                         exc_obj.* = try types.PHPObject.init(self.allocator, cls);
+                                        errdefer exc_obj.deinit(self.allocator);
 
                                         // Create message string and set property, then release our reference
                                         const message_value = try Value.initString(self.allocator, exc.message.data);
+                                        errdefer message_value.release(self.allocator);
+
                                         try exc_obj.setProperty(self.allocator, "message", message_value);
                                         message_value.release(self.allocator); // setProperty retains, so release our ref
 
                                         try exc_obj.setProperty(self.allocator, "code", Value.initInt(exc.code));
 
                                         const box = try self.allocator.create(types.gc.Box(*types.PHPObject));
+                                        errdefer self.allocator.destroy(box);
+
                                         box.* = .{ .ref_count = 1, .gc_info = .{}, .data = exc_obj };
                                         const exc_value = Value.fromBox(box, Value.TYPE_OBJECT);
                                         try self.setVariable(var_name, exc_value);
+
                                         // setVariable retains the value, so release our reference
-                                        self.releaseValue(exc_value);
+                                        
                                     } else {
                                         try self.setVariable(var_name, Value.initNull());
                                     }
@@ -7383,13 +7461,21 @@ pub const VM = struct {
                                 }
                             }
                         } else {
-                            // Release and clear current exception even if no variable binding
+                            // Release and clear exceptions even if no variable binding
+                            if (self.original_exception_value) |orig_exc| {
+                                self.releaseValue(orig_exc);
+                                    // Also clean up current_exception (PHPException)
+                                    if (self.current_exception) |exc| {
+                                        exc.deinit(self.allocator);
+                                        self.current_exception = null;
+                                    }
+                                self.original_exception_value = null;
+                            }
                             if (self.current_exception) |exc| {
                                 exc.deinit(self.allocator);
                                 self.current_exception = null;
                             }
                         }
-
                         // Execute catch block
                         result = try self.eval(catch_data.body);
                         exception_caught = true;
@@ -7427,16 +7513,18 @@ pub const VM = struct {
 
         // Evaluate the expression to throw
         const exception_value = try self.eval(throw_data.expression);
-        defer self.releaseValue(exception_value);
 
         // Create exception based on the value
         const exception = switch (exception_value.getTag()) {
             .object => blk: {
-                // If it's already an exception object, use it
+                // If it's already an exception object, preserve it for the catch clause
                 const object = exception_value.getAsObject().data;
-                // Simplified check - just check if it has a message property
                 if (object.hasProperty("message")) {
-                    // Convert object to PHPException
+                    // Store the original exception object for use in catch clause
+                    self.retainValue(exception_value);
+                    self.original_exception_value = exception_value;
+                    
+                    // Create PHPException for internal use (message, code, previous)
                     const message_prop = object.getProperty("message") catch (try Value.initString(self.allocator, "Exception"));
                     const message_str = switch (message_prop.getTag()) {
                         .string => message_prop.getAsString().data.data,
@@ -7445,6 +7533,8 @@ pub const VM = struct {
 
                     break :blk try ExceptionFactory.createTypeError(self.allocator, message_str, self.current_file, self.current_line);
                 } else {
+                    // Not a Throwable object, release and create error
+                    self.releaseValue(exception_value);
                     break :blk try ExceptionFactory.createTypeError(self.allocator, "Can only throw objects that implement Throwable", self.current_file, self.current_line);
                 }
             },
@@ -7667,6 +7757,10 @@ pub const VM = struct {
                             // Set code from second argument if provided
                             if (args.items.len > 1) {
                                 try obj.setProperty(self.allocator, "code", args.items[1]);
+                            }
+                            // Set previous from third argument if provided
+                            if (args.items.len > 2) {
+                                try obj.setProperty(self.allocator, "previous", args.items[2]);
                             }
                         }
                     }

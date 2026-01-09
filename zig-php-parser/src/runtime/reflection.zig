@@ -1178,6 +1178,12 @@ pub const ReflectionSystem = struct {
         };
     }
     
+    pub fn deinit(self: *ReflectionSystem) void {
+        // ReflectionSystem only contains references (allocator, vm)
+        // No internal allocations to clean up
+        _ = self;
+    }
+    
     pub fn getClass(self: *ReflectionSystem, name: []const u8) !ReflectionClass {
         const class = self.vm.getClass(name) orelse {
             return error.ClassNotFound;

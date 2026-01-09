@@ -101,6 +101,7 @@ pub fn main() !void {
     const arena_allocator = arena.allocator();
 
     var context = PHPContext.init(arena_allocator);
+    defer context.deinit();
 
     // Get command line arguments
     const args = try std.process.argsAlloc(allocator);
@@ -297,6 +298,7 @@ pub fn main() !void {
     }
 
     var p = try parser.Parser.initWithMode(arena_allocator, &context, php_code, effective_syntax_mode);
+    defer p.deinit();
     const program = p.parse() catch |err| {
         std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});
         if (context.errors.items.len > 0) {

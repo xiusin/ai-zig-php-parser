@@ -170,6 +170,9 @@ pub const BuiltinClassManager = struct {
         try self.addProperty(error_class, "code", .public, null);
         try self.addProperty(error_class, "file", .protected, null);
         try self.addProperty(error_class, "line", .protected, null);
+        try self.addProperty(error_class, "previous", .private, null);
+        try self.addExceptionConstructor(error_class);
+        try self.addExceptionMethod(error_class, "getMessage");
 
         try self.classes.put("Error", error_class);
 
