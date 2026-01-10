@@ -271,6 +271,21 @@ pub const Parser = struct {
             .k_switch => self.parseSwitch(),
             .k_yield => self.parseYield(),
             .k_list => self.parseListAssignment(),
+            .l_bracket => {
+                // Try to parse as array destructuring: [$a, $b] = $arr
+                // Look ahead to check if this looks like destructuring
+                const peek_tag = self.peek.tag;
+                const looks_like_destructure = switch (peek_tag) {
+                    .t_variable, .k_list, .comma => true,
+                    else => false,
+                };
+
+                if (looks_like_destructure) {
+                    return self.parseArrayDestructuring();
+                } else {
+                    return self.parseExpressionStatement();
+                }
+            },
             .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
@@ -1150,6 +1165,78 @@ pub const Parser = struct {
         const val = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val } } });
+    }
+
+    /// Parse array destructuring assignment: [$a, $b] = $arr
+    fn parseArrayDestructuring(self: *Parser) anyerror!ast.Node.Index {
+        const bracket_token = self.curr;
+        _ = try self.eat(.l_bracket);
+
+        var targets = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
+            if (self.curr.tag == .comma) {
+                const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
+                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                try targets.append(self.allocator, empty_node);
+                self.nextToken();
+                continue;
+            }
+
+            if (self.curr.tag == .k_list) {
+                const nested_list = try self.parseListExpression();
+                try targets.append(self.allocator, nested_list);
+            } else if (self.curr.tag == .l_bracket) {
+                _ = try self.eat(.l_bracket);
+                var nested_targets = std.ArrayListUnmanaged(ast.Node.Index){};
+                while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
+                    if (self.curr.tag == .comma) {
+                        const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
+                        const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                        try nested_targets.append(self.allocator, empty_node);
+                        self.nextToken();
+                        continue;
+                    }
+                    if (self.curr.tag == .t_variable) {
+                        const var_name = self.curr;
+                        const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                        try nested_targets.append(self.allocator, var_node);
+                        self.nextToken();
+                    }
+                    if (self.curr.tag == .comma) {
+                        self.nextToken();
+                        if (self.curr.tag == .r_bracket) break;
+                    }
+                }
+                _ = try self.eat(.r_bracket);
+                const arena = self.context.arena.allocator();
+                const nested_node = try self.createNode(.{ .tag = .list_assignment, .main_token = self.curr, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, nested_targets.items), .value = 0 } } });
+                try targets.append(self.allocator, nested_node);
+            } else if (self.curr.tag == .t_variable) {
+                const var_name = self.curr;
+                const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                try targets.append(self.allocator, var_node);
+                self.nextToken();
+            } else {
+                self.nextToken();
+                continue;
+            }
+
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+                if (self.curr.tag == .r_bracket) break;
+            }
+        }
+
+        _ = try self.eat(.r_bracket);
+        _ = try self.eat(.equal);
+        const val = try self.parseExpression(0);
+        _ = try self.eat(.semicolon);
+
+        const arena = self.context.arena.allocator();
+        return self.createNode(.{ .tag = .list_assignment, .main_token = bracket_token, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, targets.items), .value = val } } });
     }
 
     fn parseListAssignment(self: *Parser) anyerror!ast.Node.Index {
