@@ -3991,6 +3991,35 @@ pub const VM = struct {
                         const exception = try ExceptionFactory.createTypeError(self.allocator, "Property assignment on non-object", self.current_file, self.current_line);
                         return self.throwException(exception);
                     }
+                } else if (target_node.tag == .variable_property_access) {
+                    const obj_val = try self.eval(target_node.data.variable_property_access.target);
+                    defer self.releaseValue(obj_val);
+
+                    const prop_var_val = try self.eval(target_node.data.variable_property_access.prop_variable);
+                    defer self.releaseValue(prop_var_val);
+
+                    // Get the string value from the variable
+                    var prop_name: []const u8 = undefined;
+                    switch (prop_var_val.getTag()) {
+                        .string => {
+                            const box_ptr = prop_var_val.getAsString();
+                            prop_name = box_ptr.*.data.*.data;  // Box(*PHPString) -> *PHPString -> []u8
+                        },
+                        else => {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable property name must be a string", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        },
+                    }
+
+                    if (obj_val.isStruct()) {
+                        const struct_inst = obj_val.getAsStruct().data;
+                        try struct_inst.setField(self.allocator, prop_name, value);
+                    } else if (obj_val.isObject()) {
+                        try self.setObjectProperty(obj_val, prop_name, value);
+                    } else {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Property assignment on non-object", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
                 } else if (target_node.tag == .array_access) {
                     const arr_val = try self.eval(target_node.data.array_access.target);
                     defer self.releaseValue(arr_val);
@@ -4116,6 +4145,41 @@ pub const VM = struct {
             .compound_assignment => {
                 return self.evaluateCompoundAssignment(ast_node.data.compound_assignment);
             },
+            .list_assignment => {
+                const list_data = ast_node.data.list_assignment;
+                const array_val = try self.eval(list_data.value);
+                defer self.releaseValue(array_val);
+
+                if (!array_val.isArray()) {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use value as array in list()", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+
+                const php_array = array_val.getAsArray().data;
+                const targets = list_data.targets;
+
+                for (targets, 0..) |target_idx, i| {
+                    const target_node = self.context.nodes.items[target_idx];
+
+                    // Get value from array at index i
+                    const elem_val = php_array.get(types.ArrayKey{ .integer = @as(i64, @intCast(i)) });
+                    if (elem_val) |val| {
+                        // Set to variable if target is a variable node
+                        if (target_node.tag == .variable) {
+                            const name_id = target_node.data.variable.name;
+                            const name = self.context.string_pool.keys()[name_id];
+                            // Retain the value before assigning
+                            self.retainValue(val);
+                            try self.setVariable(name, val);
+                        } else {
+                            // For nested list or other, release the value
+                            self.releaseValue(val);
+                        }
+                    }
+                }
+
+                return Value.initNull();
+            },
             .echo_stmt => {
                 // Handle multiple expressions in echo statement
                 const exprs = ast_node.data.echo_stmt.exprs;
@@ -4138,6 +4202,9 @@ pub const VM = struct {
             },
             .safe_property_access => {
                 return self.evaluateSafePropertyAccess(ast_node.data.safe_property_access);
+            },
+            .variable_property_access => {
+                return self.evaluateVariablePropertyAccess(ast_node.data.variable_property_access);
             },
             .array_access => {
                 return self.evaluateArrayAccess(ast_node.data.array_access);
@@ -4608,6 +4675,39 @@ pub const VM = struct {
         }
     }
 
+    fn evaluateVariablePropertyAccess(self: *VM, property_data: anytype) !Value {
+        const target_value = try self.eval(property_data.target);
+        defer self.releaseValue(target_value);
+
+        // Evaluate the variable to get the property name
+        const prop_var_value = try self.eval(property_data.prop_variable);
+        defer self.releaseValue(prop_var_value);
+
+        var prop_name: []const u8 = undefined;
+        switch (prop_var_value.getTag()) {
+            .string => {
+                const box_ptr = prop_var_value.getAsString();
+                prop_name = box_ptr.*.data.*.data;  // Box(*PHPString) -> *PHPString -> []u8
+            },
+            else => {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable property name must be a string", self.current_file, self.current_line);
+                return self.throwException(exception);
+            },
+        }
+
+        if (target_value.isStruct()) {
+            const struct_inst = target_value.getAsStruct().data;
+            const value = try struct_inst.getField(prop_name);
+            self.retainValue(value);
+            return value;
+        } else if (target_value.isObject()) {
+            return self.getObjectProperty(target_value, prop_name);
+        } else {
+            const exception = try ExceptionFactory.createTypeError(self.allocator, "Property access on non-object", self.current_file, self.current_line);
+            return self.throwException(exception);
+        }
+    }
+
     fn evaluateArrayAccess(self: *VM, array_access: anytype) !Value {
         const target_value = try self.eval(array_access.target);
         defer self.releaseValue(target_value);
@@ -4650,6 +4750,13 @@ pub const VM = struct {
 
         // Resolve class name from variable, self_expr, or parent_expr
         var name: []const u8 = undefined;
+        var name_needs_free = false;
+        defer {
+            if (name_needs_free) {
+                self.allocator.free(name);
+            }
+        }
+
         if (class_name_node.tag == .variable) {
             const name_id = class_name_node.data.variable.name;
             const var_name = self.context.string_pool.keys()[name_id];
@@ -4674,7 +4781,23 @@ pub const VM = struct {
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' outside of class scope", self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
+            } else if (var_name.len > 0 and var_name[0] == '$') {
+                // It's a variable class name like new $className()
+                // Evaluate the variable to get its value
+                const var_value = try self.eval(instantiation_data.class_name);
+                defer self.releaseValue(var_value);
+
+                // Convert to string
+                if (var_value.isString()) {
+                    const php_str = var_value.getAsString().*.data;
+                    name = try self.allocator.dupe(u8, php_str.*.data);
+                    name_needs_free = true;
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable class name must be a string", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
             } else {
+                // It's a class name like new MyClass()
                 name = var_name;
             }
         } else if (class_name_node.tag == .self_expr) {

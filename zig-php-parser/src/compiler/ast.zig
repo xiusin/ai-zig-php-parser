@@ -45,6 +45,7 @@ pub const Node = struct {
         closure,
         arrow_function,
         anonymous_class,
+        list_assignment,
         if_stmt,
         while_stmt,
         for_stmt,
@@ -63,6 +64,7 @@ pub const Node = struct {
         method_call,
         property_access,
         safe_property_access, // 安全导航操作符 ?-> 或 ?.
+        variable_property_access, // $obj->$varName
         array_access,
         function_call,
         function_decl,
@@ -139,6 +141,7 @@ pub const Node = struct {
         closure: struct { attributes: []const Index, params: []const Index, captures: []const Index, return_type: ?Index, body: Index, is_static: bool },
         arrow_function: struct { attributes: []const Index, params: []const Index, return_type: ?Index, body: Index, is_static: bool },
         anonymous_class: struct { attributes: []const Index, extends: ?Index, implements: []const Index, members: []const Index, args: []const Index },
+        list_assignment: struct { targets: []const Index, value: Index },
         if_stmt: struct { condition: Index, then_branch: Index, else_branch: ?Index },
         while_stmt: struct { condition: Index, body: Index },
         for_stmt: struct { init: ?Index, condition: ?Index, loop: ?Index, body: Index },
@@ -157,6 +160,7 @@ pub const Node = struct {
         method_call: struct { target: Index, method_name: StringId, args: []const Index },
         property_access: struct { target: Index, property_name: StringId },
         safe_property_access: struct { target: Index, property_name: StringId },
+        variable_property_access: struct { target: Index, prop_variable: Index }, // $obj->$varName
         array_access: struct { target: Index, index: ?Index },
         static_method_call: struct { class_name: StringId, method_name: StringId, args: []const Index },
         static_property_access: struct { class_name: StringId, property_name: StringId },

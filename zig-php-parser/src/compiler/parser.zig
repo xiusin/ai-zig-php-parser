@@ -270,6 +270,7 @@ pub const Parser = struct {
             .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes, false),
             .k_switch => self.parseSwitch(),
             .k_yield => self.parseYield(),
+            .k_list => self.parseListAssignment(),
             .l_brace => self.parseBlock(),
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
@@ -400,8 +401,9 @@ pub const Parser = struct {
 
     /// 解析带预先收集好的修饰符的类成员
     fn parseClassMemberWithModifiers(self: *Parser, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier, is_interface: bool) anyerror!ast.Node.Index {
-        if (self.curr.tag == .k_function) {
-            const token = try self.eat(.k_function);
+        if (self.curr.tag == .k_function or self.curr.tag == .k_fn) {
+            const is_arrow = self.curr.tag == .k_fn;
+            const token = try self.eat(if (is_arrow) .k_fn else .k_function);
             // Method name can be t_string, t_go_identifier, or reserved words like set/get
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
@@ -427,14 +429,27 @@ pub const Parser = struct {
             }
             // abstract方法和接口方法没有方法体，以分号结尾
             const expects_body = !modifiers.is_abstract and !is_interface;
-            const body = if (!expects_body) blk: {
-                if (self.curr.tag == .semicolon) {
-                    self.nextToken();
-                } else {
-                    return error.UnexpectedToken;
+            const body: ?ast.Node.Index = blk: {
+                if (!expects_body) {
+                    if (self.curr.tag == .semicolon) {
+                        self.nextToken();
+                        break :blk null;
+                    } else {
+                        return error.UnexpectedToken;
+                    }
                 }
-                break :blk null;
-            } else try self.parseBlock();
+                if (is_arrow) {
+                    // Arrow function body: => expr
+                    _ = try self.eat(.fat_arrow);
+                    const expr = try self.parseExpression(0);
+                    // Create an arrow_function node for the method body
+                    const arrow_node = try self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = attributes, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = expr, .is_static = modifiers.is_static } } });
+                    // Create a block with just the arrow function as a statement
+                    const block_node = try self.createNode(.{ .tag = .block, .main_token = token, .data = .{ .block = .{ .stmts = &[_]ast.Node.Index{arrow_node} } } });
+                    break :blk block_node;
+                }
+                break :blk try self.parseBlock();
+            };
             return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
         } else {
             const token = self.curr;
@@ -510,8 +525,9 @@ pub const Parser = struct {
             self.nextToken();
         }
 
-        if (self.curr.tag == .k_function) {
-            const token = try self.eat(.k_function);
+        if (self.curr.tag == .k_function or self.curr.tag == .k_fn) {
+            const is_arrow = self.curr.tag == .k_fn;
+            const token = try self.eat(if (is_arrow) .k_fn else .k_function);
             // Method name can be t_string, t_go_identifier, or reserved words like set/get
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
@@ -537,14 +553,30 @@ pub const Parser = struct {
             }
 
             const expects_body = !modifiers.is_abstract and !is_interface;
-            const body = if (!expects_body) blk: {
-                if (self.curr.tag == .semicolon) {
-                    self.nextToken();
-                } else {
-                    return error.UnexpectedToken;
+            const body: ?ast.Node.Index = blk: {
+                if (!expects_body) {
+                    if (self.curr.tag == .semicolon) {
+                        self.nextToken();
+                        break :blk null;
+                    } else {
+                        return error.UnexpectedToken;
+                    }
                 }
-                break :blk null;
-            } else try self.parseBlock();
+                if (is_arrow) {
+                    // Arrow function body: => expr
+                    _ = try self.eat(.fat_arrow);
+                    const expr = try self.parseExpression(0);
+                    // Create an arrow_function node for the method body
+                    const arrow_node = try self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = attributes, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = expr, .is_static = modifiers.is_static } } });
+                    // Create a block with just the arrow function as a statement
+                    const block_node = try self.createNode(.{ .tag = .block, .main_token = token, .data = .{ .block = .{ .stmts = &[_]ast.Node.Index{arrow_node} } } });
+                    break :blk block_node;
+                }
+                break :blk try self.parseBlock();
+            };
+            
+            // For arrow functions, we need to create a method_decl node
+            // For now, create a method_decl with the arrow function as body
             return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
         } else {
             const token = self.curr;
@@ -1108,11 +1140,91 @@ pub const Parser = struct {
     }
 
     fn parseAssignment(self: *Parser) anyerror!ast.Node.Index {
+        // Check if this is a list() assignment
+        if (self.curr.tag == .k_list) {
+            return self.parseListAssignment();
+        }
+
         const target = try self.parseExpression(100);
         const op = try self.eat(.equal);
         const val = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val } } });
+    }
+
+    fn parseListAssignment(self: *Parser) anyerror!ast.Node.Index {
+        const list_token = self.curr;
+        _ = try self.eat(.k_list);
+        _ = try self.eat(.l_paren);
+
+        var targets = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        // Parse list items
+        while (self.curr.tag != .r_paren) {
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+                continue;
+            }
+
+            // Nested list
+            if (self.curr.tag == .k_list) {
+                const nested_list = try self.parseListExpression();
+                try targets.append(self.allocator, nested_list);
+            } else {
+                // Single variable - get the variable name
+                if (self.curr.tag == .t_variable) {
+                    const var_name = self.curr;
+                    const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                    const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                    try targets.append(self.allocator, var_node);
+                    self.nextToken();
+                } else {
+                    // Skip for now - may be empty slot like list(, $a)
+                    try targets.append(self.allocator, 0);
+                }
+            }
+        }
+
+        _ = try self.eat(.r_paren);
+        _ = try self.eat(.equal);
+        const val = try self.parseExpression(0);
+        _ = try self.eat(.semicolon);
+
+        const arena = self.context.arena.allocator();
+        return self.createNode(.{ .tag = .list_assignment, .main_token = list_token, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, targets.items), .value = val } } });
+    }
+
+    fn parseListExpression(self: *Parser) anyerror!ast.Node.Index {
+        const list_token = self.curr;
+        _ = try self.eat(.k_list);
+        _ = try self.eat(.l_paren);
+
+        var targets = std.ArrayListUnmanaged(ast.Node.Index){};
+
+        while (self.curr.tag != .r_paren) {
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+                continue;
+            }
+
+            if (self.curr.tag == .k_list) {
+                const nested = try self.parseListExpression();
+                try targets.append(self.allocator, nested);
+            } else if (self.curr.tag == .t_variable) {
+                const var_name = self.curr;
+                const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                try targets.append(self.allocator, var_node);
+                self.nextToken();
+            } else {
+                // Skip for now - empty slot
+                try targets.append(self.allocator, 0);
+            }
+        }
+
+        _ = try self.eat(.r_paren);
+        const arena = self.context.arena.allocator();
+        return self.createNode(.{ .tag = .list_assignment, .main_token = list_token, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, targets.items), .value = 0 } } });
     }
 
     fn parseExpressionStatement(self: *Parser) anyerror!ast.Node.Index {
@@ -1169,11 +1281,17 @@ pub const Parser = struct {
                     self.curr.tag == .k_throw or self.curr.tag == .k_match or
                     self.curr.tag == .k_default or self.curr.tag == .k_static or
                     self.curr.tag == .k_class or self.curr.tag == .k_function or
-                    self.curr.tag == .k_array or self.curr.tag == .k_new)
+                    self.curr.tag == .k_array or self.curr.tag == .k_new or
+                    self.curr.tag == .k_fn)
                 blk: {
                     const tok = self.curr;
                     self.nextToken();
                     break :blk tok;
+                } else if (self.curr.tag == .t_variable) {
+                    // 可变属性: $obj->$varName
+                    const var_node = try self.parseUnary();
+                    left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = var_node } } });
+                    continue;
                 } else try self.eat(.t_string);
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                 if (self.curr.tag == .l_paren) {
@@ -1203,7 +1321,8 @@ pub const Parser = struct {
                     self.curr.tag == .k_throw or self.curr.tag == .k_match or
                     self.curr.tag == .k_default or self.curr.tag == .k_static or
                     self.curr.tag == .k_class or self.curr.tag == .k_function or
-                    self.curr.tag == .k_array or self.curr.tag == .k_new)
+                    self.curr.tag == .k_array or self.curr.tag == .k_new or
+                    self.curr.tag == .k_fn)
                 blk: {
                     const tok = self.curr;
                     self.nextToken();
@@ -1426,11 +1545,17 @@ pub const Parser = struct {
                     self.curr.tag == .k_throw or self.curr.tag == .k_match or
                     self.curr.tag == .k_default or self.curr.tag == .k_static or
                     self.curr.tag == .k_class or self.curr.tag == .k_function or
-                    self.curr.tag == .k_array or self.curr.tag == .k_new)
+                    self.curr.tag == .k_array or self.curr.tag == .k_new or
+                    self.curr.tag == .k_fn)
                 blk: {
                     const tok = self.curr;
                     self.nextToken();
                     break :blk tok;
+                } else if (self.curr.tag == .t_variable) {
+                    // 可变属性: $obj->$varName
+                    const var_node = try self.parseUnaryPostfix();
+                    left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = var_node } } });
+                    continue;
                 } else try self.eat(.t_string);
 
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);

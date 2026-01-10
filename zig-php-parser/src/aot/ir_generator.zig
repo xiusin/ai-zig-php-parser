@@ -136,6 +136,7 @@ pub const Node = struct {
         closure,
         arrow_function,
         anonymous_class,
+        list_assignment,
         if_stmt,
         while_stmt,
         for_stmt,
@@ -222,6 +223,7 @@ pub const Node = struct {
         closure: struct { attributes: []const Index, params: []const Index, captures: []const Index, return_type: ?Index, body: Index, is_static: bool },
         arrow_function: struct { attributes: []const Index, params: []const Index, return_type: ?Index, body: Index, is_static: bool },
         anonymous_class: struct { attributes: []const Index, extends: ?Index, implements: []const Index, members: []const Index, args: []const Index },
+        list_assignment: struct { targets: []const Index, value: Index },
         if_stmt: struct { condition: Index, then_branch: Index, else_branch: ?Index },
         while_stmt: struct { condition: Index, body: Index },
         for_stmt: struct { init: ?Index, condition: ?Index, loop: ?Index, body: Index },
@@ -602,6 +604,7 @@ pub const IRGenerator = struct {
                 _ = try self.generateExpression(index);
             },
             .assignment => try self.generateAssignment(node),
+            .list_assignment => try self.generateListAssignment(node),
             .block => try self.generateBlock(node),
             .const_decl => try self.generateConstDecl(node),
             .global_stmt => try self.generateGlobalStmt(node),
@@ -1399,6 +1402,33 @@ pub const IRGenerator = struct {
                 } }, null);
             },
             else => {},
+        }
+    }
+
+    /// Generate IR for list() destructuring assignment
+    fn generateListAssignment(self: *Self, node: *const Node) !void {
+        const list_data = node.data.list_assignment;
+
+        // Generate the array value
+        const array_reg = try self.generateExpression(list_data.value);
+
+        // Generate assignment for each target
+        for (list_data.targets, 0..) |target_idx, i| {
+            // Extract element at index i
+            const index_reg = try self.emitWithResult(.{ .const_int = @as(i64, @intCast(i)) }, .i64);
+            const elem_reg = try self.emitWithResult(.{ .array_get = .{
+                .array = array_reg,
+                .key = index_reg,
+            } }, .php_value);
+
+            // Assign to variable if target is a variable
+            const target_node = self.getNode(target_idx) orelse continue;
+            if (target_node.tag == .variable) {
+                const var_name = self.getString(target_node.data.variable.name);
+                const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = elem_reg } }, null);
+                try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
+            }
         }
     }
 
