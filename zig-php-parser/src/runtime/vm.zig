@@ -2783,6 +2783,13 @@ pub const VM = struct {
                 return self.callObjectMethod(object_value, "__get", &args);
             },
             error.UndefinedProperty => {
+                // Check if this is actually a method - if so, return a callable closure
+                if (object.class.getMethod(property_name)) |method| {
+                    // Create a closure bound to this object
+                    const closure = try self.createBoundMethodClosure(method, object);
+                    return Value.fromBox(closure, Value.TYPE_CLOSURE);
+                }
+
                 const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, object.class.name.data, property_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             },
@@ -5307,8 +5314,9 @@ pub const VM = struct {
             }
         }
 
-        const operand = try self.eval(unary_expr.expr);
-        defer self.releaseValue(operand);
+                const operand = try self.eval(unary_expr.expr);
+
+                defer self.releaseValue(operand);
 
         return self.evaluateUnaryOp(unary_expr.op, operand);
     }
@@ -7561,6 +7569,61 @@ pub const VM = struct {
         };
 
         return self.throwException(exception);
+    }
+
+    fn createBoundMethodClosure(self: *VM, method: *types.Method, object: *types.PHPObject) !*types.Closure {
+        // Create a user function for the method
+        const closure_name = try types.PHPString.init(self.allocator, method.name.data);
+        var user_function = types.UserFunction.init(closure_name);
+
+        // Copy parameters from method - allocate as mutable array first
+        const param_count = method.parameters.len;
+        const params_array = try self.allocator.alloc(types.Method.Parameter, param_count);
+        errdefer self.allocator.free(params_array);
+        for (method.parameters, 0..) |param, i| {
+            // Create new parameter with copied name
+            const param_name: *types.PHPString = if (param.name.data.len > 0)
+                try types.PHPString.init(self.allocator, param.name.data)
+            else
+                param.name;
+
+            params_array[i] = types.Method.Parameter{
+                .name = param_name,
+                .type = param.type,
+                .default_value = param.default_value,
+                .is_variadic = param.is_variadic,
+                .is_reference = param.is_reference,
+                .is_promoted = param.is_promoted,
+                .modifiers = param.modifiers,
+                .attributes = param.attributes,
+            };
+        }
+        user_function.parameters = params_array;
+
+        user_function.body = method.body;
+        user_function.is_variadic = false;
+        user_function.min_args = @as(u32, @intCast(param_count));
+        user_function.max_args = @as(u32, @intCast(param_count));
+
+        // Create closure and allocate on heap
+        const closure_value = types.Closure.init(self.allocator, user_function);
+        const closure_ptr = try self.allocator.create(types.Closure);
+        errdefer self.allocator.destroy(closure_ptr);
+        closure_ptr.* = closure_value;
+
+        // Bind $this to the object
+        const obj_box = try self.allocator.create(types.gc.Box(*types.PHPObject));
+        errdefer self.allocator.destroy(obj_box);
+        obj_box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = object,
+        };
+        const this_value = types.Value.fromBox(obj_box, types.Value.TYPE_OBJECT);
+        errdefer this_value.release(self.allocator);
+        try closure_ptr.captured_vars.put("$this", this_value);
+
+        return closure_ptr;
     }
 
     fn evaluateClosureCreation(self: *VM, closure_data: anytype) !Value {

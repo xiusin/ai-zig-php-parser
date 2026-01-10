@@ -2626,7 +2626,8 @@ pub const Closure = struct {
                 .data = obj,
             };
             const this_value = Value.fromBox(obj_box, Value.TYPE_OBJECT);
-            try new_closure.captured_vars.put("this", this_value);
+            // Use "$this" as the variable name (with $ prefix for PHP variable)
+            try new_closure.captured_vars.put("$this", this_value);
         }
 
         _ = scope; // Would be used for scope binding in full implementation

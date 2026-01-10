@@ -340,6 +340,10 @@ pub fn main() !void {
 
     // Clean up global variables to prevent memory leak warnings
     vm_instance.cleanupGlobalVariables();
+
+    // Force garbage collection to clean up any remaining objects
+    // This helps prevent memory leak warnings in test scenarios
+    _ = vm_instance.memory_manager.gc.collect();
 }
 
 /// Run AOT compilation

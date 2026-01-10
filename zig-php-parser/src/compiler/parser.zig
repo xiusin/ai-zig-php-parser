@@ -1369,7 +1369,7 @@ pub const Parser = struct {
     fn parseUnaryPostfix(self: *Parser) anyerror!ast.Node.Index {
         var left = try self.parsePrimary();
 
-        // Handle postfix operators: function calls, array access
+        // Handle postfix operators: function calls, array access, method calls, property access
         while (true) {
             const tag = self.curr.tag;
             if (tag == .l_paren) {
@@ -1408,6 +1408,47 @@ pub const Parser = struct {
                 }
                 _ = try self.eat(.r_bracket);
                 left = try self.createNode(.{ .tag = .array_access, .main_token = op, .data = .{ .array_access = .{ .target = left, .index = index } } });
+            } else if (tag == .arrow) {
+                // Method call or property access: $obj->method(...) or $obj->property
+                const op = self.curr;
+                self.nextToken();
+
+                // Parse method/property name
+                const member_name_tok = if (self.curr.tag == .t_string)
+                    try self.eat(.t_string)
+                else if (self.curr.tag == .t_go_identifier)
+                    try self.eat(.t_go_identifier)
+                else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
+                    self.curr.tag == .k_unset or self.curr.tag == .k_clone or
+                    self.curr.tag == .k_list or self.curr.tag == .k_print or
+                    self.curr.tag == .k_lock or self.curr.tag == .k_try or
+                    self.curr.tag == .k_catch or self.curr.tag == .k_finally or
+                    self.curr.tag == .k_throw or self.curr.tag == .k_match or
+                    self.curr.tag == .k_default or self.curr.tag == .k_static or
+                    self.curr.tag == .k_class or self.curr.tag == .k_function or
+                    self.curr.tag == .k_array or self.curr.tag == .k_new)
+                blk: {
+                    const tok = self.curr;
+                    self.nextToken();
+                    break :blk tok;
+                } else try self.eat(.t_string);
+
+                const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
+
+                if (self.curr.tag == .l_paren) {
+                    // Method call
+                    self.nextToken();
+                    var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                    while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                        try args.append(self.allocator, try self.parseExpression(0));
+                        if (self.curr.tag == .comma) self.nextToken();
+                    }
+                    _ = try self.eat(.r_paren);
+                    left = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+                } else {
+                    // Property access
+                    left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
+                }
             } else {
                 break;
             }
