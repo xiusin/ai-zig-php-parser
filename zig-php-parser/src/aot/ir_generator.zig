@@ -137,6 +137,7 @@ pub const Node = struct {
         arrow_function,
         anonymous_class,
         list_assignment,
+        list_empty,
         if_stmt,
         while_stmt,
         for_stmt,
@@ -605,6 +606,7 @@ pub const IRGenerator = struct {
             },
             .assignment => try self.generateAssignment(node),
             .list_assignment => try self.generateListAssignment(node),
+            .list_empty => {}, // Empty slot - no code generation needed
             .block => try self.generateBlock(node),
             .const_decl => try self.generateConstDecl(node),
             .global_stmt => try self.generateGlobalStmt(node),

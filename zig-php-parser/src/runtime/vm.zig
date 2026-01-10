@@ -4161,7 +4161,12 @@ pub const VM = struct {
                 for (targets, 0..) |target_idx, i| {
                     const target_node = self.context.nodes.items[target_idx];
 
-                    // Get value from array at index i
+                    // Skip empty slots
+                    if (target_node.tag == .list_empty) {
+                        continue;
+                    }
+
+                    // Get value from array at position i (always use array position)
                     const elem_val = php_array.get(types.ArrayKey{ .integer = @as(i64, @intCast(i)) });
                     if (elem_val) |val| {
                         // Set to variable if target is a variable node
@@ -4171,8 +4176,15 @@ pub const VM = struct {
                             // Retain the value before assigning
                             self.retainValue(val);
                             try self.setVariable(name, val);
+                        } else if (target_node.tag == .list_assignment) {
+                            // Handle nested list assignment recursively
+                            // For nested list, val is the nested array element
+                            if (val.isArray()) {
+                                try self.assignListRecursive(val.getAsArray().data, target_node.data.list_assignment.targets);
+                            }
+                            self.releaseValue(val);
                         } else {
-                            // For nested list or other, release the value
+                            // For other cases, release the value
                             self.releaseValue(val);
                         }
                     }
@@ -7548,6 +7560,38 @@ pub const VM = struct {
 
     pub fn getStruct(self: *VM, name: []const u8) ?*types.PHPStruct {
         return self.structs.get(name);
+    }
+
+    /// Helper function to recursively assign values from nested list destructuring
+    fn assignListRecursive(self: *VM, array: *types.PHPArray, targets: []const ast.Node.Index) !void {
+        for (targets, 0..) |target_idx, i| {
+            const target_node = self.context.nodes.items[target_idx];
+
+            // Get value from array at position i (always use array position)
+            const elem_val = array.get(types.ArrayKey{ .integer = @as(i64, @intCast(i)) });
+            if (elem_val) |val| {
+                // Skip empty slots
+                if (target_node.tag == .list_empty) {
+                    self.releaseValue(val);
+                    continue;
+                }
+
+                if (target_node.tag == .variable) {
+                    const name_id = target_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    self.retainValue(val);
+                    try self.setVariable(name, val);
+                } else if (target_node.tag == .list_assignment) {
+                    // Recursive handling for nested lists
+                    if (val.isArray()) {
+                        try self.assignListRecursive(val.getAsArray().data, target_node.data.list_assignment.targets);
+                    }
+                    self.releaseValue(val);
+                } else {
+                    self.releaseValue(val);
+                }
+            }
+        }
     }
 
     fn evaluateTryStatement(self: *VM, try_data: anytype) !Value {

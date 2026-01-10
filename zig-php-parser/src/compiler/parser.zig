@@ -1162,7 +1162,23 @@ pub const Parser = struct {
         // Parse list items
         while (self.curr.tag != .r_paren) {
             if (self.curr.tag == .comma) {
-                self.nextToken();
+                // Empty slot: comma followed by either another comma, a closing paren,
+                // or something that's not a valid list element
+                const comma_pos = self.lexer.pos;
+                self.nextToken(); // Move past the comma
+                
+                // Check if next token is a valid element (variable, list, or closing paren)
+                const is_valid_element = switch (self.curr.tag) {
+                    .t_variable, .k_list, .r_paren => true,
+                    else => false,
+                };
+                
+                // Create empty node if next token is not a valid element
+                if (!is_valid_element) {
+                    const empty_token = Token{ .tag = .comma, .loc = .{ .start = comma_pos, .end = comma_pos } };
+                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                    try targets.append(self.allocator, empty_node);
+                }
                 continue;
             }
 
@@ -1179,8 +1195,10 @@ pub const Parser = struct {
                     try targets.append(self.allocator, var_node);
                     self.nextToken();
                 } else {
-                    // Skip for now - may be empty slot like list(, $a)
-                    try targets.append(self.allocator, 0);
+                    // Empty slot - create a list_empty node
+                    const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
+                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                    try targets.append(self.allocator, empty_node);
                 }
             }
         }
@@ -1203,7 +1221,23 @@ pub const Parser = struct {
 
         while (self.curr.tag != .r_paren) {
             if (self.curr.tag == .comma) {
-                self.nextToken();
+                // Empty slot: comma followed by either another comma, a closing paren,
+                // or something that's not a valid list element
+                const comma_pos = self.lexer.pos;
+                self.nextToken(); // Move past the comma
+                
+                // Check if next token is a valid element (variable, list, or closing paren)
+                const is_valid_element = switch (self.curr.tag) {
+                    .t_variable, .k_list, .r_paren => true,
+                    else => false,
+                };
+                
+                // Create empty node if next token is not a valid element
+                if (!is_valid_element) {
+                    const empty_token = Token{ .tag = .comma, .loc = .{ .start = comma_pos, .end = comma_pos } };
+                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                    try targets.append(self.allocator, empty_node);
+                }
                 continue;
             }
 
@@ -1217,8 +1251,10 @@ pub const Parser = struct {
                 try targets.append(self.allocator, var_node);
                 self.nextToken();
             } else {
-                // Skip for now - empty slot
-                try targets.append(self.allocator, 0);
+                // Empty slot - create a list_empty node
+                const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
+                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                try targets.append(self.allocator, empty_node);
             }
         }
 

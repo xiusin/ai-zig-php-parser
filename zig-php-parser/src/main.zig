@@ -534,6 +534,7 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .arrow_function => .arrow_function,
         .anonymous_class => .anonymous_class,
         .list_assignment => .list_assignment,
+        .list_empty => .list_empty,
         .if_stmt => .if_stmt,
         .while_stmt => .while_stmt,
         .for_stmt => .for_stmt,
