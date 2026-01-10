@@ -104,6 +104,11 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
     }
 
     // 提取模式部分（不包括分隔符）
+    // 如果没有找到结束分隔符，返回原始模式（PCRE2 会处理错误）
+    if (end >= pattern.len) {
+        result.pattern = pattern[start + 1..];
+        return result;
+    }
     result.pattern = pattern[start + 1..end];
 
     // 解析修饰符
@@ -283,6 +288,7 @@ pub fn pregMatchFn(vm: *VM, args: []const Value) !Value {
     if (args.len < min_args) {
         const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, min_args, @as(u32, @intCast(args.len)), "preg_match", "builtin", 0);
         _ = try vm.throwException(exception);
+        vm.preg_last_error = -1; // Set error code for argument count
         return error.ArgumentCountMismatch;
     }
 
@@ -295,12 +301,14 @@ pub fn pregMatchFn(vm: *VM, args: []const Value) !Value {
     if (pattern_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "preg_match() expects parameter 1 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
+        vm.preg_last_error = -2; // Set error code for type error
         return error.InvalidArgumentType;
     }
 
     if (subject_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "preg_match() expects parameter 2 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
+        vm.preg_last_error = -2; // Set error code for type error
         return error.InvalidArgumentType;
     }
 
@@ -310,7 +318,10 @@ pub fn pregMatchFn(vm: *VM, args: []const Value) !Value {
 
     const clean_pattern = parsePHPRegexPattern(pattern);
 
-    var pcre_pattern = try PCRE2Pattern.compile(vm.allocator, clean_pattern.pattern, clean_pattern.options);
+    var pcre_pattern = PCRE2Pattern.compile(vm.allocator, clean_pattern.pattern, clean_pattern.options) catch {
+        vm.preg_last_error = -256; // PCRE2_ERROR_NOSUBSTRING or similar for compilation failure
+        return Value.initInt(0); // Return 0 for compilation failure
+    };
     defer pcre_pattern.deinit();
 
     const rc = pcre2_match_8(
@@ -324,13 +335,16 @@ pub fn pregMatchFn(vm: *VM, args: []const Value) !Value {
     );
 
     if (rc == PCRE2_ERROR_NOMATCH) {
+        vm.preg_last_error = 0; // No error
         return Value.initInt(0);
     }
 
     if (rc < 0) {
+        vm.preg_last_error = rc; // Set PCRE2 error code
         return Value.initInt(0);
     }
 
+    vm.preg_last_error = 0; // No error
     return Value.initInt(1);
 }
 
@@ -762,9 +776,9 @@ pub fn pregQuoteFn(vm: *VM, args: []const Value) !Value {
     return try createStringValue(vm.allocator, result);
 }
 
-/// preg_last_error 实现
-pub fn pregLastErrorFn(_: *VM, _: []const Value) !Value {
-    return Value.initInt(0);
+/// preg_last_error 实现 - 返回当前协程的错误状态
+pub fn pregLastErrorFn(vm: *VM, _: []const Value) !Value {
+    return Value.initInt(vm.preg_last_error);
 }
 
 // 标志常量

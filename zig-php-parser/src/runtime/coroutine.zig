@@ -101,6 +101,9 @@ pub const OptimizedCoroutine = struct {
         locals: std.StringHashMap(Value), // Local variables
         current_file: []const u8 = "",
         current_line: usize = 0,
+        // Per-coroutine error state for isolation
+        preg_last_error: i32 = 0, // PCRE2 error code for this coroutine
+        json_last_error: i32 = 0, // JSON error code for this coroutine
 
         pub fn init(allocator: std.mem.Allocator) ExecutionContext {
             return ExecutionContext{
@@ -144,6 +147,10 @@ pub const OptimizedCoroutine = struct {
             // Save current file and line for debugging
             self.current_file = try vm_ptr.allocator.dupe(u8, vm_ptr.current_file);
             self.current_line = vm_ptr.current_line;
+
+            // Save per-coroutine error state
+            self.preg_last_error = vm_ptr.preg_last_error;
+            self.json_last_error = vm_ptr.json_last_error;
         }
 
         /// Restore context to VM
@@ -153,6 +160,10 @@ pub const OptimizedCoroutine = struct {
             // Restore execution state
             vm_ptr.current_line = self.ip;
             vm_ptr.current_file = self.current_file;
+
+            // Restore per-coroutine error state
+            vm_ptr.preg_last_error = self.preg_last_error;
+            vm_ptr.json_last_error = self.json_last_error;
 
             // Note: Global variable restoration would require more complex state management
             // For now, we preserve the current approach to avoid breaking existing functionality

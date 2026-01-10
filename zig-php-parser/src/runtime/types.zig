@@ -1629,6 +1629,11 @@ pub const PHPObject = struct {
                 return builtin_concurrency.callChannelMethod(vm_instance, self, name, args);
             }
 
+            // For Generator builtin methods
+            if (std.mem.eql(u8, class_name, "Generator")) {
+                return self.callGeneratorMethod(vm_instance, name, args);
+            }
+
             // Try magic __call method
             if (self.class.hasMethod("__call")) {
                 return error.MagicMethodCall;
@@ -1670,6 +1675,11 @@ pub const PHPObject = struct {
                     }
                     return Value.initNull();
                 }
+            }
+
+            // For Generator builtin methods, always use callGeneratorMethod even if method exists in class
+            if (std.mem.eql(u8, class_name, "Generator")) {
+                return self.callGeneratorMethod(vm_instance, name, args);
             }
 
             // For HttpResponse builtin methods
@@ -1749,6 +1759,71 @@ pub const PHPObject = struct {
         }
 
         return Value.initNull();
+    }
+
+    /// Handle Generator Iterator methods
+    fn callGeneratorMethod(self: *PHPObject, vm_ptr: *anyopaque, method_name: []const u8, args: []const Value) !Value {
+        // 获取实际的 VM 实例
+        const vm = @as(*@import("vm.zig").VM, @ptrCast(@alignCast(vm_ptr)));
+        const GeneratorState = @import("vm.zig").GeneratorState;
+
+        // Get the generator state pointer from the object
+        const state_ptr_val = self.getProperty("__generator_state_ptr") catch Value.initNull();
+        defer state_ptr_val.release(vm.allocator);
+
+        const ptr_str = if (state_ptr_val.isString()) state_ptr_val.getAsString().data.data else "";
+        const state_ptr_int = std.fmt.parseInt(u64, ptr_str, 10) catch 0;
+
+        if (state_ptr_int == 0) {
+            return Value.initNull();
+        }
+
+        const state = @as(*GeneratorState, @ptrFromInt(state_ptr_int));
+
+        // Handle each Generator method
+        if (std.mem.eql(u8, method_name, "current")) {
+            // Return current value (current_index points to next to be returned, so use current_index - 1)
+            if (state.current_index > 0 and state.current_index <= state.values.items.len) {
+                const idx = state.current_index - 1;
+                return state.values.items[idx].retain();
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "key")) {
+            // Return current key (current_index points to next to be returned, so use current_index - 1)
+            if (state.current_index > 0 and state.current_index <= state.keys.items.len) {
+                const idx = state.current_index - 1;
+                return state.keys.items[idx].retain();
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "valid")) {
+            // Check if current index is valid (has more values to iterate)
+            // After rewind, current_index is 0, valid should return true for first iteration
+            return Value.initBool(state.current_index < state.values.items.len);
+        } else if (std.mem.eql(u8, method_name, "next")) {
+            // Move to next value
+            if (state.current_index < state.values.items.len) {
+                state.current_index += 1;
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "rewind")) {
+            // Rewind to first value
+            state.current_index = 0;
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "send")) {
+            // Send value to generator (not fully implemented)
+            _ = args;
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "throw")) {
+            // Throw exception to generator (not fully implemented)
+            _ = args;
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "close")) {
+            // Close generator
+            state.is_exhausted = true;
+            return Value.initNull();
+        }
+
+        return error.UndefinedMethod;
     }
 
     pub fn clone(self: *PHPObject, allocator: std.mem.Allocator) !*PHPObject {

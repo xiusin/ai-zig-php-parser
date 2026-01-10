@@ -60,6 +60,7 @@ pub const GeneratorState = struct {
     has_started: bool, // Whether the generator has started executing
     this_context: ?Value, // Store $this context for method generators
     locals: std.StringHashMap(Value), // Store local variables between resumptions
+    current_position: ?ast.Node.Index, // Current execution position (for resuming)
 
     pub fn init(allocator: std.mem.Allocator) GeneratorState {
         return GeneratorState{
@@ -75,6 +76,7 @@ pub const GeneratorState = struct {
             .has_started = false,
             .this_context = null,
             .locals = std.StringHashMap(Value).init(allocator),
+            .current_position = null,
         };
     }
 
@@ -590,7 +592,14 @@ fn classExistsFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    const class_name = class_name_val.getAsString().data.data;
+    var class_name = class_name_val.getAsString().data.data;
+
+    // PHP 行为：带前导反斜杠表示全局命名空间，与不带反斜杠相同
+    // 例如：\Generator 与 Generator 是同一个类
+    if (class_name.len > 0 and class_name[0] == '\\') {
+        class_name = class_name[1..];
+    }
+
     const exists = vm.getClass(class_name) != null;
     return Value.initBool(exists);
 }
@@ -1216,6 +1225,10 @@ pub const VM = struct {
 
     // Builtin function registry with category-based organization
     builtin_registry: BuiltinRegistry,
+
+    // Per-coroutine error state for isolation (managed by coroutine context)
+    preg_last_error: i32 = 0, // PCRE2 error code
+    json_last_error: i32 = 0, // JSON error code
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
         return initWithSyntaxConfig(allocator, SyntaxConfig{});
@@ -2833,13 +2846,13 @@ pub const VM = struct {
         return self.nodeOrChildrenContainYield(node);
     }
 
-    fn nodeOrChildrenContainYield(self: *VM, node: ast.Node) bool {
-        if (node.tag == .yield_expr) return true;
+    fn nodeOrChildrenContainYield(self: *VM, _node: ast.Node) bool {
+        if (_node.tag == .yield_expr) return true;
 
         // Check different node types for children
-        switch (node.tag) {
+        switch (_node.tag) {
             .block => {
-                const data = node.data.block;
+                const data = _node.data.block;
                 for (data.stmts) |child| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[child])) {
                         return true;
@@ -2847,7 +2860,7 @@ pub const VM = struct {
                 }
             },
             .if_stmt => {
-                const data = node.data.if_stmt;
+                const data = _node.data.if_stmt;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.condition])) return true;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.then_branch])) return true;
                 if (data.else_branch) |else_node| {
@@ -2855,12 +2868,12 @@ pub const VM = struct {
                 }
             },
             .while_stmt => {
-                const data = node.data.while_stmt;
+                const data = _node.data.while_stmt;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.condition])) return true;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
             },
             .for_stmt => {
-                const data = node.data.for_stmt;
+                const data = _node.data.for_stmt;
                 if (data.init) |init_node| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[init_node])) return true;
                 }
@@ -2873,83 +2886,89 @@ pub const VM = struct {
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
             },
             .foreach_stmt => {
-                const data = node.data.foreach_stmt;
+                const data = _node.data.foreach_stmt;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.iterable])) return true;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
             },
+            .expression_stmt => {
+                // expression_stmt uses .none data - no child expressions to check
+                // yield expressions are their own nodes and will be checked when
+                // their parent block iterates through children
+                return false;
+            },
             .function_decl => {
-                const data = node.data.function_decl;
+                const data = _node.data.function_decl;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
             },
             .method_decl => {
-                const data = node.data.method_decl;
+                const data = _node.data.method_decl;
                 if (data.body) |body_node| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[body_node])) return true;
                 }
             },
             .class_decl => {
-                const data = node.data.container_decl;
+                const data = _node.data.container_decl;
                 for (data.members) |member| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[member])) return true;
                 }
             },
             .echo_stmt => {
-                const data = node.data.echo_stmt;
+                const data = _node.data.echo_stmt;
                 for (data.exprs) |expr| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[expr])) return true;
                 }
             },
             .assignment => {
-                const data = node.data.assignment;
+                const data = _node.data.assignment;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.value])) return true;
             },
             .binary_expr => {
-                const data = node.data.binary_expr;
+                const data = _node.data.binary_expr;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.lhs])) return true;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.rhs])) return true;
             },
             .unary_expr => {
-                const data = node.data.unary_expr;
+                const data = _node.data.unary_expr;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.expr])) return true;
             },
             .return_stmt => {
-                const data = node.data.return_stmt;
+                const data = _node.data.return_stmt;
                 if (data.expr) |expr_node| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[expr_node])) return true;
                 }
             },
             .function_call => {
-                const data = node.data.function_call;
+                const data = _node.data.function_call;
                 for (data.args) |arg| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[arg])) return true;
                 }
             },
             .method_call => {
-                const data = node.data.method_call;
+                const data = _node.data.method_call;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.target])) return true;
                 for (data.args) |arg| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[arg])) return true;
                 }
             },
             .property_access => {
-                const data = node.data.property_access;
+                const data = _node.data.property_access;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.target])) return true;
             },
             .array_access => {
-                const data = node.data.array_access;
+                const data = _node.data.array_access;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.target])) return true;
                 if (data.index) |idx| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[idx])) return true;
                 }
             },
             .object_instantiation => {
-                const data = node.data.object_instantiation;
+                const data = _node.data.object_instantiation;
                 for (data.args) |arg| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[arg])) return true;
                 }
             },
             .ternary_expr => {
-                const data = node.data.ternary_expr;
+                const data = _node.data.ternary_expr;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.cond])) return true;
                 if (data.then_expr) |then_node| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[then_node])) return true;
@@ -2957,26 +2976,26 @@ pub const VM = struct {
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.else_expr])) return true;
             },
             .array_init => {
-                const data = node.data.array_init;
+                const data = _node.data.array_init;
                 for (data.elements) |elem| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[elem])) return true;
                 }
             },
             .array_pair => {
-                const data = node.data.array_pair;
+                const data = _node.data.array_pair;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.key])) return true;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.value])) return true;
             },
             .arrow_function => {
-                const data = node.data.arrow_function;
+                const data = _node.data.arrow_function;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
             },
             .closure => {
-                const data = node.data.closure;
+                const data = _node.data.closure;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
             },
             .try_stmt => {
-                const data = node.data.try_stmt;
+                const data = _node.data.try_stmt;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
                 for (data.catch_clauses) |catch_node| {
                     if (self.nodeOrChildrenContainYield(self.context.nodes.items[catch_node])) return true;
@@ -6007,132 +6026,125 @@ pub const VM = struct {
         return last_val;
     }
 
-    /// 处理 Generator 对象的 foreach 遍历
-        /// 处理 Generator 对象的 foreach 遍历 - 急切收集所有值
-        fn evaluateGeneratorForeach(self: *VM, generator_value: Value, foreach_stmt: anytype) !Value {
-            var last_val = Value.initNull();
-    
-            const generator_obj = generator_value.getAsObject().data;
-    
-            // 获取 GeneratorState
-            const state_ptr_val = generator_obj.getProperty("__generator_state_ptr") catch Value.initNull();
-            defer state_ptr_val.release(self.allocator);
-    
-            const ptr_str = if (state_ptr_val.isString()) state_ptr_val.getAsString().data.data else "";
-            const state_ptr_int = std.fmt.parseInt(u64, ptr_str, 10) catch 0;
-    
-            if (state_ptr_int == 0) {
-                return Value.initNull();
-            }
-    
-            const state = @as(*GeneratorState, @ptrFromInt(state_ptr_int));
-    
-                    // 第一次迭代：收集所有值
-                    if (!state.has_started) {
-                        state.has_started = true;
-                        self.generator_state = state;
-            
-                        // 恢复 $this 上下文
-                        if (state.this_context) |this_val| {
-                            try self.setVariable("$this", this_val.retain());
-                        }
-            
-                                                // 执行整个函数体，收集所有 yield 的值
-                                                if (state.function_body) |body_node| {
-                                                    std.debug.print("DEBUG: body_node={}, nodes.len={}\n", .{body_node, self.context.nodes.items.len});
-                                                    const body_ast_node = self.context.nodes.items[body_node];
-                                                    std.debug.print("DEBUG: body_node.tag={}\n", .{body_ast_node.tag});
-                        
-                                                    while (true) {
-                                                        // 清除之前的值
-                                                        state.current_value = null;
-                        
-                                                        const result = self.eval(body_node) catch |err| {
-                                                            std.debug.print("DEBUG: eval returned err={}\n", .{err});
-                                                            if (err == error.YieldOutsideGenerator) {
-                                                                // Yield 已处理，current_value 应该被设置
-                                                                // 继续循环以收集更多值
-                                                                if (state.current_value == null) {
-                                                                    std.debug.print("DEBUG: No value after yield, generator exhausted\n", .{});
-                                                                    state.is_exhausted = true;
-                                                                    break;
-                                                                }
-                                                                continue;
-                                                            } else if (err == error.Return) {
-                                                                state.is_exhausted = true;
-                                                                break;
-                                                            } else if (err == error.Break) {
-                                                                self.break_level -= 1;
-                                                                state.is_exhausted = true;
-                                                                break;
-                                                            } else {
-                                                                return err;
-                                                            }
-                                                        };
-                                                        std.debug.print("DEBUG: result={}, current_value={?}\n", .{result, state.current_value});
-                        
-                                                        // 检查是否有值（正常返回的情况）
-                                                        if (state.current_value == null) {
-                                                            std.debug.print("DEBUG: No more values, breaking\n", .{});
-                                                            state.is_exhausted = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                } else {                            std.debug.print("DEBUG: No function_body!\n", .{});
-                        }
-                        state.is_exhausted = true;
-                        std.debug.print("DEBUG: Collection done, values.len={}\n", .{state.values.items.len});
-                    }    
-            // 迭代收集的值
-            loop: while (state.current_index < state.values.items.len) {
-                const key = state.keys.items[state.current_index];
-                const value = state.values.items[state.current_index];
-                state.current_index += 1;
-    
-                // 设置 key 变量
-                if (foreach_stmt.key) |key_idx| {
-                    const key_node = self.context.nodes.items[key_idx];
-                    if (key_node.tag == .variable) {
-                        const name_id = key_node.data.variable.name;
-                        const name = self.context.string_pool.keys()[name_id];
-                        try self.setVariable(name, key.retain());
-                    }
-                }
-    
-                // 设置 value 变量
-                if (foreach_stmt.value > 0 and foreach_stmt.value < self.context.nodes.items.len) {
-                    const value_node = self.context.nodes.items[foreach_stmt.value];
-                    if (value_node.tag == .variable) {
-                        const value_name_id = value_node.data.variable.name;
-                        const value_name = self.context.string_pool.keys()[value_name_id];
-                        try self.setVariable(value_name, value.retain());
-                    }
-                }
-    
-                // 执行循环体
-                self.releaseValue(last_val);
-                const body_idx = foreach_stmt.body;
-                if (body_idx > 0 and body_idx < self.context.nodes.items.len) {
-                    last_val = self.eval(body_idx) catch |err| {
-                        if (err == error.Break) {
-                            self.break_level -= 1;
-                            if (self.break_level > 0) return error.Break;
-                            break :loop;
-                        }
-                        if (err == error.Continue) {
-                            self.continue_level -= 1;
-                            if (self.continue_level > 0) return error.Continue;
-                            break :loop;
-                        }
-                        return err;
-                    };
-                } else {
-                    last_val = Value.initNull();
-                }
-            }
-    
-            return last_val;
+    /// 处理 Generator 对象的 foreach 遍历 - 使用语句迭代
+    fn evaluateGeneratorForeach(self: *VM, generator_value: Value, foreach_stmt: anytype) !Value {
+        var last_val = Value.initNull();
+
+        const generator_obj = generator_value.getAsObject().data;
+
+        // 获取 GeneratorState
+        const state_ptr_val = generator_obj.getProperty("__generator_state_ptr") catch Value.initNull();
+        defer state_ptr_val.release(self.allocator);
+
+        const ptr_str = if (state_ptr_val.isString()) state_ptr_val.getAsString().data.data else "";
+        const state_ptr_int = std.fmt.parseInt(u64, ptr_str, 10) catch 0;
+
+        if (state_ptr_int == 0) {
+            return Value.initNull();
         }
+
+        const state = @as(*GeneratorState, @ptrFromInt(state_ptr_int));
+
+        // 收集所有值
+        if (!state.has_started) {
+            state.has_started = true;
+            self.generator_state = state;
+
+            // 恢复 $this 上下文
+            if (state.this_context) |this_val| {
+                try self.setVariable("$this", this_val.retain());
+            }
+
+            // 获取函数体的语句列表
+            if (state.function_body) |body_node| {
+                const body_ast_node = self.context.nodes.items[body_node];
+
+                // 获取语句列表
+                var stmt_indices: []const ast.Node.Index = &[_]ast.Node.Index{};
+                if (body_ast_node.tag == .block) {
+                    stmt_indices = body_ast_node.data.block.stmts;
+                } else {
+                    // 如果函数体不是 block，直接使用它
+                    stmt_indices = &[_]ast.Node.Index{body_node};
+                }
+
+                // 迭代执行每条语句
+                var stmt_index: usize = 0;
+                while (stmt_index < stmt_indices.len) {
+                    const stmt = stmt_indices[stmt_index];
+
+                    // 执行语句
+                    _ = self.eval(stmt) catch |err| {
+                        if (err == error.YieldOutsideGenerator) {
+                            // Yield 已处理，继续下一个语句
+                            stmt_index += 1;
+                            continue;
+                        } else if (err == error.Return or err == error.Break) {
+                            // 函数返回或 break，停止收集
+                            break;
+                        } else {
+                            // 其他错误，停止收集
+                            break;
+                        }
+                    };
+
+                    stmt_index += 1;
+                }
+
+                state.is_exhausted = true;
+            }
+        }
+
+        // 迭代收集的值
+        loop: while (state.current_index < state.values.items.len) {
+            const key = state.keys.items[state.current_index];
+            const value = state.values.items[state.current_index];
+            state.current_index += 1;
+
+            // 设置 key 变量
+            if (foreach_stmt.key) |key_idx| {
+                const key_node = self.context.nodes.items[key_idx];
+                if (key_node.tag == .variable) {
+                    const name_id = key_node.data.variable.name;
+                    const name = self.context.string_pool.keys()[name_id];
+                    try self.setVariable(name, key.retain());
+                }
+            }
+
+            // 设置 value 变量
+            if (foreach_stmt.value > 0 and foreach_stmt.value < self.context.nodes.items.len) {
+                const value_node = self.context.nodes.items[foreach_stmt.value];
+                if (value_node.tag == .variable) {
+                    const value_name_id = value_node.data.variable.name;
+                    const value_name = self.context.string_pool.keys()[value_name_id];
+                    try self.setVariable(value_name, value.retain());
+                }
+            }
+
+            // 执行循环体
+            self.releaseValue(last_val);
+            const body_idx = foreach_stmt.body;
+            if (body_idx > 0 and body_idx < self.context.nodes.items.len) {
+                last_val = self.eval(body_idx) catch |err| {
+                    if (err == error.Break) {
+                        self.break_level -= 1;
+                        if (self.break_level > 0) return error.Break;
+                        break :loop;
+                    }
+                    if (err == error.Continue) {
+                        self.continue_level -= 1;
+                        if (self.continue_level > 0) return error.Continue;
+                        break :loop;
+                    }
+                    return err;
+                };
+            } else {
+                last_val = Value.initNull();
+            }
+        }
+
+        return last_val;
+    }
 
     fn evaluateForeachStatement(self: *VM, foreach_stmt: anytype) !Value {
         // 安全检查：确保 iterable 是有效的索引

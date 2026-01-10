@@ -50,6 +50,17 @@ pub const BuiltinClassManager = struct {
         prop_name.release(self.allocator);
     }
 
+    fn addMethod(self: *BuiltinClassManager, class: *PHPClass, name: []const u8, visibility: Property.Visibility, return_type: ?[]const u8, is_static: bool) !void {
+        const method_name = try PHPString.init(self.allocator, name);
+        var method = Method.init(method_name);
+        method.modifiers.visibility = visibility;
+        method.modifiers.is_static = is_static;
+        // Note: return_type is not stored in Method, it's used at runtime
+        _ = return_type;
+        try class.methods.put(name, method);
+        method_name.release(self.allocator);
+    }
+
     fn registerBuiltinClasses(self: *BuiltinClassManager) !void {
         // stdClass - PHP的基础动态对象类
         try self.registerStdClass();
@@ -290,6 +301,20 @@ pub const BuiltinClassManager = struct {
         generator_class.* = try PHPClass.init(self.allocator, generator_name);
         generator_name.release(self.allocator);
         generator_class.modifiers.is_final = true;
+        
+        // 添加 Generator 的属性
+        try self.addProperty(generator_class, "__generator_state_ptr", .private, null);
+        
+        // 注册 Generator 的 Iterator 方法
+        try self.addMethod(generator_class, "current", .public, null, true);
+        try self.addMethod(generator_class, "key", .public, null, true);
+        try self.addMethod(generator_class, "next", .public, null, true);
+        try self.addMethod(generator_class, "valid", .public, null, true);
+        try self.addMethod(generator_class, "rewind", .public, null, true);
+        try self.addMethod(generator_class, "send", .public, null, true);
+        try self.addMethod(generator_class, "throw", .public, null, true);
+        try self.addMethod(generator_class, "close", .public, null, true);
+        
         // Generator实现了Iterator接口
         try self.classes.put("Generator", generator_class);
     }
