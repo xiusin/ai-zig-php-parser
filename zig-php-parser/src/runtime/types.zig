@@ -2142,7 +2142,10 @@ pub const Value = struct {
                 return PHPString.init(allocator, str);
             },
             .string => PHPString.init(allocator, self.getAsString().data.data),
-            .array => PHPString.init(allocator, "Array"),
+            .array => {
+                // Build string representation of array (simplified)
+                return PHPString.init(allocator, "Array");
+            },
             .object => self.getAsObject().data.toString(allocator),
             .struct_instance => {
                 const struct_name = self.getAsStruct().data.struct_type.name.data;

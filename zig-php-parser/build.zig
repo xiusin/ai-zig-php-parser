@@ -18,6 +18,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.linkLibC();
+    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/pcre2/10.47/include" });
+    exe.linkSystemLibrary("pcre2-8");
+    exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/pcre2/10.47/lib" });
 
     b.installArtifact(exe);
 

@@ -7,6 +7,7 @@ const ArrayKey = types.ArrayKey;
 const exceptions = @import("exceptions.zig");
 const ExceptionFactory = exceptions.ExceptionFactory;
 const builtin_io = @import("builtin_io.zig");
+const pcre2 = @import("pcre2.zig");
 
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
@@ -53,6 +54,7 @@ pub const StandardLibrary = struct {
         try stdlib.registerDateTimeFunctions();
         try stdlib.registerJsonFunctions();
         try stdlib.registerHashFunctions();
+        try stdlib.registerPregFunctions();
 
         // Register PHP 8.5 URI functions
         const php85 = @import("php85_features.zig");
@@ -340,6 +342,22 @@ pub const StandardLibrary = struct {
         };
 
         for (hash_functions) |func| {
+            try self.registerFunction(func.name, func);
+        }
+    }
+
+    // Regular Expression Functions (PCRE2)
+    pub fn registerPregFunctions(self: *StandardLibrary) !void {
+        const preg_functions = [_]*const BuiltinFunction{
+            &.{ .name = "preg_match", .min_args = 2, .max_args = 5, .handler = pcre2.pregMatchFn },
+            &.{ .name = "preg_match_all", .min_args = 2, .max_args = 5, .handler = pcre2.pregMatchAllFn },
+            &.{ .name = "preg_replace", .min_args = 3, .max_args = 5, .handler = pcre2.pregReplaceFn },
+            &.{ .name = "preg_split", .min_args = 2, .max_args = 4, .handler = pcre2.pregSplitFn },
+            &.{ .name = "preg_quote", .min_args = 1, .max_args = 2, .handler = pcre2.pregQuoteFn },
+            &.{ .name = "preg_last_error", .min_args = 0, .max_args = 0, .handler = pcre2.pregLastErrorFn },
+        };
+
+        for (preg_functions) |func| {
             try self.registerFunction(func.name, func);
         }
     }
@@ -1338,6 +1356,9 @@ fn implodeFn(vm: *VM, args: []const Value) !Value {
         const value_str = try value.toString(vm.allocator);
         defer value_str.deinit(vm.allocator);
         try result.appendSlice(vm.allocator, value_str.data);
+
+        // 注意：不要调用 value.release()！
+        // 因为数组仍在使用这些元素的 Box，释放会导致后续元素访问已释放的内存
     }
 
     const result_str = try PHPString.init(vm.allocator, result.items);
