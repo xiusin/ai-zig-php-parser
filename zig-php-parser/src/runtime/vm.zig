@@ -6862,6 +6862,10 @@ pub const VM = struct {
                 .property_decl => {
                     try self.processTraitPropertyDeclaration(&php_trait, member_node.data.property_decl);
                 },
+                .trait_use => {
+                    // Handle nested trait use: trait B { use A; }
+                    try self.processNestedTraitUse(&php_trait, member_node.data.trait_use);
+                },
                 else => {},
             }
         }
@@ -6872,6 +6876,36 @@ pub const VM = struct {
         try self.defineTrait(trait_name, trait_ptr);
 
         return Value.initNull();
+    }
+
+    fn processNestedTraitUse(self: *VM, php_trait: *types.PHPTrait, trait_use_data: anytype) !void {
+        // Process each trait in the use statement and add to this trait
+        for (trait_use_data.traits) |trait_idx| {
+            const trait_node = self.context.nodes.items[trait_idx];
+            if (trait_node.tag == .named_type) {
+                const inner_trait_name = self.context.string_pool.keys()[trait_node.data.named_type.name];
+                if (self.getTrait(inner_trait_name)) |inner_trait| {
+                    // Copy methods from inner trait
+                    var method_iter = inner_trait.methods.iterator();
+                    while (method_iter.next()) |entry| {
+                        const method_name = entry.key_ptr.*;
+                        if (!php_trait.methods.contains(method_name)) {
+                            const method_copy = entry.value_ptr.*;
+                            try php_trait.methods.put(method_name, method_copy);
+                        }
+                    }
+                    // Copy properties from inner trait
+                    var prop_iter = inner_trait.properties.iterator();
+                    while (prop_iter.next()) |entry| {
+                        const prop_name = entry.key_ptr.*;
+                        if (!php_trait.properties.contains(prop_name)) {
+                            const prop_copy = entry.value_ptr.*;
+                            try php_trait.properties.put(prop_name, prop_copy);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn processTraitMethodDeclaration(self: *VM, trait_obj: *types.PHPTrait, method_data: anytype) !void {

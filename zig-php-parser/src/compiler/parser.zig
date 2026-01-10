@@ -1347,8 +1347,8 @@ pub const Parser = struct {
             .bang, .minus, .plus, .ampersand => {
                 const token = self.curr;
                 self.nextToken();
-                // Use parseUnaryPostfix to handle cases like !empty($x)
-                const expr = try self.parseUnaryPostfix();
+                // Use parseUnary to handle cases like !!$x or !$obj->method()
+                const expr = try self.parseUnary();
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
             },
             .t_variable, .t_go_identifier => {
