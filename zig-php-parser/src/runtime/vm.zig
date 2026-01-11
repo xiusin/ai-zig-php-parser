@@ -1047,8 +1047,17 @@ fn getDeclaredInterfacesFn(vm: *VM, args: []const Value) !Value {
         return error.ArgumentCountMismatch;
     }
 
-    // Return empty array - interface tracking not yet implemented
-    return try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    var iterator = vm.interfaces.iterator();
+    while (iterator.next()) |entry| {
+        const interface_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
+        try php_array.push(vm.allocator, interface_name_value);
+        vm.releaseValue(interface_name_value);
+    }
+
+    return php_array_value;
 }
 
 fn getDeclaredTraitsFn(vm: *VM, args: []const Value) !Value {
@@ -1058,8 +1067,17 @@ fn getDeclaredTraitsFn(vm: *VM, args: []const Value) !Value {
         return error.ArgumentCountMismatch;
     }
 
-    // Return empty array - trait tracking not yet implemented
-    return try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    var iterator = vm.traits.iterator();
+    while (iterator.next()) |entry| {
+        const trait_name_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
+        try php_array.push(vm.allocator, trait_name_value);
+        vm.releaseValue(trait_name_value);
+    }
+
+    return php_array_value;
 }
 
 fn getParentClassFn(vm: *VM, args: []const Value) !Value {
@@ -1163,6 +1181,678 @@ fn getClassConstantsFn(vm: *VM, args: []const Value) !Value {
     return php_array_value;
 }
 
+// ==================== High Priority Functions ====================
+
+// define() - Define a named constant
+fn defineFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 2) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 2, @intCast(args.len), "define", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const name = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "define() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    const value = args[1];
+    // Note: case_insensitive parameter is ignored for now
+    _ = if (args.len > 2) args[2].toBool() else false;
+
+    // Check if constant already exists
+    if (vm.global.get(name)) |existing| {
+        if (!existing.isNull()) {
+            // Just return false for duplicate constant (PHP behavior)
+            return Value.initBool(false);
+        }
+    }
+
+    // Store the constant
+    try vm.global.set(name, value.retain());
+
+    return Value.initBool(true);
+}
+
+// defined() - Check if a constant is defined
+fn definedFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "defined", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const name = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "defined() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    // Check if constant exists
+    if (vm.global.get(name)) |value| {
+        return Value.initBool(!value.isNull());
+    }
+
+    return Value.initBool(false);
+}
+
+// constant() - Return the value of a constant
+fn constantFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "constant", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const name = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "constant() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    if (vm.global.get(name)) |value| {
+        if (value.isNull()) {
+            const exception = try ExceptionFactory.createError(vm.allocator, "Constant is not defined", vm.current_file, vm.current_line);
+            _ = try vm.throwException(exception);
+            return error.UndefinedConstant;
+        }
+        return value.retain();
+    }
+
+    const exception = try ExceptionFactory.createError(vm.allocator, "Constant is not defined", vm.current_file, vm.current_line);
+    _ = try vm.throwException(exception);
+    return error.UndefinedConstant;
+}
+
+// func_get_args() - Get the function arguments as an array
+fn funcGetArgsFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const current_args = vm.current_call_args orelse {
+        return Value.initArrayWithManager(&vm.memory_manager);
+    };
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    for (current_args, 0..) |arg, i| {
+        const key = types.ArrayKey{ .integer = @intCast(i) };
+        try php_array.set(vm.allocator, key, arg.retain());
+    }
+
+    return php_array_value;
+}
+
+// func_get_arg() - Get a specific function argument
+fn funcGetArgFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "func_get_arg", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const current_args = vm.current_call_args orelse {
+        return Value.initNull();
+    };
+
+    const index = args[0];
+    if (index.getTag() != .integer) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "func_get_arg() expects parameter 1 to be an integer", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const i = @as(usize, @intCast(index.asInt()));
+    if (i >= current_args.len) {
+        return Value.initNull();
+    }
+
+    return current_args[i].retain();
+}
+
+// func_num_args() - Get the number of function arguments
+fn funcNumArgsFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const current_args = vm.current_call_args orelse {
+        return Value.initInt(0);
+    };
+
+    return Value.initInt(@intCast(current_args.len));
+}
+
+// eval() - Execute a string as PHP code (high-performance with coroutine support)
+fn evalFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "eval", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const code = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "eval() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    // Create null-terminated string for Parser with <?php prefix
+    // High-performance: use allocator with proper error handling
+    const php_prefix = "<?php ";
+    const full_code_len = php_prefix.len + code.len;
+    const code_with_null = try vm.allocator.alloc(u8, full_code_len + 1);
+    @memcpy(code_with_null[0..php_prefix.len], php_prefix);
+    @memcpy(code_with_null[php_prefix.len..full_code_len], code);
+    code_with_null[full_code_len] = 0;
+    defer vm.allocator.free(code_with_null);
+
+    // Create null-terminated pointer for Parser
+    const code_null_terminated: [:0]const u8 = @ptrCast(code_with_null[0..full_code_len :0]);
+
+    // Save current execution context for coroutine support
+    const saved_file = vm.current_file;
+    const saved_line = vm.current_line;
+    const saved_source = vm.current_source;
+
+    // Set eval context
+    vm.current_file = "eval";
+    vm.current_line = 1;
+
+    defer {
+        vm.current_file = saved_file;
+        vm.current_line = saved_line;
+        vm.current_source = saved_source;
+    }
+
+    // Parse the code - use context allocator for AST node allocation
+    var parser = try Parser.initWithMode(vm.context.allocator, vm.context, code_null_terminated, vm.syntax_config.mode);
+    defer parser.deinit();
+
+    // Set source for line number calculation
+    vm.current_source = code;
+
+    // Parse and get AST node
+    const body = parser.parse() catch {
+        const exception = try ExceptionFactory.createParseError(vm.allocator, "eval() code parsing failed", "eval", 1);
+        _ = try vm.throwException(exception);
+        return error.ParseError;
+    };
+
+    // Execute the parsed code in the current context
+    // Handle error.Return from return statements
+    const result = vm.eval(body) catch |err| {
+        if (err == error.Return) {
+            // Return the value set by return statement
+            if (vm.return_value) |ret_val| {
+                // Take ownership of the return value
+                const result = ret_val;
+                vm.return_value = null;
+                return result;
+            }
+            return Value.initNull();
+        }
+        return err;
+    };
+
+    return result;
+}
+
+// get_defined_vars() - Get all defined variables in the current scope
+fn getDefinedVarsFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    // Get variables from current scope
+    if (vm.call_stack.items.len > 0) {
+        const current_frame = &vm.call_stack.items[vm.call_stack.items.len - 1];
+        var iterator = current_frame.locals.iterator();
+        var i: usize = 0;
+        while (iterator.next()) |entry| {
+            const key = types.ArrayKey{ .integer = @intCast(i) };
+            try php_array.set(vm.allocator, key, entry.value_ptr.*.retain());
+            i += 1;
+        }
+    }
+
+    return php_array_value;
+}
+
+// get_defined_constants() - Get all defined constants
+fn getDefinedConstantsFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    var iterator = vm.global.vars.iterator();
+    while (iterator.next()) |entry| {
+        const key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, entry.key_ptr.*) };
+        try php_array.set(vm.allocator, key, entry.value_ptr.*.retain());
+    }
+
+    return php_array_value;
+}
+
+// get_defined_functions() - Get all defined functions
+fn getDefinedFunctionsFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    // Get user-defined functions from global scope
+    var iterator = vm.global.vars.iterator();
+    var i: usize = 0;
+    while (iterator.next()) |entry| {
+        const value = entry.value_ptr.*;
+        if (value.getTag() == .user_function) {
+            const key = types.ArrayKey{ .integer = @intCast(i) };
+            const str_value = try Value.initString(vm.allocator, entry.key_ptr.*);
+            try php_array.set(vm.allocator, key, str_value);
+            i += 1;
+        }
+    }
+
+    return php_array_value;
+}
+
+// forward_static_call_array() - Call a static method and pass arguments as array
+fn forwardStaticCallArrayFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 2) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 2, @intCast(args.len), "forward_static_call_array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const params_array = args[1];
+
+    if (params_array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "forward_static_call_array() expects parameter 2 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    // Just return null for now - static method calling is complex
+    return Value.initNull();
+}
+
+// ==================== Medium Priority Functions ====================
+
+// debug_backtrace() - Get the call stack
+fn debugBacktraceFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    // Build backtrace from call stack
+    for (vm.call_stack.items, 0..) |frame, i| {
+        const frame_array = try vm.allocator.create(types.PHPArray);
+        frame_array.* = types.PHPArray.init(vm.allocator);
+
+        // Function/file/line info
+        const func_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "function") };
+        const func_name = try types.PHPString.init(vm.allocator, frame.function_name);
+        const func_name_value = try Value.initString(vm.allocator, func_name.data);
+        try frame_array.set(vm.allocator, func_key, func_name_value);
+
+        const file_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "file") };
+        const file_name = try types.PHPString.init(vm.allocator, frame.file);
+        const file_name_value = try Value.initString(vm.allocator, file_name.data);
+        try frame_array.set(vm.allocator, file_key, file_name_value);
+
+        const line_key = types.ArrayKey{ .string = try types.PHPString.init(vm.allocator, "line") };
+        try frame_array.set(vm.allocator, line_key, Value.initInt(@intCast(frame.line)));
+
+        const key = types.ArrayKey{ .integer = @intCast(i) };
+        const frame_box = try vm.allocator.create(types.gc.Box(*types.PHPArray));
+        frame_box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = frame_array,
+        };
+        try php_array.set(vm.allocator, key, Value.fromBox(frame_box, Value.TYPE_ARRAY));
+    }
+
+    return php_array_value;
+}
+
+// debug_print_backtrace() - Print the call stack
+fn debugPrintBacktraceFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    // Print backtrace directly using std.debug.print
+    for (vm.call_stack.items, 0..) |frame, i| {
+        std.debug.print("#{d} {s}() at {s}:{d}\n", .{ i, frame.function_name, frame.file, frame.line });
+    }
+
+    return Value.initNull();
+}
+
+// register_shutdown_function() - Register a function to execute at shutdown
+fn registerShutdownFunctionFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    _ = args;
+    // TODO: Implement shutdown function registry
+    // For now, just return true to indicate the function was registered
+    return Value.initBool(true);
+}
+
+// ini_get() - Get the value of a configuration option
+fn iniGetFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "ini_get", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const option = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "ini_get() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    // Return default values for common options
+    const value = if (std.mem.eql(u8, option, "display_errors")) "1" else
+        if (std.mem.eql(u8, option, "error_reporting")) "32767" else
+        if (std.mem.eql(u8, option, "max_execution_time")) "30" else
+        if (std.mem.eql(u8, option, "memory_limit")) "128M" else
+        if (std.mem.eql(u8, option, "post_max_size")) "8M" else
+        if (std.mem.eql(u8, option, "upload_max_filesize")) "2M" else "";
+
+    return try Value.initString(vm.allocator, value);
+}
+
+// ini_set() - Set the value of a configuration option
+fn iniSetFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 2) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 2, @intCast(args.len), "ini_set", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const option = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "ini_set() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    const new_value = switch (args[1].getTag()) {
+        .string => args[1].getAsString().data.data,
+        else => "",
+    };
+
+    // Return empty string for now (old value)
+    _ = option;
+    _ = new_value;
+    return try Value.initString(vm.allocator, "");
+}
+
+// phpversion() - Get the PHP version
+fn phpversionFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+    return try Value.initString(vm.allocator, "8.5.0-dev");
+}
+
+// php_sapi_name() - Get the SAPI name
+fn phpSapiNameFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+    return try Value.initString(vm.allocator, "cli");
+}
+
+// ==================== Extension and File Functions ====================
+
+// extension_loaded() - Check if an extension is loaded
+fn extensionLoadedFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "extension_loaded", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const ext_name = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "extension_loaded() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    // Built-in extensions are always loaded
+    const builtin_extensions = &[_][]const u8{
+        "core", "standard", "pcre", "json", "hash", "mbstring", "zlib",
+        "spl", "reflection", "ctype", "date", "fileinfo",
+    };
+
+    for (builtin_extensions) |ext| {
+        if (std.mem.eql(u8, ext, ext_name)) {
+            return Value.initBool(true);
+        }
+    }
+
+    // Check dynamic extensions
+    if (vm.extension_registry) |reg| {
+        if (reg.extensions.contains(ext_name)) {
+            return Value.initBool(true);
+        }
+    }
+
+    return Value.initBool(false);
+}
+
+// get_loaded_extensions() - Get list of loaded extensions
+fn getLoadedExtensionsFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    // Built-in extensions
+    const builtin_extensions = &[_][]const u8{
+        "core", "standard", "pcre", "json", "hash", "mbstring", "zlib",
+        "spl", "reflection", "ctype", "date", "fileinfo",
+    };
+
+    var i: usize = 0;
+    for (builtin_extensions) |ext| {
+        const key = types.ArrayKey{ .integer = @intCast(i) };
+        const ext_value = try Value.initString(vm.allocator, ext);
+        try php_array.set(vm.allocator, key, ext_value);
+        i += 1;
+    }
+
+    // Dynamic extensions
+    if (vm.extension_registry) |reg| {
+        var iter = reg.extensions.iterator();
+        while (iter.next()) |entry| {
+            const key = types.ArrayKey{ .integer = @intCast(i) };
+            const ext_value = try Value.initString(vm.allocator, entry.key_ptr.*);
+            try php_array.set(vm.allocator, key, ext_value);
+            i += 1;
+        }
+    }
+
+    return php_array_value;
+}
+
+// get_extension_funcs() - Get functions provided by an extension
+fn getExtensionFuncsFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "get_extension_funcs", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const ext_name = switch (args[0].getTag()) {
+        .string => args[0].getAsString().data.data,
+        else => {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_extension_funcs() expects parameter 1 to be a string", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
+        },
+    };
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    // Check if extension is loaded
+    var is_loaded = false;
+
+    // Check built-in extensions
+    const builtin_extensions = &[_][]const u8{
+        "core", "standard", "pcre", "json", "hash", "mbstring", "zlib",
+        "spl", "reflection", "ctype", "date", "fileinfo",
+    };
+    for (builtin_extensions) |ext| {
+        if (std.mem.eql(u8, ext, ext_name)) {
+            is_loaded = true;
+            break;
+        }
+    }
+
+    // Check dynamic extensions
+    if (!is_loaded) {
+        if (vm.extension_registry) |reg| {
+            if (reg.extensions.contains(ext_name)) {
+                is_loaded = true;
+            }
+        }
+    }
+
+    if (!is_loaded) {
+        return php_array_value;
+    }
+
+    // Get functions from extension registry
+    if (vm.extension_registry) |reg| {
+        var iter = reg.functions.iterator();
+        var j: usize = 0;
+        while (iter.next()) |entry| {
+            const key = types.ArrayKey{ .integer = @intCast(j) };
+            const func_value = try Value.initString(vm.allocator, entry.key_ptr.*);
+            try php_array.set(vm.allocator, key, func_value);
+            j += 1;
+        }
+    }
+
+    return php_array_value;
+}
+
+// get_included_files() - Get array of included files
+fn getIncludedFilesFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
+
+    var i: usize = 0;
+    var iter = vm.included_files.keyIterator();
+    while (iter.next()) |file_path| {
+        const key = types.ArrayKey{ .integer = @intCast(i) };
+        const file_value = try Value.initString(vm.allocator, file_path.*);
+        try php_array.set(vm.allocator, key, file_value);
+        i += 1;
+    }
+
+    return php_array_value;
+}
+
+// ==================== Memory and GC Functions ====================
+
+// gc_collect_cycles() - Force collection of garbage cycles
+fn gcCollectCyclesFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+    const collected = vm.forceGarbageCollection();
+    return Value.initInt(@intCast(collected));
+}
+
+// memory_get_usage() - Get current memory usage
+fn memoryGetUsageFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+    const usage = vm.getMemoryUsage();
+    return Value.initInt(@intCast(usage));
+}
+
+// memory_get_peak_usage() - Get peak memory usage
+fn memoryGetPeakUsageFn(vm: *VM, args: []const Value) !Value {
+    _ = args;
+    // For now, return current usage as peak (can be enhanced)
+    const usage = vm.getMemoryUsage();
+    return Value.initInt(@intCast(usage));
+}
+
+// debug_zval_dump() - Dump a zval structure for debugging
+fn debugZvalDumpFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "debug_zval_dump", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    // For now, just return null - implementing full debug output would require
+    // modifying how values are printed to stdout
+    return Value.initNull();
+}
+
+// ==================== Assert Functions ====================
+
+// assert_options() - Set/get assert options
+fn assertOptionsFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    // Assertion options: ACTIVE (1), QUIET_EVAL (2), CALLBACK (4), COUNT (8)
+    const default_options = 1; // ACTIVE by default
+
+    if (args.len < 1) {
+        return Value.initInt(default_options);
+    }
+
+    // For now, just return current value regardless of input
+    // Full implementation would modify assert behavior
+    return Value.initInt(default_options);
+}
+
+// assert() - Check if assertion is true
+fn assertFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "assert", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const assertion = args[0];
+    const assertion_bool = assertion.toBool();
+
+    if (!assertion_bool) {
+        // Assertion failed
+        const exception = try ExceptionFactory.createError(vm.allocator, "Assertion failed", vm.current_file, vm.current_line);
+        _ = try vm.throwException(exception);
+        return Value.initBool(false);
+    }
+
+    return Value.initBool(true);
+}
+
 pub const VM = struct {
     allocator: std.mem.Allocator,
     global: *Environment,
@@ -1229,6 +1919,9 @@ pub const VM = struct {
     // Per-coroutine error state for isolation (managed by coroutine context)
     preg_last_error: i32 = 0, // PCRE2 error code
     json_last_error: i32 = 0, // JSON error code
+
+    // Function arguments for func_get_args(), func_get_arg(), func_num_args()
+    current_call_args: ?[]const Value = null,
 
     pub fn init(allocator: std.mem.Allocator) !*VM {
         return initWithSyntaxConfig(allocator, SyntaxConfig{});
@@ -1653,6 +2346,38 @@ pub const VM = struct {
         try self.defineBuiltin("interface_exists", interfaceExistsFn);
         try self.defineBuiltin("trait_exists", traitExistsFn);
         try self.defineBuiltin("get_class_constants", getClassConstantsFn);
+
+        // High priority functions
+        try self.defineBuiltin("define", defineFn);
+        try self.defineBuiltin("defined", definedFn);
+        try self.defineBuiltin("constant", constantFn);
+        try self.defineBuiltin("func_get_args", funcGetArgsFn);
+        try self.defineBuiltin("func_get_arg", funcGetArgFn);
+        try self.defineBuiltin("func_num_args", funcNumArgsFn);
+        try self.defineBuiltin("eval", evalFn);
+        try self.defineBuiltin("get_defined_vars", getDefinedVarsFn);
+        try self.defineBuiltin("get_defined_constants", getDefinedConstantsFn);
+        try self.defineBuiltin("get_defined_functions", getDefinedFunctionsFn);
+        try self.defineBuiltin("forward_static_call_array", forwardStaticCallArrayFn);
+
+        // Medium priority functions
+        try self.defineBuiltin("debug_backtrace", debugBacktraceFn);
+        try self.defineBuiltin("debug_print_backtrace", debugPrintBacktraceFn);
+        try self.defineBuiltin("register_shutdown_function", registerShutdownFunctionFn);
+        try self.defineBuiltin("ini_get", iniGetFn);
+        try self.defineBuiltin("ini_set", iniSetFn);
+        try self.defineBuiltin("phpversion", phpversionFn);
+        try self.defineBuiltin("php_sapi_name", phpSapiNameFn);
+        try self.defineBuiltin("extension_loaded", extensionLoadedFn);
+        try self.defineBuiltin("get_loaded_extensions", getLoadedExtensionsFn);
+        try self.defineBuiltin("get_extension_funcs", getExtensionFuncsFn);
+        try self.defineBuiltin("get_included_files", getIncludedFilesFn);
+        try self.defineBuiltin("gc_collect_cycles", gcCollectCyclesFn);
+        try self.defineBuiltin("memory_get_usage", memoryGetUsageFn);
+        try self.defineBuiltin("memory_get_peak_usage", memoryGetPeakUsageFn);
+        try self.defineBuiltin("debug_zval_dump", debugZvalDumpFn);
+        try self.defineBuiltin("assert_options", assertOptionsFn);
+        try self.defineBuiltin("assert", assertFn);
     }
 
     pub fn registerStandardLibraryFunctions(self: *VM) !void {
@@ -1706,6 +2431,18 @@ pub const VM = struct {
         // System constants
         try self.global.set("DIRECTORY_SEPARATOR", try Value.initString(self.allocator, "/"));
         try self.global.set("PATH_SEPARATOR", try Value.initString(self.allocator, ":"));
+
+        // File constants
+        try self.global.set("FILE_USE_INCLUDE_PATH", Value.initInt(1));
+        try self.global.set("FILE_IGNORE_NEW_LINES", Value.initInt(2));
+        try self.global.set("FILE_SKIP_EMPTY_LINES", Value.initInt(4));
+        try self.global.set("FILE_APPEND", Value.initInt(8));
+
+        // Lock constants
+        try self.global.set("LOCK_SH", Value.initInt(1));
+        try self.global.set("LOCK_EX", Value.initInt(2));
+        try self.global.set("LOCK_UN", Value.initInt(3));
+        try self.global.set("LOCK_NB", Value.initInt(4));
     }
 
     /// Initialize the builtin function registry with core functions
@@ -3020,6 +3757,11 @@ pub const VM = struct {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
+        // Set current_call_args for func_get_args(), func_get_arg(), func_num_args()
+        const old_call_args = self.current_call_args;
+        self.current_call_args = positional_args;
+        defer self.current_call_args = old_call_args;
+
         // Push call frame for better error reporting
         try self.pushCallFrame(function.name.data, self.current_file, self.current_line);
 
@@ -3143,6 +3885,11 @@ pub const VM = struct {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
+        // Set current_call_args for func_get_args(), func_get_arg(), func_num_args()
+        const old_call_args = self.current_call_args;
+        self.current_call_args = args;
+        defer self.current_call_args = old_call_args;
+
         // Push call frame
         try self.pushCallFrame("closure", self.current_file, self.current_line);
         defer self.popCallFrame();
@@ -3168,6 +3915,11 @@ pub const VM = struct {
     pub fn callArrowFunction(self: *VM, arrow_function: *types.ArrowFunction, args: []const Value) !Value {
         const start_time = std.time.nanoTimestamp();
         self.execution_stats.function_calls += 1;
+
+        // Set current_call_args for func_get_args(), func_get_arg(), func_num_args()
+        const old_call_args = self.current_call_args;
+        self.current_call_args = args;
+        defer self.current_call_args = old_call_args;
 
         // Push call frame
         try self.pushCallFrame("arrow_function", self.current_file, self.current_line);
@@ -3886,7 +4638,10 @@ pub const VM = struct {
                 for (ast_node.data.root.stmts) |stmt| {
                     // Release the previous value before evaluating the next one
                     self.releaseValue(last_val);
-                    last_val = try self.eval(stmt);
+                    const eval_result = self.eval(stmt) catch |err| {
+                        return err;
+                    };
+                    last_val = eval_result;
                 }
                 return last_val;
             },

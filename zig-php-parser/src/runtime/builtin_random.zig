@@ -281,153 +281,210 @@ pub const RandomBuiltins = struct {
             BuiltinFunction.init("random_bytes", .random, random_bytes, 1, 1, "Cryptographically secure random bytes"),
         };
     }
+    
+    /// PHP shuffle() - Randomly shuffle an array (in-place)
+    /// Requirements: 4.0
+    pub fn shuffle(vm: *anyopaque, args: []const Value) !Value {
+        const VM = @import("vm.zig").VM;
+        const vm_ptr = @as(*VM, @ptrCast(@alignCast(vm)));
+        
+        if (args.len < 1) {
+            return BuiltinError.ArgumentCountMismatch;
+        }
+        
+        const array_value = args[0];
+        
+        // Get the array (Box contains PHPArray pointer)
+        const array_box = switch (array_value.getTag()) {
+            .array => array_value.getAsArray(),
+            else => {
+                return BuiltinError.InvalidArgumentType;
+            },
+        };
+        
+        // Get the actual PHPArray from the box
+        const php_array = array_box.data;
+        
+        // Get count
+        const count = php_array.elements.count();
+        if (count <= 1) {
+            return Value.initBool(true);
+        }
+        
+        // Collect all entries into a slice
+        var entries = try vm_ptr.allocator.alloc(struct { key: types.ArrayKey, value: Value }, count);
+        defer vm_ptr.allocator.free(entries);
+        
+        var idx: usize = 0;
+        var iter = php_array.elements.iterator();
+        while (iter.next()) |entry| {
+            entries[idx].key = entry.key_ptr.*;
+            entries[idx].value = entry.value_ptr.*;
+            idx += 1;
+        }
+        
+        // Fisher-Yates shuffle
+        ensureMtInitialized();
+        const random = mt_rng.random();
+        
+        var i: usize = count;
+        while (i > 1) {
+            i -= 1;
+            const j = random.intRangeAtMost(usize, 0, i - 1);
+            if (i != j) {
+                const temp = entries[i];
+                entries[i] = entries[j];
+                entries[j] = temp;
+            }
+        }
+        
+        // Clear array and release old values
+        var clear_iter = php_array.elements.iterator();
+        while (clear_iter.next()) |entry| {
+            entry.value_ptr.release(vm_ptr.allocator);
+            if (entry.key_ptr.* == .string) {
+                entry.key_ptr.string.release(vm_ptr.allocator);
+            }
+        }
+        php_array.elements.clearRetainingCapacity();
+        
+        // Re-insert shuffled entries
+        for (entries) |*e| {
+            // Retain for the new insertion
+            _ = e.value.retain();
+            if (e.key == .string) {
+                e.key.string.retain();
+            }
+            php_array.elements.putAssumeCapacity(e.key, e.value);
+        }
+        
+        return Value.initBool(true);
+    }
+    
+    /// PHP array_rand() - Pick one or more random keys from an array
+    /// Requirements: 4.0
+    pub fn array_rand(vm: *anyopaque, args: []const Value) !Value {
+        const VM = @import("vm.zig").VM;
+        const vm_ptr = @as(*VM, @ptrCast(@alignCast(vm)));
+        
+        if (args.len < 1) {
+            return BuiltinError.ArgumentCountMismatch;
+        }
+        
+        const array_value = args[0];
+        const num_req = if (args.len > 1) blk: {
+            switch (args[1].getTag()) {
+                .integer => break :blk @as(usize, @intCast(args[1].asInt())),
+                .float => break :blk @as(usize, @intCast(@as(i64, @intFromFloat(args[1].asFloat())))),
+                else => return BuiltinError.InvalidArgumentType,
+            }
+        } else 1;
+        
+        // Get the array
+        if (array_value.getTag() != .array) {
+            return BuiltinError.InvalidArgumentType;
+        }
+        
+        const array_box = array_value.getAsArray();
+        const php_array = array_box.data;
+        const count = php_array.elements.count();
+        
+        if (count == 0) {
+            return BuiltinError.InvalidArgumentType;
+        }
+        
+        if (num_req > count) {
+            return BuiltinError.InvalidArgumentType;
+        }
+        
+        ensureMtInitialized();
+        const random = mt_rng.random();
+        
+        // Collect all keys
+        var keys = try vm_ptr.allocator.alloc(types.ArrayKey, count);
+        defer vm_ptr.allocator.free(keys);
+        
+        var idx: usize = 0;
+        var iterator = php_array.elements.iterator();
+        while (iterator.next()) |entry| {
+            keys[idx] = entry.key_ptr.*;
+            idx += 1;
+        }
+        
+        // If requesting only 1 key
+        if (num_req == 1) {
+            const random_idx = @as(usize, @intCast(random.intRangeAtMost(i32, 0, @as(i32, @intCast(count - 1)))));
+            const selected_key = keys[random_idx];
+            
+            return switch (selected_key) {
+                .integer => Value.initInt(selected_key.integer),
+                .string => |s| blk: {
+                    const box = try vm_ptr.allocator.create(types.gc.Box(*types.PHPString));
+                    box.* = .{
+                        .ref_count = 1,
+                        .gc_info = .{},
+                        .data = try types.PHPString.init(vm_ptr.allocator, s.data),
+                    };
+                    break :blk Value.fromBox(box, Value.TYPE_STRING);
+                },
+            };
+        }
+        
+        // If requesting multiple keys, return array of keys
+        var result_array = try vm_ptr.allocator.create(types.PHPArray);
+        errdefer {
+            result_array.deinit(vm_ptr.allocator);
+            vm_ptr.allocator.destroy(result_array);
+        }
+        result_array.* = types.PHPArray.init(vm_ptr.allocator);
+        
+        // Fisher-Yates shuffle indices and take first num_req
+        var indices = try vm_ptr.allocator.alloc(usize, count);
+        defer vm_ptr.allocator.free(indices);
+        
+        for (0..count) |i| {
+            indices[i] = i;
+        }
+        
+        var i = count;
+        while (i > 0) {
+            i -= 1;
+            const j = @as(usize, @intCast(random.intRangeAtMost(i32, 0, @as(i32, @intCast(i)))));
+            if (i != j) {
+                const temp = indices[i];
+                indices[i] = indices[j];
+                indices[j] = temp;
+            }
+        }
+        
+        // Add first num_req keys to result
+        for (0..num_req) |k| {
+            const selected_key = keys[indices[k]];
+            const key_value = switch (selected_key) {
+                .integer => Value.initInt(selected_key.integer),
+                .string => |s| blk: {
+                    const box = try vm_ptr.allocator.create(types.gc.Box(*types.PHPString));
+                    box.* = .{
+                        .ref_count = 1,
+                        .gc_info = .{},
+                        .data = try types.PHPString.init(vm_ptr.allocator, s.data),
+                    };
+                    break :blk Value.fromBox(box, Value.TYPE_STRING);
+                },
+            };
+            try result_array.push(vm_ptr.allocator, key_value);
+        }
+        
+        const box = try vm_ptr.allocator.create(types.gc.Box(*types.PHPArray));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_array,
+        };
+        
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
 };
-
-test "RandomBuiltins.rand" {
-    const testing = std.testing;
-    
-    // Mock VM for testing
-    var mock_vm: u8 = 0;
-    const vm_ptr = @as(*anyopaque, @ptrCast(&mock_vm));
-    
-    // Test rand() with no arguments
-    const result1 = try RandomBuiltins.rand(vm_ptr, &[_]Value{});
-    try testing.expect(result1.getTag() == .integer);
-    try testing.expect(result1.asInt() >= 0);
-    
-    // Test rand(min, max)
-    const min_val = Value.initInt(10);
-    const max_val = Value.initInt(20);
-    const result2 = try RandomBuiltins.rand(vm_ptr, &[_]Value{ min_val, max_val });
-    try testing.expect(result2.getTag() == .integer);
-    try testing.expect(result2.asInt() >= 10 and result2.asInt() <= 20);
-    
-    // Test invalid range
-    const invalid_min = Value.initInt(20);
-    const invalid_max = Value.initInt(10);
-    const result3 = RandomBuiltins.rand(vm_ptr, &[_]Value{ invalid_min, invalid_max });
-    try testing.expectError(BuiltinError.InvalidArgumentType, result3);
-}
-
-test "RandomBuiltins.mt_rand" {
-    const testing = std.testing;
-    
-    var mock_vm: u8 = 0;
-    const vm_ptr = @as(*anyopaque, @ptrCast(&mock_vm));
-    
-    // Test mt_rand() with no arguments
-    const result1 = try RandomBuiltins.mt_rand(vm_ptr, &[_]Value{});
-    try testing.expect(result1.getTag() == .integer);
-    try testing.expect(result1.asInt() >= 0);
-    
-    // Test mt_rand(min, max)
-    const min_val = Value.initInt(5);
-    const max_val = Value.initInt(15);
-    const result2 = try RandomBuiltins.mt_rand(vm_ptr, &[_]Value{ min_val, max_val });
-    try testing.expect(result2.getTag() == .integer);
-    try testing.expect(result2.asInt() >= 5 and result2.asInt() <= 15);
-}
-
-test "RandomBuiltins.srand" {
-    const testing = std.testing;
-    
-    var mock_vm: u8 = 0;
-    const vm_ptr = @as(*anyopaque, @ptrCast(&mock_vm));
-    
-    // Test srand() with no arguments (uses current time)
-    const result1 = try RandomBuiltins.srand(vm_ptr, &[_]Value{});
-    try testing.expect(result1.getTag() == .null);
-    
-    // Test srand(seed)
-    const seed_val = Value.initInt(12345);
-    const result2 = try RandomBuiltins.srand(vm_ptr, &[_]Value{seed_val});
-    try testing.expect(result2.getTag() == .null);
-}
-
-test "RandomBuiltins.mt_srand" {
-    const testing = std.testing;
-    
-    var mock_vm: u8 = 0;
-    const vm_ptr = @as(*anyopaque, @ptrCast(&mock_vm));
-    
-    // Test mt_srand() with no arguments
-    const result1 = try RandomBuiltins.mt_srand(vm_ptr, &[_]Value{});
-    try testing.expect(result1.getTag() == .null);
-    
-    // Test mt_srand(seed)
-    const seed_val = Value.initInt(54321);
-    const result2 = try RandomBuiltins.mt_srand(vm_ptr, &[_]Value{seed_val});
-    try testing.expect(result2.getTag() == .null);
-}
-
-test "RandomBuiltins.random_int" {
-    const testing = std.testing;
-    
-    var mock_vm: u8 = 0;
-    const vm_ptr = @as(*anyopaque, @ptrCast(&mock_vm));
-    
-    // Test random_int(min, max)
-    const min_val = Value.initInt(100);
-    const max_val = Value.initInt(200);
-    const result = try RandomBuiltins.random_int(vm_ptr, &[_]Value{ min_val, max_val });
-    try testing.expect(result.getTag() == .integer);
-    try testing.expect(result.asInt() >= 100 and result.asInt() <= 200);
-    
-    // Test invalid argument count
-    const result2 = RandomBuiltins.random_int(vm_ptr, &[_]Value{min_val});
-    try testing.expectError(BuiltinError.ArgumentCountMismatch, result2);
-}
-
-test "RandomBuiltins.random_bytes" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-    
-    // Create a minimal VM structure for testing
-    const MockVM = struct {
-        allocator: std.mem.Allocator,
-    };
-    
-    var mock_vm = MockVM{ .allocator = allocator };
-    const vm_ptr = @as(*anyopaque, @ptrCast(&mock_vm));
-    
-    // Test random_bytes(length)
-    const length_val = Value.initInt(16);
-    const result = try RandomBuiltins.random_bytes(vm_ptr, &[_]Value{length_val});
-    try testing.expect(result.getTag() == .string);
-    
-    const bytes_string = result.getAsString();
-    defer bytes_string.release(allocator);
-    try testing.expect(bytes_string.data.length == 16);
-    
-    // Test invalid length
-    const invalid_length = Value.initInt(-1);
-    const result2 = RandomBuiltins.random_bytes(vm_ptr, &[_]Value{invalid_length});
-    try testing.expectError(BuiltinError.InvalidArgumentType, result2);
-}
-
-test "RandomBuiltins seeding consistency" {
-    const testing = std.testing;
-    
-    var mock_vm: u8 = 0;
-    const vm_ptr = @as(*anyopaque, @ptrCast(&mock_vm));
-    
-    // Seed both generators with the same value
-    const seed_val = Value.initInt(42);
-    _ = try RandomBuiltins.srand(vm_ptr, &[_]Value{seed_val});
-    _ = try RandomBuiltins.mt_srand(vm_ptr, &[_]Value{seed_val});
-    
-    // Generate some numbers to verify seeding worked
-    const result1 = try RandomBuiltins.rand(vm_ptr, &[_]Value{});
-    const result2 = try RandomBuiltins.mt_rand(vm_ptr, &[_]Value{});
-    
-    try testing.expect(result1.getTag() == .integer);
-    try testing.expect(result2.getTag() == .integer);
-    
-    // Re-seed with same value and verify we get same sequence
-    _ = try RandomBuiltins.srand(vm_ptr, &[_]Value{seed_val});
-    const result3 = try RandomBuiltins.rand(vm_ptr, &[_]Value{});
-    try testing.expect(result3.asInt() == result1.asInt());
-}
 
 test "RandomBuiltins.rand" {
     const testing = std.testing;

@@ -32,6 +32,15 @@ pub fn registerHttpClasses(vm: anytype) !void {
 /// 清理HTTP相关全局资源
 pub fn cleanup() void {
     if (global_servers_initialized) {
+        // 销毁所有服务器实例
+        var iter = global_servers.iterator();
+        while (iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const server = entry.value_ptr.*;
+            server.deinit();
+            server.allocator.destroy(server);
+            server.allocator.free(name);
+        }
         global_servers.deinit();
         global_servers_initialized = false;
     }

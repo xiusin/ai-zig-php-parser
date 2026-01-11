@@ -1,0 +1,157 @@
+========================================
+PHP 脚本测试报告
+========================================
+
+测试: aot_arrays.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x10b420006 leaked: 
+error(gpa): memory address 0x10b420007 leaked: 
+error(gpa): memory address 0x10b420008 leaked: 
+error(gpa): memory address 0x10b1c0370 leaked: 
+error(gpa): memory address 0x10b1c0380 leaked: 
+error(gpa): memory address 0x10b1c0390 leaked: 
+error(gpa): memory address 0x10b1c03a0 leaked: 
+error(gpa): memory address 0x10b1c03b0 leaked: 
+error(gpa): memory address 0x10b262740 leaked: 
+error(gpa): memory address 0x10b262780 leaked: 
+error(gpa): memory address 0x10b2627c0 leaked: 
+error(gpa): memory address 0x10b262800 leaked: 
+
+测试: aot_classes.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x101560006 leaked: 
+error(gpa): memory address 0x101560007 leaked: 
+error(gpa): memory address 0x101560008 leaked: 
+error(gpa): memory address 0x1012e0370 leaked: 
+error(gpa): memory address 0x1012e0380 leaked: 
+error(gpa): memory address 0x1012e0390 leaked: 
+error(gpa): memory address 0x1012e03a0 leaked: 
+error(gpa): memory address 0x1012e03b0 leaked: 
+error(gpa): memory address 0x1013c2740 leaked: 
+error(gpa): memory address 0x1013c2780 leaked: 
+error(gpa): memory address 0x1013c27c0 leaked: 
+error(gpa): memory address 0x1013c2800 leaked: 
+
+测试: aot_functions.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x104f80006 leaked: 
+error(gpa): memory address 0x104f80007 leaked: 
+error(gpa): memory address 0x104f80008 leaked: 
+error(gpa): memory address 0x104d00370 leaked: 
+error(gpa): memory address 0x104d00380 leaked: 
+error(gpa): memory address 0x104d00390 leaked: 
+error(gpa): memory address 0x104d003a0 leaked: 
+error(gpa): memory address 0x104d003b0 leaked: 
+error(gpa): memory address 0x104dc2740 leaked: 
+error(gpa): memory address 0x104dc2780 leaked: 
+error(gpa): memory address 0x104dc27c0 leaked: 
+error(gpa): memory address 0x104dc2800 leaked: 
+
+测试: aot_hello.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x10dae0006 leaked: 
+error(gpa): memory address 0x10dae0007 leaked: 
+error(gpa): memory address 0x10dae0008 leaked: 
+error(gpa): memory address 0x10d900370 leaked: 
+error(gpa): memory address 0x10d900380 leaked: 
+error(gpa): memory address 0x10d900390 leaked: 
+error(gpa): memory address 0x10d9003a0 leaked: 
+error(gpa): memory address 0x10d9003b0 leaked: 
+error(gpa): memory address 0x10d9a2740 leaked: 
+error(gpa): memory address 0x10d9a2780 leaked: 
+error(gpa): memory address 0x10d9a27c0 leaked: 
+error(gpa): memory address 0x10d9a2800 leaked: 
+
+测试: aot_strings.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x10d8a0006 leaked: 
+error(gpa): memory address 0x10d8a0007 leaked: 
+error(gpa): memory address 0x10d8a0008 leaked: 
+error(gpa): memory address 0x10d640370 leaked: 
+error(gpa): memory address 0x10d640380 leaked: 
+error(gpa): memory address 0x10d640390 leaked: 
+error(gpa): memory address 0x10d6403a0 leaked: 
+error(gpa): memory address 0x10d6403b0 leaked: 
+error(gpa): memory address 0x10d6e2740 leaked: 
+error(gpa): memory address 0x10d6e2780 leaked: 
+error(gpa): memory address 0x10d6e27c0 leaked: 
+error(gpa): memory address 0x10d6e2800 leaked: 
+
+测试: arrays.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x106140006 leaked: 
+error(gpa): memory address 0x106140007 leaked: 
+error(gpa): memory address 0x106140008 leaked: 
+error(gpa): memory address 0x105ec0370 leaked: 
+error(gpa): memory address 0x105ec0380 leaked: 
+error(gpa): memory address 0x105ec0390 leaked: 
+error(gpa): memory address 0x105ec03a0 leaked: 
+error(gpa): memory address 0x105ec03b0 leaked: 
+error(gpa): memory address 0x105f82740 leaked: 
+error(gpa): memory address 0x105f82780 leaked: 
+error(gpa): memory address 0x105f827c0 leaked: 
+error(gpa): memory address 0x105f82800 leaked: 
+
+测试: basic_co.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x101de0006 leaked: 
+error(gpa): memory address 0x101de0007 leaked: 
+error(gpa): memory address 0x101de0008 leaked: 
+error(gpa): memory address 0x101de000b leaked: 
+error(gpa): memory address 0x101be0370 leaked: 
+error(gpa): memory address 0x101be0380 leaked: 
+error(gpa): memory address 0x101be0390 leaked: 
+error(gpa): memory address 0x101be03a0 leaked: 
+error(gpa): memory address 0x101be03b0 leaked: 
+error(gpa): memory address 0x101be03d0 leaked: 
+error(gpa): memory address 0x101c82740 leaked: 
+error(gpa): memory address 0x101c82780 leaked: 
+error(gpa): memory address 0x101c827c0 leaked: 
+error(gpa): memory address 0x101c82800 leaked: 
+error(gpa): memory address 0x101c82880 leaked: 
+error(gpa): memory address 0x101b20400 leaked: 
+error(gpa): memory address 0x101b20480 leaked: 
+error(gpa): memory address 0x101d63300 leaked: 
+error(gpa): memory address 0x101d63400 leaked: 
+error(gpa): memory address 0x101d63600 leaked: 
+error(gpa): memory address 0x101d63700 leaked: 
+error(gpa): memory address 0x101d63800 leaked: 
+error(gpa): memory address 0x101d63900 leaked: 
+error(gpa): memory address 0x101d63a00 leaked: 
+error(gpa): memory address 0x101d63b00 leaked: 
+error(gpa): memory address 0x101d63c00 leaked: 
+error(gpa): memory address 0x101d63d00 leaked: 
+error(gpa): memory address 0x101d63e00 leaked: 
+error(gpa): memory address 0x101d63f00 leaked: 
+error(gpa): memory address 0x101d64000 leaked: 
+error(gpa): memory address 0x101d64100 leaked: 
+error(gpa): memory address 0x101d64200 leaked: 
+error(gpa): memory address 0x101d64300 leaked: 
+error(gpa): memory address 0x101c01800 leaked: 
+error(gpa): memory address 0x101c01a00 leaked: 
+
+测试: benchmark.php
+----------------------------------------
+⚠️  内存泄露
+error(gpa): memory address 0x105040006 leaked: 
+error(gpa): memory address 0x105040007 leaked: 
+error(gpa): memory address 0x105040008 leaked: 
+error(gpa): memory address 0x104dc0370 leaked: 
+error(gpa): memory address 0x104dc0380 leaked: 
+error(gpa): memory address 0x104dc0390 leaked: 
+error(gpa): memory address 0x104dc03a0 leaked: 
+error(gpa): memory address 0x104dc03b0 leaked: 
+error(gpa): memory address 0x104ea2740 leaked: 
+error(gpa): memory address 0x104ea2780 leaked: 
+error(gpa): memory address 0x104ea27c0 leaked: 
+error(gpa): memory address 0x104ea2800 leaked: 
+
+测试: concurrent_demo.php
+----------------------------------------

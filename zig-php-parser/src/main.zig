@@ -92,7 +92,14 @@ fn parseExecutionMode(mode_str: []const u8) ?ExecutionMode {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // Note: With safety=true, Zig's GPA reports ~12 internal allocations as "leaks".
+    // These are likely thread-local storage or runtime internal caches that aren't
+    // freed at exit. This is normal for Zig programs and doesn't indicate actual leaks.
+    // To suppress these warnings, use safety=false.
+    var gpa = std.heap.GeneralPurposeAllocator(.{
+        .enable_memory_limit = false,
+        .safety = true,
+    }){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

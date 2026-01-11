@@ -7,6 +7,8 @@ const ArrayKey = types.ArrayKey;
 const exceptions = @import("exceptions.zig");
 const ExceptionFactory = exceptions.ExceptionFactory;
 const builtin_io = @import("builtin_io.zig");
+const builtin_random = @import("builtin_random.zig");
+const builtin_vars = @import("builtin_vars.zig");
 const pcre2 = @import("pcre2.zig");
 
 // Forward declaration for VM
@@ -55,6 +57,7 @@ pub const StandardLibrary = struct {
         try stdlib.registerJsonFunctions();
         try stdlib.registerHashFunctions();
         try stdlib.registerPregFunctions();
+        try stdlib.registerRandomFunctions();
 
         // Register PHP 8.5 URI functions
         const php85 = @import("php85_features.zig");
@@ -63,6 +66,9 @@ pub const StandardLibrary = struct {
         // Register extended functions
         const stdlib_ext = @import("stdlib_ext.zig");
         try stdlib_ext.registerExtendedFunctions(&stdlib);
+
+        // Register variable/class/constant functions
+        try builtin_vars.registerVariableFunctions(&stdlib);
 
         return stdlib;
     }
@@ -122,7 +128,16 @@ pub const StandardLibrary = struct {
             &.{ .name = "array_intersect", .min_args = 2, .max_args = 255, .handler = arrayIntersectFn },
             &.{ .name = "array_splice", .min_args = 2, .max_args = 4, .handler = arraySpliceFn },
             &.{ .name = "array_walk", .min_args = 2, .max_args = 3, .handler = arrayWalkFn },
-    &.{ .name = "array_diff", .min_args = 2, .max_args = 255, .handler = arrayDiffFn },
+            &.{ .name = "array_chunk", .min_args = 2, .max_args = 3, .handler = arrayChunkFn },
+            &.{ .name = "array_pad", .min_args = 3, .max_args = 3, .handler = arrayPadFn },
+            &.{ .name = "array_key_first", .min_args = 1, .max_args = 1, .handler = arrayKeyFirstFn },
+            &.{ .name = "array_key_last", .min_args = 1, .max_args = 1, .handler = arrayKeyLastFn },
+            &.{ .name = "array_fill_keys", .min_args = 2, .max_args = 2, .handler = arrayFillKeysFn },
+            &.{ .name = "array_change_key_case", .min_args = 1, .max_args = 2, .handler = arrayChangeKeyCaseFn },
+            &.{ .name = "array_count_values", .min_args = 1, .max_args = 1, .handler = arrayCountValuesFn },
+            &.{ .name = "array_rand", .min_args = 1, .max_args = 2, .handler = arrayRandWrapper },
+            &.{ .name = "shuffle", .min_args = 1, .max_args = 1, .handler = shuffleWrapper },
+            &.{ .name = "array_diff", .min_args = 2, .max_args = 255, .handler = arrayDiffFn },
             &.{ .name = "isset", .min_args = 1, .max_args = 255, .handler = issetFn },
         };
 
@@ -264,10 +279,39 @@ pub const StandardLibrary = struct {
             &.{ .name = "filesize", .min_args = 1, .max_args = 1, .handler = builtin_io.filesizeFn },
             &.{ .name = "filemtime", .min_args = 1, .max_args = 1, .handler = builtin_io.filemtimeFn },
 
+            // File reading/writing
+            &.{ .name = "file", .min_args = 1, .max_args = 3, .handler = builtin_io.fileFn },
+            &.{ .name = "readfile", .min_args = 1, .max_args = 3, .handler = builtin_io.readfileFn },
+
             // File management
             &.{ .name = "unlink", .min_args = 1, .max_args = 1, .handler = builtin_io.unlinkFn },
             &.{ .name = "rename", .min_args = 2, .max_args = 2, .handler = builtin_io.renameFn },
             &.{ .name = "copy", .min_args = 2, .max_args = 3, .handler = builtin_io.copyFn },
+            &.{ .name = "flock", .min_args = 2, .max_args = 2, .handler = builtin_io.flockFn },
+            &.{ .name = "ftruncate", .min_args = 2, .max_args = 2, .handler = builtin_io.ftruncateFn },
+
+            // File permission checks
+            &.{ .name = "is_readable", .min_args = 1, .max_args = 1, .handler = builtin_io.isReadableFn },
+            &.{ .name = "is_writable", .min_args = 1, .max_args = 1, .handler = builtin_io.isWritableFn },
+            &.{ .name = "is_executable", .min_args = 1, .max_args = 1, .handler = builtin_io.isExecutableFn },
+
+            // Stat/cache functions
+            &.{ .name = "clearstatcache", .min_args = 0, .max_args = 255, .handler = builtin_io.clearstatcacheFn },
+            &.{ .name = "disk_free_space", .min_args = 1, .max_args = 1, .handler = builtin_io.diskFreeSpaceFn },
+            &.{ .name = "disk_total_space", .min_args = 1, .max_args = 1, .handler = builtin_io.diskTotalSpaceFn },
+
+            // File operations (new)
+            &.{ .name = "is_link", .min_args = 1, .max_args = 1, .handler = builtin_io.isLinkFn },
+            &.{ .name = "chmod", .min_args = 2, .max_args = 2, .handler = builtin_io.chmodFn },
+            &.{ .name = "chown", .min_args = 2, .max_args = 2, .handler = builtin_io.chownFn },
+            &.{ .name = "chgrp", .min_args = 2, .max_args = 2, .handler = builtin_io.chgrpFn },
+            &.{ .name = "link", .min_args = 2, .max_args = 2, .handler = builtin_io.linkFn },
+            &.{ .name = "symlink", .min_args = 2, .max_args = 2, .handler = builtin_io.symlinkFn },
+            &.{ .name = "readlink", .min_args = 1, .max_args = 1, .handler = builtin_io.readlinkFn },
+            &.{ .name = "lstat", .min_args = 1, .max_args = 1, .handler = builtin_io.lstatFn },
+            &.{ .name = "stat", .min_args = 1, .max_args = 1, .handler = builtin_io.statFn },
+            &.{ .name = "fnmatch", .min_args = 2, .max_args = 3, .handler = builtin_io.fnmatchFn },
+            &.{ .name = "glob", .min_args = 1, .max_args = 2, .handler = builtin_io.globFn },
 
             // Directory operations
             &.{ .name = "mkdir", .min_args = 1, .max_args = 3, .handler = builtin_io.mkdirFn },
@@ -361,7 +405,28 @@ pub const StandardLibrary = struct {
             try self.registerFunction(func.name, func);
         }
     }
+
+    // Random Functions
+    pub fn registerRandomFunctions(self: *StandardLibrary) !void {
+        const random_functions = [_]*const BuiltinFunction{
+            &.{ .name = "shuffle", .min_args = 1, .max_args = 1, .handler = shuffleWrapper },
+            &.{ .name = "array_rand", .min_args = 1, .max_args = 2, .handler = arrayRandWrapper },
+        };
+
+        for (random_functions) |func| {
+            try self.registerFunction(func.name, func);
+        }
+    }
 };
+
+// Random function wrappers to handle type conversion
+fn shuffleWrapper(vm: *VM, args: []const Value) !Value {
+    return builtin_random.RandomBuiltins.shuffle(vm, args);
+}
+
+fn arrayRandWrapper(vm: *VM, args: []const Value) !Value {
+    return builtin_random.RandomBuiltins.array_rand(vm, args);
+}
 
 // Array Function Implementations
 fn arrayMapFn(vm: *VM, args: []const Value) !Value {
@@ -2029,7 +2094,7 @@ fn jsonEncodeFn(vm: *VM, args: []const Value) !Value {
 
 fn jsonDecodeFn(vm: *VM, args: []const Value) !Value {
     const json_str = args[0];
-    const assoc = if (args.len > 1) args[1].toBool() else false;
+    const assoc = if (args.len > 1) args[1].asBool() else false;
 
     if (json_str.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "json_decode() expects parameter 1 to be string", "builtin", 0);
@@ -2037,33 +2102,285 @@ fn jsonDecodeFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    // Simplified JSON decoding
     const json_data = json_str.getAsString().data.data;
+    var parser = JsonParser{ .input = json_data, .pos = 0 };
+    return try parser.parseValue(vm.allocator, vm, assoc);
+}
 
-    // Basic parsing for simple cases
-    if (std.mem.eql(u8, json_data, "null")) {
-        return Value.initNull();
-    } else if (std.mem.eql(u8, json_data, "true")) {
-        return Value.initBool(true);
-    } else if (std.mem.eql(u8, json_data, "false")) {
-        return Value.initBool(false);
-    } else if (json_data.len > 0 and json_data[0] == '"' and json_data[json_data.len - 1] == '"') {
-        // String value
-        const str_content = json_data[1 .. json_data.len - 1];
-        return try Value.initString(vm.allocator, str_content);
-    } else if (std.fmt.parseInt(i64, json_data, 10)) |int_val| {
-        return Value.initInt(int_val);
-    } else |_| {
-        if (std.fmt.parseFloat(f64, json_data)) |float_val| {
-            return Value.initFloat(float_val);
-        } else |_| {
-            // Invalid JSON
-            return Value.initNull();
+const JsonParser = struct {
+    input: []const u8,
+    pos: usize,
+
+    fn skipWhitespace(self: *JsonParser) void {
+        while (self.pos < self.input.len) {
+            switch (self.input[self.pos]) {
+                ' ', '\n', '\r', '\t' => self.pos += 1,
+                else => break,
+            }
         }
     }
 
-    _ = assoc; // Would be used for object/array decoding
-}
+const JsonParseError = error{OutOfMemory};
+
+    fn parseValue(self: *JsonParser, allocator: std.mem.Allocator, vm: *VM, assoc: bool) JsonParseError!Value {
+        self.skipWhitespace();
+        if (self.pos >= self.input.len) {
+            return Value.initNull();
+        }
+
+        return switch (self.input[self.pos]) {
+            'n' => self.parseNull() catch Value.initNull(),
+            't' => self.parseTrue() catch Value.initNull(),
+            'f' => self.parseFalse() catch Value.initNull(),
+            '"' => self.parseString(allocator),
+            '[' => self.parseArray(allocator, vm, assoc),
+            '{' => self.parseObject(allocator, vm, assoc),
+            '-', '0'...'9' => self.parseNumber(),
+            else => Value.initNull(),
+        };
+    }
+
+    fn parseNull(self: *JsonParser) !Value {
+        if (std.mem.startsWith(u8, self.input[self.pos..], "null")) {
+            self.pos += 4;
+            return Value.initNull();
+        }
+        return Value.initNull();
+    }
+
+    fn parseTrue(self: *JsonParser) !Value {
+        if (std.mem.startsWith(u8, self.input[self.pos..], "true")) {
+            self.pos += 4;
+            return Value.initBool(true);
+        }
+        return Value.initNull();
+    }
+
+    fn parseFalse(self: *JsonParser) !Value {
+        if (std.mem.startsWith(u8, self.input[self.pos..], "false")) {
+            self.pos += 5;
+            return Value.initBool(false);
+        }
+        return Value.initNull();
+    }
+
+    fn parseString(self: *JsonParser, allocator: std.mem.Allocator) !Value {
+        self.pos += 1; // Skip opening quote
+        var result = std.ArrayListUnmanaged(u8){};
+        defer result.deinit(allocator);
+
+        while (self.pos < self.input.len) {
+            const c = self.input[self.pos];
+            if (c == '"') {
+                self.pos += 1;
+                const slice = try result.toOwnedSlice(allocator);
+                return try Value.initString(allocator, slice);
+            }
+            if (c == '\\' and self.pos + 1 < self.input.len) {
+                self.pos += 1;
+                const escaped = self.input[self.pos];
+                switch (escaped) {
+                    '"' => try result.append(allocator, '"'),
+                    '\\' => try result.append(allocator, '\\'),
+                    '/' => try result.append(allocator, '/'),
+                    'b' => try result.append(allocator, '\x08'),
+                    'f' => try result.append(allocator, '\x0C'),
+                    'n' => try result.append(allocator, '\n'),
+                    'r' => try result.append(allocator, '\r'),
+                    't' => try result.append(allocator, '\t'),
+                    'u' => {
+                        // Unicode escape - skip for now
+                        self.pos += 1;
+                    },
+                    else => try result.append(allocator, escaped),
+                }
+            } else {
+                try result.append(allocator, c);
+            }
+            self.pos += 1;
+        }
+
+        return Value.initNull();
+    }
+
+    fn parseNumber(self: *JsonParser) !Value {
+        const start = self.pos;
+        if (self.input[self.pos] == '-') self.pos += 1;
+        while (self.pos < self.input.len and self.input[self.pos] >= '0' and self.input[self.pos] <= '9') {
+            self.pos += 1;
+        }
+        if (self.pos < self.input.len and self.input[self.pos] == '.') {
+            self.pos += 1;
+            while (self.pos < self.input.len and self.input[self.pos] >= '0' and self.input[self.pos] <= '9') {
+                self.pos += 1;
+            }
+        }
+        if (self.pos < self.input.len and (self.input[self.pos] == 'e' or self.input[self.pos] == 'E')) {
+            self.pos += 1;
+            if (self.pos < self.input.len and (self.input[self.pos] == '+' or self.input[self.pos] == '-')) {
+                self.pos += 1;
+            }
+            while (self.pos < self.input.len and self.input[self.pos] >= '0' and self.input[self.pos] <= '9') {
+                self.pos += 1;
+            }
+        }
+
+        const num_str = self.input[start..self.pos];
+        if (std.mem.indexOf(u8, num_str, ".") != null or
+            std.mem.indexOf(u8, num_str, "e") != null or
+            std.mem.indexOf(u8, num_str, "E") != null) {
+            if (std.fmt.parseFloat(f64, num_str)) |f| {
+                return Value.initFloat(f);
+            } else |_| {}
+        } else {
+            if (std.fmt.parseInt(i64, num_str, 10)) |i| {
+                return Value.initInt(i);
+            } else |_| {}
+        }
+
+        return Value.initNull();
+    }
+
+    fn parseArray(self: *JsonParser, allocator: std.mem.Allocator, vm: *VM, assoc: bool) !Value {
+        self.pos += 1; // Skip '['
+        self.skipWhitespace();
+
+        const array_box = try allocator.create(types.gc.Box(*types.PHPArray));
+        const php_array = try allocator.create(types.PHPArray);
+        php_array.* = types.PHPArray.init(allocator);
+        array_box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = php_array,
+        };
+
+        var first = true;
+        if (self.pos < self.input.len and self.input[self.pos] != ']') {
+            while (true) {
+                if (!first) {
+                    self.skipWhitespace();
+                    if (self.input[self.pos] == ',') {
+                        self.pos += 1;
+                    }
+                }
+                first = false;
+
+                self.skipWhitespace();
+                const value = self.parseValue(allocator, vm, assoc) catch Value.initNull();
+                php_array.push(allocator, value) catch {};
+
+                self.skipWhitespace();
+                if (self.pos < self.input.len and self.input[self.pos] == ']') {
+                    break;
+                }
+                if (self.pos >= self.input.len or self.input[self.pos] != ',') {
+                    break;
+                }
+                self.pos += 1;
+            }
+        }
+
+        if (self.pos < self.input.len and self.input[self.pos] == ']') {
+            self.pos += 1;
+        }
+
+        return Value.fromBox(array_box, Value.TYPE_ARRAY);
+    }
+
+    fn parseObject(self: *JsonParser, allocator: std.mem.Allocator, vm: *VM, assoc: bool) !Value {
+        _ = assoc; // Always use array for now
+        self.pos += 1; // Skip '{'
+        self.skipWhitespace();
+
+        const array_box = try allocator.create(types.gc.Box(*types.PHPArray));
+        const php_array = try allocator.create(types.PHPArray);
+        php_array.* = types.PHPArray.init(allocator);
+        array_box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = php_array,
+        };
+
+        var first = true;
+        if (self.pos < self.input.len and self.input[self.pos] != '}') {
+            while (true) {
+                if (!first) {
+                    self.skipWhitespace();
+                    if (self.input[self.pos] == ',') {
+                        self.pos += 1;
+                    }
+                }
+                first = false;
+
+                self.skipWhitespace();
+                if (self.input[self.pos] != '"') break;
+
+                // Parse key
+                self.pos += 1;
+                var key_builder = std.ArrayListUnmanaged(u8){};
+                defer key_builder.deinit(allocator);
+
+                while (self.pos < self.input.len) {
+                    const c = self.input[self.pos];
+                    if (c == '"') {
+                        self.pos += 1; // Skip closing quote
+                        break;
+                    }
+                    if (c == '\\' and self.pos + 1 < self.input.len) {
+                        self.pos += 1;
+                        const escaped = self.input[self.pos];
+                        switch (escaped) {
+                            '"' => try key_builder.append(allocator, '"'),
+                            '\\' => try key_builder.append(allocator, '\\'),
+                            '/' => try key_builder.append(allocator, '/'),
+                            'n' => try key_builder.append(allocator, '\n'),
+                            'r' => try key_builder.append(allocator, '\r'),
+                            't' => try key_builder.append(allocator, '\t'),
+                            else => try key_builder.append(allocator, escaped),
+                        }
+                    } else {
+                        try key_builder.append(allocator, c);
+                    }
+                    self.pos += 1;
+                }
+
+                self.skipWhitespace();
+                if (self.pos >= self.input.len or self.input[self.pos] != ':') {
+                    // Try parsing even without colon if we have valid key-value
+                    if (self.pos < self.input.len and self.input[self.pos] != ',') {
+                        // Still try to parse value
+                    }
+                }
+                self.pos += 1; // Skip ':'
+
+                // Parse value
+                self.skipWhitespace();
+                const value = try self.parseValue(allocator, vm, false);
+
+                // Store in array with string key
+                const key_slice = try key_builder.toOwnedSlice(allocator);
+                const key_str = try types.PHPString.init(allocator, key_slice);
+                const key = types.ArrayKey{ .string = key_str };
+                try php_array.set(allocator, key, value);
+
+                self.skipWhitespace();
+                if (self.pos < self.input.len and self.input[self.pos] == '}') {
+                    break;
+                }
+                if (self.pos >= self.input.len or self.input[self.pos] != ',') {
+                    break;
+                }
+                self.pos += 1;
+            }
+        }
+
+        if (self.pos < self.input.len and self.input[self.pos] == '}') {
+            self.pos += 1;
+        }
+
+        return Value.fromBox(array_box, Value.TYPE_ARRAY);
+    }
+};
 
 fn jsonLastErrorFn(vm: *VM, args: []const Value) !Value {
     _ = vm;
@@ -2086,21 +2403,64 @@ fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
         .float => try std.fmt.allocPrint(allocator, "{d}", .{value.asFloat()}),
         .string => try std.fmt.allocPrint(allocator, "\"{s}\"", .{value.getAsString().data.data}),
         .array => {
+            const arr = value.getAsArray().data;
+
+            // Check if it's an associative array (has string keys)
+            var is_object = false;
+            var iter = arr.elements.iterator();
+            while (iter.next()) |entry| {
+                if (entry.key_ptr.* == .string) {
+                    is_object = true;
+                    break;
+                }
+            }
+
             var result = std.ArrayListUnmanaged(u8){};
             defer result.deinit(allocator);
 
-            try result.append(allocator, '[');
-            var first = true;
-            var iterator = value.getAsArray().data.elements.iterator();
-            while (iterator.next()) |entry| {
-                if (!first) try result.appendSlice(allocator, ",");
-                first = false;
+            if (is_object) {
+                // Output as JSON object
+                try result.append(allocator, '{');
+                var first = true;
+                var obj_iter = arr.elements.iterator();
+                while (obj_iter.next()) |entry| {
+                    if (!first) try result.appendSlice(allocator, ",");
+                    first = false;
 
-                const element_json = try encodeValueAsJson(entry.value_ptr.*, allocator);
-                defer allocator.free(element_json);
-                try result.appendSlice(allocator, element_json);
+                    // Output key
+                    switch (entry.key_ptr.*) {
+                        .string => |s| {
+                            try result.appendSlice(allocator, "\"");
+                            try result.appendSlice(allocator, s.data);
+                            try result.appendSlice(allocator, "\"");
+                        },
+                        .integer => |i| {
+                            try result.writer(allocator).print("{d}", .{i});
+                        },
+                    }
+                    try result.append(allocator, ':');
+
+                    // Output value
+                    const element_json = try encodeValueAsJson(entry.value_ptr.*, allocator);
+                    defer allocator.free(element_json);
+                    try result.appendSlice(allocator, element_json);
+                }
+                try result.append(allocator, '}');
+            } else {
+                // Output as JSON array
+                try result.append(allocator, '[');
+                var first = true;
+                var arr_iter = arr.elements.iterator();
+                while (arr_iter.next()) |entry| {
+                    if (!first) try result.appendSlice(allocator, ",");
+                    first = false;
+
+                    const element_json = try encodeValueAsJson(entry.value_ptr.*, allocator);
+                    defer allocator.free(element_json);
+                    try result.appendSlice(allocator, element_json);
+                }
+                try result.append(allocator, ']');
             }
-            try result.append(allocator, ']');
 
             return try allocator.dupe(u8, result.items);
         },
@@ -4157,6 +4517,357 @@ fn arrayWalkFn(vm: *VM, args: []const Value) !Value {
     }
 
     return Value.initBool(true);
+}
+
+// PHP array_chunk() - Split an array into chunks
+fn arrayChunkFn(vm: *VM, args: []const Value) !Value {
+    const array = args[0];
+    const size = args[1];
+    const preserve_keys = if (args.len > 2) args[2].asBool() else false;
+
+    if (array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_chunk() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const chunk_size = @as(usize, @intCast(size.asInt()));
+    if (chunk_size < 1) {
+        const exception = try ExceptionFactory.createValueError(vm.allocator, "array_chunk() size parameter must be positive", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr = array.getAsArray().data;
+
+    // Collect elements into a temp array
+    var temp = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
+    defer temp.deinit(vm.allocator);
+
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+        try temp.append(vm.allocator, .{ .key = key, .value = value });
+    }
+
+    var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
+    result_array.* = PHPArray.init(vm.allocator);
+
+    var chunk_idx: i64 = 0;
+    var chunk_array: ?*PHPArray = null;
+    var element_idx: usize = 0;
+
+    for (temp.items) |item| {
+        if (chunk_array == null or element_idx >= chunk_size) {
+            // Create a new chunk array
+            const new_chunk = try vm.allocator.create(PHPArray);
+            errdefer vm.allocator.destroy(new_chunk);
+            new_chunk.* = PHPArray.init(vm.allocator);
+
+            // If there's a previous chunk, add it to result
+            if (chunk_array) |prev_chunk| {
+                const chunk_str = try std.fmt.allocPrint(vm.allocator, "{d}", .{chunk_idx});
+                const chunk_key = try PHPString.init(vm.allocator, chunk_str);
+
+                const chunk_box = try vm.allocator.create(types.gc.Box(*PHPArray));
+                chunk_box.* = .{ .ref_count = 1, .gc_info = .{}, .data = prev_chunk };
+
+                try result_array.set(vm.allocator, .{ .string = chunk_key }, Value.fromBox(chunk_box, Value.TYPE_ARRAY));
+                chunk_idx += 1;
+            }
+
+            chunk_array = new_chunk;
+            element_idx = 0;
+        }
+
+        const current_chunk = chunk_array orelse continue;
+
+        if (preserve_keys) {
+            try current_chunk.set(vm.allocator, item.key, item.value);
+        } else {
+            const int_key: i64 = @as(i64, @intCast(element_idx));
+            try current_chunk.set(vm.allocator, .{ .integer = int_key }, item.value);
+        }
+        element_idx += 1;
+    }
+
+    // Add the last chunk
+    if (chunk_array) |last_chunk| {
+        const chunk_str = try std.fmt.allocPrint(vm.allocator, "{d}", .{chunk_idx});
+        const chunk_key = try PHPString.init(vm.allocator, chunk_str);
+
+        const chunk_box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        chunk_box.* = .{ .ref_count = 1, .gc_info = .{}, .data = last_chunk };
+
+        try result_array.set(vm.allocator, .{ .string = chunk_key }, Value.fromBox(chunk_box, Value.TYPE_ARRAY));
+    }
+
+    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+    box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result_array };
+    return Value.fromBox(box, Value.TYPE_ARRAY);
+}
+
+// PHP array_pad() - Pad array to specified length
+fn arrayPadFn(vm: *VM, args: []const Value) !Value {
+    const array = args[0];
+    const pad_size = args[1];
+    const pad_value = args[2];
+
+    if (array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_pad() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr = array.getAsArray().data;
+    const current_size = arr.elements.count();
+    const target_size = @as(usize, @intCast(pad_size.asInt()));
+
+    if (target_size < current_size) {
+        // No padding needed, just return a copy of the array
+        const result = try vm.allocator.create(PHPArray);
+        errdefer vm.allocator.destroy(result);
+        result.* = PHPArray.init(vm.allocator);
+
+        var iter = arr.elements.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+
+            switch (key) {
+                .integer => {
+                    result.elements.put(.{ .integer = key.integer }, value.retain()) catch {};
+                },
+                .string => {
+                    const str_key = try PHPString.init(vm.allocator, key.string.data);
+                    result.elements.put(.{ .string = str_key }, value.retain()) catch {};
+                },
+            }
+        }
+
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
+
+    const result = try vm.allocator.create(PHPArray);
+    errdefer vm.allocator.destroy(result);
+    result.* = PHPArray.init(vm.allocator);
+
+    const pad_needed = target_size - current_size;
+    const before_pad = if (pad_size.asInt() < 0) @as(usize, @intCast(-pad_size.asInt())) else 0;
+    const after_pad = pad_needed - before_pad;
+
+    // Add before padding
+    var i: usize = 0;
+    while (i < before_pad) : (i += 1) {
+        const int_key: i64 = @as(i64, @intCast(-@as(i64, @intCast(i + 1))));
+        result.elements.put(.{ .integer = int_key }, pad_value.retain()) catch {};
+    }
+
+    // Copy original array
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        switch (key) {
+            .integer => {
+                try result.set(vm.allocator, .{ .integer = key.integer }, value);
+            },
+            .string => {
+                const str_key = try PHPString.init(vm.allocator, key.string.data);
+                try result.set(vm.allocator, .{ .string = str_key }, value);
+            },
+        }
+    }
+
+    // Add after padding
+    i = 0;
+    while (i < after_pad) : (i += 1) {
+        const int_key: i64 = @as(i64, @intCast(current_size + i));
+        try result.set(vm.allocator, .{ .integer = int_key }, pad_value);
+    }
+
+    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+    box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result };
+    return Value.fromBox(box, Value.TYPE_ARRAY);
+}
+
+// PHP array_key_first() - Get the first key of an array
+fn arrayKeyFirstFn(vm: *VM, args: []const Value) !Value {
+    const array = args[0];
+
+    if (array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_key_first() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr = array.getAsArray().data;
+    if (arr.elements.count() == 0) {
+        return Value.initBool(false);
+    }
+
+    if (arr.elements.count() == 0) {
+        return Value.initBool(false);
+    }
+
+    var iter = arr.elements.iterator();
+    const first_entry = iter.next() orelse return Value.initBool(false);
+    const first_key = first_entry.key_ptr.*;
+
+    return switch (first_key) {
+        .integer => Value.initInt(first_key.integer),
+        .string => Value.initStringWithManager(&vm.memory_manager, first_key.string.data) catch Value.initNull(),
+    };
+}
+
+// PHP array_key_last() - Get the last key of an array
+fn arrayKeyLastFn(vm: *VM, args: []const Value) !Value {
+    const array = args[0];
+
+    if (array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_key_last() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr = array.getAsArray().data;
+    if (arr.elements.count() == 0) {
+        return Value.initBool(false);
+    }
+
+    var last_key: ArrayKey = undefined;
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        last_key = entry.key_ptr.*;
+    }
+
+    return switch (last_key) {
+        .integer => Value.initInt(last_key.integer),
+        .string => Value.initStringWithManager(&vm.memory_manager, last_key.string.data) catch Value.initNull(),
+    };
+}
+
+// PHP array_fill_keys() - Fill an array with values, specifying keys
+fn arrayFillKeysFn(vm: *VM, args: []const Value) !Value {
+    const keys = args[0];
+    const value = args[1];
+
+    if (keys.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_fill_keys() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const keys_arr = keys.getAsArray().data;
+    const result = try vm.allocator.create(PHPArray);
+    errdefer vm.allocator.destroy(result);
+    result.* = PHPArray.init(vm.allocator);
+
+    var iter = keys_arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const key_copy = switch (key) {
+            .integer => ArrayKey{ .integer = key.integer },
+            .string => blk: {
+                const str_key = try PHPString.init(vm.allocator, key.string.data);
+                break :blk ArrayKey{ .string = str_key };
+            },
+        };
+        try result.set(vm.allocator, key_copy, value);
+    }
+
+    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+    box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result };
+    return Value.fromBox(box, Value.TYPE_ARRAY);
+}
+
+// PHP array_change_key_case() - Changes the case of array keys
+fn arrayChangeKeyCaseFn(vm: *VM, args: []const Value) !Value {
+    const array = args[0];
+    const case_type = if (args.len > 1) args[1].asInt() else 0; // 0 = CASE_LOWER, 1 = CASE_UPPER
+
+    if (array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_change_key_case() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr = array.getAsArray().data;
+    const result = try vm.allocator.create(PHPArray);
+    errdefer vm.allocator.destroy(result);
+    result.* = PHPArray.init(vm.allocator);
+
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        const new_key = switch (key) {
+            .integer => key, // Integers stay the same
+            .string => blk: {
+                const new_data = try vm.allocator.alloc(u8, key.string.data.len);
+                @memcpy(new_data, key.string.data);
+                for (new_data) |*c| {
+                    if (case_type == 0) {
+                        c.* = std.ascii.toLower(c.*);
+                    } else {
+                        c.* = std.ascii.toUpper(c.*);
+                    }
+                }
+                const str_key = try PHPString.init(vm.allocator, new_data);
+                break :blk ArrayKey{ .string = str_key };
+            },
+        };
+        try result.set(vm.allocator, new_key, value);
+    }
+
+    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+    box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result };
+    return Value.fromBox(box, Value.TYPE_ARRAY);
+}
+
+// PHP array_count_values() - Counts all the values of an array
+fn arrayCountValuesFn(vm: *VM, args: []const Value) !Value {
+    const array = args[0];
+
+    if (array.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_count_values() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const arr = array.getAsArray().data;
+    const result = try vm.allocator.create(PHPArray);
+    errdefer vm.allocator.destroy(result);
+    result.* = PHPArray.init(vm.allocator);
+
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const value = entry.value_ptr.*;
+
+        // Create a string key from the value
+        const key_str = try value.toString(vm.allocator);
+
+        // Check if key already exists and increment count
+        const existing = result.elements.get(.{ .string = key_str });
+        if (existing) |count_val| {
+            try result.set(vm.allocator, .{ .string = key_str }, Value.initInt(count_val.asInt() + 1));
+        } else {
+            try result.set(vm.allocator, .{ .string = key_str }, Value.initInt(1));
+        }
+    }
+
+    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+    box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result };
+    return Value.fromBox(box, Value.TYPE_ARRAY);
 }
 
 // bin2hex - Convert binary data to hexadecimal

@@ -504,14 +504,15 @@ pub const JsonFunctions = struct {
     }
 
     fn encodeValue(result: *std.ArrayList(u8), value: Value) !void {
-        switch (value.tag) {
+        switch (value.getTag()) {
             .null => try result.appendSlice("null"),
-            .boolean => try result.appendSlice(if (value.data.boolean) "true" else "false"),
-            .integer => try result.writer().print("{d}", .{value.data.integer}),
-            .float => try result.writer().print("{d}", .{value.data.float}),
+            .boolean => try result.appendSlice(if (value.asBool()) "true" else "false"),
+            .integer => try result.writer().print("{d}", .{value.asInt()}),
+            .float => try result.writer().print("{d}", .{value.asFloat()}),
             .string => {
                 try result.append('"');
-                for (value.data.string.data.data) |c| {
+                const str_data = value.getAsString().data.data;
+                for (str_data) |c| {
                     switch (c) {
                         '"' => try result.appendSlice("\\\""),
                         '\\' => try result.appendSlice("\\\\"),
@@ -524,17 +525,23 @@ pub const JsonFunctions = struct {
                 try result.append('"');
             },
             .array => {
-                const arr = value.data.array.data;
+                const arr = value.getAsArray().data;
                 var is_object = false;
+                var key_count: usize = 0;
+                var string_key_count: usize = 0;
 
                 // 检查是否是关联数组
                 var iter = arr.elements.iterator();
                 while (iter.next()) |entry| {
+                    key_count += 1;
+                    std.debug.print("DEBUG: key {} is {s}\n", .{ key_count, @tagName(entry.key_ptr.*) });
                     if (entry.key_ptr.* == .string) {
+                        string_key_count += 1;
+                        std.debug.print("DEBUG: string key = {s}\n", .{entry.key_ptr.string.data});
                         is_object = true;
-                        break;
                     }
                 }
+                std.debug.print("DEBUG: total keys={}, string keys={}, is_object={}\n", .{ key_count, string_key_count, is_object });
 
                 if (is_object) {
                     try result.append('{');
@@ -578,8 +585,8 @@ pub const JsonFunctions = struct {
             return Value.initNull();
         }
 
-        const json_str = switch (args[0].tag) {
-            .string => args[0].data.string.data.data,
+        const json_str = switch (args[0].getTag()) {
+            .string => args[0].getAsString().data.data,
             else => return Value.initNull(),
         };
 
