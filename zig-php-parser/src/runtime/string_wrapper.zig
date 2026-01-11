@@ -75,16 +75,36 @@ pub const StringWrapper = struct {
     }
 
     pub fn substring(self: *StringWrapper, start: i64, len: ?i64) !*PHPString {
-        const start_idx: usize = if (start < 0) 0 else @intCast(start);
+        // Handle negative start index (count from end)
+        const start_idx: usize = blk: {
+            if (start < 0) {
+                const abs_start = @as(usize, @intCast(-start));
+                break :blk if (abs_start > self.string.length) 0 else self.string.length - abs_start;
+            } else {
+                break :blk @intCast(@min(start, @as(i64, @intCast(self.string.length))));
+            }
+        };
+
         if (start_idx >= self.string.length) {
             return PHPString.init(self.allocator, "");
         }
 
-        const end_idx: usize = if (len) |l| {
-            const length: usize = @intCast(@max(0, l));
-            @min(start_idx + length, self.string.length);
-        } else {
-            self.string.length;
+        const end_idx: usize = blk: {
+            if (len) |l| {
+                if (l >= 0) {
+                    const length: usize = @intCast(@max(0, l));
+                    break :blk @min(start_idx + length, self.string.length);
+                } else {
+                    // Negative length: exclude -l characters from end
+                    const abs_len = @as(usize, @intCast(-l));
+                    if (abs_len >= self.string.length - start_idx) {
+                        return PHPString.init(self.allocator, "");
+                    }
+                    break :blk self.string.length - abs_len;
+                }
+            } else {
+                break :blk self.string.length;
+            }
         };
 
         return PHPString.init(self.allocator, self.string.data[start_idx..end_idx]);

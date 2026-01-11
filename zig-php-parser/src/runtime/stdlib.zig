@@ -14,6 +14,17 @@ const pcre2 = @import("pcre2.zig");
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
 
+// Helper function to create string return value (inline for performance)
+inline fn createStringReturn(allocator: std.mem.Allocator, str: *PHPString) !Value {
+    const box = try allocator.create(types.gc.Box(*PHPString));
+    box.* = .{
+        .ref_count = 1,
+        .gc_info = .{},
+        .data = str,
+    };
+    return Value.fromBox(box, Value.TYPE_STRING);
+}
+
 pub const BuiltinFunction = struct {
     name: []const u8,
     min_args: u8,
@@ -428,6 +439,62 @@ fn arrayRandWrapper(vm: *VM, args: []const Value) !Value {
     return builtin_random.RandomBuiltins.array_rand(vm, args);
 }
 
+// Fast path for callback invocation - optimized for array functions
+// Skips call frame management and statistics for speed
+inline fn invokeCallbackFast(vm: *VM, callback: Value, arg: Value) !Value {
+    return switch (callback.getTag()) {
+        .native_function => blk: {
+            const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
+            const args = [_]Value{arg};
+            break :blk try function(vm, &args);
+        },
+        .closure => blk: {
+            const closure = callback.getAsClosure().data;
+            break :blk try vm.callClosureFast(closure, arg);
+        },
+        .arrow_function => blk: {
+            const arrow_fn = callback.getAsArrowFunc().data;
+            break :blk try vm.callArrowFunctionFast(arrow_fn, arg);
+        },
+        else => error.InvalidCallback,
+    };
+}
+
+// 2-argument version for array_reduce
+inline fn invokeCallbackFast2(vm: *VM, callback: Value, arg1: Value, arg2: Value) !Value {
+    return switch (callback.getTag()) {
+        .native_function => blk: {
+            const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
+            const args = [_]Value{ arg1, arg2 };
+            break :blk try function(vm, &args);
+        },
+        .user_function => try vm.callUserFunction(callback.getAsUserFunc().data, &[_]Value{ arg1, arg2 }),
+        .closure => blk: {
+            const closure = callback.getAsClosure().data;
+            break :blk try vm.callClosureFast2(closure, arg1, arg2);
+        },
+        .arrow_function => blk: {
+            const arrow_fn = callback.getAsArrowFunc().data;
+            break :blk try vm.callArrowFunction(arrow_fn, &[_]Value{ arg1, arg2 });
+        },
+        else => error.InvalidCallback,
+    };
+}
+
+// Helper function to invoke callback with 1-2 arguments
+inline fn invokeCallback(vm: *VM, callback: Value, args: []const Value) !Value {
+    return switch (callback.getTag()) {
+        .native_function => blk: {
+            const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
+            break :blk try function(vm, args);
+        },
+        .user_function => try vm.callUserFunction(callback.getAsUserFunc().data, args),
+        .closure => try vm.callClosure(callback.getAsClosure().data, args),
+        .arrow_function => try vm.callArrowFunction(callback.getAsArrowFunc().data, args),
+        else => error.InvalidCallback,
+    };
+}
+
 // Array Function Implementations
 fn arrayMapFn(vm: *VM, args: []const Value) !Value {
     const callback = args[0];
@@ -439,37 +506,30 @@ fn arrayMapFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    const source_array = array.getAsArray().data;
+    const count = source_array.elements.count();
+
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
         result_array.deinit(vm.allocator);
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
+    try result_array.elements.ensureTotalCapacity(count);
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = source_array.elements.iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
 
-        // Call callback function with value
-        const callback_args = [_]Value{value};
-        const result_value = switch (callback.getTag()) {
-            .native_function => blk: {
-                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
-                break :blk try function(vm, &callback_args);
-            },
-            .user_function => try vm.callUserFunction(callback.getAsUserFunc().data, &callback_args),
-            .closure => try vm.callClosure(callback.getAsClosure().data, &callback_args),
-            .arrow_function => try vm.callArrowFunction(callback.getAsArrowFunc().data, &callback_args),
-            else => {
-                const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_map() expects parameter 1 to be a valid callback", "builtin", 0);
-                _ = try vm.throwException(exception);
-                return error.InvalidArgumentType;
-            },
+        // Use fast callback for native functions, closures, arrow functions
+        const result_value = invokeCallbackFast(vm, callback, value) catch {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_map() expects parameter 1 to be a valid callback", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
         };
 
-        try result_array.set(vm.allocator, key, result_value);
-        vm.releaseValue(result_value);
+        result_array.elements.putAssumeCapacity(key, result_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -491,16 +551,20 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    const source_array = array.getAsArray().data;
+    const count = source_array.elements.count();
+
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
         result_array.deinit(vm.allocator);
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
+    try result_array.elements.ensureTotalCapacity(count);
 
     const callback = if (args.len > 1) args[1] else null;
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = source_array.elements.iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -508,30 +572,18 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
         var should_include = false;
 
         if (callback) |cb| {
-            // Call callback function with value
-            const callback_args = [_]Value{value};
-            const result_value = switch (cb.getTag()) {
-                .native_function => blk: {
-                    const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(cb.getAsNativeFunc()));
-                    break :blk try function(vm, &callback_args);
-                },
-                .user_function => try vm.callUserFunction(cb.getAsUserFunc().data, &callback_args),
-                .closure => try vm.callClosure(cb.getAsClosure().data, &callback_args),
-                .arrow_function => try vm.callArrowFunction(cb.getAsArrowFunc().data, &callback_args),
-                else => {
-                    const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_filter() expects parameter 2 to be a valid callback", "builtin", 0);
-                    _ = try vm.throwException(exception);
-                    return error.InvalidArgumentType;
-                },
+            const result_value = invokeCallbackFast(vm, cb, value) catch {
+                const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_filter() expects parameter 2 to be a valid callback", "builtin", 0);
+                _ = try vm.throwException(exception);
+                return error.InvalidArgumentType;
             };
             should_include = result_value.toBool();
         } else {
-            // No callback, filter out falsy values
             should_include = value.toBool();
         }
 
         if (should_include) {
-            try result_array.set(vm.allocator, key, value);
+            result_array.elements.putAssumeCapacity(key, value);
         }
     }
 
@@ -562,21 +614,10 @@ fn arrayReduceFn(vm: *VM, args: []const Value) !Value {
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
 
-        // Call callback function with accumulator and current value
-        const callback_args = [_]Value{ accumulator, value };
-        accumulator = switch (callback.getTag()) {
-            .native_function => blk: {
-                const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(callback.getAsNativeFunc()));
-                break :blk try function(vm, &callback_args);
-            },
-            .user_function => try vm.callUserFunction(callback.getAsUserFunc().data, &callback_args),
-            .closure => try vm.callClosure(callback.getAsClosure().data, &callback_args),
-            .arrow_function => try vm.callArrowFunction(callback.getAsArrowFunc().data, &callback_args),
-            else => {
-                const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_reduce() expects parameter 2 to be a valid callback", "builtin", 0);
-                _ = try vm.throwException(exception);
-                return error.InvalidArgumentType;
-            },
+        accumulator = invokeCallbackFast2(vm, callback, accumulator, value) catch {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_reduce() expects parameter 2 to be a valid callback", "builtin", 0);
+            _ = try vm.throwException(exception);
+            return error.InvalidArgumentType;
         };
     }
 
@@ -584,29 +625,58 @@ fn arrayReduceFn(vm: *VM, args: []const Value) !Value {
 }
 
 fn arrayMergeFn(vm: *VM, args: []const Value) !Value {
-    var result_array = try vm.allocator.create(PHPArray);
-    errdefer {
-        result_array.deinit(vm.allocator);
-        vm.allocator.destroy(result_array);
-    }
-    result_array.* = PHPArray.init(vm.allocator);
-
+    // First pass: calculate total element count for pre-allocation
+    var total_count: usize = 0;
     for (args) |arg| {
         if (arg.getTag() != .array) {
             const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_merge() expects all parameters to be arrays", "builtin", 0);
             _ = try vm.throwException(exception);
             return error.InvalidArgumentType;
         }
+        total_count += arg.getAsArray().data.count();
+    }
 
+    if (total_count == 0) {
+        const result_array = try vm.allocator.create(PHPArray);
+        result_array.* = PHPArray.init(vm.allocator);
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_array,
+        };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
+
+    var result_array = try vm.allocator.create(PHPArray);
+    errdefer {
+        result_array.deinit(vm.allocator);
+        vm.allocator.destroy(result_array);
+    }
+    result_array.* = PHPArray.init(vm.allocator);
+    try result_array.elements.ensureTotalCapacity(total_count);
+
+    // Second pass: merge all arrays with direct insertion
+    for (args) |arg| {
         var iterator = arg.getAsArray().data.elements.iterator();
         while (iterator.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
 
-            // For numeric keys, reindex; for string keys, preserve
+            // Direct insertion - retain value and put
+            _ = value.retain();
             switch (key) {
-                .integer => try result_array.push(vm.allocator, value),
-                .string => try result_array.set(vm.allocator, key, value),
+                .integer => {
+                    const dest_key = ArrayKey{ .integer = result_array.next_index };
+                    result_array.next_index += 1;
+                    result_array.elements.putAssumeCapacity(dest_key, value);
+                },
+                .string => |s| {
+                    // Retain string key
+                    const new_key = ArrayKey{ .string = s };
+                    new_key.string.retain();
+                    result_array.elements.putAssumeCapacity(new_key, value);
+                },
             }
         }
     }
@@ -630,32 +700,54 @@ fn arrayKeysFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    const source_array = array.getAsArray().data;
+    const count = source_array.elements.count();
+
+    if (count == 0) {
+        const result_array = try vm.allocator.create(PHPArray);
+        result_array.* = PHPArray.init(vm.allocator);
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_array,
+        };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
+
+    // Pre-allocate result array
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
         result_array.deinit(vm.allocator);
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
+    try result_array.elements.ensureTotalCapacity(count);
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = source_array.elements.iterator();
+    var idx: i64 = 0;
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
 
         const key_value = switch (key) {
             .integer => |i| Value.initInt(i),
             .string => |s| blk: {
+                const str = try PHPString.init(vm.allocator, s.data);
                 const box = try vm.allocator.create(types.gc.Box(*PHPString));
                 box.* = .{
                     .ref_count = 1,
                     .gc_info = .{},
-                    .data = try PHPString.init(vm.allocator, s.data),
+                    .data = str,
                 };
                 break :blk Value.fromBox(box, Value.TYPE_STRING);
             },
         };
 
-        try result_array.push(vm.allocator, key_value);
-        vm.releaseValue(key_value);
+        // Direct insert with integer key
+        const dest_key = ArrayKey{ .integer = idx };
+        idx += 1;
+        _ = key_value.retain();
+        result_array.elements.putAssumeCapacity(dest_key, key_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -677,17 +769,38 @@ fn arrayValuesFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    const source_array = array.getAsArray().data;
+    const count = source_array.elements.count();
+
+    if (count == 0) {
+        const result_array = try vm.allocator.create(PHPArray);
+        result_array.* = PHPArray.init(vm.allocator);
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_array,
+        };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
+
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
         result_array.deinit(vm.allocator);
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
+    try result_array.elements.ensureTotalCapacity(count);
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    // Direct insertion - avoid push overhead
+    var iterator = source_array.elements.iterator();
+    var idx: i64 = 0;
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
-        try result_array.push(vm.allocator, value);
+        _ = value.retain();
+        const key = ArrayKey{ .integer = idx };
+        idx += 1;
+        result_array.elements.putAssumeCapacity(key, value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -832,6 +945,17 @@ fn inArrayFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    // Fast path: if needle is already a string and we're not in strict mode,
+    // we can avoid repeated conversions
+    const needle_is_string = needle.getTag() == .string;
+    var needle_str: ?*types.PHPString = null;
+    defer if (needle_str) |s| s.release(vm.allocator);
+
+    if (!strict and needle_is_string) {
+        needle_str = needle.getAsString().data;
+        needle_str.?.retain();
+    }
+
     var iterator = haystack.getAsArray().data.elements.iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
@@ -850,14 +974,36 @@ fn inArrayFn(vm: *VM, args: []const Value) !Value {
                 if (is_equal) return Value.initBool(true);
             }
         } else {
-            // Loose comparison (convert and compare)
-            const needle_str = try needle.toString(vm.allocator);
-            defer needle_str.deinit(vm.allocator);
-            const value_str = try value.toString(vm.allocator);
-            defer value_str.deinit(vm.allocator);
+            // Loose comparison - optimized path
+            if (value.getTag() == needle.getTag()) {
+                // Same type - can compare directly without conversion
+                const is_equal = switch (needle.getTag()) {
+                    .null => true,
+                    .boolean => needle.asBool() == value.asBool(),
+                    .integer => needle.asInt() == value.asInt(),
+                    .float => needle.asFloat() == value.asFloat(),
+                    .string => std.mem.eql(u8, needle.getAsString().data.data, value.getAsString().data.data),
+                    else => false,
+                };
+                if (is_equal) return Value.initBool(true);
+            } else if (needle_is_string and value.getTag() == .string) {
+                // Both are strings - direct comparison
+                if (std.mem.eql(u8, needle.getAsString().data.data, value.getAsString().data.data)) {
+                    return Value.initBool(true);
+                }
+            } else {
+                // Type mismatch - need conversion for comparison
+                const needle_str_val = needle_str orelse needle: {
+                    const s = try needle.toString(vm.allocator);
+                    needle_str = s;
+                    break :needle s;
+                };
+                const value_str = try value.toString(vm.allocator);
+                defer value_str.deinit(vm.allocator);
 
-            if (std.mem.eql(u8, needle_str.data, value_str.data)) {
-                return Value.initBool(true);
+                if (std.mem.eql(u8, needle_str_val.data, value_str.data)) {
+                    return Value.initBool(true);
+                }
             }
         }
     }
@@ -874,6 +1020,17 @@ fn arraySearchFn(vm: *VM, args: []const Value) !Value {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_search() expects parameter 2 to be array", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
+    }
+
+    // Fast path: if needle is already a string and we're not in strict mode,
+    // we can avoid repeated conversions
+    const needle_is_string = needle.getTag() == .string;
+    var needle_str: ?*types.PHPString = null;
+    defer if (needle_str) |s| s.release(vm.allocator);
+
+    if (!strict and needle_is_string) {
+        needle_str = needle.getAsString().data;
+        needle_str.?.retain();
     }
 
     var iterator = haystack.getAsArray().data.elements.iterator();
@@ -896,13 +1053,32 @@ fn arraySearchFn(vm: *VM, args: []const Value) !Value {
                 };
             }
         } else {
-            // Loose comparison
-            const needle_str = try needle.toString(vm.allocator);
-            defer needle_str.deinit(vm.allocator);
-            const value_str = try value.toString(vm.allocator);
-            defer value_str.deinit(vm.allocator);
+            // Loose comparison - optimized path
+            if (value.getTag() == needle.getTag()) {
+                // Same type - can compare directly without conversion
+                is_match = switch (needle.getTag()) {
+                    .null => true,
+                    .boolean => needle.asBool() == value.asBool(),
+                    .integer => needle.asInt() == value.asInt(),
+                    .float => needle.asFloat() == value.asFloat(),
+                    .string => std.mem.eql(u8, needle.getAsString().data.data, value.getAsString().data.data),
+                    else => false,
+                };
+            } else if (needle_is_string and value.getTag() == .string) {
+                // Both are strings - direct comparison
+                is_match = std.mem.eql(u8, needle.getAsString().data.data, value.getAsString().data.data);
+            } else {
+                // Type mismatch - need conversion for comparison
+                const needle_str_val = needle_str orelse needle: {
+                    const s = try needle.toString(vm.allocator);
+                    needle_str = s;
+                    break :needle s;
+                };
+                const value_str = try value.toString(vm.allocator);
+                defer value_str.deinit(vm.allocator);
 
-            is_match = std.mem.eql(u8, needle_str.data, value_str.data);
+                is_match = std.mem.eql(u8, needle_str_val.data, value_str.data);
+            }
         }
 
         if (is_match) {
@@ -958,15 +1134,7 @@ fn substrFn(vm: *VM, args: []const Value) !Value {
     const length_int = if (length.getTag() == .integer) length.asInt() else null;
 
     const result_str = try str.getAsString().data.substring(start_int, length_int, vm.allocator);
-
-    const box = try vm.allocator.create(types.gc.Box(*PHPString));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = result_str,
-    };
-
-    return Value.fromBox(box, Value.TYPE_STRING);
+    return createStringReturn(vm.allocator, result_str);
 }
 
 fn strReplaceFn(vm: *VM, args: []const Value) !Value {
@@ -981,21 +1149,13 @@ fn strReplaceFn(vm: *VM, args: []const Value) !Value {
     }
 
     const result_str = try subject.getAsString().data.replace(search.getAsString().data, replace.getAsString().data, vm.allocator);
-
-    const box = try vm.allocator.create(types.gc.Box(*PHPString));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = result_str,
-    };
-
-    return Value.fromBox(box, Value.TYPE_STRING);
+    return createStringReturn(vm.allocator, result_str);
 }
 
 fn strposFn(vm: *VM, args: []const Value) !Value {
     const haystack = args[0];
     const needle = args[1];
-    const offset = if (args.len > 2) args[2] else Value.initInt(0);
+    const offset: usize = if (args.len > 2) @intCast(args[2].asInt()) else 0;
 
     if (haystack.getTag() != .string or needle.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "strpos() expects parameters 1 and 2 to be strings", "builtin", 0);
@@ -1003,27 +1163,22 @@ fn strposFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    if (offset.getTag() != .integer) {
-        const exception = try ExceptionFactory.createTypeError(vm.allocator, "strpos() expects parameter 3 to be integer", "builtin", 0);
-        _ = try vm.throwException(exception);
-        return error.InvalidArgumentType;
-    }
+    const haystack_str = haystack.getAsString().data.data;
+    const needle_str = needle.getAsString().data.data;
 
-    // Simple implementation - would need to handle offset properly
-    const pos = haystack.getAsString().data.indexOf(needle.getAsString().data);
-
-    if (pos >= 0) {
-        return Value.initInt(pos);
-    } else {
-        return Value.initBool(false); // PHP returns false when not found
+    // Use indexOfPos to handle offset correctly
+    const search_slice = if (offset > 0) haystack_str[offset..] else haystack_str;
+    if (std.mem.indexOf(u8, search_slice, needle_str)) |pos| {
+        return Value.initInt(@intCast(offset + pos));
     }
+    return Value.initBool(false);
 }
 
-// Case-insensitive strpos
+// Case-insensitive strpos (optimized - no string allocation)
 fn striposFn(vm: *VM, args: []const Value) !Value {
     const haystack = args[0];
     const needle = args[1];
-    _ = if (args.len > 2) args[2] else Value.initInt(0);
+    const offset: usize = if (args.len > 2) @intCast(args[2].asInt()) else 0;
 
     if (haystack.getTag() != .string or needle.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "stripos() expects parameters 1 and 2 to be strings", "builtin", 0);
@@ -1034,20 +1189,8 @@ fn striposFn(vm: *VM, args: []const Value) !Value {
     const haystack_str = haystack.getAsString().data.data;
     const needle_str = needle.getAsString().data.data;
 
-    // Simple case-insensitive search
-    const haystack_lower = try vm.allocator.alloc(u8, haystack_str.len);
-    defer vm.allocator.free(haystack_lower);
-    for (haystack_str, 0..) |c, i| {
-        haystack_lower[i] = std.ascii.toLower(c);
-    }
-
-    const needle_lower = try vm.allocator.alloc(u8, needle_str.len);
-    defer vm.allocator.free(needle_lower);
-    for (needle_str, 0..) |c, i| {
-        needle_lower[i] = std.ascii.toLower(c);
-    }
-
-    if (std.mem.indexOf(u8, haystack_lower, needle_lower)) |pos| {
+    // Use optimized std.ascii.indexOfIgnoreCasePos (no allocation needed)
+    if (std.ascii.indexOfIgnoreCasePos(haystack_str, offset, needle_str)) |pos| {
         return Value.initInt(@intCast(pos));
     }
     return Value.initBool(false);
@@ -1342,18 +1485,12 @@ fn explodeFn(vm: *VM, args: []const Value) !Value {
         const pos = std.mem.indexOf(u8, str.data[start..], delim.data);
         if (pos) |p| {
             const actual_pos = start + p;
-            const part = try PHPString.init(vm.allocator, str.data[start..actual_pos]);
 
-            const box = try vm.allocator.create(types.gc.Box(*PHPString));
-            box.* = .{
-                .ref_count = 1,
-                .gc_info = .{},
-                .data = part,
-            };
-
-            const value = Value.fromBox(box, Value.TYPE_STRING);
+            // Use Value.initString helper (optimized)
+            const value = try Value.initString(vm.allocator, str.data[start..actual_pos]);
             try result_array.push(vm.allocator, value);
             vm.releaseValue(value);
+
             start = actual_pos + delim.length;
             count += 1;
         } else {
@@ -1363,16 +1500,8 @@ fn explodeFn(vm: *VM, args: []const Value) !Value {
 
     // Add the remaining part
     if (start < str.length) {
-        const part = try PHPString.init(vm.allocator, str.data[start..]);
-
-        const box = try vm.allocator.create(types.gc.Box(*PHPString));
-        box.* = .{
-            .ref_count = 1,
-            .gc_info = .{},
-            .data = part,
-        };
-
-        const value = Value.fromBox(box, Value.TYPE_STRING);
+        // Use Value.initString helper (optimized)
+        const value = try Value.initString(vm.allocator, str.data[start..]);
         try result_array.push(vm.allocator, value);
         vm.releaseValue(value);
     }
@@ -1385,6 +1514,14 @@ fn explodeFn(vm: *VM, args: []const Value) !Value {
     };
 
     return Value.fromBox(array_box, Value.TYPE_ARRAY);
+}
+
+// Helper to calculate string length for implode - inlined for performance
+inline fn getValueStringLen(value: Value) ?usize {
+    if (value.getTag() == .string) {
+        return value.getAsString().data.len;
+    }
+    return null;
 }
 
 fn implodeFn(vm: *VM, args: []const Value) !Value {
@@ -1403,30 +1540,76 @@ fn implodeFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    var result = std.ArrayListUnmanaged(u8){};
-    defer result.deinit(vm.allocator);
+    // Inline frequently accessed values (getAsString returns Box)
+    const glue_box = glue.getAsString();
+    const glue_data = glue_box.data.data;
+    const glue_len = glue_data.len;
+    const array_data = pieces.getAsArray().data;
+    const count = array_data.elements.count();
 
-    const glue_str = glue.getAsString().data;
+    if (count == 0) {
+        const result_str = try PHPString.init(vm.allocator, "");
+        const box = try vm.allocator.create(types.gc.Box(*PHPString));
+        box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_str,
+        };
+        return Value.fromBox(box, Value.TYPE_STRING);
+    }
+
+    // First pass: calculate total length
+    var total_length: usize = 0;
+    var iterator = array_data.elements.iterator();
+    while (iterator.next()) |entry| {
+        const value = entry.value_ptr.*;
+
+        // Inline tag check
+        if (value.getTag() == .string) {
+            total_length += value.getAsString().data.data.len;
+        } else {
+            const value_str = try value.toString(vm.allocator);
+            total_length += value_str.data.len;
+            value_str.deinit(vm.allocator);
+        }
+    }
+
+    if (count > 1) {
+        total_length += (count - 1) * glue_len;
+    }
+
+    // Allocate exact size buffer
+    const result_data = try vm.allocator.alloc(u8, total_length);
+
+    // Second pass: copy strings directly to result buffer
+    var pos: usize = 0;
     var first = true;
-
-    var iterator = pieces.getAsArray().data.elements.iterator();
+    iterator = array_data.elements.iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
 
         if (!first) {
-            try result.appendSlice(vm.allocator, glue_str.data);
+            @memcpy(result_data[pos..pos + glue_len], glue_data);
+            pos += glue_len;
         }
         first = false;
 
-        const value_str = try value.toString(vm.allocator);
-        defer value_str.deinit(vm.allocator);
-        try result.appendSlice(vm.allocator, value_str.data);
-
-        // 注意：不要调用 value.release()！
-        // 因为数组仍在使用这些元素的 Box，释放会导致后续元素访问已释放的内存
+        if (value.getTag() == .string) {
+            const str_data = value.getAsString().data.data;
+            const len = str_data.len;
+            @memcpy(result_data[pos..pos + len], str_data);
+            pos += len;
+        } else {
+            const value_str = try value.toString(vm.allocator);
+            const len = value_str.data.len;
+            @memcpy(result_data[pos..pos + len], value_str.data);
+            pos += len;
+            value_str.deinit(vm.allocator);
+        }
     }
 
-    const result_str = try PHPString.init(vm.allocator, result.items);
+    const result_str = try PHPString.init(vm.allocator, result_data);
+    vm.allocator.free(result_data);
 
     const box = try vm.allocator.create(types.gc.Box(*PHPString));
     box.* = .{
@@ -1434,7 +1617,6 @@ fn implodeFn(vm: *VM, args: []const Value) !Value {
         .gc_info = .{},
         .data = result_str,
     };
-
     return Value.fromBox(box, Value.TYPE_STRING);
 }
 
@@ -1623,7 +1805,6 @@ fn minFn(vm: *VM, args: []const Value) !Value {
     }
 
     var min_val = args[0];
-
     for (args[1..]) |arg| {
         const comparison = compareValues(min_val, arg);
         if (comparison > 0) {
@@ -1642,7 +1823,6 @@ fn maxFn(vm: *VM, args: []const Value) !Value {
     }
 
     var max_val = args[0];
-
     for (args[1..]) |arg| {
         const comparison = compareValues(max_val, arg);
         if (comparison < 0) {
@@ -2394,16 +2574,29 @@ fn jsonLastErrorMsgFn(vm: *VM, args: []const Value) !Value {
     return try Value.initString(vm.allocator, "No error");
 }
 
-// Helper function for JSON encoding
+// Static constants to avoid allocations
+const JSON_NULL_STR = "null";
+const JSON_TRUE_STR = "true";
+const JSON_FALSE_STR = "false";
+const JSON_OPEN_BRACE = "{";
+const JSON_CLOSE_BRACE = "}";
+const JSON_OPEN_BRACKET = "[";
+const JSON_CLOSE_BRACKET = "]";
+const JSON_COMMA = ",";
+const JSON_COLON = ":";
+const JSON_QUOTE = "\"";
+
+// Helper function for JSON encoding (optimized with pre-allocation)
 fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
     return switch (value.getTag()) {
-        .null => try allocator.dupe(u8, "null"),
-        .boolean => try allocator.dupe(u8, if (value.asBool()) "true" else "false"),
+        .null => try allocator.dupe(u8, JSON_NULL_STR),
+        .boolean => try allocator.dupe(u8, if (value.asBool()) JSON_TRUE_STR else JSON_FALSE_STR),
         .integer => try std.fmt.allocPrint(allocator, "{d}", .{value.asInt()}),
         .float => try std.fmt.allocPrint(allocator, "{d}", .{value.asFloat()}),
         .string => try std.fmt.allocPrint(allocator, "\"{s}\"", .{value.getAsString().data.data}),
         .array => {
             const arr = value.getAsArray().data;
+            const len = arr.elements.count();
 
             // Check if it's an associative array (has string keys)
             var is_object = false;
@@ -2415,58 +2608,63 @@ fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
                 }
             }
 
+            // Pre-allocate with estimated capacity (avg 10 chars per element + overhead)
+            const estimated_cap = if (len == 0) 2 else len * 12 + 4;
             var result = std.ArrayListUnmanaged(u8){};
+            try result.ensureTotalCapacity(allocator, estimated_cap);
             defer result.deinit(allocator);
 
             if (is_object) {
                 // Output as JSON object
-                try result.append(allocator, '{');
+                result.appendAssumeCapacity('{');
                 var first = true;
                 var obj_iter = arr.elements.iterator();
                 while (obj_iter.next()) |entry| {
-                    if (!first) try result.appendSlice(allocator, ",");
+                    if (!first) result.appendAssumeCapacity(',');
                     first = false;
 
                     // Output key
                     switch (entry.key_ptr.*) {
                         .string => |s| {
-                            try result.appendSlice(allocator, "\"");
-                            try result.appendSlice(allocator, s.data);
-                            try result.appendSlice(allocator, "\"");
+                            result.appendAssumeCapacity('"');
+                            result.appendSliceAssumeCapacity(s.data);
+                            result.appendAssumeCapacity('"');
                         },
                         .integer => |i| {
-                            try result.writer(allocator).print("{d}", .{i});
+                            const buf = try std.fmt.allocPrint(allocator, "{d}", .{i});
+                            defer allocator.free(buf);
+                            result.appendSliceAssumeCapacity(buf);
                         },
                     }
-                    try result.append(allocator, ':');
+                    result.appendAssumeCapacity(':');
 
                     // Output value
                     const element_json = try encodeValueAsJson(entry.value_ptr.*, allocator);
                     defer allocator.free(element_json);
-                    try result.appendSlice(allocator, element_json);
+                    result.appendSliceAssumeCapacity(element_json);
                 }
-                try result.append(allocator, '}');
+                result.appendAssumeCapacity('}');
             } else {
                 // Output as JSON array
-                try result.append(allocator, '[');
+                result.appendAssumeCapacity('[');
                 var first = true;
                 var arr_iter = arr.elements.iterator();
                 while (arr_iter.next()) |entry| {
-                    if (!first) try result.appendSlice(allocator, ",");
+                    if (!first) result.appendAssumeCapacity(',');
                     first = false;
 
                     const element_json = try encodeValueAsJson(entry.value_ptr.*, allocator);
                     defer allocator.free(element_json);
-                    try result.appendSlice(allocator, element_json);
+                    result.appendSliceAssumeCapacity(element_json);
                 }
-                try result.append(allocator, ']');
+                result.appendAssumeCapacity(']');
             }
 
             return try allocator.dupe(u8, result.items);
         },
         .object => try std.fmt.allocPrint(allocator, "{{\"class\":\"{s}\"}}", .{value.getAsObject().data.class.name.data}),
         .struct_instance => try std.fmt.allocPrint(allocator, "{{\"struct\":\"{s}\"}}", .{value.getAsStruct().data.struct_type.name.data}),
-        else => try allocator.dupe(u8, "null"),
+        else => try allocator.dupe(u8, JSON_NULL_STR),
     };
 }
 
@@ -2908,32 +3106,54 @@ fn arrayReverseFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    const source_array = array.getAsArray().data;
+    const count = source_array.elements.count();
+
+    if (count == 0) {
+        const result_array = try vm.allocator.create(PHPArray);
+        result_array.* = PHPArray.init(vm.allocator);
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result_array };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
+
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
         result_array.deinit(vm.allocator);
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
+    try result_array.elements.ensureTotalCapacity(count);
 
-    // Collect elements in reverse order using ArrayListUnmanaged
-    var temp = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
-    defer temp.deinit(vm.allocator);
+    // Pre-allocate temp array with exact size
+    const temp = try vm.allocator.alloc(struct { key: ArrayKey, value: Value }, count);
+    defer vm.allocator.free(temp);
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    // Copy elements to temp (backwards order)
+    var idx: usize = 0;
+    var iterator = source_array.elements.iterator();
     while (iterator.next()) |entry| {
-        try temp.append(vm.allocator, .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* });
+        temp[idx] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };
+        idx += 1;
     }
 
-    var i = temp.items.len;
+    // Reverse insert directly
     var new_index: i64 = 0;
+    var i: usize = count;
     while (i > 0) {
         i -= 1;
-        const item = temp.items[i];
+        const item = temp[i];
+        _ = item.value.retain();
         if (preserve_keys) {
-            try result_array.set(vm.allocator, item.key, item.value);
+            // For string keys, need to retain
+            if (item.key == .string) {
+                item.key.string.retain();
+            }
+            result_array.elements.putAssumeCapacity(item.key, item.value);
         } else {
-            try result_array.set(vm.allocator, ArrayKey{ .integer = new_index }, item.value);
+            const dest_key = ArrayKey{ .integer = new_index };
             new_index += 1;
+            result_array.elements.putAssumeCapacity(dest_key, item.value);
         }
     }
 
@@ -2993,6 +3213,9 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    const arr = array.getAsArray().data;
+    const count = arr.elements.count();
+
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
         result_array.deinit(vm.allocator);
@@ -3000,7 +3223,10 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
     }
     result_array.* = PHPArray.init(vm.allocator);
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    // Pre-allocate capacity
+    try result_array.elements.ensureTotalCapacity(count);
+
+    var iterator = arr.elements.iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -3023,7 +3249,7 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
             },
         };
 
-        try result_array.set(vm.allocator, new_key, new_value);
+        result_array.elements.putAssumeCapacity(new_key, new_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -3042,9 +3268,38 @@ fn arraySliceFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
+    const source_array = array.getAsArray().data;
+    const count = source_array.elements.count();
     const offset: i64 = if (offset_val.getTag() == .integer) offset_val.asInt() else 0;
-    const count = array.getAsArray().data.count();
     const length: i64 = if (length_val.getTag() == .integer) length_val.asInt() else @intCast(count);
+
+    if (count == 0) {
+        const result_array = try vm.allocator.create(PHPArray);
+        result_array.* = PHPArray.init(vm.allocator);
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result_array };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
+
+    // Calculate slice range
+    const start: usize = if (offset < 0)
+        @intCast(@max(0, @as(i64, @intCast(count)) + offset))
+    else
+        @intCast(@min(@as(i64, @intCast(count)), offset));
+
+    const end: usize = if (length < 0)
+        @intCast(@max(0, @as(i64, @intCast(count)) + length))
+    else
+        @intCast(@min(@as(i64, @intCast(count)), @as(i64, @intCast(start)) + length));
+
+    const slice_count = if (end > start) end - start else 0;
+    if (slice_count == 0) {
+        const result_array = try vm.allocator.create(PHPArray);
+        result_array.* = PHPArray.init(vm.allocator);
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result_array };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
 
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
@@ -3052,31 +3307,20 @@ fn arraySliceFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
+    try result_array.elements.ensureTotalCapacity(slice_count);
 
-    // Collect elements
-    var temp = std.ArrayListUnmanaged(Value){};
-    defer temp.deinit(vm.allocator);
-
-    var iterator = array.getAsArray().data.elements.iterator();
+    // Direct insertion - collect and copy values
+    var iterator = source_array.elements.iterator();
+    var idx: usize = 0;
+    var result_idx: i64 = 0;
     while (iterator.next()) |entry| {
-        try temp.append(vm.allocator, entry.value_ptr.*);
-    }
-
-    // Handle negative offset
-    const start: usize = if (offset < 0)
-        @intCast(@max(0, @as(i64, @intCast(temp.items.len)) + offset))
-    else
-        @intCast(@min(@as(i64, @intCast(temp.items.len)), offset));
-
-    // Handle negative length
-    const end: usize = if (length < 0)
-        @intCast(@max(0, @as(i64, @intCast(temp.items.len)) + length))
-    else
-        @intCast(@min(@as(i64, @intCast(temp.items.len)), @as(i64, @intCast(start)) + length));
-
-    var idx: i64 = 0;
-    for (temp.items[start..end]) |value| {
-        try result_array.set(vm.allocator, ArrayKey{ .integer = idx }, value);
+        if (idx >= start and idx < end) {
+            const value = entry.value_ptr.*;
+            _ = value.retain();
+            const key = ArrayKey{ .integer = result_idx };
+            result_idx += 1;
+            result_array.elements.putAssumeCapacity(key, value);
+        }
         idx += 1;
     }
 
@@ -3173,12 +3417,28 @@ fn arrayFillFn(vm: *VM, args: []const Value) !Value {
     const num: i64 = if (args[1].getTag() == .integer) args[1].asInt() else 0;
     const value = args[2];
 
+    if (num <= 0) {
+        var empty_array = try vm.allocator.create(PHPArray);
+        errdefer {
+            empty_array.deinit(vm.allocator);
+            vm.allocator.destroy(empty_array);
+        }
+        empty_array.* = PHPArray.init(vm.allocator);
+
+        const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+        box.* = .{ .ref_count = 1, .gc_info = .{}, .data = empty_array };
+        return Value.fromBox(box, Value.TYPE_ARRAY);
+    }
+
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
         result_array.deinit(vm.allocator);
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
+
+    // Retain value once for all uses
+    _ = value.retain();
 
     var i: i64 = 0;
     while (i < num) : (i += 1) {
@@ -4519,7 +4779,7 @@ fn arrayWalkFn(vm: *VM, args: []const Value) !Value {
     return Value.initBool(true);
 }
 
-// PHP array_chunk() - Split an array into chunks
+// PHP array_chunk() - Split an array into chunks (optimized)
 fn arrayChunkFn(vm: *VM, args: []const Value) !Value {
     const array = args[0];
     const size = args[1];
@@ -4539,16 +4799,16 @@ fn arrayChunkFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arr = array.getAsArray().data;
+    const count = arr.count();
 
-    // Collect elements into a temp array
+    // Pre-allocate temp ArrayList with exact size
     var temp = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
+    try temp.ensureTotalCapacity(vm.allocator, count);
     defer temp.deinit(vm.allocator);
 
     var iter = arr.elements.iterator();
     while (iter.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const value = entry.value_ptr.*;
-        try temp.append(vm.allocator, .{ .key = key, .value = value });
+        temp.appendAssumeCapacity(.{ .key = entry.key_ptr.*, .value = entry.value_ptr.* });
     }
 
     var result_array = try vm.allocator.create(PHPArray);
@@ -4625,14 +4885,17 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arr = array.getAsArray().data;
-    const current_size = arr.elements.count();
+    const count = arr.elements.count();
     const target_size = @as(usize, @intCast(pad_size.asInt()));
 
-    if (target_size < current_size) {
+    if (target_size < count) {
         // No padding needed, just return a copy of the array
         const result = try vm.allocator.create(PHPArray);
         errdefer vm.allocator.destroy(result);
         result.* = PHPArray.init(vm.allocator);
+
+        // Pre-allocate capacity
+        try result.elements.ensureTotalCapacity(count);
 
         var iter = arr.elements.iterator();
         while (iter.next()) |entry| {
@@ -4641,11 +4904,11 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
 
             switch (key) {
                 .integer => {
-                    result.elements.put(.{ .integer = key.integer }, value.retain()) catch {};
+                    result.elements.putAssumeCapacity(.{ .integer = key.integer }, value.retain());
                 },
                 .string => {
                     const str_key = try PHPString.init(vm.allocator, key.string.data);
-                    result.elements.put(.{ .string = str_key }, value.retain()) catch {};
+                    result.elements.putAssumeCapacity(.{ .string = str_key }, value.retain());
                 },
             }
         }
@@ -4659,15 +4922,18 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
     errdefer vm.allocator.destroy(result);
     result.* = PHPArray.init(vm.allocator);
 
-    const pad_needed = target_size - current_size;
+    const pad_needed = target_size - count;
     const before_pad = if (pad_size.asInt() < 0) @as(usize, @intCast(-pad_size.asInt())) else 0;
     const after_pad = pad_needed - before_pad;
+
+    // Pre-allocate capacity for all elements
+    try result.elements.ensureTotalCapacity(target_size);
 
     // Add before padding
     var i: usize = 0;
     while (i < before_pad) : (i += 1) {
         const int_key: i64 = @as(i64, @intCast(-@as(i64, @intCast(i + 1))));
-        result.elements.put(.{ .integer = int_key }, pad_value.retain()) catch {};
+        result.elements.putAssumeCapacity(.{ .integer = int_key }, pad_value.retain());
     }
 
     // Copy original array
@@ -4678,11 +4944,11 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
 
         switch (key) {
             .integer => {
-                try result.set(vm.allocator, .{ .integer = key.integer }, value);
+                result.elements.putAssumeCapacity(.{ .integer = key.integer }, value);
             },
             .string => {
                 const str_key = try PHPString.init(vm.allocator, key.string.data);
-                try result.set(vm.allocator, .{ .string = str_key }, value);
+                result.elements.putAssumeCapacity(.{ .string = str_key }, value);
             },
         }
     }
@@ -4690,8 +4956,8 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
     // Add after padding
     i = 0;
     while (i < after_pad) : (i += 1) {
-        const int_key: i64 = @as(i64, @intCast(current_size + i));
-        try result.set(vm.allocator, .{ .integer = int_key }, pad_value);
+        const int_key: i64 = @as(i64, @intCast(count + i));
+        result.elements.putAssumeCapacity(.{ .integer = int_key }, pad_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));

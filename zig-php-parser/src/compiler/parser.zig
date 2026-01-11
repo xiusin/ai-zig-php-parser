@@ -2256,7 +2256,7 @@ pub const Parser = struct {
         }
     }
 
-    fn getPrecedence(self: *Parser, tag: Token.Tag) u8 {
+    inline fn getPrecedence(self: *Parser, tag: Token.Tag) u8 {
         _ = self;
         return switch (tag) {
             .plus_plus, .minus_minus => 120, // Postfix increment/decrement (highest precedence)

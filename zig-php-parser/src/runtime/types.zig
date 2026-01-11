@@ -65,15 +65,39 @@ pub const PHPString = struct {
     }
 
     pub fn substring(self: *PHPString, start: i64, length: ?i64, allocator: std.mem.Allocator) !*PHPString {
-        const start_idx: usize = if (start < 0) 0 else @intCast(start);
+        // Handle negative start index (count from end)
+        const start_idx: usize = blk: {
+            if (start < 0) {
+                const abs_start = @as(usize, @intCast(-start));
+                break :blk if (abs_start > self.length) 0 else self.length - abs_start;
+            } else {
+                break :blk @intCast(@min(start, @as(i64, @intCast(self.length))));
+            }
+        };
+
         if (start_idx >= self.length) {
             return PHPString.init(allocator, "");
         }
 
-        const end_idx: usize = if (length) |len| blk: {
-            const end = start_idx + @as(usize, @intCast(@max(0, len)));
-            break :blk @min(end, self.length);
-        } else self.length;
+        // Handle length (positive, negative, or null)
+        const end_idx: usize = blk: {
+            if (length) |len| {
+                if (len >= 0) {
+                    // Positive length: return up to len characters
+                    break :blk @min(start_idx + @as(usize, @intCast(len)), self.length);
+                } else {
+                    // Negative length: exclude -len characters from end
+                    const abs_len = @as(usize, @intCast(-len));
+                    if (abs_len >= self.length - start_idx) {
+                        return PHPString.init(allocator, "");
+                    }
+                    break :blk self.length - abs_len;
+                }
+            } else {
+                // No length: return to end of string
+                break :blk self.length;
+            }
+        };
 
         if (start_idx >= end_idx) {
             return PHPString.init(allocator, "");
@@ -99,20 +123,35 @@ pub const PHPString = struct {
             return PHPString.init(allocator, self.data);
         }
 
-        var result = std.ArrayListUnmanaged(u8){};
-        defer result.deinit(allocator);
-
+        // Pre-calculate expected replacements to estimate size
+        var count: usize = 0;
         var i: usize = 0;
-        while (i < self.length) {
-            if (i + search.length <= self.length and
-                std.mem.eql(u8, self.data[i .. i + search.length], search.data))
-            {
-                try result.appendSlice(allocator, replacement.data);
-                i += search.length;
-            } else {
-                try result.append(allocator, self.data[i]);
-                i += 1;
+        while (i <= self.length -| search.length) : (i += 1) {
+            if (std.mem.eql(u8, self.data[i .. i + search.length], search.data)) {
+                count += 1;
+                i += search.length - 1;
             }
+        }
+
+        // Pre-allocate result buffer (estimate: original + (replacement - search) * count)
+        const size_estimate = self.length + (replacement.length -| search.length) * count;
+        var result = std.ArrayListUnmanaged(u8){};
+        try result.ensureTotalCapacity(allocator, @max(size_estimate, 16));
+
+        // Perform replacement
+        i = 0;
+        while (i <= self.length -| search.length) : (i += 1) {
+            if (std.mem.eql(u8, self.data[i .. i + search.length], search.data)) {
+                try result.appendSlice(allocator, replacement.data);
+                i += search.length - 1;
+            } else {
+                result.appendAssumeCapacity(self.data[i]);
+            }
+        }
+
+        // Append remaining characters
+        while (i < self.length) : (i += 1) {
+            result.appendAssumeCapacity(self.data[i]);
         }
 
         return PHPString.init(allocator, result.items);
@@ -202,8 +241,12 @@ pub const PHPArray = struct {
     }
 
     pub fn push(self: *PHPArray, allocator: std.mem.Allocator, value: Value) !void {
+        _ = allocator;
         const key = ArrayKey{ .integer = self.next_index };
-        try self.set(allocator, key, value);
+        // Fast path: for integer sequential keys, we know the key doesn't exist
+        // so we can skip the get() call and just retain and put
+        _ = value.retain();
+        try self.elements.put(key, value);
         self.next_index += 1;
     }
 
