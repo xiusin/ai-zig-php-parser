@@ -134,7 +134,7 @@ inline fn isValueEmpty(value: Value) bool {
         .integer => value.asInt() == 0,
         .float => value.asFloat() == 0.0,
         .string => value.getAsString().data.data.len == 0,
-        .array => value.getAsArray().data.elements.count() == 0,
+        .array => value.getAsArray().data.getElements().count() == 0,
         else => false,
     };
 }
@@ -295,17 +295,17 @@ pub fn callUserFuncArrayFn(vm: *VM, args: []const Value) !Value {
 
     // Fast path: if array is empty, pass empty args
     const array_data = args_array.getAsArray().data;
-    if (array_data.elements.count() == 0) {
+    if (array_data.getElements().count() == 0) {
         return executeCallback(vm, callback, &.{});
     }
 
     // Build arguments array (avoid allocation if possible)
-    const count = array_data.elements.count();
+    const count = array_data.getElements().count();
     const arg_values = try vm.allocator.alloc(Value, count);
     defer vm.allocator.free(arg_values);
 
     var idx: usize = 0;
-    var iterator = array_data.elements.iterator();
+    var iterator = array_data.getElements().iterator();
     while (iterator.next()) |entry| {
         arg_values[idx] = entry.value_ptr.*;
         idx += 1;
@@ -1244,7 +1244,7 @@ pub fn strtrFn(vm: *VM, args: []const Value) !Value {
         const pairs = from.getAsArray().data;
 
         var result = try vm.allocator.dupe(u8, input);
-        var iter = pairs.elements.iterator();
+        var iter = pairs.getElements().iterator();
         while (iter.next()) |entry| {
             const from_key = switch (entry.key_ptr.*) {
                 .string => |s| s.data,
@@ -1304,7 +1304,7 @@ pub fn httpBuildQueryFn(vm: *VM, args: []const Value) !Value {
     const enc_val = if (enc_type) |e| e.asInt() else 1; // PHP_QUERY_RFC1738 = 1
     const delim = if (delimiter) |d| d.getAsString().data.data else "&";
 
-    var iter = query_data.getAsArray().data.elements.iterator();
+    var iter = query_data.getAsArray().data.getElements().iterator();
     var first = true;
     while (iter.next()) |entry| {
         const key = switch (entry.key_ptr.*) {

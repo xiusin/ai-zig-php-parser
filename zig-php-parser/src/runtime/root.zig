@@ -98,6 +98,42 @@ pub const RealTimeProfiler = performance_monitor.RealTimeProfiler;
 
 // 插件系统
 pub const plugin_system = @import("plugin_system.zig");
+
+// ============================================================================
+// 高性能优化模块
+// ============================================================================
+
+// 高性能内存池
+pub const fast_pool = @import("fast_pool.zig");
+pub const SlabAllocator = fast_pool.SlabAllocator;
+pub const BumpAllocator = fast_pool.BumpAllocator;
+pub const MultiPool = fast_pool.MultiPool;
+pub const PoolManager = fast_pool.PoolManager;
+
+// 高性能字符串
+pub const fast_string = @import("fast_string.zig");
+pub const StringPool = fast_string.StringPool;
+pub const SSOString = fast_string.SSOString;
+pub const fnv1a = fast_string.fnv1a;
+
+// 高性能值类型
+pub const fast_value = @import("fast_value.zig");
+pub const FastValue = fast_value.FastValue;
+pub const FastOps = fast_value.FastOps;
+pub const ValueStack = fast_value.ValueStack;
+
+// SIMD 优化
+pub const simd_ops = @import("simd_ops.zig");
+pub const SimdString = simd_ops.SimdString;
+pub const SimdArray = simd_ops.SimdArray;
+pub const FastMem = simd_ops.FastMem;
+
+// 优化运行时
+pub const fast_runtime = @import("fast_runtime.zig");
+pub const OptRuntime = fast_runtime.OptRuntime;
+pub const OptConfig = fast_runtime.OptConfig;
+pub const Benchmark = fast_runtime.Benchmark;
+pub const PerfStats = fast_runtime.PerfStats;
 pub const PluginSystem = plugin_system.PluginSystem;
 
 // 调试器

@@ -55,7 +55,7 @@ pub const ArrayWrapper = struct {
         const last_key = ArrayKey{ .integer = @as(i64, @intCast(count - 1)) };
         const value = self.array.get(last_key);
         if (value != null) {
-            _ = self.array.elements.orderedRemove(last_key);
+            _ = self.array.getElements().orderedRemove(last_key);
         }
         return value;
     }
@@ -66,14 +66,14 @@ pub const ArrayWrapper = struct {
         try new_elements.put(ArrayKey{ .integer = 0 }, value);
         _ = value.retain();
 
-        var iter = self.array.elements.iterator();
+        var iter = self.array.getElements().iterator();
         var new_index: i64 = 1;
         while (iter.next()) |entry| {
             try new_elements.put(ArrayKey{ .integer = new_index }, entry.value_ptr.*);
             new_index += 1;
         }
 
-        self.array.elements.deinit();
+        self.array.getElements().deinit();
         self.array.elements = new_elements;
         self.array.next_index = new_index;
 
@@ -85,7 +85,7 @@ pub const ArrayWrapper = struct {
 
         // 找到最小的整数键
         var min_key: ?i64 = null;
-        var iter = self.array.elements.iterator();
+        var iter = self.array.getElements().iterator();
         while (iter.next()) |entry| {
             if (entry.key_ptr.* == .integer) {
                 const key = entry.key_ptr.*.integer;
@@ -104,7 +104,7 @@ pub const ArrayWrapper = struct {
             // 创建新的数组，所有键都向前移动一位
             var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, false).initContext(self.allocator, .{});
 
-            iter = self.array.elements.iterator();
+            iter = self.array.getElements().iterator();
             while (iter.next()) |entry| {
                 if (entry.key_ptr.* == .integer) {
                     const key = entry.key_ptr.*.integer;
@@ -120,7 +120,7 @@ pub const ArrayWrapper = struct {
                 }
             }
 
-            self.array.elements.deinit();
+            self.array.getElements().deinit();
             self.array.elements = new_elements;
             // 更新 next_index（如果是数字索引的数组）
             if (min_key.? == 0) {
@@ -132,7 +132,7 @@ pub const ArrayWrapper = struct {
     }
 
     pub fn merge(self: *ArrayWrapper, other: *PHPArray) !*ArrayWrapper {
-        var iter = other.elements.iterator();
+        var iter = other.getElements().iterator();
         while (iter.next()) |entry| {
             try self.array.push(self.allocator, entry.value_ptr.*);
         }
@@ -148,7 +148,7 @@ pub const ArrayWrapper = struct {
         var temp_values = try self.allocator.alloc(Value, element_count);
         defer self.allocator.free(temp_values);
 
-        var iter = self.array.elements.iterator();
+        var iter = self.array.getElements().iterator();
         var i: usize = 0;
         while (iter.next()) |entry| : (i += 1) {
             temp_values[i] = entry.value_ptr.*;
@@ -160,7 +160,7 @@ pub const ArrayWrapper = struct {
             try new_elements.put(new_key, temp_values[element_count - 1 - i]);
         }
 
-        self.array.elements.deinit();
+        self.array.getElements().deinit();
         self.array.elements = new_elements;
 
         return self;
@@ -170,7 +170,7 @@ pub const ArrayWrapper = struct {
         const result = try self.allocator.create(PHPArray);
         result.* = PHPArray.init(self.allocator);
 
-        var iter = self.array.elements.iterator();
+        var iter = self.array.getElements().iterator();
         while (iter.next()) |entry| {
             const key_value = switch (entry.key_ptr.*) {
                 .integer => |i| Value.initInt(i),
@@ -189,7 +189,7 @@ pub const ArrayWrapper = struct {
         const result = try self.allocator.create(PHPArray);
         result.* = PHPArray.init(self.allocator);
 
-        var iter = self.array.elements.iterator();
+        var iter = self.array.getElements().iterator();
         while (iter.next()) |entry| {
             try result.push(self.allocator, entry.value_ptr.*);
         }
@@ -201,7 +201,7 @@ pub const ArrayWrapper = struct {
         const result = try self.allocator.create(PHPArray);
         result.* = PHPArray.init(self.allocator);
 
-        var iter = self.array.elements.iterator();
+        var iter = self.array.getElements().iterator();
         while (iter.next()) |entry| {
             _ = callback;
             const keep = entry.value_ptr.*.toBool();
@@ -217,7 +217,7 @@ pub const ArrayWrapper = struct {
         const result = try self.allocator.create(PHPArray);
         result.* = PHPArray.init(self.allocator);
 
-        var iter = self.array.elements.iterator();
+        var iter = self.array.getElements().iterator();
         while (iter.next()) |entry| {
             _ = callback;
             try result.push(self.allocator, entry.value_ptr.*);

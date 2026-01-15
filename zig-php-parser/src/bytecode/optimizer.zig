@@ -107,6 +107,86 @@ pub const BytecodeOptimizer = struct {
             }
             i += 1;
         }
+        
+        // 条件表达式折叠 (三元运算符优化)
+        try self.foldConditionalExpressions(func);
+    }
+    
+    /// 条件表达式折叠 - 优化三元运算符 (true ? a : b)
+    /// 
+    /// 模式匹配：
+    /// 1. push_const (bool), jz else_label, <then_branch>, jmp end_label, <else_branch>
+    ///    -> 如果条件为常量true，直接执行then分支
+    ///    -> 如果条件为常量false，直接执行else分支
+    fn foldConditionalExpressions(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
+        var i: usize = 0;
+        while (i + 1 < func.bytecode.len) {
+            const inst1 = func.bytecode[i];
+            const inst2 = func.bytecode[i + 1];
+            
+            // 模式：push_const (bool), jz else_label
+            if (inst1.opcode == .push_const and inst2.opcode == .jz) {
+                const cond_val = func.constants[inst1.operand1];
+                const else_label = inst2.operand1;
+                
+                // 检查条件是否为常量布尔值
+                const is_true = switch (cond_val) {
+                    .bool_val => |b| b,
+                    .int_val => |n| n != 0,
+                    else => null,
+                };
+                
+                if (is_true) |cond| {
+                    if (cond) {
+                        // 条件为true：移除jz指令，保留then分支
+                        // 需要找到对应的jmp end_label并移除
+                        func.bytecode[i] = Instruction.init(.nop, 0, 0);
+                        func.bytecode[i + 1] = Instruction.init(.nop, 0, 0);
+                        
+                        // 查找并移除else分支的跳转
+                        var j = i + 2;
+                        while (j < func.bytecode.len and j < else_label) {
+                            if (func.bytecode[j].opcode == .jmp) {
+                                const end_label = func.bytecode[j].operand1;
+                                func.bytecode[j] = Instruction.init(.nop, 0, 0);
+                                
+                                // 将else分支标记为死代码
+                                var k = else_label;
+                                while (k < end_label and k < func.bytecode.len) {
+                                    if (func.bytecode[k].opcode != .nop) {
+                                        func.bytecode[k] = Instruction.init(.nop, 0, 0);
+                                        self.stats.dead_code_removed += 1;
+                                    }
+                                    k += 1;
+                                }
+                                break;
+                            }
+                            j += 1;
+                        }
+                        
+                        self.stats.constants_folded += 1;
+                    } else {
+                        // 条件为false：跳转到else分支，移除then分支
+                        func.bytecode[i] = Instruction.init(.nop, 0, 0);
+                        func.bytecode[i + 1] = Instruction.init(.jmp, else_label, 0);
+                        
+                        // 将then分支标记为死代码
+                        var j = i + 2;
+                        while (j < else_label and j < func.bytecode.len) {
+                            if (func.bytecode[j].opcode != .nop and func.bytecode[j].opcode != .jmp) {
+                                func.bytecode[j] = Instruction.init(.nop, 0, 0);
+                                self.stats.dead_code_removed += 1;
+                            }
+                            j += 1;
+                        }
+                        
+                        self.stats.constants_folded += 1;
+                    }
+                }
+            }
+            
+            i += 1;
+        }
     }
 
     fn foldIntOp(_: *BytecodeOptimizer, val1: Value, val2: Value, op: enum { add, sub, mul, div }) ?Value {
@@ -158,7 +238,7 @@ pub const BytecodeOptimizer = struct {
 
     /// 死代码消除 - 移除不可达代码
     fn deadCodeElimination(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
-        var reachable = try self.allocator.alloc(bool, func.bytecode.len);
+        const reachable = try self.allocator.alloc(bool, func.bytecode.len);
         defer self.allocator.free(reachable);
         @memset(reachable, false);
 
@@ -175,7 +255,6 @@ pub const BytecodeOptimizer = struct {
     }
 
     fn markReachable(self: *BytecodeOptimizer, func: *CompiledFunction, start: usize, reachable: []bool) !void {
-        _ = self;
         var i = start;
         while (i < func.bytecode.len) {
             if (reachable[i]) break; // 已访问
@@ -512,9 +591,9 @@ pub const InlineCache = struct {
 
     /// 查找缓存
     pub fn lookup(self: *InlineCache, class_id: u16) ?u16 {
-        for (self.entries[0..self.count]) |entry| {
+        for (self.entries[0..self.count], 0..) |*entry, i| {
             if (entry.class_id == class_id) {
-                entry.hit_count += 1;
+                self.entries[i].hit_count += 1;
                 return entry.method_offset;
             }
         }
@@ -594,4 +673,125 @@ test "escape analyzer" {
     defer analyzer.deinit();
 
     try std.testing.expect(analyzer.canStackAllocate("local_var"));
+}
+
+test "conditional expression folding - true condition" {
+    // 测试 true ? a : b -> a
+    var func = CompiledFunction{
+        .bytecode = undefined,
+        .constants = undefined,
+        .name = "test",
+        .arg_count = 0,
+        .local_count = 0,
+        .max_stack = 10,
+        .flags = .{},
+        .line_table = &[_]CompiledFunction.LineInfo{},
+        .exception_table = &[_]CompiledFunction.ExceptionEntry{},
+    };
+    
+    // 模拟字节码：push_const(true), jz(5), push_const(10), jmp(6), push_const(20)
+    var bytecode = [_]Instruction{
+        Instruction.init(.push_const, 0, 0), // true
+        Instruction.init(.jz, 4, 0),         // jump to else if false
+        Instruction.init(.push_const, 1, 0), // then: 10
+        Instruction.init(.jmp, 5, 0),        // jump to end
+        Instruction.init(.push_const, 2, 0), // else: 20
+        Instruction.init(.nop, 0, 0),        // end
+    };
+    func.bytecode = &bytecode;
+    
+    var constants = [_]Value{
+        Value{ .bool_val = true },  // 0
+        Value{ .int_val = 10 },     // 1
+        Value{ .int_val = 20 },     // 2
+    };
+    func.constants = &constants;
+    
+    var opt = BytecodeOptimizer.init(std.testing.allocator, .basic);
+    try opt.constantFolding(&func);
+    
+    // 验证：条件和jz应该被移除，else分支应该被标记为nop
+    try std.testing.expect(func.bytecode[0].opcode == .nop);
+    try std.testing.expect(func.bytecode[1].opcode == .nop);
+    try std.testing.expect(func.bytecode[4].opcode == .nop); // else分支被移除
+}
+
+test "conditional expression folding - false condition" {
+    // 测试 false ? a : b -> b
+    var func = CompiledFunction{
+        .bytecode = undefined,
+        .constants = undefined,
+        .name = "test",
+        .arg_count = 0,
+        .local_count = 0,
+        .max_stack = 10,
+        .flags = .{},
+        .line_table = &[_]CompiledFunction.LineInfo{},
+        .exception_table = &[_]CompiledFunction.ExceptionEntry{},
+    };
+    
+    // 模拟字节码：push_const(false), jz(5), push_const(10), jmp(6), push_const(20)
+    var bytecode = [_]Instruction{
+        Instruction.init(.push_const, 0, 0), // false
+        Instruction.init(.jz, 4, 0),         // jump to else if false
+        Instruction.init(.push_const, 1, 0), // then: 10
+        Instruction.init(.jmp, 5, 0),        // jump to end
+        Instruction.init(.push_const, 2, 0), // else: 20
+        Instruction.init(.nop, 0, 0),        // end
+    };
+    func.bytecode = &bytecode;
+    
+    var constants = [_]Value{
+        Value{ .bool_val = false }, // 0
+        Value{ .int_val = 10 },     // 1
+        Value{ .int_val = 20 },     // 2
+    };
+    func.constants = &constants;
+    
+    var opt = BytecodeOptimizer.init(std.testing.allocator, .basic);
+    try opt.constantFolding(&func);
+    
+    // 验证：条件应该被移除，jz变为jmp，then分支应该被标记为nop
+    try std.testing.expect(func.bytecode[0].opcode == .nop);
+    try std.testing.expect(func.bytecode[1].opcode == .jmp);
+    try std.testing.expect(func.bytecode[2].opcode == .nop); // then分支被移除
+}
+
+test "conditional expression folding - integer condition" {
+    // 测试整数条件：1 ? a : b -> a (非零为true)
+    var func = CompiledFunction{
+        .bytecode = undefined,
+        .constants = undefined,
+        .name = "test",
+        .arg_count = 0,
+        .local_count = 0,
+        .max_stack = 10,
+        .flags = .{},
+        .line_table = &[_]CompiledFunction.LineInfo{},
+        .exception_table = &[_]CompiledFunction.ExceptionEntry{},
+    };
+    
+    var bytecode = [_]Instruction{
+        Instruction.init(.push_const, 0, 0), // 1 (true)
+        Instruction.init(.jz, 4, 0),
+        Instruction.init(.push_const, 1, 0),
+        Instruction.init(.jmp, 5, 0),
+        Instruction.init(.push_const, 2, 0),
+        Instruction.init(.nop, 0, 0),
+    };
+    func.bytecode = &bytecode;
+    
+    var constants = [_]Value{
+        Value{ .int_val = 1 },      // 0 (非零 = true)
+        Value{ .int_val = 10 },     // 1
+        Value{ .int_val = 20 },     // 2
+    };
+    func.constants = &constants;
+    
+    var opt = BytecodeOptimizer.init(std.testing.allocator, .basic);
+    try opt.constantFolding(&func);
+    
+    // 验证：整数1应该被当作true处理
+    try std.testing.expect(func.bytecode[0].opcode == .nop);
+    try std.testing.expect(func.bytecode[1].opcode == .nop);
 }

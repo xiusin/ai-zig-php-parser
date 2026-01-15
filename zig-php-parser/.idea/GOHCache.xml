@@ -17,20 +17,6 @@
             </set>
           </value>
         </entry>
-        <entry key="CustBaseWhere">
-          <value>
-            <set>
-              <option value="file://$USER_HOME$/products/fansnewgo/internal/middleware/checklogin.go" />
-            </set>
-          </value>
-        </entry>
-        <entry key="Login">
-          <value>
-            <set>
-              <option value="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go" />
-            </set>
-          </value>
-        </entry>
         <entry key="LoginOrPing">
           <value>
             <set>
@@ -45,13 +31,6 @@
             </set>
           </value>
         </entry>
-        <entry key="PersonalWechat">
-          <value>
-            <set>
-              <option value="file://$USER_HOME$/products/fansnewgo/internal/model/personalWechat.go" />
-            </set>
-          </value>
-        </entry>
         <entry key="PersonalWechatCounter">
           <value>
             <set>
@@ -59,10 +38,10 @@
             </set>
           </value>
         </entry>
-        <entry key="UserStats">
+        <entry key="VersionData">
           <value>
             <set>
-              <option value="file://$USER_HOME$/products/fansnewgo/internal/handler/workWechat.go" />
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go" />
             </set>
           </value>
         </entry>
@@ -80,24 +59,10 @@
             </set>
           </value>
         </entry>
-        <entry key="bodyLogWriter">
+        <entry key="adUidTopHandler">
           <value>
             <set>
-              <option value="file://$USER_HOME$/products/fansnewgo/internal/middleware/logging.go" />
-            </set>
-          </value>
-        </entry>
-        <entry key="options">
-          <value>
-            <set>
-              <option value="file://$USER_HOME$/products/fansnewgo/internal/middleware/logging.go" />
-            </set>
-          </value>
-        </entry>
-        <entry key="workWechatHandler">
-          <value>
-            <set>
-              <option value="file://$USER_HOME$/products/fansnewgo/internal/handler/workWechat.go" />
+              <option value="file://$USER_HOME$/products/fansnewgo/internal/handler/adUidTop.go" />
             </set>
           </value>
         </entry>
@@ -105,74 +70,22 @@
     </option>
     <option name="scannedPathMapping">
       <map>
-        <entry key="file://$USER_HOME$/products/fansnewgo/internal/handler/workWechat.go">
+        <entry key="file://$USER_HOME$/products/fansnewgo/internal/handler/adUidTop.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767598175699" />
+              <option name="lastModified" value="1768354628225" />
               <option name="schema">
                 <list>
-                  <option value="workWechatHandler" />
-                  <option value="UserStats" />
+                  <option value="adUidTopHandler" />
                 </list>
               </option>
-            </ScannedPath>
-          </value>
-        </entry>
-        <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/checklogin.go">
-          <value>
-            <ScannedPath>
-              <option name="lastModified" value="1767516714509" />
-              <option name="schema">
-                <list>
-                  <option value="CustBaseWhere" />
-                </list>
-              </option>
-            </ScannedPath>
-          </value>
-        </entry>
-        <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/cors.go">
-          <value>
-            <ScannedPath>
-              <option name="lastModified" value="1767516714517" />
-            </ScannedPath>
-          </value>
-        </entry>
-        <entry key="file://$USER_HOME$/products/fansnewgo/internal/middleware/logging.go">
-          <value>
-            <ScannedPath>
-              <option name="lastModified" value="1767515620884" />
-              <option name="schema">
-                <list>
-                  <option value="options" />
-                  <option value="bodyLogWriter" />
-                </list>
-              </option>
-            </ScannedPath>
-          </value>
-        </entry>
-        <entry key="file://$USER_HOME$/products/fansnewgo/internal/model/personalWechat.go">
-          <value>
-            <ScannedPath>
-              <option name="lastModified" value="1767519397068" />
-              <option name="schema">
-                <list>
-                  <option value="PersonalWechat" />
-                </list>
-              </option>
-            </ScannedPath>
-          </value>
-        </entry>
-        <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/cache.go">
-          <value>
-            <ScannedPath>
-              <option name="lastModified" value="1767516714522" />
             </ScannedPath>
           </value>
         </entry>
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/counter.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767601059577" />
+              <option name="lastModified" value="1768353244018" />
               <option name="schema">
                 <list>
                   <option value="WsRequestData" />
@@ -186,13 +99,14 @@
         <entry key="file://$USER_HOME$/products/fansnewgo/internal/tools/counter/dto_vo.go">
           <value>
             <ScannedPath>
-              <option name="lastModified" value="1767518484563" />
+              <option name="lastModified" value="1768352028740" />
               <option name="schema">
                 <list>
                   <option value="LoginOrPing" />
                   <option value="AddFans" />
                   <option value="Confirm" />
                   <option value="OpenChat" />
+                  <option value="VersionData" />
                 </list>
               </option>
             </ScannedPath>
@@ -202,22 +116,17 @@
     </option>
     <option name="tableStructMapping">
       <map>
+        <entry key="ad_uid_top_handler" value="adUidTopHandler" />
         <entry key="add_fans" value="AddFans" />
-        <entry key="body_log_writer" value="bodyLogWriter" />
         <entry key="confirm" value="Confirm" />
-        <entry key="cust_base_where" value="CustBaseWhere" />
-        <entry key="login" value="Login" />
         <entry key="login_or_ping" value="LoginOrPing" />
         <entry key="open_chat" value="OpenChat" />
-        <entry key="options" value="options" />
-        <entry key="personal_wechat" value="PersonalWechat" />
         <entry key="personal_wechat_counter" value="PersonalWechatCounter" />
-        <entry key="user_stats" value="UserStats" />
-        <entry key="work_wechat_handler" value="workWechatHandler" />
+        <entry key="version_data" value="VersionData" />
         <entry key="ws_request_data" value="WsRequestData" />
         <entry key="ws_resp_data" value="WsRespData" />
       </map>
     </option>
-    <option name="lastTimeChecked" value="1767512484664" />
+    <option name="lastTimeChecked" value="1768298183097" />
   </component>
 </project>

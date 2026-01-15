@@ -11,6 +11,10 @@ const builtin_random = @import("builtin_random.zig");
 const builtin_vars = @import("builtin_vars.zig");
 const pcre2 = @import("pcre2.zig");
 
+// SIMD optimized string operations for performance
+const simd_ops = @import("simd_ops.zig");
+const SimdString = simd_ops.SimdString;
+
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
 
@@ -507,7 +511,7 @@ fn arrayMapFn(vm: *VM, args: []const Value) !Value {
     }
 
     const source_array = array.getAsArray().data;
-    const count = source_array.elements.count();
+    const count = source_array.getElements().count();
 
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
@@ -515,9 +519,9 @@ fn arrayMapFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.elements.ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(count);
 
-    var iterator = source_array.elements.iterator();
+    var iterator = source_array.getElements().iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -529,7 +533,7 @@ fn arrayMapFn(vm: *VM, args: []const Value) !Value {
             return error.InvalidArgumentType;
         };
 
-        result_array.elements.putAssumeCapacity(key, result_value);
+        result_array.getElements().putAssumeCapacity(key, result_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -552,7 +556,7 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
     }
 
     const source_array = array.getAsArray().data;
-    const count = source_array.elements.count();
+    const count = source_array.getElements().count();
 
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
@@ -560,11 +564,11 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.elements.ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(count);
 
     const callback = if (args.len > 1) args[1] else null;
 
-    var iterator = source_array.elements.iterator();
+    var iterator = source_array.getElements().iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -583,7 +587,7 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
         }
 
         if (should_include) {
-            result_array.elements.putAssumeCapacity(key, value);
+            result_array.getElements().putAssumeCapacity(key, value);
         }
     }
 
@@ -610,7 +614,7 @@ fn arrayReduceFn(vm: *VM, args: []const Value) !Value {
 
     var accumulator = initial;
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = array.getAsArray().data.getElements().iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
 
@@ -654,11 +658,11 @@ fn arrayMergeFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.elements.ensureTotalCapacity(total_count);
+    try result_array.getElements().ensureTotalCapacity(total_count);
 
     // Second pass: merge all arrays with direct insertion
     for (args) |arg| {
-        var iterator = arg.getAsArray().data.elements.iterator();
+        var iterator = arg.getAsArray().data.getElements().iterator();
         while (iterator.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
@@ -669,13 +673,13 @@ fn arrayMergeFn(vm: *VM, args: []const Value) !Value {
                 .integer => {
                     const dest_key = ArrayKey{ .integer = result_array.next_index };
                     result_array.next_index += 1;
-                    result_array.elements.putAssumeCapacity(dest_key, value);
+                    result_array.getElements().putAssumeCapacity(dest_key, value);
                 },
                 .string => |s| {
                     // Retain string key
                     const new_key = ArrayKey{ .string = s };
                     new_key.string.retain();
-                    result_array.elements.putAssumeCapacity(new_key, value);
+                    result_array.getElements().putAssumeCapacity(new_key, value);
                 },
             }
         }
@@ -701,7 +705,7 @@ fn arrayKeysFn(vm: *VM, args: []const Value) !Value {
     }
 
     const source_array = array.getAsArray().data;
-    const count = source_array.elements.count();
+    const count = source_array.getElements().count();
 
     if (count == 0) {
         const result_array = try vm.allocator.create(PHPArray);
@@ -722,9 +726,9 @@ fn arrayKeysFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.elements.ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(count);
 
-    var iterator = source_array.elements.iterator();
+    var iterator = source_array.getElements().iterator();
     var idx: i64 = 0;
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -747,7 +751,7 @@ fn arrayKeysFn(vm: *VM, args: []const Value) !Value {
         const dest_key = ArrayKey{ .integer = idx };
         idx += 1;
         _ = key_value.retain();
-        result_array.elements.putAssumeCapacity(dest_key, key_value);
+        result_array.getElements().putAssumeCapacity(dest_key, key_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -770,7 +774,7 @@ fn arrayValuesFn(vm: *VM, args: []const Value) !Value {
     }
 
     const source_array = array.getAsArray().data;
-    const count = source_array.elements.count();
+    const count = source_array.getElements().count();
 
     if (count == 0) {
         const result_array = try vm.allocator.create(PHPArray);
@@ -790,17 +794,17 @@ fn arrayValuesFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.elements.ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(count);
 
     // Direct insertion - avoid push overhead
-    var iterator = source_array.elements.iterator();
+    var iterator = source_array.getElements().iterator();
     var idx: i64 = 0;
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
         _ = value.retain();
         const key = ArrayKey{ .integer = idx };
         idx += 1;
-        result_array.elements.putAssumeCapacity(key, value);
+        result_array.getElements().putAssumeCapacity(key, value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -851,7 +855,7 @@ fn arrayPopFn(vm: *VM, args: []const Value) !Value {
     var last_key: ?ArrayKey = null;
     var last_value: ?Value = null;
 
-    var iterator = php_array.elements.iterator();
+    var iterator = php_array.getElements().iterator();
     while (iterator.next()) |entry| {
         last_key = entry.key_ptr.*;
         last_value = entry.value_ptr.*;
@@ -859,7 +863,7 @@ fn arrayPopFn(vm: *VM, args: []const Value) !Value {
 
     if (last_key) |key| {
         const result = last_value.?;
-        _ = php_array.elements.swapRemove(key);
+        _ = php_array.getElements().swapRemove(key);
         return result;
     }
 
@@ -885,7 +889,7 @@ fn arrayShiftFn(vm: *VM, args: []const Value) !Value {
     var first_key: ?ArrayKey = null;
     var first_value: ?Value = null;
 
-    var iterator = php_array.elements.iterator();
+    var iterator = php_array.getElements().iterator();
     if (iterator.next()) |entry| {
         first_key = entry.key_ptr.*;
         first_value = entry.value_ptr.*;
@@ -893,7 +897,7 @@ fn arrayShiftFn(vm: *VM, args: []const Value) !Value {
 
     if (first_key) |key| {
         const result = first_value.?;
-        _ = php_array.elements.swapRemove(key);
+        _ = php_array.getElements().swapRemove(key);
         return result;
     }
 
@@ -920,15 +924,21 @@ fn arrayUnshiftFn(vm: *VM, args: []const Value) !Value {
     }
 
     // Add existing elements
-    var iterator = php_array.elements.iterator();
+    var iterator = php_array.getElements().iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
         try new_array.push(vm.allocator, value);
     }
 
-    // Replace the original array's contents
-    php_array.elements.deinit();
-    php_array.elements = new_array.elements;
+    // Replace the original array's contents by copying from new_array
+    // First clear the old array
+    php_array.getElements().clearRetainingCapacity();
+    
+    // Copy elements from new_array
+    var new_iter = new_array.getElements().iterator();
+    while (new_iter.next()) |entry| {
+        try php_array.set(vm.allocator, entry.key_ptr.*, entry.value_ptr.*);
+    }
     php_array.next_index = new_array.next_index;
 
     return Value.initInt(@intCast(php_array.count()));
@@ -956,7 +966,7 @@ fn inArrayFn(vm: *VM, args: []const Value) !Value {
         needle_str.?.retain();
     }
 
-    var iterator = haystack.getAsArray().data.elements.iterator();
+    var iterator = haystack.getAsArray().data.getElements().iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
 
@@ -1033,7 +1043,7 @@ fn arraySearchFn(vm: *VM, args: []const Value) !Value {
         needle_str.?.retain();
     }
 
-    var iterator = haystack.getAsArray().data.elements.iterator();
+    var iterator = haystack.getAsArray().data.getElements().iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -1166,9 +1176,9 @@ fn strposFn(vm: *VM, args: []const Value) !Value {
     const haystack_str = haystack.getAsString().data.data;
     const needle_str = needle.getAsString().data.data;
 
-    // Use indexOfPos to handle offset correctly
-    const search_slice = if (offset > 0) haystack_str[offset..] else haystack_str;
-    if (std.mem.indexOf(u8, search_slice, needle_str)) |pos| {
+    // Use SIMD-optimized search for better performance
+    const search_slice = if (offset > 0 and offset < haystack_str.len) haystack_str[offset..] else haystack_str;
+    if (SimdString.findSimd(search_slice, needle_str)) |pos| {
         return Value.initInt(@intCast(offset + pos));
     }
     return Value.initBool(false);
@@ -1216,7 +1226,7 @@ fn strrposFn(vm: *VM, args: []const Value) !Value {
     return Value.initBool(false);
 }
 
-// Case-insensitive strrpos
+// Case-insensitive strrpos - optimized with SIMD
 fn strriposFn(vm: *VM, args: []const Value) !Value {
     const haystack = args[0];
     const needle = args[1];
@@ -1232,15 +1242,13 @@ fn strriposFn(vm: *VM, args: []const Value) !Value {
 
     const haystack_lower = try vm.allocator.alloc(u8, haystack_str.len);
     defer vm.allocator.free(haystack_lower);
-    for (haystack_str, 0..) |c, i| {
-        haystack_lower[i] = std.ascii.toLower(c);
-    }
+    // Use SIMD-optimized toLower
+    SimdString.toLowerSimd(haystack_lower, haystack_str);
 
     const needle_lower = try vm.allocator.alloc(u8, needle_str.len);
     defer vm.allocator.free(needle_lower);
-    for (needle_str, 0..) |c, i| {
-        needle_lower[i] = std.ascii.toLower(c);
-    }
+    // Use SIMD-optimized toLower
+    SimdString.toLowerSimd(needle_lower, needle_str);
 
     if (std.mem.lastIndexOf(u8, haystack_lower, needle_lower)) |pos| {
         return Value.initInt(@intCast(pos));
@@ -1260,9 +1268,8 @@ fn strtolowerFn(vm: *VM, args: []const Value) !Value {
     const original = str.getAsString().data;
     const lower_data = try vm.allocator.alloc(u8, original.length);
 
-    for (original.data, 0..) |char, i| {
-        lower_data[i] = std.ascii.toLower(char);
-    }
+    // Use SIMD-optimized toLower for better performance on longer strings
+    SimdString.toLowerSimd(lower_data, original.data);
 
     const result_str = try vm.allocator.create(PHPString);
     result_str.* = .{
@@ -1294,9 +1301,8 @@ fn strtoupperFn(vm: *VM, args: []const Value) !Value {
     const original = str.getAsString().data;
     const upper_data = try vm.allocator.alloc(u8, original.length);
 
-    for (original.data, 0..) |char, i| {
-        upper_data[i] = std.ascii.toUpper(char);
-    }
+    // Use SIMD-optimized toUpper for better performance on longer strings
+    SimdString.toUpperSimd(upper_data, original.data);
 
     const result_str = try vm.allocator.create(PHPString);
     result_str.* = .{
@@ -1545,7 +1551,7 @@ fn implodeFn(vm: *VM, args: []const Value) !Value {
     const glue_data = glue_box.data.data;
     const glue_len = glue_data.len;
     const array_data = pieces.getAsArray().data;
-    const count = array_data.elements.count();
+    const count = array_data.getElements().count();
 
     if (count == 0) {
         const result_str = try PHPString.init(vm.allocator, "");
@@ -1560,7 +1566,7 @@ fn implodeFn(vm: *VM, args: []const Value) !Value {
 
     // First pass: calculate total length
     var total_length: usize = 0;
-    var iterator = array_data.elements.iterator();
+    var iterator = array_data.getElements().iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
 
@@ -1584,12 +1590,12 @@ fn implodeFn(vm: *VM, args: []const Value) !Value {
     // Second pass: copy strings directly to result buffer
     var pos: usize = 0;
     var first = true;
-    iterator = array_data.elements.iterator();
+    iterator = array_data.getElements().iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
 
         if (!first) {
-            @memcpy(result_data[pos..pos + glue_len], glue_data);
+            @memcpy(result_data[pos .. pos + glue_len], glue_data);
             pos += glue_len;
         }
         first = false;
@@ -1597,12 +1603,12 @@ fn implodeFn(vm: *VM, args: []const Value) !Value {
         if (value.getTag() == .string) {
             const str_data = value.getAsString().data.data;
             const len = str_data.len;
-            @memcpy(result_data[pos..pos + len], str_data);
+            @memcpy(result_data[pos .. pos + len], str_data);
             pos += len;
         } else {
             const value_str = try value.toString(vm.allocator);
             const len = value_str.data.len;
-            @memcpy(result_data[pos..pos + len], value_str.data);
+            @memcpy(result_data[pos .. pos + len], value_str.data);
             pos += len;
             value_str.deinit(vm.allocator);
         }
@@ -1674,9 +1680,15 @@ fn strRepeatFn(vm: *VM, args: []const Value) !Value {
     return Value.fromBox(box, Value.TYPE_STRING);
 }
 
-// Math Function Implementations
+// Math Function Implementations - 快速路径优化版本
 fn absFn(vm: *VM, args: []const Value) !Value {
-    const num = try toFloat(vm, args[0]);
+    const arg = args[0];
+    // 快速路径：整数直接处理，避免浮点转换
+    if (arg.getTag() == .integer) {
+        const i = arg.asInt();
+        return Value.initInt(if (i < 0) -i else i);
+    }
+    const num = try toFloat(vm, arg);
     return Value.initFloat(@abs(num));
 }
 
@@ -1714,7 +1726,7 @@ fn roundFn(vm: *VM, args: []const Value) !Value {
 fn sqrtFn(vm: *VM, args: []const Value) !Value {
     const number = args[0];
 
-    const num_val = switch (number.getTag()) {
+    const num_val: f64 = switch (number.getTag()) {
         .integer => @as(f64, @floatFromInt(number.asInt())),
         .float => number.asFloat(),
         else => {
@@ -1767,34 +1779,26 @@ fn powFn(vm: *VM, args: []const Value) !Value {
 
 fn floorFn(vm: *VM, args: []const Value) !Value {
     const number = args[0];
-
-    const num_val = switch (number.getTag()) {
-        .integer => return number, // Already an integer
-        .float => number.asFloat(),
-        else => {
-            const exception = try ExceptionFactory.createTypeError(vm.allocator, "floor() expects parameter 1 to be numeric", "builtin", 0);
-            _ = try vm.throwException(exception);
-            return error.InvalidArgumentType;
-        },
-    };
-
-    return Value.initFloat(@floor(num_val));
+    // 快速路径：整数直接返回
+    if (number.getTag() == .integer) return number;
+    if (number.getTag() != .float) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "floor() expects parameter 1 to be numeric", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+    return Value.initFloat(@floor(number.asFloat()));
 }
 
 fn ceilFn(vm: *VM, args: []const Value) !Value {
     const number = args[0];
-
-    const num_val = switch (number.getTag()) {
-        .integer => return number, // Already an integer
-        .float => number.asFloat(),
-        else => {
-            const exception = try ExceptionFactory.createTypeError(vm.allocator, "ceil() expects parameter 1 to be numeric", "builtin", 0);
-            _ = try vm.throwException(exception);
-            return error.InvalidArgumentType;
-        },
-    };
-
-    return Value.initFloat(@ceil(num_val));
+    // 快速路径：整数直接返回
+    if (number.getTag() == .integer) return number;
+    if (number.getTag() != .float) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "ceil() expects parameter 1 to be numeric", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+    return Value.initFloat(@ceil(number.asFloat()));
 }
 
 fn minFn(vm: *VM, args: []const Value) !Value {
@@ -2300,7 +2304,7 @@ const JsonParser = struct {
         }
     }
 
-const JsonParseError = error{OutOfMemory};
+    const JsonParseError = error{OutOfMemory};
 
     fn parseValue(self: *JsonParser, allocator: std.mem.Allocator, vm: *VM, assoc: bool) JsonParseError!Value {
         self.skipWhitespace();
@@ -2408,7 +2412,8 @@ const JsonParseError = error{OutOfMemory};
         const num_str = self.input[start..self.pos];
         if (std.mem.indexOf(u8, num_str, ".") != null or
             std.mem.indexOf(u8, num_str, "e") != null or
-            std.mem.indexOf(u8, num_str, "E") != null) {
+            std.mem.indexOf(u8, num_str, "E") != null)
+        {
             if (std.fmt.parseFloat(f64, num_str)) |f| {
                 return Value.initFloat(f);
             } else |_| {}
@@ -2596,11 +2601,11 @@ fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
         .string => try std.fmt.allocPrint(allocator, "\"{s}\"", .{value.getAsString().data.data}),
         .array => {
             const arr = value.getAsArray().data;
-            const len = arr.elements.count();
+            const len = arr.getElements().count();
 
             // Check if it's an associative array (has string keys)
             var is_object = false;
-            var iter = arr.elements.iterator();
+            var iter = arr.getElements().iterator();
             while (iter.next()) |entry| {
                 if (entry.key_ptr.* == .string) {
                     is_object = true;
@@ -2618,7 +2623,7 @@ fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
                 // Output as JSON object
                 result.appendAssumeCapacity('{');
                 var first = true;
-                var obj_iter = arr.elements.iterator();
+                var obj_iter = arr.getElements().iterator();
                 while (obj_iter.next()) |entry| {
                     if (!first) result.appendAssumeCapacity(',');
                     first = false;
@@ -2648,7 +2653,7 @@ fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
                 // Output as JSON array
                 result.appendAssumeCapacity('[');
                 var first = true;
-                var arr_iter = arr.elements.iterator();
+                var arr_iter = arr.getElements().iterator();
                 while (arr_iter.next()) |entry| {
                     if (!first) result.appendAssumeCapacity(',');
                     first = false;
@@ -2949,7 +2954,7 @@ fn arrayFirstFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = array.getAsArray().data.getElements().iterator();
 
     if (callback) |cb| {
         // Find first element that matches callback
@@ -2999,7 +3004,7 @@ fn arrayLastFn(vm: *VM, args: []const Value) !Value {
     if (callback) |cb| {
         // Find last element that matches callback
         var last_match: ?Value = null;
-        var iterator = array.getAsArray().data.elements.iterator();
+        var iterator = array.getAsArray().data.getElements().iterator();
 
         while (iterator.next()) |entry| {
             const value = entry.value_ptr.*;
@@ -3028,7 +3033,7 @@ fn arrayLastFn(vm: *VM, args: []const Value) !Value {
     } else {
         // Return last element
         var last_value: ?Value = null;
-        var iterator = array.getAsArray().data.elements.iterator();
+        var iterator = array.getAsArray().data.getElements().iterator();
 
         while (iterator.next()) |entry| {
             last_value = entry.value_ptr.*;
@@ -3048,18 +3053,9 @@ fn arraySumFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    var sum: f64 = 0;
-    var iterator = array.getAsArray().data.elements.iterator();
-
-    while (iterator.next()) |entry| {
-        const value = entry.value_ptr.*;
-        sum += switch (value.getTag()) {
-            .integer => @floatFromInt(value.asInt()),
-            .float => value.asFloat(),
-            .string => std.fmt.parseFloat(f64, value.getAsString().data.data) catch 0,
-            else => 0,
-        };
-    }
+    // 使用PHPArray的SoA优化求和方法
+    const php_array = array.getAsArray().data;
+    const sum = php_array.sumFloats();
 
     // Return int if sum is a whole number
     if (@floor(sum) == sum and sum >= @as(f64, @floatFromInt(std.math.minInt(i64))) and sum <= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
@@ -3078,7 +3074,7 @@ fn arrayProductFn(vm: *VM, args: []const Value) !Value {
     }
 
     var product: f64 = 1;
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = array.getAsArray().data.getElements().iterator();
 
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
@@ -3107,7 +3103,7 @@ fn arrayReverseFn(vm: *VM, args: []const Value) !Value {
     }
 
     const source_array = array.getAsArray().data;
-    const count = source_array.elements.count();
+    const count = source_array.getElements().count();
 
     if (count == 0) {
         const result_array = try vm.allocator.create(PHPArray);
@@ -3123,7 +3119,7 @@ fn arrayReverseFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.elements.ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(count);
 
     // Pre-allocate temp array with exact size
     const temp = try vm.allocator.alloc(struct { key: ArrayKey, value: Value }, count);
@@ -3131,7 +3127,7 @@ fn arrayReverseFn(vm: *VM, args: []const Value) !Value {
 
     // Copy elements to temp (backwards order)
     var idx: usize = 0;
-    var iterator = source_array.elements.iterator();
+    var iterator = source_array.getElements().iterator();
     while (iterator.next()) |entry| {
         temp[idx] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };
         idx += 1;
@@ -3149,11 +3145,11 @@ fn arrayReverseFn(vm: *VM, args: []const Value) !Value {
             if (item.key == .string) {
                 item.key.string.retain();
             }
-            result_array.elements.putAssumeCapacity(item.key, item.value);
+            result_array.getElements().putAssumeCapacity(item.key, item.value);
         } else {
             const dest_key = ArrayKey{ .integer = new_index };
             new_index += 1;
-            result_array.elements.putAssumeCapacity(dest_key, item.value);
+            result_array.getElements().putAssumeCapacity(dest_key, item.value);
         }
     }
 
@@ -3181,7 +3177,7 @@ fn arrayUniqueFn(vm: *VM, args: []const Value) !Value {
     var seen = std.StringHashMap(void).init(vm.allocator);
     defer seen.deinit();
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = array.getAsArray().data.getElements().iterator();
     while (iterator.next()) |entry| {
         const value = entry.value_ptr.*;
         const str_val = switch (value.getTag()) {
@@ -3214,7 +3210,7 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arr = array.getAsArray().data;
-    const count = arr.elements.count();
+    const count = arr.getElements().count();
 
     var result_array = try vm.allocator.create(PHPArray);
     errdefer {
@@ -3224,9 +3220,9 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
     result_array.* = PHPArray.init(vm.allocator);
 
     // Pre-allocate capacity
-    try result_array.elements.ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(count);
 
-    var iterator = arr.elements.iterator();
+    var iterator = arr.getElements().iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -3249,7 +3245,7 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
             },
         };
 
-        result_array.elements.putAssumeCapacity(new_key, new_value);
+        result_array.getElements().putAssumeCapacity(new_key, new_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -3269,7 +3265,7 @@ fn arraySliceFn(vm: *VM, args: []const Value) !Value {
     }
 
     const source_array = array.getAsArray().data;
-    const count = source_array.elements.count();
+    const count = source_array.getElements().count();
     const offset: i64 = if (offset_val.getTag() == .integer) offset_val.asInt() else 0;
     const length: i64 = if (length_val.getTag() == .integer) length_val.asInt() else @intCast(count);
 
@@ -3307,10 +3303,10 @@ fn arraySliceFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.elements.ensureTotalCapacity(slice_count);
+    try result_array.getElements().ensureTotalCapacity(slice_count);
 
     // Direct insertion - collect and copy values
-    var iterator = source_array.elements.iterator();
+    var iterator = source_array.getElements().iterator();
     var idx: usize = 0;
     var result_idx: i64 = 0;
     while (iterator.next()) |entry| {
@@ -3319,7 +3315,7 @@ fn arraySliceFn(vm: *VM, args: []const Value) !Value {
             _ = value.retain();
             const key = ArrayKey{ .integer = result_idx };
             result_idx += 1;
-            result_array.elements.putAssumeCapacity(key, value);
+            result_array.getElements().putAssumeCapacity(key, value);
         }
         idx += 1;
     }
@@ -3355,7 +3351,7 @@ fn arrayColumnFn(vm: *VM, args: []const Value) !Value {
         else => ArrayKey{ .integer = 0 },
     };
 
-    var iterator = array.getAsArray().data.elements.iterator();
+    var iterator = array.getAsArray().data.getElements().iterator();
     while (iterator.next()) |entry| {
         const row = entry.value_ptr.*;
         if (row.getTag() == .array) {
@@ -3726,7 +3722,7 @@ fn dumpValueDebug(value: Value, indent: usize) void {
         .array => {
             const arr = value.getAsArray().data;
             std.debug.print("array({d}) {{\n", .{arr.count()});
-            var iter = arr.elements.iterator();
+            var iter = arr.getElements().iterator();
             while (iter.next()) |entry| {
                 std.debug.print("{s}", .{ind[0..@min((indent + 1) * 2, ind.len)]});
                 switch (entry.key_ptr.*) {
@@ -3759,7 +3755,7 @@ fn printValueDebug(value: Value, indent: usize) void {
         .string => std.debug.print("{s}", .{value.getAsString().data.data}),
         .array => {
             std.debug.print("Array\n{s}(\n", .{ind[0..@min(indent * 4, ind.len)]});
-            var iter = value.getAsArray().data.elements.iterator();
+            var iter = value.getAsArray().data.getElements().iterator();
             while (iter.next()) |entry| {
                 std.debug.print("{s}", .{ind[0..@min((indent + 1) * 4, ind.len)]});
                 switch (entry.key_ptr.*) {
@@ -3789,7 +3785,7 @@ fn exportValueDebug(value: Value) void {
         .string => std.debug.print("'{s}'", .{value.getAsString().data.data}),
         .array => {
             std.debug.print("array (\n", .{});
-            var iter = value.getAsArray().data.elements.iterator();
+            var iter = value.getAsArray().data.getElements().iterator();
             while (iter.next()) |entry| {
                 switch (entry.key_ptr.*) {
                     .integer => |i| std.debug.print("  {d} => ", .{i}),
@@ -3970,7 +3966,7 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
             const count = arr.count();
             try buffer.writer(vm.allocator).print("a:{d}:{{", .{count});
 
-            var iterator = arr.elements.iterator();
+            var iterator = arr.getElements().iterator();
             while (iterator.next()) |entry| {
                 const key = entry.key_ptr.*;
                 const val = entry.value_ptr.*;
@@ -4261,7 +4257,7 @@ fn sortFn(vm: *VM, args: []const Value) !Value {
     var values = std.ArrayListUnmanaged(Value){};
     defer values.deinit(vm.allocator);
 
-    var iterator = php_array.elements.iterator();
+    var iterator = php_array.getElements().iterator();
     while (iterator.next()) |entry| {
         try values.append(vm.allocator, entry.value_ptr.*);
     }
@@ -4274,12 +4270,12 @@ fn sortFn(vm: *VM, args: []const Value) !Value {
     }.lessThan);
 
     // Clear and rebuild array with numeric keys
-    php_array.elements.clearRetainingCapacity();
+    php_array.getElements().clearRetainingCapacity();
     php_array.next_index = 0;
 
     for (values.items) |value| {
         const key = ArrayKey{ .integer = @intCast(php_array.next_index) };
-        php_array.elements.put(key, value) catch {};
+        php_array.getElements().put(key, value) catch {};
         php_array.next_index += 1;
     }
 
@@ -4301,7 +4297,7 @@ fn rsortFn(vm: *VM, args: []const Value) !Value {
     var values = std.ArrayListUnmanaged(Value){};
     defer values.deinit(vm.allocator);
 
-    var iterator = php_array.elements.iterator();
+    var iterator = php_array.getElements().iterator();
     while (iterator.next()) |entry| {
         try values.append(vm.allocator, entry.value_ptr.*);
     }
@@ -4313,12 +4309,12 @@ fn rsortFn(vm: *VM, args: []const Value) !Value {
         }
     }.lessThan);
 
-    php_array.elements.clearRetainingCapacity();
+    php_array.getElements().clearRetainingCapacity();
     php_array.next_index = 0;
 
     for (values.items) |value| {
         const key = ArrayKey{ .integer = @intCast(php_array.next_index) };
-        php_array.elements.put(key, value) catch {};
+        php_array.getElements().put(key, value) catch {};
         php_array.next_index += 1;
     }
 
@@ -4426,8 +4422,8 @@ fn arrayKeyExistsFn(vm: *VM, args: []const Value) !Value {
     const php_array = array.getAsArray().data;
 
     const exists = switch (key.getTag()) {
-        .integer => php_array.elements.contains(ArrayKey{ .integer = key.asInt() }),
-        .string => php_array.elements.contains(ArrayKey{ .string = key.getAsString().data }),
+        .integer => php_array.getElements().contains(ArrayKey{ .integer = key.asInt() }),
+        .string => php_array.getElements().contains(ArrayKey{ .string = key.getAsString().data }),
         else => false,
     };
 
@@ -4515,7 +4511,7 @@ fn arrayIntersectFn(vm: *VM, args: []const Value) !Value {
     const result_arr = result.getAsArray().data;
 
     // For each value in arr1, check if it exists in all other arrays
-    var iter1 = arr1.elements.iterator();
+    var iter1 = arr1.getElements().iterator();
     while (iter1.next()) |entry1| {
         const value1 = entry1.value_ptr.*;
 
@@ -4529,7 +4525,7 @@ fn arrayIntersectFn(vm: *VM, args: []const Value) !Value {
 
             const arr = arg.getAsArray().data;
             var found = false;
-            var iter = arr.elements.iterator();
+            var iter = arr.getElements().iterator();
             while (iter.next()) |entry| {
                 const value = entry.value_ptr.*;
 
@@ -4603,7 +4599,7 @@ fn arrayDiffFn(vm: *VM, args: []const Value) !Value {
     const result_arr = result.getAsArray().data;
 
     // For each value in arr1, check if it exists in any other array
-    var iter1 = arr1.elements.iterator();
+    var iter1 = arr1.getElements().iterator();
     while (iter1.next()) |entry1| {
         const value1 = entry1.value_ptr.*;
 
@@ -4613,7 +4609,7 @@ fn arrayDiffFn(vm: *VM, args: []const Value) !Value {
             if (arg.getTag() != .array) continue;
 
             const arr = arg.getAsArray().data;
-            var iter = arr.elements.iterator();
+            var iter = arr.getElements().iterator();
             while (iter.next()) |entry| {
                 const value = entry.value_ptr.*;
 
@@ -4691,7 +4687,7 @@ fn arraySpliceFn(vm: *VM, args: []const Value) !Value {
     // Copy removed elements to result
     var idx: i64 = 0;
     var result_idx: i64 = 0;
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         const value = entry.value_ptr.*;
         if (idx >= start and idx < end) {
@@ -4707,12 +4703,12 @@ fn arraySpliceFn(vm: *VM, args: []const Value) !Value {
     if (start >= 0 and start < arr_count) {
         const actual_end = if (end > arr_count) arr_count else end;
         _ = arr.removeRange(vm.allocator, start, actual_end);
-        
+
         // Insert replacement elements if provided
         if (replacement) |rep| {
             if (rep.getTag() == .array) {
                 const rep_arr = rep.getAsArray().data;
-                var rep_iter = rep_arr.elements.iterator();
+                var rep_iter = rep_arr.getElements().iterator();
                 var insert_idx = start;
                 while (rep_iter.next()) |entry| {
                     const rep_value = entry.value_ptr.*;
@@ -4740,7 +4736,7 @@ fn arrayWalkFn(vm: *VM, args: []const Value) !Value {
     const arr = array.getAsArray().data;
     const userdata = if (args.len > 2) args[2] else null;
 
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -4806,7 +4802,7 @@ fn arrayChunkFn(vm: *VM, args: []const Value) !Value {
     try temp.ensureTotalCapacity(vm.allocator, count);
     defer temp.deinit(vm.allocator);
 
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         temp.appendAssumeCapacity(.{ .key = entry.key_ptr.*, .value = entry.value_ptr.* });
     }
@@ -4885,7 +4881,7 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arr = array.getAsArray().data;
-    const count = arr.elements.count();
+    const count = arr.getElements().count();
     const target_size = @as(usize, @intCast(pad_size.asInt()));
 
     if (target_size < count) {
@@ -4895,20 +4891,20 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
         result.* = PHPArray.init(vm.allocator);
 
         // Pre-allocate capacity
-        try result.elements.ensureTotalCapacity(count);
+        try result.getElements().ensureTotalCapacity(count);
 
-        var iter = arr.elements.iterator();
+        var iter = arr.getElements().iterator();
         while (iter.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
 
             switch (key) {
                 .integer => {
-                    result.elements.putAssumeCapacity(.{ .integer = key.integer }, value.retain());
+                    result.getElements().putAssumeCapacity(.{ .integer = key.integer }, value.retain());
                 },
                 .string => {
                     const str_key = try PHPString.init(vm.allocator, key.string.data);
-                    result.elements.putAssumeCapacity(.{ .string = str_key }, value.retain());
+                    result.getElements().putAssumeCapacity(.{ .string = str_key }, value.retain());
                 },
             }
         }
@@ -4927,28 +4923,28 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
     const after_pad = pad_needed - before_pad;
 
     // Pre-allocate capacity for all elements
-    try result.elements.ensureTotalCapacity(target_size);
+    try result.getElements().ensureTotalCapacity(target_size);
 
     // Add before padding
     var i: usize = 0;
     while (i < before_pad) : (i += 1) {
         const int_key: i64 = @as(i64, @intCast(-@as(i64, @intCast(i + 1))));
-        result.elements.putAssumeCapacity(.{ .integer = int_key }, pad_value.retain());
+        result.getElements().putAssumeCapacity(.{ .integer = int_key }, pad_value.retain());
     }
 
     // Copy original array
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
 
         switch (key) {
             .integer => {
-                result.elements.putAssumeCapacity(.{ .integer = key.integer }, value);
+                result.getElements().putAssumeCapacity(.{ .integer = key.integer }, value);
             },
             .string => {
                 const str_key = try PHPString.init(vm.allocator, key.string.data);
-                result.elements.putAssumeCapacity(.{ .string = str_key }, value);
+                result.getElements().putAssumeCapacity(.{ .string = str_key }, value);
             },
         }
     }
@@ -4957,7 +4953,7 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
     i = 0;
     while (i < after_pad) : (i += 1) {
         const int_key: i64 = @as(i64, @intCast(count + i));
-        result.elements.putAssumeCapacity(.{ .integer = int_key }, pad_value);
+        result.getElements().putAssumeCapacity(.{ .integer = int_key }, pad_value);
     }
 
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
@@ -4976,15 +4972,15 @@ fn arrayKeyFirstFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arr = array.getAsArray().data;
-    if (arr.elements.count() == 0) {
+    if (arr.getElements().count() == 0) {
         return Value.initBool(false);
     }
 
-    if (arr.elements.count() == 0) {
+    if (arr.getElements().count() == 0) {
         return Value.initBool(false);
     }
 
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     const first_entry = iter.next() orelse return Value.initBool(false);
     const first_key = first_entry.key_ptr.*;
 
@@ -5005,12 +5001,12 @@ fn arrayKeyLastFn(vm: *VM, args: []const Value) !Value {
     }
 
     const arr = array.getAsArray().data;
-    if (arr.elements.count() == 0) {
+    if (arr.getElements().count() == 0) {
         return Value.initBool(false);
     }
 
     var last_key: ArrayKey = undefined;
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         last_key = entry.key_ptr.*;
     }
@@ -5037,7 +5033,7 @@ fn arrayFillKeysFn(vm: *VM, args: []const Value) !Value {
     errdefer vm.allocator.destroy(result);
     result.* = PHPArray.init(vm.allocator);
 
-    var iter = keys_arr.elements.iterator();
+    var iter = keys_arr.getElements().iterator();
     while (iter.next()) |entry| {
         const key = entry.key_ptr.*;
         const key_copy = switch (key) {
@@ -5071,7 +5067,7 @@ fn arrayChangeKeyCaseFn(vm: *VM, args: []const Value) !Value {
     errdefer vm.allocator.destroy(result);
     result.* = PHPArray.init(vm.allocator);
 
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
@@ -5115,7 +5111,7 @@ fn arrayCountValuesFn(vm: *VM, args: []const Value) !Value {
     errdefer vm.allocator.destroy(result);
     result.* = PHPArray.init(vm.allocator);
 
-    var iter = arr.elements.iterator();
+    var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         const value = entry.value_ptr.*;
 
@@ -5123,7 +5119,7 @@ fn arrayCountValuesFn(vm: *VM, args: []const Value) !Value {
         const key_str = try value.toString(vm.allocator);
 
         // Check if key already exists and increment count
-        const existing = result.elements.get(.{ .string = key_str });
+        const existing = result.getElements().get(.{ .string = key_str });
         if (existing) |count_val| {
             try result.set(vm.allocator, .{ .string = key_str }, Value.initInt(count_val.asInt() + 1));
         } else {

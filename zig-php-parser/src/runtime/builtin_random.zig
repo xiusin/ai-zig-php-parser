@@ -306,7 +306,7 @@ pub const RandomBuiltins = struct {
         const php_array = array_box.data;
         
         // Get count
-        const count = php_array.elements.count();
+        const count = php_array.getElements().count();
         if (count <= 1) {
             return Value.initBool(true);
         }
@@ -316,7 +316,7 @@ pub const RandomBuiltins = struct {
         defer vm_ptr.allocator.free(entries);
         
         var idx: usize = 0;
-        var iter = php_array.elements.iterator();
+        var iter = php_array.getElements().iterator();
         while (iter.next()) |entry| {
             entries[idx].key = entry.key_ptr.*;
             entries[idx].value = entry.value_ptr.*;
@@ -339,14 +339,14 @@ pub const RandomBuiltins = struct {
         }
         
         // Clear array and release old values
-        var clear_iter = php_array.elements.iterator();
+        var clear_iter = php_array.getElements().iterator();
         while (clear_iter.next()) |entry| {
             entry.value_ptr.release(vm_ptr.allocator);
             if (entry.key_ptr.* == .string) {
                 entry.key_ptr.string.release(vm_ptr.allocator);
             }
         }
-        php_array.elements.clearRetainingCapacity();
+        php_array.getElements().clearRetainingCapacity();
         
         // Re-insert shuffled entries
         for (entries) |*e| {
@@ -355,7 +355,7 @@ pub const RandomBuiltins = struct {
             if (e.key == .string) {
                 e.key.string.retain();
             }
-            php_array.elements.putAssumeCapacity(e.key, e.value);
+            php_array.getElements().putAssumeCapacity(e.key, e.value);
         }
         
         return Value.initBool(true);
@@ -387,7 +387,7 @@ pub const RandomBuiltins = struct {
         
         const array_box = array_value.getAsArray();
         const php_array = array_box.data;
-        const count = php_array.elements.count();
+        const count = php_array.getElements().count();
         
         if (count == 0) {
             return BuiltinError.InvalidArgumentType;
@@ -405,7 +405,7 @@ pub const RandomBuiltins = struct {
         defer vm_ptr.allocator.free(keys);
         
         var idx: usize = 0;
-        var iterator = php_array.elements.iterator();
+        var iterator = php_array.getElements().iterator();
         while (iterator.next()) |entry| {
             keys[idx] = entry.key_ptr.*;
             idx += 1;

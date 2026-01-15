@@ -20,8 +20,10 @@ pub fn build(b: *std.Build) void {
     exe.linkLibC();
     // Support both Intel (usr/local) and Apple Silicon (opt/homebrew) PCRE2 paths
     exe.addIncludePath(.{ .cwd_relative = "/usr/local/Cellar/pcre2/10.47/include" });
+    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/pcre2/include" });
     exe.linkSystemLibrary("pcre2-8");
     exe.addLibraryPath(.{ .cwd_relative = "/usr/local/Cellar/pcre2/10.47/lib" });
+    exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/pcre2/lib" });
 
     b.installArtifact(exe);
 
@@ -83,27 +85,16 @@ pub fn build(b: *std.Build) void {
     // Unit tests
     const test_step = b.step("test", "Run unit tests");
 
-    // List of all test files
+    // List of all test files (only existing files)
     const test_files = [_][]const u8{
-        "src/test_enhanced_types.zig",
-        "src/test_gc.zig",
-        "src/test_enhanced_functions.zig",
-        "src/test_enhanced_parser.zig",
-        "src/test_error_handling.zig",
-        "src/test_object_integration.zig",
-        "src/test_object_system.zig",
-        "src/test_reflection.zig",
-        "src/test_attribute_system.zig",
-        "src/test_bytecode_vm.zig",
-        "src/test_gc_stress.zig",
-        "src/test_bytecode_syntax_mode.zig",
+        // AOT module tests
         "src/aot/root.zig",
         "src/aot/diagnostics.zig",
         "src/aot/ir_generator.zig",
+        // Runtime tests
         "src/runtime/coroutine_error_handling.zig",
         "src/runtime/coroutine_debugging.zig",
         "src/runtime/test_error_handling_property.zig",
-        "src/test_comprehensive_concurrency.zig",
     };
 
     // Add all test files

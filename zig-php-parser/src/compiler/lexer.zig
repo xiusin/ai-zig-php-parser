@@ -2,6 +2,7 @@ const std = @import("std");
 const Token = @import("token.zig").Token;
 pub const SyntaxMode = @import("syntax_mode.zig").SyntaxMode;
 pub const SyntaxConfig = @import("syntax_mode.zig").SyntaxConfig;
+const keyword_lookup = @import("keyword_lookup.zig");
 
 pub const Lexer = struct {
     buffer: [:0]const u8,
@@ -307,24 +308,19 @@ pub const Lexer = struct {
         while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_' or self.buffer[self.pos] == '\\')) self.pos += 1;
         const text = self.buffer[start..self.pos];
 
-        // Fast path: identifiers longer than 10 chars are definitely not keywords
-        // This avoids 50+ string comparisons for most user-defined identifiers
-        const text_len = self.pos - start;
-        if (text_len > 10) {
-            const tag: Token.Tag = if (self.syntax_mode == .go) .t_go_identifier else .t_string;
-            return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
+        // 使用高性能关键词查找（完美哈希表，O(1)复杂度）
+        // 短关键词（2-5字符）使用超快速路径，长关键词使用哈希表
+        if (text.len <= 5) {
+            if (keyword_lookup.lookupFast(text)) |tag| {
+                return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
+            }
+        } else if (text.len <= 15) {
+            if (keyword_lookup.lookup(text)) |tag| {
+                return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
+            }
         }
-        
-        // Check for keywords first (same for both PHP and Go modes)
-        const keyword_tag: ?Token.Tag = if (std.mem.eql(u8, text, "class")) .k_class else if (std.mem.eql(u8, text, "interface")) .k_interface else if (std.mem.eql(u8, text, "trait")) .k_trait else if (std.mem.eql(u8, text, "enum")) .k_enum else if (std.mem.eql(u8, text, "struct")) .k_struct else if (std.mem.eql(u8, text, "extends")) .k_extends else if (std.mem.eql(u8, text, "implements")) .k_implements else if (std.mem.eql(u8, text, "use")) .k_use else if (std.mem.eql(u8, text, "public")) .k_public else if (std.mem.eql(u8, text, "private")) .k_private else if (std.mem.eql(u8, text, "protected")) .k_protected else if (std.mem.eql(u8, text, "static")) .k_static else if (std.mem.eql(u8, text, "readonly")) .k_readonly else if (std.mem.eql(u8, text, "final")) .k_final else if (std.mem.eql(u8, text, "abstract")) .k_abstract else if (std.mem.eql(u8, text, "function")) .k_function else if (std.mem.eql(u8, text, "fn")) .k_fn else if (std.mem.eql(u8, text, "new")) .k_new else if (std.mem.eql(u8, text, "if")) .k_if else if (std.mem.eql(u8, text, "else")) .k_else else if (std.mem.eql(u8, text, "elseif")) .k_elseif else if (std.mem.eql(u8, text, "while")) .k_while else if (std.mem.eql(u8, text, "for")) .k_for else if (std.mem.eql(u8, text, "foreach")) .k_foreach else if (std.mem.eql(u8, text, "as")) .k_as else if (std.mem.eql(u8, text, "match")) .k_match else if (std.mem.eql(u8, text, "default")) .k_default else if (std.mem.eql(u8, text, "namespace")) .k_namespace else if (std.mem.eql(u8, text, "global")) .k_global else if (std.mem.eql(u8, text, "const")) .k_const else if (std.mem.eql(u8, text, "go")) .k_go else if (std.mem.eql(u8, text, "lock")) .k_lock else if (std.mem.eql(u8, text, "return")) .k_return else if (std.mem.eql(u8, text, "echo")) .k_echo else if (std.mem.eql(u8, text, "get")) .k_get else if (std.mem.eql(u8, text, "set")) .k_set else if (std.mem.eql(u8, text, "break")) .k_break else if (std.mem.eql(u8, text, "case")) .k_case else if (std.mem.eql(u8, text, "catch")) .k_catch else if (std.mem.eql(u8, text, "clone")) .k_clone else if (std.mem.eql(u8, text, "with")) .k_with else if (std.mem.eql(u8, text, "continue")) .k_continue else if (std.mem.eql(u8, text, "declare")) .k_declare else if (std.mem.eql(u8, text, "do")) .k_do else if (std.mem.eql(u8, text, "finally")) .k_finally else if (std.mem.eql(u8, text, "goto")) .k_goto else if (std.mem.eql(u8, text, "include")) .k_include else if (std.mem.eql(u8, text, "instanceof")) .k_instanceof else if (std.mem.eql(u8, text, "print")) .k_print else if (std.mem.eql(u8, text, "require")) .k_require else if (std.mem.eql(u8, text, "switch")) .k_switch else if (std.mem.eql(u8, text, "throw")) .k_throw else if (std.mem.eql(u8, text, "try")) .k_try else if (std.mem.eql(u8, text, "yield")) .k_yield else if (std.mem.eql(u8, text, "true")) .k_true else if (std.mem.eql(u8, text, "false")) .k_false else if (std.mem.eql(u8, text, "null")) .k_null else if (std.mem.eql(u8, text, "array")) .k_array else if (std.mem.eql(u8, text, "callable")) .k_callable else if (std.mem.eql(u8, text, "iterable")) .k_iterable else if (std.mem.eql(u8, text, "list")) .k_list else if (std.mem.eql(u8, text, "object")) .k_object else if (std.mem.eql(u8, text, "mixed")) .k_mixed else if (std.mem.eql(u8, text, "never")) .k_never else if (std.mem.eql(u8, text, "void")) .k_void else if (std.mem.eql(u8, text, "__DIR__")) .m_dir else if (std.mem.eql(u8, text, "__FILE__")) .m_file else if (std.mem.eql(u8, text, "__LINE__")) .m_line else if (std.mem.eql(u8, text, "__FUNCTION__")) .m_function else if (std.mem.eql(u8, text, "__CLASS__")) .m_class else if (std.mem.eql(u8, text, "__METHOD__")) .m_method else if (std.mem.eql(u8, text, "__NAMESPACE__")) .m_namespace else if (std.mem.eql(u8, text, "include_once")) .k_include_once else if (std.mem.eql(u8, text, "require_once")) .k_require_once else null;
-        
-        // If it's a keyword, return it
-        if (keyword_tag) |tag| {
-            return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
-        }
-        
-        // Not a keyword - in Go mode, treat as a variable (t_go_identifier)
-        // In PHP mode, treat as a string/identifier (t_string)
+
+        // 非关键词：Go模式返回t_go_identifier，PHP模式返回t_string
         const tag: Token.Tag = if (self.syntax_mode == .go) .t_go_identifier else .t_string;
         return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
     }

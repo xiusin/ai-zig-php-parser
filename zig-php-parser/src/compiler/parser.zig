@@ -1815,11 +1815,11 @@ pub const Parser = struct {
                     raw_text[1 .. raw_text.len - 1]
                 else
                     raw_text;
-                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content), .quote_type = quote_type } } });
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(string_content), .quote_type = quote_type } } });
             },
             .t_encapsed_and_whitespace => {
                 const t = try self.eat(.t_encapsed_and_whitespace);
-                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
             },
             .t_backtick_string => {
                 const t = try self.eat(.t_backtick_string);
@@ -1828,7 +1828,7 @@ pub const Parser = struct {
                     raw_text[1 .. raw_text.len - 1]
                 else
                     raw_text;
-                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(string_content), .quote_type = .backtick } } });
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(string_content), .quote_type = .backtick } } });
             },
             .t_heredoc_start, .t_nowdoc_start => {
                 // Parse heredoc/nowdoc string with interpolation support
@@ -1847,7 +1847,7 @@ pub const Parser = struct {
                     if (self.curr.tag == .t_heredoc_end) {
                         self.nextToken();
                     }
-                    return self.createNode(.{ .tag = .literal_string, .main_token = start_tok, .data = .{ .literal_string = .{ .value = try self.context.intern(content) } } });
+                    return self.createNode(.{ .tag = .literal_string, .main_token = start_tok, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(content) } } });
                 } else {
                     // Heredoc: support interpolation like double-quoted strings
                     var left: ?ast.Node.Index = null;
@@ -1856,7 +1856,7 @@ pub const Parser = struct {
                             .t_encapsed_and_whitespace => blk: {
                                 const t = self.curr;
                                 self.nextToken();
-                                break :blk try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                                break :blk try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
                             },
                             .t_variable => blk: {
                                 const t = self.curr;
@@ -1876,7 +1876,7 @@ pub const Parser = struct {
                     if (self.curr.tag == .t_heredoc_end) {
                         self.nextToken();
                     }
-                    return left orelse try self.createNode(.{ .tag = .literal_string, .main_token = start_tok, .data = .{ .literal_string = .{ .value = try self.context.intern("") } } });
+                    return left orelse try self.createNode(.{ .tag = .literal_string, .main_token = start_tok, .data = .{ .literal_string = .{ .value = try self.context.internLiteral("") } } });
                 }
             },
             .l_bracket => self.parseArrayLiteral(),
@@ -1942,7 +1942,7 @@ pub const Parser = struct {
             switch (self.curr.tag) {
                 .t_encapsed_and_whitespace => {
                     const t = try self.eat(.t_encapsed_and_whitespace);
-                    part = try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                    part = try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
                 },
                 .t_variable => {
                     const t = try self.eat(.t_variable);
@@ -1987,7 +1987,7 @@ pub const Parser = struct {
         if (left) |l| return l;
 
         // Empty string ""
-        return self.createNode(.{ .tag = .literal_string, .main_token = start_token, .data = .{ .literal_string = .{ .value = try self.context.intern("") } } });
+        return self.createNode(.{ .tag = .literal_string, .main_token = start_token, .data = .{ .literal_string = .{ .value = try self.context.internLiteral("") } } });
     }
 
     fn parseClosure(self: *Parser) anyerror!ast.Node.Index {

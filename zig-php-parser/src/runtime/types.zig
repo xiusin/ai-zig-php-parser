@@ -61,6 +61,7 @@ pub const PHPString = struct {
         result.data = new_data;
         result.length = self.length + other.length;
         result.encoding = self.encoding; // Use first string's encoding
+        result.ref_count = 1;
         return result;
     }
 
@@ -183,9 +184,83 @@ pub const ArrayKey = union(enum) {
     }
 };
 
+/// PHPArray - 混合模式数组实现
+/// 支持两种存储模式：
+/// 1. packed: 连续整数键数组，O(1)索引访问，内存紧凑
+/// 2. mixed: 支持字符串键和非连续整数键，使用哈希表
+///
+/// 自动模式转换：
+/// - 初始为 packed 模式
+/// - 遇到字符串键或非连续整数键时自动转换为 mixed 模式
 pub const PHPArray = struct {
-    elements: std.ArrayHashMap(ArrayKey, Value, ArrayContext, false),
-    next_index: i64,
+    /// 存储模式
+    const Mode = enum { packed_mode, mixed_mode };
+
+    /// Packed 模式存储 - 连续 Value 数组
+    const PackedStorage = struct {
+        data: []Value,
+        len: u32,
+        capacity: u32,
+
+        const INITIAL_CAPACITY = 8;
+        const GROWTH_FACTOR = 2;
+
+        fn init(allocator: std.mem.Allocator) !PackedStorage {
+            return initWithCapacity(allocator, INITIAL_CAPACITY);
+        }
+
+        fn initWithCapacity(allocator: std.mem.Allocator, cap: u32) !PackedStorage {
+            const capacity = @max(cap, INITIAL_CAPACITY);
+            return .{
+                .data = try allocator.alloc(Value, capacity),
+                .len = 0,
+                .capacity = capacity,
+            };
+        }
+
+        fn deinit(self: *PackedStorage, allocator: std.mem.Allocator) void {
+            for (self.data[0..self.len]) |*v| {
+                v.release(allocator);
+            }
+            allocator.free(self.data);
+        }
+
+        inline fn get(self: *const PackedStorage, index: u32) ?Value {
+            if (index >= self.len) return null;
+            return self.data[index];
+        }
+
+        fn set(self: *PackedStorage, allocator: std.mem.Allocator, index: u32, value: Value) bool {
+            if (index >= self.len) return false;
+            self.data[index].release(allocator);
+            _ = value.retain();
+            self.data[index] = value;
+            return true;
+        }
+
+        fn ensureCapacity(self: *PackedStorage, allocator: std.mem.Allocator, min_cap: u32) !void {
+            if (self.capacity >= min_cap) return;
+            var new_cap = self.capacity;
+            while (new_cap < min_cap) {
+                new_cap *= GROWTH_FACTOR;
+            }
+            const new_data = try allocator.alloc(Value, new_cap);
+            @memcpy(new_data[0..self.len], self.data[0..self.len]);
+            allocator.free(self.data);
+            self.data = new_data;
+            self.capacity = new_cap;
+        }
+
+        fn push(self: *PackedStorage, allocator: std.mem.Allocator, value: Value) !void {
+            try self.ensureCapacity(allocator, self.len + 1);
+            _ = value.retain();
+            self.data[self.len] = value;
+            self.len += 1;
+        }
+    };
+
+    /// Mixed 模式存储 - 使用 ArrayHashMap
+    const MixedStorage = std.ArrayHashMap(ArrayKey, Value, ArrayContext, false);
 
     pub const ArrayContext = struct {
         pub fn hash(_: ArrayContext, key: ArrayKey) u32 {
@@ -197,127 +272,301 @@ pub const PHPArray = struct {
         }
     };
 
+    // 存储 union
+    storage: union {
+        packed_data: PackedStorage,
+        mixed_data: MixedStorage,
+    },
+    mode: Mode,
+    next_index: i64,
+    allocator: std.mem.Allocator,
+
+    /// 兼容性属性：返回 mixed 存储的引用
+    /// 注意：访问此属性会强制转换为 mixed 模式
+    pub fn getElements(self: *PHPArray) *MixedStorage {
+        if (self.mode == .packed_mode) {
+            self.convertToMixed() catch {};
+        }
+        return &self.storage.mixed_data;
+    }
+
+    /// 初始化数组（默认 packed 模式）
     pub fn init(allocator: std.mem.Allocator) PHPArray {
         return PHPArray{
-            .elements = std.ArrayHashMap(ArrayKey, Value, ArrayContext, false).initContext(allocator, .{}),
+            .storage = .{ .packed_data = PackedStorage.initWithCapacity(allocator, PackedStorage.INITIAL_CAPACITY) catch .{
+                .data = &[_]Value{},
+                .len = 0,
+                .capacity = 0,
+            } },
+            .mode = .packed_mode,
             .next_index = 0,
+            .allocator = allocator,
         };
     }
 
+    /// 释放数组
     pub fn deinit(self: *PHPArray, allocator: std.mem.Allocator) void {
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            entry.value_ptr.release(allocator);
-            // 释放字符串类型的键
-            if (entry.key_ptr.* == .string) {
-                entry.key_ptr.string.release(allocator);
-            }
+        switch (self.mode) {
+            .packed_mode => self.storage.packed_data.deinit(allocator),
+            .mixed_mode => {
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    entry.value_ptr.release(allocator);
+                    if (entry.key_ptr.* == .string) {
+                        entry.key_ptr.string.release(allocator);
+                    }
+                }
+                self.storage.mixed_data.deinit();
+            },
         }
-        self.elements.deinit();
     }
 
+    /// 获取元素
     pub fn get(self: *PHPArray, key: ArrayKey) ?Value {
-        return self.elements.get(key);
+        return switch (self.mode) {
+            .packed_mode => switch (key) {
+                .integer => |i| if (i >= 0 and i < self.storage.packed_data.len)
+                    self.storage.packed_data.get(@intCast(i))
+                else
+                    null,
+                .string => null, // packed 模式不支持字符串键
+            },
+            .mixed_mode => self.storage.mixed_data.get(key),
+        };
     }
 
+    /// 设置元素
     pub fn set(self: *PHPArray, allocator: std.mem.Allocator, key: ArrayKey, value: Value) !void {
-        // Check if key already exists
-        const key_exists = self.elements.get(key) != null;
+        switch (self.mode) {
+            .packed_mode => {
+                switch (key) {
+                    .integer => |i| {
+                        // 检查是否可以保持 packed 模式
+                        if (i >= 0) {
+                            const idx: u32 = @intCast(i);
+                            if (idx < self.storage.packed_data.len) {
+                                // 更新现有元素
+                                _ = self.storage.packed_data.set(allocator, idx, value);
+                                return;
+                            } else if (idx == self.storage.packed_data.len) {
+                                // 追加元素
+                                try self.storage.packed_data.push(allocator, value);
+                                self.next_index = i + 1;
+                                return;
+                            }
+                        }
+                        // 非连续索引，转换为 mixed 模式
+                        try self.convertToMixed();
+                        try self.setMixed(allocator, key, value);
+                    },
+                    .string => {
+                        // 字符串键，转换为 mixed 模式
+                        try self.convertToMixed();
+                        try self.setMixed(allocator, key, value);
+                    },
+                }
+            },
+            .mixed_mode => try self.setMixed(allocator, key, value),
+        }
+    }
 
-        // If key already exists, release old value
-        if (self.elements.get(key)) |old_value| {
+    /// Mixed 模式设置元素（内部方法）
+    fn setMixed(self: *PHPArray, allocator: std.mem.Allocator, key: ArrayKey, value: Value) !void {
+        const key_exists = self.storage.mixed_data.get(key) != null;
+        if (self.storage.mixed_data.get(key)) |old_value| {
             old_value.release(allocator);
         }
-
-        // Retain new value
         _ = value.retain();
-
-        // Only retain string key if it's a new key
         if (!key_exists and key == .string) {
             key.string.retain();
         }
-
-        try self.elements.put(key, value);
+        // 更新 next_index
+        if (key == .integer) {
+            if (key.integer >= self.next_index) {
+                self.next_index = key.integer + 1;
+            }
+        }
+        try self.storage.mixed_data.put(key, value);
     }
 
+    /// 追加元素（使用下一个整数索引）
     pub fn push(self: *PHPArray, allocator: std.mem.Allocator, value: Value) !void {
-        _ = allocator;
-        const key = ArrayKey{ .integer = self.next_index };
-        // Fast path: for integer sequential keys, we know the key doesn't exist
-        // so we can skip the get() call and just retain and put
-        _ = value.retain();
-        try self.elements.put(key, value);
-        self.next_index += 1;
+        switch (self.mode) {
+            .packed_mode => {
+                try self.storage.packed_data.push(allocator, value);
+                self.next_index += 1;
+            },
+            .mixed_mode => {
+                const key = ArrayKey{ .integer = self.next_index };
+                _ = value.retain();
+                try self.storage.mixed_data.put(key, value);
+                self.next_index += 1;
+            },
+        }
     }
 
+    /// 获取元素数量
     pub fn count(self: *PHPArray) usize {
-        return self.elements.count();
+        return switch (self.mode) {
+            .packed_mode => self.storage.packed_data.len,
+            .mixed_mode => self.storage.mixed_data.count(),
+        };
     }
 
+    /// 转换为 mixed 模式
+    fn convertToMixed(self: *PHPArray) !void {
+        if (self.mode == .mixed_mode) return;
+
+        var mixed = MixedStorage.initContext(self.allocator, .{});
+
+        // 复制所有元素
+        for (self.storage.packed_data.data[0..self.storage.packed_data.len], 0..) |value, i| {
+            // 不需要 retain，因为我们是移动而不是复制
+            try mixed.put(.{ .integer = @intCast(i) }, value);
+        }
+
+        // 释放 packed 存储（但不释放 Value，因为已移动）
+        self.allocator.free(self.storage.packed_data.data);
+
+        self.storage = .{ .mixed_data = mixed };
+        self.mode = .mixed_mode;
+    }
+
+    /// 检查是否为 packed 模式
+    pub fn isPacked(self: *const PHPArray) bool {
+        return self.mode == .packed_mode;
+    }
+
+    /// 检查是否为 mixed 模式
+    pub fn isMixed(self: *const PHPArray) bool {
+        return self.mode == .mixed_mode;
+    }
+
+    /// 获取所有键
     pub fn keys(self: *PHPArray, allocator: std.mem.Allocator) ![]ArrayKey {
-        var result = try allocator.alloc(ArrayKey, self.elements.count());
-        var i: usize = 0;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            result[i] = entry.key_ptr.*;
-            i += 1;
+        const cnt = self.count();
+        var result = try allocator.alloc(ArrayKey, cnt);
+        switch (self.mode) {
+            .packed_mode => {
+                for (0..self.storage.packed_data.len) |i| {
+                    result[i] = .{ .integer = @intCast(i) };
+                }
+            },
+            .mixed_mode => {
+                var i: usize = 0;
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    result[i] = entry.key_ptr.*;
+                    i += 1;
+                }
+            },
         }
         return result;
     }
 
+    /// 获取所有值
     pub fn values(self: *PHPArray, allocator: std.mem.Allocator) ![]Value {
-        var result = try allocator.alloc(Value, self.elements.count());
-        var i: usize = 0;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            result[i] = entry.value_ptr.*;
-            i += 1;
+        const cnt = self.count();
+        var result = try allocator.alloc(Value, cnt);
+        switch (self.mode) {
+            .packed_mode => {
+                @memcpy(result, self.storage.packed_data.data[0..self.storage.packed_data.len]);
+            },
+            .mixed_mode => {
+                var i: usize = 0;
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    result[i] = entry.value_ptr.*;
+                    i += 1;
+                }
+            },
         }
         return result;
     }
 
     /// SoA批量整数提取，用于SIMD加速的数值计算
     pub fn extractIntegers(self: *PHPArray, allocator: std.mem.Allocator) ![]i64 {
-        var result = try allocator.alloc(i64, self.elements.count());
-        var i: usize = 0;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            result[i] = switch (entry.value_ptr.getTag()) {
-                .integer => entry.value_ptr.asInt(),
-                .float => @intFromFloat(entry.value_ptr.asFloat()),
-                else => 0,
-            };
-            i += 1;
+        const cnt = self.count();
+        var result = try allocator.alloc(i64, cnt);
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len], 0..) |v, i| {
+                    result[i] = switch (v.getTag()) {
+                        .integer => v.asInt(),
+                        .float => @intFromFloat(v.asFloat()),
+                        else => 0,
+                    };
+                }
+            },
+            .mixed_mode => {
+                var i: usize = 0;
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    result[i] = switch (entry.value_ptr.getTag()) {
+                        .integer => entry.value_ptr.asInt(),
+                        .float => @intFromFloat(entry.value_ptr.asFloat()),
+                        else => 0,
+                    };
+                    i += 1;
+                }
+            },
         }
         return result;
     }
 
     /// SoA批量浮点提取，用于SIMD加速的数值计算
     pub fn extractFloats(self: *PHPArray, allocator: std.mem.Allocator) ![]f64 {
-        var result = try allocator.alloc(f64, self.elements.count());
-        var i: usize = 0;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            result[i] = switch (entry.value_ptr.getTag()) {
-                .float => entry.value_ptr.asFloat(),
-                .integer => @floatFromInt(entry.value_ptr.asInt()),
-                else => 0.0,
-            };
-            i += 1;
+        const cnt = self.count();
+        var result = try allocator.alloc(f64, cnt);
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len], 0..) |v, i| {
+                    result[i] = switch (v.getTag()) {
+                        .float => v.asFloat(),
+                        .integer => @floatFromInt(v.asInt()),
+                        else => 0.0,
+                    };
+                }
+            },
+            .mixed_mode => {
+                var i: usize = 0;
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    result[i] = switch (entry.value_ptr.getTag()) {
+                        .float => entry.value_ptr.asFloat(),
+                        .integer => @floatFromInt(entry.value_ptr.asInt()),
+                        else => 0.0,
+                    };
+                    i += 1;
+                }
+            },
         }
         return result;
     }
 
-    /// SoA批量求和优化
+    /// SoA批量求和优化（packed 模式可使用 SIMD）
     pub fn sumIntegers(self: *PHPArray) i64 {
         var sum: i64 = 0;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            sum += switch (entry.value_ptr.getTag()) {
-                .integer => entry.value_ptr.asInt(),
-                .float => @intFromFloat(entry.value_ptr.asFloat()),
-                else => 0,
-            };
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len]) |v| {
+                    sum += switch (v.getTag()) {
+                        .integer => v.asInt(),
+                        .float => @intFromFloat(v.asFloat()),
+                        else => 0,
+                    };
+                }
+            },
+            .mixed_mode => {
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    sum += switch (entry.value_ptr.getTag()) {
+                        .integer => entry.value_ptr.asInt(),
+                        .float => @intFromFloat(entry.value_ptr.asFloat()),
+                        else => 0,
+                    };
+                }
+            },
         }
         return sum;
     }
@@ -325,13 +574,26 @@ pub const PHPArray = struct {
     /// SoA批量浮点求和优化
     pub fn sumFloats(self: *PHPArray) f64 {
         var sum: f64 = 0.0;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            sum += switch (entry.value_ptr.getTag()) {
-                .float => entry.value_ptr.asFloat(),
-                .integer => @floatFromInt(entry.value_ptr.asInt()),
-                else => 0.0,
-            };
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len]) |v| {
+                    sum += switch (v.getTag()) {
+                        .float => v.asFloat(),
+                        .integer => @floatFromInt(v.asInt()),
+                        else => 0.0,
+                    };
+                }
+            },
+            .mixed_mode => {
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    sum += switch (entry.value_ptr.getTag()) {
+                        .float => entry.value_ptr.asFloat(),
+                        .integer => @floatFromInt(entry.value_ptr.asInt()),
+                        else => 0.0,
+                    };
+                }
+            },
         }
         return sum;
     }
@@ -339,16 +601,32 @@ pub const PHPArray = struct {
     /// SoA批量最大值
     pub fn maxValue(self: *PHPArray) ?f64 {
         var max: ?f64 = null;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            const val: f64 = switch (entry.value_ptr.getTag()) {
-                .float => entry.value_ptr.asFloat(),
-                .integer => @floatFromInt(entry.value_ptr.asInt()),
-                else => continue,
-            };
-            if (max == null or val > max.?) {
-                max = val;
-            }
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len]) |v| {
+                    const val: f64 = switch (v.getTag()) {
+                        .float => v.asFloat(),
+                        .integer => @floatFromInt(v.asInt()),
+                        else => continue,
+                    };
+                    if (max == null or val > max.?) {
+                        max = val;
+                    }
+                }
+            },
+            .mixed_mode => {
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    const val: f64 = switch (entry.value_ptr.getTag()) {
+                        .float => entry.value_ptr.asFloat(),
+                        .integer => @floatFromInt(entry.value_ptr.asInt()),
+                        else => continue,
+                    };
+                    if (max == null or val > max.?) {
+                        max = val;
+                    }
+                }
+            },
         }
         return max;
     }
@@ -356,16 +634,32 @@ pub const PHPArray = struct {
     /// SoA批量最小值
     pub fn minValue(self: *PHPArray) ?f64 {
         var min: ?f64 = null;
-        var iterator = self.elements.iterator();
-        while (iterator.next()) |entry| {
-            const val: f64 = switch (entry.value_ptr.getTag()) {
-                .float => entry.value_ptr.asFloat(),
-                .integer => @floatFromInt(entry.value_ptr.asInt()),
-                else => continue,
-            };
-            if (min == null or val < min.?) {
-                min = val;
-            }
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len]) |v| {
+                    const val: f64 = switch (v.getTag()) {
+                        .float => v.asFloat(),
+                        .integer => @floatFromInt(v.asInt()),
+                        else => continue,
+                    };
+                    if (min == null or val < min.?) {
+                        min = val;
+                    }
+                }
+            },
+            .mixed_mode => {
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    const val: f64 = switch (entry.value_ptr.getTag()) {
+                        .float => entry.value_ptr.asFloat(),
+                        .integer => @floatFromInt(entry.value_ptr.asInt()),
+                        else => continue,
+                    };
+                    if (min == null or val < min.?) {
+                        min = val;
+                    }
+                }
+            },
         }
         return min;
     }
@@ -432,11 +726,7 @@ pub const PHPArray = struct {
     pub fn removeMultiDim(self: *PHPArray, allocator: std.mem.Allocator, key_path: []const ArrayKey) bool {
         if (key_path.len == 0) return false;
         if (key_path.len == 1) {
-            if (self.elements.orderedRemove(key_path[0])) |kv| {
-                kv.value.release(allocator);
-                return true;
-            }
-            return false;
+            return self.remove(allocator, key_path[0]);
         }
 
         // 导航到父数组
@@ -448,22 +738,50 @@ pub const PHPArray = struct {
 
         if (current_value.getTag() != .array) return false;
         const parent_arr = current_value.getAsArray().data;
-        if (parent_arr.elements.orderedRemove(key_path[key_path.len - 1])) |kv| {
-            kv.value.release(allocator);
-            return true;
+        return parent_arr.remove(allocator, key_path[key_path.len - 1]);
+    }
+
+    /// 删除单个元素
+    pub fn remove(self: *PHPArray, allocator: std.mem.Allocator, key: ArrayKey) bool {
+        switch (self.mode) {
+            .packed_mode => {
+                // packed 模式下删除元素需要转换为 mixed
+                switch (key) {
+                    .integer => |i| {
+                        if (i >= 0 and i < self.storage.packed_data.len) {
+                            // 转换为 mixed 模式后删除
+                            self.convertToMixed() catch return false;
+                            return self.remove(allocator, key);
+                        }
+                    },
+                    .string => return false,
+                }
+                return false;
+            },
+            .mixed_mode => {
+                if (self.storage.mixed_data.orderedRemove(key)) |kv| {
+                    kv.value.release(allocator);
+                    if (key == .string) {
+                        key.string.release(allocator);
+                    }
+                    return true;
+                }
+                return false;
+            },
         }
-        return false;
     }
 
     /// 移除指定范围的元素（用于array_splice）
     /// 返回被移除的元素数量
     pub fn removeRange(self: *PHPArray, allocator: std.mem.Allocator, start: i64, end: i64) usize {
         if (start >= end) return 0;
-        
-        // 对于索引数组，需要重建数组以保持顺序
+
+        // 转换为 mixed 模式处理（简化实现）
+        self.convertToMixed() catch return 0;
+
         var removed_count: usize = 0;
         var new_idx: i64 = 0;
-        
+
         // 收集要保留的元素
         var to_keep = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
         defer {
@@ -472,43 +790,39 @@ pub const PHPArray = struct {
             }
             to_keep.deinit(allocator);
         }
-        
-        var iter = self.elements.iterator();
+
+        var iter = self.storage.mixed_data.iterator();
         var idx: i64 = 0;
         while (iter.next()) |entry| {
             if (idx >= start and idx < end) {
-                // 释放要移除的值
                 entry.value_ptr.release(allocator);
                 removed_count += 1;
             } else {
-                // 保留元素
                 to_keep.append(allocator, .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* }) catch {};
             }
             idx += 1;
         }
-        
-        // 清空当前数组
-        self.elements.clearRetainingCapacity();
-        
-        // 重新插入保留的元素，使用新的整数索引
+
+        self.storage.mixed_data.clearRetainingCapacity();
+
         for (to_keep.items) |item| {
-            // 释放旧的字符串键（如果有）
             if (item.key == .string) {
                 item.key.string.release(allocator);
             }
             self.set(allocator, ArrayKey{ .integer = new_idx }, item.value) catch {};
             new_idx += 1;
         }
-        
+
         return removed_count;
     }
 
     /// 插入元素到指定位置
     pub fn insertAt(self: *PHPArray, allocator: std.mem.Allocator, index: i64, value: Value) !void {
-        // 简化方法：重建数组
+        // 转换为 mixed 模式处理
+        try self.convertToMixed();
+
         var new_idx: i64 = 0;
-        
-        // 收集所有元素
+
         var to_keep = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
         defer {
             for (to_keep.items) |item| {
@@ -516,41 +830,133 @@ pub const PHPArray = struct {
             }
             to_keep.deinit(allocator);
         }
-        
-        var iter = self.elements.iterator();
+
+        var iter = self.storage.mixed_data.iterator();
         while (iter.next()) |entry| {
             to_keep.append(allocator, .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* }) catch {};
         }
-        
-        // 清空并重建
-        self.elements.clearRetainingCapacity();
-        
-        // 重新插入，插入新元素
+
+        self.storage.mixed_data.clearRetainingCapacity();
+
         for (to_keep.items) |item| {
             if (new_idx == index) {
-                // 在这个位置插入新值
                 if (item.key == .string) {
                     item.key.string.release(allocator);
                 }
                 try self.set(allocator, ArrayKey{ .integer = new_idx }, value);
                 new_idx += 1;
             }
-            // 插入原元素
             if (item.key == .string) {
                 item.key.string.release(allocator);
             }
             try self.set(allocator, ArrayKey{ .integer = new_idx }, item.value);
             new_idx += 1;
         }
-        
-        // 如果插入位置在末尾
+
         if (index == new_idx) {
             try self.set(allocator, ArrayKey{ .integer = new_idx }, value);
         }
     }
 
-    pub fn getIterator(self: *PHPArray) @TypeOf(self.elements.iterator()) {
-        return self.elements.iterator();
+    /// 统一迭代器接口
+    pub const Iterator = struct {
+        array: *PHPArray,
+        packed_idx: u32,
+        mixed_iter: ?MixedStorage.Iterator,
+
+        pub fn next(self: *Iterator) ?struct { key: ArrayKey, value: Value } {
+            switch (self.array.mode) {
+                .packed_mode => {
+                    if (self.packed_idx >= self.array.storage.packed_data.len) return null;
+                    const idx = self.packed_idx;
+                    self.packed_idx += 1;
+                    return .{
+                        .key = .{ .integer = @intCast(idx) },
+                        .value = self.array.storage.packed_data.data[idx],
+                    };
+                },
+                .mixed_mode => {
+                    if (self.mixed_iter) |*iter| {
+                        if (iter.next()) |entry| {
+                            return .{
+                                .key = entry.key_ptr.*,
+                                .value = entry.value_ptr.*,
+                            };
+                        }
+                    }
+                    return null;
+                },
+            }
+        }
+    };
+
+    /// 获取迭代器
+    pub fn iterator(self: *PHPArray) Iterator {
+        return .{
+            .array = self,
+            .packed_idx = 0,
+            .mixed_iter = if (self.mode == .mixed_mode) self.storage.mixed_data.iterator() else null,
+        };
+    }
+
+    /// 兼容旧 API 的迭代器（返回 mixed 存储的迭代器类型）
+    pub fn getIterator(self: *PHPArray) MixedStorage.Iterator {
+        // 如果是 packed 模式，需要先转换
+        if (self.mode == .packed_mode) {
+            self.convertToMixed() catch {};
+        }
+        return self.storage.mixed_data.iterator();
+    }
+
+    /// 获取 packed 模式下的直接数据访问（用于 SIMD 优化）
+    pub fn getPackedSlice(self: *const PHPArray) ?[]const Value {
+        if (self.mode != .packed_mode) return null;
+        return self.storage.packed_data.data[0..self.storage.packed_data.len];
+    }
+
+    /// 快速整数索引访问（仅 packed 模式，O(1)）
+    pub inline fn getIntFast(self: *const PHPArray, index: u32) ?Value {
+        if (self.mode != .packed_mode) return null;
+        if (index >= self.storage.packed_data.len) return null;
+        return self.storage.packed_data.data[index];
+    }
+
+    /// 检查是否包含指定值（packed 模式可 SIMD 优化）
+    pub fn containsValue(self: *PHPArray, needle: Value) bool {
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len]) |v| {
+                    if (v.val == needle.val) return true;
+                }
+                return false;
+            },
+            .mixed_mode => {
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    if (entry.value_ptr.val == needle.val) return true;
+                }
+                return false;
+            },
+        }
+    }
+
+    /// 查找值的索引（packed 模式可 SIMD 优化）
+    pub fn findValue(self: *PHPArray, needle: Value) ?ArrayKey {
+        switch (self.mode) {
+            .packed_mode => {
+                for (self.storage.packed_data.data[0..self.storage.packed_data.len], 0..) |v, i| {
+                    if (v.val == needle.val) return .{ .integer = @intCast(i) };
+                }
+                return null;
+            },
+            .mixed_mode => {
+                var iter = self.storage.mixed_data.iterator();
+                while (iter.next()) |entry| {
+                    if (entry.value_ptr.val == needle.val) return entry.key_ptr.*;
+                }
+                return null;
+            },
+        }
     }
 };
 
@@ -1223,8 +1629,8 @@ pub const StructInstance = struct {
     }
 
     pub fn deinit(self: *StructInstance, allocator: std.mem.Allocator) void {
-        var iterator = self.fields.iterator();
-        while (iterator.next()) |entry| {
+        var iter = self.fields.iterator();
+        while (iter.next()) |entry| {
             entry.value_ptr.release(allocator);
         }
         self.fields.deinit();
@@ -1545,6 +1951,70 @@ pub const PHPObject = struct {
             self.shape.deinit();
             allocator.destroy(self.shape);
         }
+    }
+
+    /// 快速属性读取（使用内联缓存）
+    /// 
+    /// 如果缓存命中（shape_id 匹配），直接使用偏移量访问，~1ns
+    /// 否则进行完整查找并更新缓存
+    pub inline fn getPropertyFast(self: *PHPObject, name: []const u8, cache: *InlineCacheEntry) !Value {
+        // 快速路径：缓存命中
+        if (cache.shape_id == self.shape.id) {
+            cache.hits +|= 1;
+            return self.property_values.items[cache.offset];
+        }
+
+        // 慢速路径：查找并更新缓存
+        if (self.shape.getPropertySlot(name)) |slot| {
+            cache.shape_id = self.shape.id;
+            cache.offset = slot.offset;
+            return self.property_values.items[slot.offset];
+        }
+
+        // 回退到完整查找
+        return self.getProperty(name);
+    }
+
+    /// 快速属性写入（使用内联缓存）
+    pub inline fn setPropertyFast(self: *PHPObject, allocator: std.mem.Allocator, name: []const u8, value: Value, cache: *InlineCacheEntry) !void {
+        // 快速路径：缓存命中且属性已存在
+        if (cache.shape_id == self.shape.id) {
+            cache.hits +|= 1;
+            self.property_values.items[cache.offset].release(allocator);
+            _ = value.retain();
+            self.property_values.items[cache.offset] = value;
+            return;
+        }
+
+        // 慢速路径：查找并更新缓存
+        if (self.shape.getPropertySlot(name)) |slot| {
+            cache.shape_id = self.shape.id;
+            cache.offset = slot.offset;
+            self.property_values.items[slot.offset].release(allocator);
+            _ = value.retain();
+            self.property_values.items[slot.offset] = value;
+            return;
+        }
+
+        // 属性不存在，使用完整的 setProperty（会触发 shape 转换）
+        try self.setProperty(allocator, name, value);
+        // 更新缓存
+        if (self.shape.getPropertySlot(name)) |slot| {
+            cache.shape_id = self.shape.id;
+            cache.offset = slot.offset;
+        }
+    }
+
+    /// 通过偏移量直接访问属性（最快，需要已知偏移量）
+    pub inline fn getPropertyByOffset(self: *PHPObject, offset: usize) Value {
+        return self.property_values.items[offset];
+    }
+
+    /// 通过偏移量直接设置属性（最快，需要已知偏移量）
+    pub inline fn setPropertyByOffset(self: *PHPObject, allocator: std.mem.Allocator, offset: usize, value: Value) void {
+        self.property_values.items[offset].release(allocator);
+        _ = value.retain();
+        self.property_values.items[offset] = value;
     }
 
     pub fn getProperty(self: *PHPObject, name: []const u8) !Value {
@@ -2001,9 +2471,33 @@ pub const Value = struct {
         return .{ .val = QNAN | (if (b) TAG_TRUE else TAG_FALSE) };
     }
 
+    // 48位整数常量 (与 FastValue 对齐)
+    pub const INT48_MASK: u64 = 0x0000FFFFFFFFFFFF; // 低48位掩码
+    pub const INT48_SIGN_BIT: u64 = 0x0000800000000000; // 第47位为符号位
+    pub const INT48_MAX: i64 = 0x00007FFFFFFFFFFF; // 140,737,488,355,327
+    pub const INT48_MIN: i64 = -0x0000800000000000; // -140,737,488,355,328
+
     pub fn initInt(i: i64) Value {
-        // 使用 SIGN_BIT | QNAN 作为整数标记，低 32 位存储值
-        return .{ .val = TAG_INT_MARKER | @as(u64, @as(u32, @bitCast(@as(i32, @truncate(i))))) };
+        // 48位整数范围检查 (±140万亿)
+        if (i >= INT48_MIN and i <= INT48_MAX) {
+            // 48位补码编码：直接截取低48位
+            const encoded: u64 = @as(u64, @bitCast(i)) & INT48_MASK;
+            return .{ .val = TAG_INT_MARKER | encoded };
+        }
+        // 超出48位范围：使用浮点数存储
+        return .{ .val = @bitCast(@as(f64, @floatFromInt(i))) };
+    }
+
+    /// 创建32位整数值 (快速路径，无范围检查)
+    pub inline fn initInt32(i: i32) Value {
+        const extended: i64 = i;
+        const encoded: u64 = @as(u64, @bitCast(extended)) & INT48_MASK;
+        return .{ .val = TAG_INT_MARKER | encoded };
+    }
+
+    /// 检查i64是否在48位整数范围内
+    pub inline fn fitsIn48Bits(i: i64) bool {
+        return i >= INT48_MIN and i <= INT48_MAX;
     }
 
     pub fn initFloat(f: f64) Value {
@@ -2134,7 +2628,33 @@ pub const Value = struct {
         return @bitCast(self.val);
     }
     pub fn asInt(self: Value) i64 {
-        return @as(i64, @intCast(@as(i32, @bitCast(@as(u32, @truncate(self.val))))));
+        // 检查是否是整数标记 (48位整数)
+        if ((self.val & (SIGN_BIT | QNAN)) == TAG_INT_MARKER) {
+            const raw: u64 = self.val & INT48_MASK;
+            // 符号扩展：如果第47位为1，则为负数
+            if ((raw & INT48_SIGN_BIT) != 0) {
+                // 负数：填充高16位为1
+                return @bitCast(raw | 0xFFFF000000000000);
+            }
+            return @bitCast(raw);
+        }
+        // 否则可能是浮点数存储的大整数
+        if ((self.val & QNAN) != QNAN) {
+            const f: f64 = @bitCast(self.val);
+            // 安全转换：检查浮点数是否在i64范围内
+            if (f >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
+                f <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
+            {
+                return @intFromFloat(f);
+            }
+            return 0;
+        }
+        return 0;
+    }
+    
+    /// 提取为32位整数 (截断，用于兼容旧代码)
+    pub inline fn asInt32(self: Value) i32 {
+        return @truncate(self.asInt());
     }
     pub fn asBool(self: Value) bool {
         return (self.val & 0x1) == 1;
@@ -2284,15 +2804,216 @@ pub const Value = struct {
             else => false,
         };
     }
+
+    // ============================================================================
+    // 快速算术操作 (FastOps 兼容)
+    // 这些操作假设类型已经检查过，用于热路径优化
+    // ============================================================================
+
+    /// 快速整数加法 (无类型检查)
+    pub inline fn addIntFast(a: Value, b: Value) Value {
+        const result = a.asInt() +% b.asInt();
+        return initInt(result);
+    }
+
+    /// 快速整数减法 (无类型检查)
+    pub inline fn subIntFast(a: Value, b: Value) Value {
+        const result = a.asInt() -% b.asInt();
+        return initInt(result);
+    }
+
+    /// 快速整数乘法 (无类型检查)
+    pub inline fn mulIntFast(a: Value, b: Value) Value {
+        const result = a.asInt() *% b.asInt();
+        return initInt(result);
+    }
+
+    /// 快速整数除法 (无类型检查，除数为0返回0)
+    pub inline fn divIntFast(a: Value, b: Value) Value {
+        const bv = b.asInt();
+        if (bv == 0) return initInt(0);
+        return initInt(@divTrunc(a.asInt(), bv));
+    }
+
+    /// 快速整数取模 (无类型检查，除数为0返回0)
+    pub inline fn modIntFast(a: Value, b: Value) Value {
+        const bv = b.asInt();
+        if (bv == 0) return initInt(0);
+        return initInt(@mod(a.asInt(), bv));
+    }
+
+    /// 快速浮点加法 (无类型检查)
+    pub inline fn addFloatFast(a: Value, b: Value) Value {
+        return initFloat(a.asFloat() + b.asFloat());
+    }
+
+    /// 快速浮点减法 (无类型检查)
+    pub inline fn subFloatFast(a: Value, b: Value) Value {
+        return initFloat(a.asFloat() - b.asFloat());
+    }
+
+    /// 快速浮点乘法 (无类型检查)
+    pub inline fn mulFloatFast(a: Value, b: Value) Value {
+        return initFloat(a.asFloat() * b.asFloat());
+    }
+
+    /// 快速浮点除法 (无类型检查)
+    pub inline fn divFloatFast(a: Value, b: Value) Value {
+        return initFloat(a.asFloat() / b.asFloat());
+    }
+
+    /// 通用加法 (带类型检查和溢出处理)
+    pub fn addGeneric(a: Value, b: Value) Value {
+        if (a.isInt() and b.isInt()) {
+            const ai = a.asInt();
+            const bi = b.asInt();
+            const result = @addWithOverflow(ai, bi);
+            if (result[1] != 0 or !fitsIn48Bits(result[0])) {
+                // 溢出：转为浮点数
+                return initFloat(@as(f64, @floatFromInt(ai)) + @as(f64, @floatFromInt(bi)));
+            }
+            return initInt(result[0]);
+        }
+        // 混合类型：转为浮点数
+        const af: f64 = if (a.isInt()) @floatFromInt(a.asInt()) else a.asFloat();
+        const bf: f64 = if (b.isInt()) @floatFromInt(b.asInt()) else b.asFloat();
+        return initFloat(af + bf);
+    }
+
+    /// 通用减法 (带类型检查和溢出处理)
+    pub fn subGeneric(a: Value, b: Value) Value {
+        if (a.isInt() and b.isInt()) {
+            const ai = a.asInt();
+            const bi = b.asInt();
+            const result = @subWithOverflow(ai, bi);
+            if (result[1] != 0 or !fitsIn48Bits(result[0])) {
+                return initFloat(@as(f64, @floatFromInt(ai)) - @as(f64, @floatFromInt(bi)));
+            }
+            return initInt(result[0]);
+        }
+        const af: f64 = if (a.isInt()) @floatFromInt(a.asInt()) else a.asFloat();
+        const bf: f64 = if (b.isInt()) @floatFromInt(b.asInt()) else b.asFloat();
+        return initFloat(af - bf);
+    }
+
+    /// 通用乘法 (带类型检查和溢出处理)
+    pub fn mulGeneric(a: Value, b: Value) Value {
+        if (a.isInt() and b.isInt()) {
+            const ai = a.asInt();
+            const bi = b.asInt();
+            const result = @mulWithOverflow(ai, bi);
+            if (result[1] != 0 or !fitsIn48Bits(result[0])) {
+                return initFloat(@as(f64, @floatFromInt(ai)) * @as(f64, @floatFromInt(bi)));
+            }
+            return initInt(result[0]);
+        }
+        const af: f64 = if (a.isInt()) @floatFromInt(a.asInt()) else a.asFloat();
+        const bf: f64 = if (b.isInt()) @floatFromInt(b.asInt()) else b.asFloat();
+        return initFloat(af * bf);
+    }
+
+    /// 通用除法 (PHP语义：整数整除返回整数，否则返回浮点)
+    pub fn divGeneric(a: Value, b: Value) Value {
+        if (a.isInt() and b.isInt()) {
+            const ai = a.asInt();
+            const bi = b.asInt();
+            if (bi != 0 and @mod(ai, bi) == 0) {
+                const result = @divTrunc(ai, bi);
+                if (fitsIn48Bits(result)) {
+                    return initInt(result);
+                }
+            }
+        }
+        const af: f64 = if (a.isInt()) @floatFromInt(a.asInt()) else a.asFloat();
+        const bf: f64 = if (b.isInt()) @floatFromInt(b.asInt()) else b.asFloat();
+        return initFloat(af / bf);
+    }
+
+    /// 快速整数比较 (无类型检查)
+    pub inline fn ltIntFast(a: Value, b: Value) Value {
+        return initBool(a.asInt() < b.asInt());
+    }
+
+    pub inline fn gtIntFast(a: Value, b: Value) Value {
+        return initBool(a.asInt() > b.asInt());
+    }
+
+    pub inline fn leIntFast(a: Value, b: Value) Value {
+        return initBool(a.asInt() <= b.asInt());
+    }
+
+    pub inline fn geIntFast(a: Value, b: Value) Value {
+        return initBool(a.asInt() >= b.asInt());
+    }
+
+    pub inline fn eqIntFast(a: Value, b: Value) Value {
+        return initBool(a.asInt() == b.asInt());
+    }
+
+    /// 快速位操作 (无类型检查)
+    pub inline fn bitAndFast(a: Value, b: Value) Value {
+        return initInt(a.asInt() & b.asInt());
+    }
+
+    pub inline fn bitOrFast(a: Value, b: Value) Value {
+        return initInt(a.asInt() | b.asInt());
+    }
+
+    pub inline fn bitXorFast(a: Value, b: Value) Value {
+        return initInt(a.asInt() ^ b.asInt());
+    }
+
+    pub inline fn bitNotFast(a: Value) Value {
+        return initInt(~a.asInt());
+    }
+
+    pub inline fn shlFast(a: Value, b: Value) Value {
+        const shift: u6 = @intCast(@as(u64, @bitCast(b.asInt())) & 63);
+        return initInt(a.asInt() << shift);
+    }
+
+    pub inline fn shrFast(a: Value, b: Value) Value {
+        const shift: u6 = @intCast(@as(u64, @bitCast(b.asInt())) & 63);
+        return initInt(a.asInt() >> shift);
+    }
+
+    /// 转换为浮点数
+    pub fn toFloat(self: Value) f64 {
+        if (self.isFloat()) return self.asFloat();
+        if (self.isInt()) return @floatFromInt(self.asInt());
+        if (self.isBool()) return if (self.asBool()) 1.0 else 0.0;
+        return 0.0;
+    }
+
+    /// 转换为整数
+    pub fn toInt(self: Value) i64 {
+        if (self.isInt()) return self.asInt();
+        if (self.isFloat()) {
+            const f = self.asFloat();
+            if (f >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
+                f <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
+            {
+                return @intFromFloat(f);
+            }
+            return 0;
+        }
+        if (self.isBool()) return if (self.asBool()) 1 else 0;
+        return 0;
+    }
 };
 
 /// 隐藏类(Shape) - 对象属性布局描述
 /// 用于替换传统的HashMap，提高属性访问性能
+/// 
+/// 增强版本：支持内联缓存
+/// - 内联缓存兼容：通过 id 快速比较
 pub const Shape = struct {
     id: u32,
     parent: ?*Shape,
     property_map: std.StringHashMap(u32), // 属性名 -> 偏移量
     property_count: u32,
+    /// 分配器引用
+    allocator: ?std.mem.Allocator = null,
 
     pub var next_id: u32 = 0;
 
@@ -2302,6 +3023,7 @@ pub const Shape = struct {
             .parent = parent,
             .property_map = std.StringHashMap(u32).init(allocator),
             .property_count = if (parent) |p| p.property_count else 0,
+            .allocator = allocator,
         };
     }
 
@@ -2331,6 +3053,17 @@ pub const Shape = struct {
         return null;
     }
 
+    /// 获取属性槽位（兼容 shape.zig 的 PropertySlot 接口）
+    pub fn getPropertySlot(self: *const Shape, name: []const u8) ?PropertySlot {
+        if (self.property_map.get(name)) |offset| {
+            return PropertySlot{ .offset = @intCast(offset) };
+        }
+        if (self.parent) |p| {
+            return p.getPropertySlot(name);
+        }
+        return null;
+    }
+
     /// 检查属性是否存在
     pub fn hasProperty(self: *Shape, name: []const u8) bool {
         return self.getPropertyOffset(name) != null;
@@ -2356,8 +3089,39 @@ pub const Shape = struct {
 
         // 添加新属性
         _ = try new_shape.addProperty(added_property);
+
         return new_shape;
     }
+
+    /// 获取统计信息
+    pub fn getStats(self: *const Shape) Stats {
+        return .{
+            .id = self.id,
+            .property_count = self.property_count,
+            .transition_count = 0,
+        };
+    }
+
+    pub const Stats = struct {
+        id: u32,
+        property_count: u32,
+        transition_count: usize,
+    };
+};
+
+/// 属性槽位信息（兼容 shape.zig）
+pub const PropertySlot = struct {
+    /// 槽位偏移
+    offset: u16,
+    /// 属性标志
+    flags: Flags = .{},
+
+    pub const Flags = packed struct {
+        writable: bool = true,
+        enumerable: bool = true,
+        configurable: bool = true,
+        _padding: u5 = 0,
+    };
 };
 
 pub const UserFunction = struct {
@@ -2654,8 +3418,8 @@ pub const Closure = struct {
         new_closure.* = Closure.init(allocator, self.function);
 
         // Copy captured variables
-        var iterator = self.captured_vars.iterator();
-        while (iterator.next()) |entry| {
+        var iter = self.captured_vars.iterator();
+        while (iter.next()) |entry| {
             try new_closure.captured_vars.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 

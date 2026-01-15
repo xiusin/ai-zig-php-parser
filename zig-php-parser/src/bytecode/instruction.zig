@@ -270,6 +270,20 @@ pub const OpCode = enum(u8) {
     capture_var = 0xE2, // 捕获变量
     arrow_fn = 0xE3, // 箭头函数
 
+    // ========== 寄存器指令 (0xE4-0xEF) - 寄存器优化 ==========
+    load_reg = 0xE4, // 从变量加载到寄存器: load_reg reg, var_id
+    store_reg = 0xE5, // 从寄存器存储到变量: store_reg var_id, reg
+    move_reg = 0xE6, // 寄存器间移动: move_reg dst_reg, src_reg
+    add_reg = 0xE7, // 寄存器加法: add_reg dst_reg, src_reg
+    sub_reg = 0xE8, // 寄存器减法: sub_reg dst_reg, src_reg
+    mul_reg = 0xE9, // 寄存器乘法: mul_reg dst_reg, src_reg
+    div_reg = 0xEA, // 寄存器除法: div_reg dst_reg, src_reg
+    cmp_reg = 0xEB, // 寄存器比较: cmp_reg reg1, reg2
+    spill_reg = 0xEC, // 溢出寄存器到栈: spill_reg reg
+    reload_reg = 0xED, // 从栈重新加载到寄存器: reload_reg reg
+    clear_regs = 0xEE, // 清空所有寄存器（函数调用前）
+    // 0xEF 保留
+
     // ========== 调试与元操作 (0xF0-0xFF) ==========
     debug_break = 0xF0, // 调试断点
     line_number = 0xF1, // 行号标记
@@ -288,9 +302,11 @@ pub const OpCode = enum(u8) {
     /// 获取操作数数量
     pub fn operandCount(self: OpCode) u8 {
         return switch (self) {
-            .nop, .pop, .dup, .swap, .push_null, .push_true, .push_false, .push_int_0, .push_int_1, .ret_void, .halt, .cow_copy => 0,
+            .nop, .pop, .dup, .swap, .push_null, .push_true, .push_false, .push_int_0, .push_int_1, .ret_void, .halt, .cow_copy, .clear_regs => 0,
 
-            .push_const, .push_local, .push_global, .store_local, .store_global, .jmp, .jz, .jnz, .call, .new_array, .new_object, .new_struct, .throw, .guard_int, .guard_float, .guard_string, .pass_by_value, .pass_by_ref, .pass_by_cow, .pass_by_move, .cow_check, .ret_move, .ret_cow => 1,
+            .push_const, .push_local, .push_global, .store_local, .store_global, .jmp, .jz, .jnz, .call, .new_array, .new_object, .new_struct, .throw, .guard_int, .guard_float, .guard_string, .pass_by_value, .pass_by_ref, .pass_by_cow, .pass_by_move, .cow_check, .ret_move, .ret_cow, .spill_reg, .reload_reg => 1,
+
+            .load_reg, .store_reg, .move_reg, .add_reg, .sub_reg, .mul_reg, .div_reg, .cmp_reg => 2,
 
             else => 2,
         };

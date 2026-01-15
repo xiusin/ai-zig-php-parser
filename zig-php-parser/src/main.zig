@@ -20,7 +20,7 @@ fn printUsage() void {
         \\       zig-php --compile [compile-options] <file.php>
         \\
         \\Interpreter Options:
-        \\  --mode=<mode>      Execution mode: tree, bytecode, auto (default: tree)
+        \\  --mode=<mode>      Execution mode: tree, bytecode, fast, auto (default: tree)
         \\  --syntax=<syntax>  Syntax mode: php, go (default: php)
         \\  --config=<file>    Load configuration from specified file
         \\  --help, -h         Show this help message
@@ -41,6 +41,7 @@ fn printUsage() void {
         \\Execution Modes:
         \\  tree      Tree-walking interpreter (most compatible, default)
         \\  bytecode  Bytecode virtual machine (higher performance)
+        \\  fast      FastVM with NaN-boxing (highest performance, limited features)
         \\  auto      Automatically select based on code characteristics
         \\
         \\Syntax Modes:
@@ -54,6 +55,7 @@ fn printUsage() void {
         \\Examples:
         \\  zig-php script.php                        Run with interpreter
         \\  zig-php --mode=bytecode app.php           Run with bytecode VM
+        \\  zig-php --mode=fast app.php               Run with FastVM (highest perf)
         \\  zig-php --syntax=go app.php               Run with Go-style syntax
         \\  zig-php --config=myconfig.json app.php    Run with custom config
         \\  zig-php --compile hello.php               Compile to native executable
@@ -66,7 +68,7 @@ fn printUsage() void {
 /// 打印版本信息
 fn printVersion() void {
     std.debug.print("zig-php 0.1.0 (Zig PHP Interpreter)\n", .{});
-    std.debug.print("Execution modes: tree-walking, bytecode, auto\n", .{});
+    std.debug.print("Execution modes: tree-walking, bytecode, fast_vm, auto\n", .{});
     std.debug.print("AOT compilation: supported\n", .{});
 }
 
@@ -85,6 +87,9 @@ fn parseExecutionMode(mode_str: []const u8) ?ExecutionMode {
         return .tree_walking;
     } else if (std.mem.eql(u8, mode_str, "bytecode")) {
         return .bytecode;
+    } else if (std.mem.eql(u8, mode_str, "fast") or std.mem.eql(u8, mode_str, "fast_vm")) {
+        // fast_vm 模式使用 FastVM (NaN-boxing 高性能执行)
+        return .fast;
     } else if (std.mem.eql(u8, mode_str, "auto")) {
         return .auto;
     }
@@ -174,7 +179,7 @@ pub fn main() !void {
                 execution_mode = mode;
             } else {
                 std.debug.print("Error: Unknown execution mode '{s}'\n", .{mode_str});
-                std.debug.print("Valid modes: tree, bytecode, auto\n", .{});
+                std.debug.print("Valid modes: tree, bytecode, fast, auto\n", .{});
                 return;
             }
         } else if (std.mem.startsWith(u8, arg, "--syntax=")) {
