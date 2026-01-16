@@ -12,132 +12,124 @@ const std = @import("std");
 const fast_value = @import("fast_value.zig");
 const fast_pool = @import("fast_pool.zig");
 const fast_string = @import("fast_string.zig");
+const func_mod = @import("func.zig");
+const jit = @import("../jit/root.zig");
+const opcode_mod = @import("opcode.zig");
 
 const FastValue = fast_value.FastValue;
 const FastOps = fast_value.FastOps;
 const ValueStack = fast_value.ValueStack;
+pub const CompiledFunc = func_mod.CompiledFunc;
+pub const OpCode = opcode_mod.OpCode;
 
 // ============================================================================
 // 字节码指令
 // ============================================================================
 
-pub const OpCode = enum(u8) {
-    // 栈操作 (0x00-0x0F)
-    nop = 0x00,
-    push_nil = 0x01,
-    push_true = 0x02,
-    push_false = 0x03,
-    push_int = 0x04, // 后跟 i32
-    push_float = 0x05, // 后跟 f64
-    push_const = 0x06, // 后跟常量索引
-    push_local = 0x07, // 后跟局部变量索引
-    store_local = 0x08,
-    pop = 0x09,
-    dup = 0x0A,
-    swap = 0x0B,
-
-    // 整数算术 (0x10-0x1F) - 类型特化
-    add_i = 0x10,
-    sub_i = 0x11,
-    mul_i = 0x12,
-    div_i = 0x13,
-    mod_i = 0x14,
-    neg_i = 0x15,
-    inc_i = 0x16,
-    dec_i = 0x17,
-
-    // 浮点算术 (0x20-0x2F)
-    add_f = 0x20,
-    sub_f = 0x21,
-    mul_f = 0x22,
-    div_f = 0x23,
-    neg_f = 0x25,
-
-    // 通用算术 (0x30-0x3F) - 带类型检查
-    add = 0x30,
-    sub = 0x31,
-    mul = 0x32,
-    div = 0x33,
-    mod = 0x34,
-    neg = 0x35,
-
-    // 比较 (0x40-0x4F)
-    eq = 0x40,
-    ne = 0x41,
-    lt = 0x42,
-    le = 0x43,
-    gt = 0x44,
-    ge = 0x45,
-    eq_i = 0x46,
-    lt_i = 0x47,
-    gt_i = 0x48,
-
-    // 位操作 (0x50-0x5F)
-    band = 0x50,
-    bor = 0x51,
-    bxor = 0x52,
-    bnot = 0x53,
-    shl = 0x54,
-    shr = 0x55,
-
-    // 逻辑 (0x60-0x6F)
-    land = 0x60,
-    lor = 0x61,
-    lnot = 0x62,
-
-    // 控制流 (0x70-0x7F)
-    jmp = 0x70, // 无条件跳转
-    jz = 0x71, // 为假跳转
-    jnz = 0x72, // 为真跳转
-    call = 0x73, // 函数调用
-    ret = 0x74, // 返回
-    ret_nil = 0x75, // 返回 nil
-    halt = 0x7F,
-
-    // 超级指令 (0x80-0x8F) - 合并常见序列
-    load_add_i = 0x80, // push_local + add_i
-    load_sub_i = 0x81,
-    load_inc_store = 0x82, // push_local + inc_i + store_local
-    load_dec_store = 0x83,
-    push_0 = 0x84, // push_int 0
-    push_1 = 0x85, // push_int 1
-    push_m1 = 0x86, // push_int -1
-    dup_add_i = 0x87, // dup + add_i
-
-    // 数组/对象 (0x90-0x9F)
-    new_array = 0x90,
-    array_get = 0x91,
-    array_set = 0x92,
-    array_push = 0x93,
-    obj_get = 0x94,
-    obj_set = 0x95,
-    obj_call = 0x96,
-
-    // 字符串 (0xA0-0xAF)
-    concat = 0xA0,
-    strlen = 0xA1,
-
-    // 内置函数 (0xB0-0xBF)
-    echo = 0xB0,
-    print = 0xB1,
-
-    // 调试 (0xF0-0xFF)
-    debug = 0xF0,
-    line = 0xF1, // 行号信息
-};
-
-// ============================================================================
-// 编译后的函数
-// ============================================================================
-
-pub const CompiledFunc = struct {
-    name: []const u8,
-    code: []const u8,
-    constants: []FastValue,
-    locals_count: u16,
-    params_count: u16,
-    max_stack: u16,
-};
+// pub const OpCode = enum(u8) {
+//     // 栈操作 (0x00-0x0F)
+//     nop = 0x00,
+//     push_nil = 0x01,
+//     push_true = 0x02,
+//     push_false = 0x03,
+//     push_int = 0x04, // 后跟 i32
+//     push_float = 0x05, // 后跟 f64
+//     push_const = 0x06, // 后跟常量索引
+//     push_local = 0x07, // 后跟局部变量索引
+//     store_local = 0x08,
+//     pop = 0x09,
+//     dup = 0x0A,
+//     swap = 0x0B,
+// 
+//     // 整数算术 (0x10-0x1F) - 类型特化
+//     add_i = 0x10,
+//     sub_i = 0x11,
+//     mul_i = 0x12,
+//     div_i = 0x13,
+//     mod_i = 0x14,
+//     neg_i = 0x15,
+//     inc_i = 0x16,
+//     dec_i = 0x17,
+// 
+//     // 浮点算术 (0x20-0x2F)
+//     add_f = 0x20,
+//     sub_f = 0x21,
+//     mul_f = 0x22,
+//     div_f = 0x23,
+//     neg_f = 0x25,
+// 
+//     // 通用算术 (0x30-0x3F) - 带类型检查
+//     add = 0x30,
+//     sub = 0x31,
+//     mul = 0x32,
+//     div = 0x33,
+//     mod = 0x34,
+//     neg = 0x35,
+// 
+//     // 比较 (0x40-0x4F)
+//     eq = 0x40,
+//     ne = 0x41,
+//     lt = 0x42,
+//     le = 0x43,
+//     gt = 0x44,
+//     ge = 0x45,
+//     eq_i = 0x46,
+//     lt_i = 0x47,
+//     gt_i = 0x48,
+// 
+//     // 位操作 (0x50-0x5F)
+//     band = 0x50,
+//     bor = 0x51,
+//     bxor = 0x52,
+//     bnot = 0x53,
+//     shl = 0x54,
+//     shr = 0x55,
+// 
+//     // 逻辑 (0x60-0x6F)
+//     land = 0x60,
+//     lor = 0x61,
+//     lnot = 0x62,
+// 
+//     // 控制流 (0x70-0x7F)
+//     jmp = 0x70, // 无条件跳转
+//     jz = 0x71, // 为假跳转
+//     jnz = 0x72, // 为真跳转
+//     call = 0x73, // 函数调用
+//     ret = 0x74, // 返回
+//     ret_nil = 0x75, // 返回 nil
+//     halt = 0x7F,
+// 
+//     // 超级指令 (0x80-0x8F) - 合并常见序列
+//     load_add_i = 0x80, // push_local + add_i
+//     load_sub_i = 0x81,
+//     load_inc_store = 0x82, // push_local + inc_i + store_local
+//     load_dec_store = 0x83,
+//     push_0 = 0x84, // push_int 0
+//     push_1 = 0x85, // push_int 1
+//     push_m1 = 0x86, // push_int -1
+//     dup_add_i = 0x87, // dup + add_i
+// 
+//     // 数组/对象 (0x90-0x9F)
+//     new_array = 0x90,
+//     array_get = 0x91,
+//     array_set = 0x92,
+//     array_push = 0x93,
+//     obj_get = 0x94,
+//     obj_set = 0x95,
+//     obj_call = 0x96,
+// 
+//     // 字符串 (0xA0-0xAF)
+//     concat = 0xA0,
+//     strlen = 0xA1,
+// 
+//     // 内置函数 (0xB0-0xBF)
+//     echo = 0xB0,
+//     print = 0xB1,
+// 
+//     // 调试 (0xF0-0xFF)
+//     debug = 0xF0,
+//     line = 0xF1, // 行号信息
+// };
 
 // ============================================================================
 // 调用帧
@@ -148,6 +140,7 @@ pub const CallFrame = struct {
     ip: u32,
     bp: u32, // 基指针（局部变量起始）
     ret_addr: u32,
+    hot_counter: u32 = 0,
 };
 
 // ============================================================================
@@ -237,8 +230,13 @@ pub const FastVM = struct {
     ic: InlineCache,
     tf: TypeFeedback,
     output: std.ArrayListUnmanaged(u8),
+    code_cache: jit.CodeCache,
+    jit_compiler: jit.Compiler,
 
     pub fn init(allocator: std.mem.Allocator) !FastVM {
+        var code_cache = try jit.CodeCache.init(allocator, 1024 * 1024);
+        errdefer code_cache.deinit();
+
         return .{
             .allocator = allocator,
             .stack = try ValueStack.init(allocator),
@@ -248,7 +246,26 @@ pub const FastVM = struct {
             .ic = InlineCache.init(),
             .tf = TypeFeedback.init(),
             .output = .{},
+            .code_cache = code_cache,
+            .jit_compiler = jit.Compiler.init(allocator),
         };
+    }
+
+    fn jitCompile(self: *FastVM, func: *const CompiledFunc, osr_ip: ?usize) void {
+       const mutable_func = @constCast(func);
+       if (mutable_func.jit_code != null) return;
+       
+       std.debug.print("Attempting JIT compile for {s} osr_ip={?}\n", .{func.name, osr_ip});
+       
+       if (self.jit_compiler.compile(&self.code_cache, func, &self.tf, osr_ip)) |res| {
+            if (res) |r| {
+                mutable_func.jit_code = r.code;
+                mutable_func.osr_entry_offset = r.osr_entry_offset;
+                std.debug.print("JIT compiled {s} osr_off={d}\n", .{func.name, r.osr_entry_offset});
+            }
+       } else |err| {
+            std.debug.print("JIT compilation failed: {s}\n", .{@errorName(err)});
+       }
     }
 
     pub fn deinit(self: *FastVM) void {
@@ -259,6 +276,27 @@ pub const FastVM = struct {
 
     /// 执行函数
     pub fn execute(self: *FastVM, func: *const CompiledFunc) !FastValue {
+        // std.debug.print("FastVM executing {s} (len={d})\n", .{func.name, func.code.len});
+        
+        // Force JIT for test
+        // if (std.mem.eql(u8, func.name, "main") and func.jit_code == null) {
+        //      self.jitCompile(func, null);
+        // }
+
+        // JIT Fast Path
+        if (func.jit_code) |jit_ptr| {
+             // Check signature for "sum" or "main"
+             if (std.mem.eql(u8, func.name, "sum") or std.mem.eql(u8, func.name, "main")) {
+                 // const stack_ptr = self.stack.data.ptr;
+                 // const bp = self.stack.top; // Wait, bp should be 0 for main? No, execute sets bp to stack.top
+                 // For main, frame is set up below.
+                 // If we JIT, we need to setup frame or pass stack pointer correctly.
+                 // For now, let's skip JIT Fast Path for main on entry, rely on OSR.
+                 // return FastValue.initInt(42);
+                 _ = jit_ptr;
+             }
+        }
+
         // 设置初始帧
         self.frames[0] = .{
             .func = func,
@@ -300,6 +338,8 @@ pub const FastVM = struct {
             const op_byte = code[frame.ip];
             const op: OpCode = @enumFromInt(op_byte);
             frame.ip += 1;
+            // std.debug.print("Op: {s} stack: {d}\n", .{@tagName(op), self.stack.top});
+            std.debug.print("Op: {s} stack: {d}\n", .{@tagName(op), self.stack.top});
 
             switch (op) {
                 // --- 栈操作 ---
@@ -419,16 +459,31 @@ pub const FastVM = struct {
                 .add => {
                     const b = self.stack.pop();
                     const a = self.stack.pop();
+                    if (a.isInt() and b.isInt()) {
+                        self.tf.record(@intCast(frame.ip - 1), a);
+                    } else {
+                        self.tf.record(@intCast(frame.ip - 1), FastValue.nil);
+                    }
                     self.stack.push(FastOps.add(a, b));
                 },
                 .sub => {
                     const b = self.stack.pop();
                     const a = self.stack.pop();
+                    if (a.isInt() and b.isInt()) {
+                        self.tf.record(@intCast(frame.ip - 1), a);
+                    } else {
+                        self.tf.record(@intCast(frame.ip - 1), FastValue.nil);
+                    }
                     self.stack.push(FastOps.sub(a, b));
                 },
                 .mul => {
                     const b = self.stack.pop();
                     const a = self.stack.pop();
+                    if (a.isInt() and b.isInt()) {
+                        self.tf.record(@intCast(frame.ip - 1), a);
+                    } else {
+                        self.tf.record(@intCast(frame.ip - 1), FastValue.nil);
+                    }
                     self.stack.push(FastOps.mul(a, b));
                 },
                 .div => {
@@ -470,6 +525,11 @@ pub const FastVM = struct {
                 .lt => {
                     const b = self.stack.pop();
                     const a = self.stack.pop();
+                    if (a.isInt() and b.isInt()) {
+                        self.tf.record(@intCast(frame.ip - 1), a);
+                    } else {
+                        self.tf.record(@intCast(frame.ip - 1), FastValue.nil);
+                    }
                     self.stack.push(FastOps.lt(a, b));
                 },
                 .le => {
@@ -554,20 +614,83 @@ pub const FastVM = struct {
                 .jmp => {
                     const offset = std.mem.readInt(i16, code[frame.ip..][0..2], .little);
                     frame.ip += 2;
-                    frame.ip = @intCast(@as(i32, @intCast(frame.ip)) + offset - 2);
+                    frame.ip = @intCast(@as(i32, @intCast(frame.ip)) + offset);
+                    
+                    std.debug.print("JMP offset: {d} counter: {d}\n", .{offset, frame.hot_counter});
+                    if (offset < 0) {
+                        // std.debug.print("Backward jump: {d}\n", .{offset});
+                        frame.hot_counter +|= 1;
+                        if (frame.hot_counter > 100) {
+                             self.jitCompile(frame.func, frame.ip);
+                             if (frame.func.jit_code) |jit_ptr| {
+                                 if (frame.func.osr_entry_offset != 0) {
+                                     const stack_ptr = self.stack.data.ptr;
+                                     const bp = frame.bp;
+                                     // Pass stack.top as 3rd argument (x2)
+                                     const stack_top = self.stack.top;
+                                     const code_ptr = @intFromPtr(jit_ptr);
+                                     const f: *const fn([*]FastValue, usize, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
+                                     std.debug.print("JIT Call: stack_ptr={*} bp={d} stack_top={d} osr_off={d}\n", .{stack_ptr, bp, stack_top, frame.func.osr_entry_offset});
+                                     const ret = f(stack_ptr, bp, stack_top, frame.func.osr_entry_offset);
+                                     std.debug.print("OSR execution result: {d}\n", .{ret});
+                                     return FastValue.initInt(ret);
+                                 }
+                             }
+                        }
+                    }
                 },
                 .jz => {
                     const offset = std.mem.readInt(i16, code[frame.ip..][0..2], .little);
                     frame.ip += 2;
                     if (!self.stack.pop().toBool()) {
-                        frame.ip = @intCast(@as(i32, @intCast(frame.ip)) + offset - 2);
+                        frame.ip = @intCast(@as(i32, @intCast(frame.ip)) + offset);
+                        if (offset < 0) {
+                            // std.debug.print("Backward jump (jz): {d}\n", .{offset});
+                            frame.hot_counter +|= 1;
+                            if (frame.hot_counter > 100) {
+                                 self.jitCompile(frame.func, frame.ip);
+                                 if (frame.func.jit_code) |jit_ptr| {
+                                     if (frame.func.osr_entry_offset != 0) {
+                                         const stack_ptr = self.stack.data.ptr;
+                                         const bp = frame.bp;
+                                         const stack_top = self.stack.top;
+                                         const code_ptr = @intFromPtr(jit_ptr);
+                                         const f: *const fn([*]FastValue, usize, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
+                                         std.debug.print("JIT Call: stack_ptr={*} bp={d} stack_top={d} osr_off={d}\n", .{stack_ptr, bp, stack_top, frame.func.osr_entry_offset});
+                                         const ret = f(stack_ptr, bp, stack_top, frame.func.osr_entry_offset);
+                                         std.debug.print("OSR execution result: {d}\n", .{ret});
+                                         // return FastValue.initInt(ret);
+                                         // _ = ret;
+                                     }
+                                 }
+                            }
+                        }
                     }
                 },
                 .jnz => {
                     const offset = std.mem.readInt(i16, code[frame.ip..][0..2], .little);
                     frame.ip += 2;
                     if (self.stack.pop().toBool()) {
-                        frame.ip = @intCast(@as(i32, @intCast(frame.ip)) + offset - 2);
+                        frame.ip = @intCast(@as(i32, @intCast(frame.ip)) + offset);
+                        if (offset < 0) {
+                            // std.debug.print("Backward jump (jnz): {d}\n", .{offset});
+                            frame.hot_counter +|= 1;
+                            if (frame.hot_counter > 100) {
+                                 self.jitCompile(frame.func, frame.ip);
+                                 if (frame.func.jit_code) |jit_ptr| {
+                                     if (frame.func.osr_entry_offset != 0) {
+                                         const stack_ptr = self.stack.data.ptr;
+                                         const bp = frame.bp;
+                                         const stack_top = self.stack.top;
+                                         const code_ptr = @intFromPtr(jit_ptr) + frame.func.osr_entry_offset;
+                                         const f: *const fn([*]FastValue, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
+                                         const ret = f(stack_ptr, bp, stack_top);
+                                         // return FastValue.initInt(ret);
+                                         _ = ret;
+                                     }
+                                 }
+                            }
+                        }
                     }
                 },
 

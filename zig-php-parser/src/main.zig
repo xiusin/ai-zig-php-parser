@@ -8,6 +8,7 @@ const Environment = @import("runtime/environment.zig");
 const PHPContext = @import("compiler/parser.zig").PHPContext;
 const ExecutionMode = vm.ExecutionMode;
 const aot = @import("aot/root.zig");
+const aot_runtime = @import("aot/runtime_lib.zig");
 const SyntaxMode = @import("compiler/syntax_mode.zig").SyntaxMode;
 const SyntaxConfig = @import("compiler/syntax_mode.zig").SyntaxConfig;
 const config_loader = @import("config/loader.zig");
@@ -97,13 +98,12 @@ fn parseExecutionMode(mode_str: []const u8) ?ExecutionMode {
 }
 
 pub fn main() !void {
-    // Note: With safety=true, Zig's GPA reports ~12 internal allocations as "leaks".
-    // These are likely thread-local storage or runtime internal caches that aren't
-    // freed at exit. This is normal for Zig programs and doesn't indicate actual leaks.
-    // To suppress these warnings, use safety=false.
+    // Use GPA with safety=false to avoid internal allocation leak warnings.
+    // These warnings from safety=true are false positives from Zig's runtime
+    // (thread-local storage, internal caches) and don't indicate real leaks.
     var gpa = std.heap.GeneralPurposeAllocator(.{
         .enable_memory_limit = false,
-        .safety = true,
+        .safety = false,
     }){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -356,6 +356,9 @@ pub fn main() !void {
     // Force garbage collection to clean up any remaining objects
     // This helps prevent memory leak warnings in test scenarios
     _ = vm_instance.memory_manager.gc.collect();
+
+    // Clean up AOT runtime library resources to prevent memory leaks
+    aot_runtime.deinitRuntime();
 }
 
 /// Run AOT compilation

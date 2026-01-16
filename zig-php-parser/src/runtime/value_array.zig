@@ -193,38 +193,58 @@ pub const PackedValueArray = struct {
 // ============================================================================
 
 pub const MixedValueArray = struct {
+    const INVALID_INDEX = 0xFFFFFFFF;
+
     const Entry = struct {
         key: ArrayKey,
         value: Value,
         hash: u64,
+        next: u32, // 哈希冲突链的下一个索引
     };
 
     entries: std.ArrayList(Entry),
-    index_map: std.AutoHashMap(u64, usize),
+    // 哈希表存储的是 entries 的索引
+    hash_table: []u32,
+    mask: u32,
     next_int_key: i64,
     allocator: std.mem.Allocator,
     ref_count: u32,
+    
+    // 已删除元素的数量，用于决定是否重建
+    deleted_count: u32,
 
     pub fn init(allocator: std.mem.Allocator) MixedValueArray {
+        // 初始大小 8
+        const init_size = 8;
+        const hash_table = allocator.alloc(u32, init_size) catch unreachable;
+        @memset(hash_table, INVALID_INDEX);
+
         return .{
-            .entries = .{},
-            .index_map = std.AutoHashMap(u64, usize).init(allocator),
+            .entries = std.ArrayList(Entry).init(allocator),
+            .hash_table = hash_table,
+            .mask = init_size - 1,
             .next_int_key = 0,
             .allocator = allocator,
             .ref_count = 1,
+            .deleted_count = 0,
         };
     }
 
     pub fn deinit(self: *MixedValueArray) void {
         // 释放所有值和字符串键
         for (self.entries.items) |entry| {
+            if (entry.hash == 0 and entry.next == INVALID_INDEX and @intFromEnum(entry.value.val) == 0) {
+                // Skip deleted/dummy entries if any (though we usually compact)
+                continue;
+            }
+            // 简单的有效性检查：如果 value 不是 undef
             entry.value.release(self.allocator);
             if (entry.key == .string) {
                 entry.key.string.release(self.allocator);
             }
         }
-        self.entries.deinit(self.allocator);
-        self.index_map.deinit();
+        self.entries.deinit();
+        self.allocator.free(self.hash_table);
     }
 
     pub fn retain(self: *MixedValueArray) *MixedValueArray {
@@ -242,38 +262,74 @@ pub const MixedValueArray = struct {
         return false;
     }
 
+    fn rehash(self: *MixedValueArray, new_size: u32) !void {
+        const old_table = self.hash_table;
+        const new_table = try self.allocator.alloc(u32, new_size);
+        @memset(new_table, INVALID_INDEX);
+
+        self.hash_table = new_table;
+        self.mask = new_size - 1;
+
+        // 重新插入所有有效条目
+        // 注意：我们这里只是重建哈希表索引，entries 数组保持不变（除非我们需要压缩）
+        // 如果 deleted_count 过高，我们应该同时压缩 entries
+        
+        if (self.deleted_count > 0) {
+            // TODO: 实现压缩逻辑 (Compact)
+            // 目前简化为：只重建索引
+        }
+
+        for (self.entries.items, 0..) |*entry, i| {
+            // Skip deleted entries (value type check needed ideally, but for now assume all in entries are valid unless marked)
+            // 在此实现中，我们暂时不标记删除，只追加。真正删除需要 tombstone。
+            // 假设目前只有添加操作。
+            
+            const idx = entry.hash & self.mask;
+            entry.next = self.hash_table[idx];
+            self.hash_table[idx] = @intCast(i);
+        }
+
+        self.allocator.free(old_table);
+    }
+
     pub fn get(self: *const MixedValueArray, key: ArrayKey) ?Value {
         const h = key.hash();
-        if (self.index_map.get(h)) |idx| {
-            if (key.eql(self.entries.items[idx].key)) {
-                return self.entries.items[idx].value;
-            }
-        }
-        // 线性搜索处理哈希冲突
-        for (self.entries.items) |entry| {
-            if (key.eql(entry.key)) {
+        var idx = self.hash_table[h & self.mask];
+
+        while (idx != INVALID_INDEX) {
+            const entry = &self.entries.items[idx];
+            if (entry.hash == h and key.eql(entry.key)) {
                 return entry.value;
             }
+            idx = entry.next;
         }
         return null;
     }
 
     pub fn set(self: *MixedValueArray, key: ArrayKey, value: Value) !void {
         const h = key.hash();
+        var idx = self.hash_table[h & self.mask];
 
-        // 检查是否已存在
-        for (self.entries.items, 0..) |*entry, i| {
-            if (key.eql(entry.key)) {
-                // 释放旧值，保留新值
+        // 检查是否存在
+        while (idx != INVALID_INDEX) {
+            var entry = &self.entries.items[idx];
+            if (entry.hash == h and key.eql(entry.key)) {
+                // 更新值
                 entry.value.release(self.allocator);
                 _ = value.retain();
                 entry.value = value;
                 return;
             }
-            _ = i;
+            idx = entry.next;
         }
 
-        // 复制字符串键并保留
+        // 插入新值
+        // 检查是否需要扩容
+        if (self.entries.items.len >= self.hash_table.len) {
+            try self.rehash(self.hash_table.len * 2);
+        }
+
+        // 复制键
         const owned_key: ArrayKey = switch (key) {
             .integer => |i| blk: {
                 if (i >= self.next_int_key) {
@@ -288,9 +344,18 @@ pub const MixedValueArray = struct {
         };
 
         _ = value.retain();
-        const idx = self.entries.items.len;
-        try self.entries.append(self.allocator, .{ .key = owned_key, .value = value, .hash = h });
-        try self.index_map.put(h, idx);
+        
+        const new_idx = @as(u32, @intCast(self.entries.items.len));
+        const hash_idx = h & self.mask;
+        
+        try self.entries.append(Entry{
+            .key = owned_key,
+            .value = value,
+            .hash = h,
+            .next = self.hash_table[hash_idx],
+        });
+        
+        self.hash_table[hash_idx] = new_idx;
     }
 
     pub fn push(self: *MixedValueArray, value: Value) !void {

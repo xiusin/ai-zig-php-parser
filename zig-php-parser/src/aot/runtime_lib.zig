@@ -39,6 +39,19 @@ pub fn initRuntime() void {
 
 /// Deinitialize the runtime and free all resources
 pub fn deinitRuntime() void {
+    // Free global mutex if it was allocated dynamically (not the static fallback)
+    if (global_mutex) |mutex| {
+        // Only free if it's not the static fallback mutex
+        // We detect this by checking if it was allocated with the GPA
+        // Since we can't easily check, we just try to destroy it
+        if (global_gpa != null) {
+            const allocator = global_gpa.?.allocator();
+            allocator.destroy(mutex);
+        }
+        global_mutex = null;
+    }
+
+    // Free the global allocator and all its resources
     if (global_gpa) |*gpa| {
         _ = gpa.deinit();
         global_gpa = null;

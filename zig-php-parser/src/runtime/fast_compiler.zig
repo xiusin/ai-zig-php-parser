@@ -202,10 +202,11 @@ pub const FastCompiler = struct {
         if (target_node.tag == .variable) {
             const name = self.getString(target_node.data.variable.name);
             const local_idx = self.resolveLocal(name) orelse try self.addLocal(name);
-            // 直接存储，不保留值（作为语句使用时不需要返回值）
+            // 赋值表达式应该返回赋值后的值
+            try self.emitOp(.dup);
             try self.emitOp(.store_local);
             try self.emitByte(@intCast(local_idx));
-            self.popStack(); // 值被消耗
+            // self.popStack(); // store_local 消耗一个，dup 增加一个，净增 1
         }
     }
 
@@ -236,6 +237,7 @@ pub const FastCompiler = struct {
             .double_pipe, .k_or => .lor,
             .ampersand => .band,
             .pipe => .bor,
+            .dot => .concat,
             else => return CompileError.UnsupportedFeature,
         };
         try self.emitOp(opcode);
