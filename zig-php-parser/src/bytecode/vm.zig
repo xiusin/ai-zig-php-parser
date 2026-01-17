@@ -3312,6 +3312,7 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.logic_and)] = handleLogicAnd;
     table[@intFromEnum(OpCode.logic_or)] = handleLogicOr;
     table[@intFromEnum(OpCode.logic_not)] = handleLogicNot;
+    table[@intFromEnum(OpCode.coalesce)] = handleCoalesce;
 
     // 控制流
     table[@intFromEnum(OpCode.jmp)] = handleJmp;
@@ -3880,8 +3881,20 @@ fn handleLogicOr(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMEr
 }
 
 fn handleLogicNot(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const a = (try vm.pop()).toBool();
-    try vm.push(.{ .bool_val = !a });
+    const val = try vm.pop();
+    const result = !val.toBool();
+    try vm.push(.{ .bool_val = result });
+    return .continue_execution;
+}
+
+/// OPT-015: Null coalescing operator (??)
+/// @post 栈顶为左值（非 null）或右值（左值为 null）
+fn handleCoalesce(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const right = try vm.pop();
+    const left = try vm.pop();
+
+    const result = if (left == .null_val) right else left;
+    try vm.push(result);
     return .continue_execution;
 }
 
