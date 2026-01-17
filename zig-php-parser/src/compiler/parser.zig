@@ -114,6 +114,34 @@ pub const Parser = struct {
         self.context.errors.append(self.allocator, err) catch {};
     }
 
+    fn unescapeDoubleQuoted(self: *Parser, input: []const u8) anyerror![]u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, input.len);
+
+        var i: usize = 0;
+        while (i < input.len) : (i += 1) {
+            const c = input[i];
+            if (c == '\\' and i + 1 < input.len) {
+                const n = input[i + 1];
+                switch (n) {
+                    'n' => try out.append(self.allocator, '\n'),
+                    'r' => try out.append(self.allocator, '\r'),
+                    't' => try out.append(self.allocator, '\t'),
+                    '\\' => try out.append(self.allocator, '\\'),
+                    '"' => try out.append(self.allocator, '"'),
+                    '$' => try out.append(self.allocator, '$'),
+                    else => try out.append(self.allocator, n),
+                }
+                i += 1;
+                continue;
+            }
+            try out.append(self.allocator, c);
+        }
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
     fn eat(self: *Parser, tag: Token.Tag) anyerror!Token {
         if (self.curr.tag == tag) {
             const t = self.curr;
@@ -187,13 +215,13 @@ pub const Parser = struct {
             };
             try stmts.append(self.allocator, stmt);
         }
-        
+
         // Copy all tokens to context for line number calculation
         try self.context.tokens.ensureUnusedCapacity(self.context.allocator, self.all_tokens.items.len);
         for (self.all_tokens.items) |token| {
             self.context.tokens.appendAssumeCapacity(token);
         }
-        
+
         const arena = self.context.arena.allocator();
         return self.createNode(.{
             .tag = .root,
@@ -427,8 +455,7 @@ pub const Parser = struct {
                 const tok = self.curr;
                 self.nextToken();
                 break :blk tok;
-            } else
-                try self.eat(.t_string);
+            } else try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -490,7 +517,7 @@ pub const Parser = struct {
                     type_node = try self.parseType();
                 }
             }
-            
+
             // In Go mode, property names can be t_go_identifier (without $ prefix)
             var name_str: []const u8 = undefined;
             if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
@@ -551,8 +578,7 @@ pub const Parser = struct {
                 const tok = self.curr;
                 self.nextToken();
                 break :blk tok;
-            } else
-                try self.eat(.t_string);
+            } else try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -589,7 +615,7 @@ pub const Parser = struct {
                 }
                 break :blk try self.parseBlock();
             };
-            
+
             // For arrow functions, we need to create a method_decl node
             // For now, create a method_decl with the arrow function as body
             return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
@@ -617,7 +643,7 @@ pub const Parser = struct {
                     type_node = try self.parseType();
                 }
             }
-            
+
             // In Go mode, property names can be t_go_identifier (without $ prefix)
             var name_str: []const u8 = undefined;
             if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
@@ -669,7 +695,7 @@ pub const Parser = struct {
 
     fn parseNamespace(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_namespace);
-        
+
         // Handle global namespace: namespace { ... }
         if (self.curr.tag == .l_brace) {
             // Global namespace block
@@ -677,17 +703,17 @@ pub const Parser = struct {
             const body = try self.parseBlock();
             return body;
         }
-        
+
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         self.context.current_namespace = name_id;
-        
+
         // Handle namespace with block: namespace Foo { ... }
         if (self.curr.tag == .l_brace) {
             const body = try self.parseBlock();
             return body;
         }
-        
+
         // Handle namespace with semicolon: namespace Foo;
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .expression_stmt, .main_token = token, .data = .{ .none = {} } });
@@ -1177,7 +1203,7 @@ pub const Parser = struct {
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
             if (self.curr.tag == .comma) {
                 const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
-                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
                 try targets.append(self.allocator, empty_node);
                 self.nextToken();
                 continue;
@@ -1192,7 +1218,7 @@ pub const Parser = struct {
                 while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
                     if (self.curr.tag == .comma) {
                         const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
-                        const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                        const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
                         try nested_targets.append(self.allocator, empty_node);
                         self.nextToken();
                         continue;
@@ -1253,17 +1279,17 @@ pub const Parser = struct {
                 // or something that's not a valid list element
                 const comma_pos = self.lexer.pos;
                 self.nextToken(); // Move past the comma
-                
+
                 // Check if next token is a valid element (variable, list, or closing paren)
                 const is_valid_element = switch (self.curr.tag) {
                     .t_variable, .k_list, .r_paren => true,
                     else => false,
                 };
-                
+
                 // Create empty node if next token is not a valid element
                 if (!is_valid_element) {
                     const empty_token = Token{ .tag = .comma, .loc = .{ .start = comma_pos, .end = comma_pos } };
-                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
                     try targets.append(self.allocator, empty_node);
                 }
                 continue;
@@ -1284,7 +1310,7 @@ pub const Parser = struct {
                 } else {
                     // Empty slot - create a list_empty node
                     const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
-                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
                     try targets.append(self.allocator, empty_node);
                 }
             }
@@ -1312,17 +1338,17 @@ pub const Parser = struct {
                 // or something that's not a valid list element
                 const comma_pos = self.lexer.pos;
                 self.nextToken(); // Move past the comma
-                
+
                 // Check if next token is a valid element (variable, list, or closing paren)
                 const is_valid_element = switch (self.curr.tag) {
                     .t_variable, .k_list, .r_paren => true,
                     else => false,
                 };
-                
+
                 // Create empty node if next token is not a valid element
                 if (!is_valid_element) {
                     const empty_token = Token{ .tag = .comma, .loc = .{ .start = comma_pos, .end = comma_pos } };
-                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
                     try targets.append(self.allocator, empty_node);
                 }
                 continue;
@@ -1340,7 +1366,7 @@ pub const Parser = struct {
             } else {
                 // Empty slot - create a list_empty node
                 const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
-                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{.list_empty = {}} });
+                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
                 try targets.append(self.allocator, empty_node);
             }
         }
@@ -1565,7 +1591,7 @@ pub const Parser = struct {
                 left = try self.createNode(.{ .tag = .postfix_expr, .main_token = op, .data = .{ .postfix_expr = .{ .op = tag, .expr = left } } });
             } else {
                 const right = try self.parseExpression(next_p);
-                
+
                 // In Go mode, + operator on strings should be concatenation (like PHP's .)
                 var effective_op = op.tag;
                 if (self.syntax_mode == .go and tag == .plus) {
@@ -1574,13 +1600,13 @@ pub const Parser = struct {
                     const right_node = self.context.nodes.items[right];
                     const left_is_string = left_node.tag == .literal_string;
                     const right_is_string = right_node.tag == .literal_string;
-                    
+
                     if (left_is_string or right_is_string) {
                         // Use dot (concat) operator for string concatenation
                         effective_op = .dot;
                     }
                 }
-                
+
                 left = try self.createNode(.{ .tag = .binary_expr, .main_token = op, .data = .{ .binary_expr = .{ .lhs = left, .op = effective_op, .rhs = right } } });
             }
         }
@@ -1815,7 +1841,14 @@ pub const Parser = struct {
                     raw_text[1 .. raw_text.len - 1]
                 else
                     raw_text;
-                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(string_content), .quote_type = quote_type } } });
+
+                const interned_id = if (quote_type == .double) blk: {
+                    const unescaped = try self.unescapeDoubleQuoted(string_content);
+                    defer self.allocator.free(unescaped);
+                    break :blk try self.context.internLiteral(unescaped);
+                } else try self.context.internLiteral(string_content);
+
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = interned_id, .quote_type = quote_type } } });
             },
             .t_encapsed_and_whitespace => {
                 const t = try self.eat(.t_encapsed_and_whitespace);
@@ -2064,10 +2097,10 @@ pub const Parser = struct {
         const expr = try self.parseExpression(0);
         _ = try self.eat(.r_paren);
         _ = try self.eat(.l_brace);
-        
+
         var cases = std.ArrayListUnmanaged(ast.Node.Index){};
         var default_case: ?ast.Node.Index = null;
-        
+
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             if (self.curr.tag == .k_case) {
                 self.nextToken();
@@ -2097,7 +2130,7 @@ pub const Parser = struct {
                 self.nextToken(); // Skip unexpected tokens
             }
         }
-        
+
         _ = try self.eat(.r_brace);
         const arena = self.context.arena.allocator();
         const cases_slice = try arena.dupe(ast.Node.Index, cases.items);
@@ -2109,7 +2142,7 @@ pub const Parser = struct {
         const token = try self.eat(.k_yield);
         var key: ?ast.Node.Index = null;
         var value: ?ast.Node.Index = null;
-        
+
         if (self.curr.tag != .semicolon and self.curr.tag != .r_brace and self.curr.tag != .r_paren) {
             // Check for yield key => value
             value = try self.parseExpression(0);
@@ -2120,12 +2153,12 @@ pub const Parser = struct {
                 value = try self.parseExpression(0);
             }
         }
-        
+
         // Consume semicolon if present (yield as statement)
         if (self.curr.tag == .semicolon) {
             self.nextToken();
         }
-        
+
         return self.createNode(.{ .tag = .yield_expr, .main_token = token, .data = .{ .yield_expr = .{ .key = key, .value = value } } });
     }
 
@@ -2133,7 +2166,7 @@ pub const Parser = struct {
         const token = try self.eat(.k_new);
         if (self.curr.tag == .k_class) {
             self.nextToken();
-            
+
             // Parse constructor arguments
             var args = std.ArrayListUnmanaged(ast.Node.Index){};
             if (self.curr.tag == .l_paren) {
@@ -2144,14 +2177,14 @@ pub const Parser = struct {
                 }
                 _ = try self.eat(.r_paren);
             }
-            
+
             // Parse extends
             var extends: ?ast.Node.Index = null;
             if (self.curr.tag == .k_extends) {
                 self.nextToken();
                 extends = try self.parsePrimary();
             }
-            
+
             // Parse implements
             var implements = std.ArrayListUnmanaged(ast.Node.Index){};
             if (self.curr.tag == .k_implements) {
@@ -2161,7 +2194,7 @@ pub const Parser = struct {
                     if (self.curr.tag == .comma) self.nextToken();
                 }
             }
-            
+
             // Parse class body
             _ = try self.eat(.l_brace);
             var members = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -2169,29 +2202,17 @@ pub const Parser = struct {
                 try members.append(self.allocator, try self.parseStatement());
             }
             _ = try self.eat(.r_brace);
-            
+
             const arena = self.context.arena.allocator();
             const args_slice = try arena.dupe(ast.Node.Index, args.items);
             const implements_slice = try arena.dupe(ast.Node.Index, implements.items);
             const members_slice = try arena.dupe(ast.Node.Index, members.items);
-            
+
             args.deinit(self.allocator);
             implements.deinit(self.allocator);
             members.deinit(self.allocator);
-            
-            return self.createNode(.{ 
-                .tag = .anonymous_class, 
-                .main_token = token, 
-                .data = .{ 
-                    .anonymous_class = .{ 
-                        .attributes = &.{}, 
-                        .extends = extends, 
-                        .implements = implements_slice, 
-                        .members = members_slice, 
-                        .args = args_slice 
-                    } 
-                } 
-            });
+
+            return self.createNode(.{ .tag = .anonymous_class, .main_token = token, .data = .{ .anonymous_class = .{ .attributes = &.{}, .extends = extends, .implements = implements_slice, .members = members_slice, .args = args_slice } } });
         }
 
         // In Go mode, class names are t_go_identifier (without $ prefix)
@@ -2202,7 +2223,7 @@ pub const Parser = struct {
             const name_id = try self.context.intern(name_str);
             break :blk self.createNode(.{ .tag = .variable, .main_token = name_tok, .data = .{ .variable = .{ .name = name_id } } });
         } else try self.parsePrimary();
-        
+
         var args = std.ArrayListUnmanaged(ast.Node.Index){};
 
         if (self.curr.tag == .l_paren) {
@@ -2264,7 +2285,7 @@ pub const Parser = struct {
             .l_bracket => 110, // Array access
             .arrow => 100,
             .safe_arrow => 100, // 安全导航操作符 ?-> (PHP 模式)
-            .safe_dot => 100,   // 安全导航操作符 ?. (Go 模式)
+            .safe_dot => 100, // 安全导航操作符 ?. (Go 模式)
             .double_colon => 100, // Static access has same precedence as instance access
             .pipe_greater => 90, // Pipe operator has high precedence
             .asterisk, .slash, .percent => 60,

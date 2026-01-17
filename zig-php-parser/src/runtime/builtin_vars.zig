@@ -586,16 +586,7 @@ pub fn iniGetFn(vm: *VM, args: []const Value) !Value {
     }
 
     // Default values for common ini settings (inline check for performance)
-    const default_value: ?[]const u8 = if (std.mem.eql(u8, name, "error_reporting")) "32767" else
-        if (std.mem.eql(u8, name, "display_errors")) "1" else
-        if (std.mem.eql(u8, name, "log_errors")) "0" else
-        if (std.mem.eql(u8, name, "max_execution_time")) "0" else
-        if (std.mem.eql(u8, name, "memory_limit")) "128M" else
-        if (std.mem.eql(u8, name, "post_max_size")) "8M" else
-        if (std.mem.eql(u8, name, "upload_max_filesize")) "2M" else
-        if (std.mem.eql(u8, name, "precision")) "14" else
-        if (std.mem.eql(u8, name, "assert.active")) "1" else
-        if (std.mem.eql(u8, name, "zend.assertions")) "1" else null;
+    const default_value: ?[]const u8 = if (std.mem.eql(u8, name, "error_reporting")) "32767" else if (std.mem.eql(u8, name, "display_errors")) "1" else if (std.mem.eql(u8, name, "log_errors")) "0" else if (std.mem.eql(u8, name, "max_execution_time")) "0" else if (std.mem.eql(u8, name, "memory_limit")) "128M" else if (std.mem.eql(u8, name, "post_max_size")) "8M" else if (std.mem.eql(u8, name, "upload_max_filesize")) "2M" else if (std.mem.eql(u8, name, "precision")) "14" else if (std.mem.eql(u8, name, "assert.active")) "1" else if (std.mem.eql(u8, name, "zend.assertions")) "1" else null;
 
     if (default_value) |value| {
         return Value.initString(vm.allocator, value);
@@ -792,7 +783,7 @@ pub fn parseUrlFn(vm: *VM, args: []const Value) !Value {
                             path_start = host_end;
                             if (std.mem.indexOf(u8, rest, "?")) |qi| {
                                 query_start = host_end + qi;
-                                if (std.mem.indexOf(u8, rest[qi + 1..], "#")) |fi| {
+                                if (std.mem.indexOf(u8, rest[qi + 1 ..], "#")) |fi| {
                                     fragment_start = host_end + qi + 1 + fi;
                                 }
                             } else if (std.mem.indexOf(u8, rest, "#")) |fi| {
@@ -828,23 +819,39 @@ pub fn parseUrlFn(vm: *VM, args: []const Value) !Value {
         const host = if (host_end > host_start) url_str[host_start..host_end] else "";
         const path = if (path_start < query_start) url_str[path_start..query_start] else "";
         const query = if (query_start < fragment_start and query_start < url_str.len and url_str[query_start] == '?')
-            url_str[query_start + 1..fragment_start] else "";
+            url_str[query_start + 1 .. fragment_start]
+        else
+            "";
         const fragment = if (fragment_start < url_str.len and url_str[fragment_start] == '#')
-            url_str[fragment_start + 1..] else "";
+            url_str[fragment_start + 1 ..]
+        else
+            "";
 
         return switch (comp) {
             PHP_URL_SCHEME => if (scheme_end > 0)
-                Value.initString(vm.allocator, url_str[0..scheme_end]) else Value.initBool(false),
+                Value.initString(vm.allocator, url_str[0..scheme_end])
+            else
+                Value.initBool(false),
             PHP_URL_HOST => if (host.len > 0)
-                Value.initString(vm.allocator, host) else Value.initBool(false),
+                Value.initString(vm.allocator, host)
+            else
+                Value.initBool(false),
             PHP_URL_PORT => if (port != null)
-                Value.initInt(port.?) else Value.initBool(false),
+                Value.initInt(port.?)
+            else
+                Value.initBool(false),
             PHP_URL_PATH => if (path.len > 0)
-                Value.initString(vm.allocator, path) else Value.initBool(false),
+                Value.initString(vm.allocator, path)
+            else
+                Value.initBool(false),
             PHP_URL_QUERY => if (query.len > 0)
-                Value.initString(vm.allocator, query) else Value.initBool(false),
+                Value.initString(vm.allocator, query)
+            else
+                Value.initBool(false),
             PHP_URL_FRAGMENT => if (fragment.len > 0)
-                Value.initString(vm.allocator, fragment) else Value.initBool(false),
+                Value.initString(vm.allocator, fragment)
+            else
+                Value.initBool(false),
             else => Value.initBool(false),
         };
     }
@@ -860,11 +867,17 @@ pub fn parseUrlFn(vm: *VM, args: []const Value) !Value {
     const scheme = if (scheme_end > 0) url_str[0..scheme_end] else "";
     const host = if (host_end > host_start) url_str[host_start..host_end] else "";
     const path = if (path_start < fragment_start and path_start < url_str.len and url_str[path_start] == '/')
-        url_str[path_start..query_start] else "";
+        url_str[path_start..query_start]
+    else
+        "";
     const query = if (query_start < fragment_start and query_start < url_str.len and url_str[query_start] == '?')
-        url_str[query_start + 1..fragment_start] else "";
+        url_str[query_start + 1 .. fragment_start]
+    else
+        "";
     const fragment = if (fragment_start < url_str.len and url_str[fragment_start] == '#')
-        url_str[fragment_start + 1..] else "";
+        url_str[fragment_start + 1 ..]
+    else
+        "";
 
     // Scheme
     if (scheme.len > 0) {
@@ -1170,28 +1183,24 @@ pub fn funcGetArgFn(vm: *VM, args: []const Value) !Value {
 }
 
 /// func_get_args - Returns an array of the function's arguments
+/// @ownership TRANSFER: 返回的数组由调用者负责释放
 pub fn funcGetArgsFn(vm: *VM, args: []const Value) !Value {
     _ = args;
     const call_args = vm.current_call_args orelse {
         return Value.initNull();
     };
 
-    const result_array = try vm.allocator.create(PHPArray);
-    result_array.* = PHPArray.init(vm.allocator);
+    // 使用 memory_manager 统一管理生命周期
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
 
     for (call_args, 0..) |arg, i| {
         const key = ArrayKey{ .integer = @intCast(i) };
-        try result_array.set(vm.allocator, key, arg);
+        // 直接复制值到数组，无需手动 retain（set 内部会处理）
+        try php_array.set(vm.allocator, key, arg);
     }
 
-    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = result_array,
-    };
-
-    return Value.fromBox(box, Value.TYPE_ARRAY);
+    return php_array_value;
 }
 
 // ============================================================================
@@ -1235,7 +1244,8 @@ pub fn strtrFn(vm: *VM, args: []const Value) !Value {
             }
         }
 
-        return Value.initString(vm.allocator, result.items);
+        // 使用 memory_manager 管理返回字符串
+        return Value.initStringWithManager(&vm.memory_manager, result.items);
     }
 
     if (from.getTag() == .array) {
@@ -1272,7 +1282,8 @@ pub fn strtrFn(vm: *VM, args: []const Value) !Value {
             result = try new_result.toOwnedSlice(vm.allocator);
         }
 
-        return Value.initString(vm.allocator, result);
+        // 使用 memory_manager 管理返回字符串
+        return Value.initStringWithManager(&vm.memory_manager, result);
     }
 
     return str;
@@ -1338,7 +1349,8 @@ pub fn httpBuildQueryFn(vm: *VM, args: []const Value) !Value {
         try result.appendSlice(vm.allocator, encoded_val);
     }
 
-    return Value.initString(vm.allocator, result.items);
+    // 使用 memory_manager 创建字符串，确保正确的生命周期管理
+    return Value.initStringWithManager(&vm.memory_manager, result.items);
 }
 
 inline fn urlEncode(allocator: std.mem.Allocator, input: []const u8, enc_type: i64) ![]const u8 {
@@ -1364,11 +1376,13 @@ inline fn urlEncode(allocator: std.mem.Allocator, input: []const u8, enc_type: i
 // ============================================================================
 
 /// get_loaded_extensions - Returns an array of loaded extensions
+/// @ownership TRANSFER: 返回的数组由调用者负责释放
 pub fn getLoadedExtensionsFn(vm: *VM, args: []const Value) !Value {
     _ = args;
 
-    const result_array = try vm.allocator.create(PHPArray);
-    result_array.* = PHPArray.init(vm.allocator);
+    // 使用 memory_manager 统一管理生命周期，避免内存泄漏
+    const php_array_value = try Value.initArrayWithManager(&vm.memory_manager);
+    const php_array = php_array_value.getAsArray().data;
 
     // Return core extensions (hardcoded for now)
     const core_extensions = [_][]const u8{
@@ -1382,18 +1396,12 @@ pub fn getLoadedExtensionsFn(vm: *VM, args: []const Value) !Value {
 
     for (core_extensions, 0..) |ext, i| {
         const key = ArrayKey{ .integer = @intCast(i) };
-        const val = try Value.initString(vm.allocator, ext);
-        try result_array.set(vm.allocator, key, val);
+        // 使用 memory_manager 创建字符串，确保正确的生命周期管理
+        const val = try Value.initStringWithManager(&vm.memory_manager, ext);
+        try php_array.set(vm.allocator, key, val);
     }
 
-    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = result_array,
-    };
-
-    return Value.fromBox(box, Value.TYPE_ARRAY);
+    return php_array_value;
 }
 
 /// extension_loaded - Checks if an extension is loaded
@@ -1497,8 +1505,6 @@ pub fn registerVariableFunctions(stdlib: anytype) !void {
         &.{ .name = "strtr", .min_args = 2, .max_args = 3, .handler = strtrFn },
 
         // Array functions
-        
-        
 
         // URL functions
         &.{ .name = "http_build_query", .min_args = 1, .max_args = 5, .handler = httpBuildQueryFn },

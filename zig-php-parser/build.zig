@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -18,9 +19,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.linkLibC();
-    // Use Homebrew PCRE2 paths for Apple Silicon Mac
-    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/pcre2/include" });
-    exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/pcre2/lib" });
+    // Detect platform for Homebrew PCRE2 paths
+    const pcre2_prefix = if (builtin.target.cpu.arch == .aarch64) "/opt/homebrew/opt/pcre2" else "/usr/local/opt/pcre2";
+    exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
+    exe.addLibraryPath(.{ .cwd_relative = pcre2_prefix ++ "/lib" });
     exe.linkSystemLibrary("pcre2-8");
 
     b.installArtifact(exe);

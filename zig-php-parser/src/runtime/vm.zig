@@ -1703,7 +1703,8 @@ fn getLoadedExtensionsFn(vm: *VM, args: []const Value) !Value {
     var i: usize = 0;
     for (builtin_extensions) |ext| {
         const key = types.ArrayKey{ .integer = @intCast(i) };
-        const ext_value = try Value.initString(vm.allocator, ext);
+        // 使用 memory_manager 创建字符串，确保正确的生命周期管理
+        const ext_value = try Value.initStringWithManager(&vm.memory_manager, ext);
         try php_array.set(vm.allocator, key, ext_value);
         i += 1;
     }
@@ -1713,7 +1714,8 @@ fn getLoadedExtensionsFn(vm: *VM, args: []const Value) !Value {
         var iter = reg.extensions.iterator();
         while (iter.next()) |entry| {
             const key = types.ArrayKey{ .integer = @intCast(i) };
-            const ext_value = try Value.initString(vm.allocator, entry.key_ptr.*);
+            // 使用 memory_manager 创建字符串
+            const ext_value = try Value.initStringWithManager(&vm.memory_manager, entry.key_ptr.*);
             try php_array.set(vm.allocator, key, ext_value);
             i += 1;
         }
@@ -1921,6 +1923,7 @@ pub const VM = struct {
     execution_mode: ExecutionMode = .tree_walking,
     bytecode_vm_instance: ?*BytecodeVM = null,
     fast_vm_instance: ?*FastVM = null,
+    jit_enabled: bool = false,
 
     // File loading tracking
     included_files: std.StringHashMap(void),
@@ -2000,6 +2003,7 @@ pub const VM = struct {
             .execution_mode = .tree_walking,
             .bytecode_vm_instance = null,
             .fast_vm_instance = null,
+            .jit_enabled = false,
             .included_files = std.StringHashMap(void).init(allocator),
             // Syntax mode configuration
             .syntax_config = config,
@@ -2125,7 +2129,7 @@ pub const VM = struct {
             frame.deinit(self.allocator);
         }
         self.call_frame_pool.deinit(self.allocator);
-        
+
         // 3.6 Clean up fast call frame pool
         self.fast_call_frame_pool.deinit();
 
@@ -2894,7 +2898,7 @@ pub const VM = struct {
         try self.call_stack.append(self.allocator, frame);
         // Update cache
         self.current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
-        
+
         // Track call depth in execution stats
         self.execution_stats.function_calls += 1;
     }
@@ -2920,16 +2924,16 @@ pub const VM = struct {
             }
         }
     }
-    
+
     /// Get call frame pool statistics
     /// This provides insights into call frame allocation patterns
     pub fn getCallFramePoolStats(self: *const VM) fast_pool.CallFramePool.Stats {
         return self.fast_call_frame_pool.getStats();
     }
-    
+
     /// Example method showing how to use the fast call frame pool
     /// This demonstrates the zero-allocation pattern for small functions
-    /// 
+    ///
     /// For future optimization: functions with ≤8 local variables can use
     /// the fast pool to avoid heap allocations entirely
     pub fn pushFastCallFrame(self: *VM, function_name: []const u8, file: []const u8, line: u32) !*fast_pool.PooledCallFrame {
@@ -2937,7 +2941,7 @@ pub const VM = struct {
         const frame = try self.fast_call_frame_pool.acquire(function_name, file, line);
         return frame;
     }
-    
+
     /// Release a fast call frame back to the pool
     pub fn popFastCallFrame(self: *VM, frame: *fast_pool.PooledCallFrame) void {
         self.fast_call_frame_pool.release(frame, self.allocator);
@@ -4556,7 +4560,7 @@ pub const VM = struct {
                 return builtin_func.call(self, args);
             }
         }
-        
+
         // Second, check extension functions (Requirements: 9.2)
         if (self.extension_registry) |ext_reg| {
             if (ext_reg.findFunction(function_name)) |ext_func| {
@@ -4748,6 +4752,13 @@ pub const VM = struct {
         self.execution_mode = mode;
     }
 
+    pub fn setJitEnabled(self: *VM, enabled: bool) !void {
+        self.jit_enabled = enabled;
+        if (self.bytecode_vm_instance) |bvm| {
+            try bvm.setJitEnabled(enabled);
+        }
+    }
+
     /// 获取当前执行模式
     pub fn getExecutionMode(self: *VM) ExecutionMode {
         return self.execution_mode;
@@ -4759,6 +4770,9 @@ pub const VM = struct {
             return bvm;
         }
         self.bytecode_vm_instance = try BytecodeVM.init(self.allocator);
+        if (self.jit_enabled) {
+            try self.bytecode_vm_instance.?.setJitEnabled(true);
+        }
         return self.bytecode_vm_instance.?;
     }
 
@@ -4781,11 +4795,35 @@ pub const VM = struct {
         };
         defer compiled_func.deinit(self.allocator);
 
+        // 注册用户定义的函数到BytecodeVM
+        const user_funcs = generator.getUserFunctions();
+        var iter = user_funcs.iterator();
+        while (iter.next()) |entry| {
+            bvm.registerFunction(entry.key_ptr.*, entry.value_ptr.*) catch |err| {
+                std.debug.print("Function registration failed: {s}\n", .{@errorName(err)});
+            };
+        }
+
         // 执行字节码
         const result = bvm.execute(compiled_func) catch |err| {
             std.debug.print("Bytecode execution failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
+
+        // 输出 BytecodeVM 的 echo/print 结果
+        const output = bvm.getOutput();
+        if (output.len > 0) {
+            std.debug.print("{s}", .{output});
+            bvm.clearOutput();
+        }
+
+        // 合并统计信息
+        self.execution_stats.function_calls += bvm.stats.function_calls;
+        self.execution_stats.memory_allocations += bvm.stats.memory_allocations;
+        self.execution_stats.execution_time_ns += bvm.stats.execution_time_ns;
+        if (bvm.bytes_allocated > self.execution_stats.peak_memory_usage) {
+            self.execution_stats.peak_memory_usage = bvm.bytes_allocated;
+        }
 
         // 转换结果
         return self.convertBytecodeValue(result);
@@ -5323,19 +5361,47 @@ pub const VM = struct {
     }
 
     fn concatenateStrings(self: *VM, left: Value, right: Value) !Value {
-        // Convert both values to strings (PHP behavior)
+        // 快速路径：两个值都已经是字符串
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
+
+        if (left_tag == .string and right_tag == .string) {
+            const left_box = left.getAsString();
+            const right_box = right.getAsString();
+            const left_data = left_box.data.data;
+            const right_data = right_box.data.data;
+            const total_len = left_data.len + right_data.len;
+
+            // 直接分配并拷贝，避免 allocPrint 格式化开销
+            const result = try self.allocator.alloc(u8, total_len);
+            @memcpy(result[0..left_data.len], left_data);
+            @memcpy(result[left_data.len..], right_data);
+
+            if (self.optimization_flags.enable_string_interning) {
+                defer self.allocator.free(result);
+                return self.createInternedString(result);
+            } else {
+                defer self.allocator.free(result);
+                return Value.initStringWithManager(&self.memory_manager, result);
+            }
+        }
+
+        // 慢路径：需要类型转换
         const left_str = try self.valueToString(left);
         defer if (left_str.needs_free) self.allocator.free(left_str.str);
 
         const right_str = try self.valueToString(right);
         defer if (right_str.needs_free) self.allocator.free(right_str.str);
 
+        const total_len = left_str.str.len + right_str.str.len;
+        const result = try self.allocator.alloc(u8, total_len);
+        @memcpy(result[0..left_str.str.len], left_str.str);
+        @memcpy(result[left_str.str.len..], right_str.str);
+
         if (self.optimization_flags.enable_string_interning) {
-            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str.str, right_str.str });
             defer self.allocator.free(result);
             return self.createInternedString(result);
         } else {
-            const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ left_str.str, right_str.str });
             defer self.allocator.free(result);
             return Value.initStringWithManager(&self.memory_manager, result);
         }

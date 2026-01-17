@@ -22,6 +22,7 @@ fn printUsage() void {
         \\
         \\Interpreter Options:
         \\  --mode=<mode>      Execution mode: tree, bytecode, fast, auto (default: tree)
+        \\  --jit              Enable JIT (bytecode mode only)
         \\  --syntax=<syntax>  Syntax mode: php, go (default: php)
         \\  --config=<file>    Load configuration from specified file
         \\  --help, -h         Show this help message
@@ -122,7 +123,8 @@ pub fn main() !void {
     // Track CLI overrides (null means not specified on CLI)
     var cli_syntax_mode: ?SyntaxMode = null;
     var cli_config_file: ?[]const u8 = null;
-    var execution_mode: ExecutionMode = .tree_walking;
+    var execution_mode: ExecutionMode = .bytecode;
+    var enable_jit = false;
     var php_file: ?[]const u8 = null;
 
     // AOT compilation options
@@ -182,6 +184,8 @@ pub fn main() !void {
                 std.debug.print("Valid modes: tree, bytecode, fast, auto\n", .{});
                 return;
             }
+        } else if (std.mem.eql(u8, arg, "--jit")) {
+            enable_jit = true;
         } else if (std.mem.startsWith(u8, arg, "--syntax=")) {
             const syntax_str = arg[9..];
             if (SyntaxMode.fromString(syntax_str)) |mode| {
@@ -324,6 +328,9 @@ pub fn main() !void {
     var vm_instance = try vm.VM.init(allocator);
     vm_instance.context = &context;
     vm_instance.setExecutionMode(execution_mode);
+    if (enable_jit) {
+        try vm_instance.setJitEnabled(true);
+    }
     if (php_file) |filename| {
         vm_instance.current_file = filename;
         vm_instance.current_source = php_code; // Set source code for line number calculation

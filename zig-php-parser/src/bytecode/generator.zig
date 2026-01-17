@@ -130,6 +130,11 @@ pub const BytecodeGenerator = struct {
         self.enable_escape_optimization = false;
     }
 
+    /// 获取编译生成的用户函数表
+    pub fn getUserFunctions(self: *BytecodeGenerator) *std.StringHashMapUnmanaged(*CompiledFunction) {
+        return &self.functions;
+    }
+
     /// 检查AST节点是否可以栈分配
     fn canStackAllocateNode(self: *BytecodeGenerator, index: ast.Node.Index) bool {
         if (!self.enable_escape_optimization) return false;
@@ -283,6 +288,7 @@ pub const BytecodeGenerator = struct {
             .line_table = &[_]CompiledFunction.LineInfo{},
             .exception_table = &[_]CompiledFunction.ExceptionEntry{},
         };
+
         _ = node;
         return func;
     }
@@ -339,7 +345,12 @@ pub const BytecodeGenerator = struct {
         const node = self.getNode(index);
         const stmts = node.data.root.stmts;
         for (stmts) |stmt_idx| {
+            const saved_stack = self.current_stack;
             try self.visitNode(stmt_idx);
+            while (self.current_stack > saved_stack) {
+                try self.emit(.pop, 0, 0);
+                self.popStack();
+            }
         }
     }
 
@@ -348,7 +359,12 @@ pub const BytecodeGenerator = struct {
         const node = self.getNode(index);
         const stmts = node.data.block.stmts;
         for (stmts) |stmt_idx| {
+            const saved_stack = self.current_stack;
             try self.visitNode(stmt_idx);
+            while (self.current_stack > saved_stack) {
+                try self.emit(.pop, 0, 0);
+                self.popStack();
+            }
         }
     }
 
@@ -359,15 +375,13 @@ pub const BytecodeGenerator = struct {
         for (exprs) |expr_idx| {
             try self.visitNode(expr_idx);
             try self.emit(.call_builtin, 0, 1); // echo = builtin #0
-            self.popStack();
         }
     }
 
-    /// 访问表达式语句
+    /// 访问表达式语句（占位符节点，无需处理）
     fn visitExpressionStmt(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
-        // 表达式语句直接是表达式节点，需要访问表达式然后弹出结果
-        try self.visitNode(index);
-        try self.emit(.pop, 0, 0);
+        _ = self;
+        _ = index;
     }
 
     /// 访问if语句
@@ -416,9 +430,9 @@ pub const BytecodeGenerator = struct {
             .break_label = loop_end,
         });
 
-        // 循环开始标记
-        try self.emit(.loop_start, 0, 0);
+        // 循环开始标记（确保每次迭代都会执行）
         try self.placeLabel(loop_start);
+        try self.emit(.loop_start, 0, 0);
 
         // 条件检查
         try self.visitNode(while_data.condition);
@@ -431,9 +445,9 @@ pub const BytecodeGenerator = struct {
         // 跳回循环开始
         try self.emitJump(.jmp, loop_start);
 
-        // 循环结束
-        try self.emit(.loop_end, 0, 0);
+        // 循环结束（确保跳转到退出点时也会执行）
         try self.placeLabel(loop_end);
+        try self.emit(.loop_end, 0, 0);
 
         _ = self.loop_stack.pop();
     }
@@ -454,13 +468,16 @@ pub const BytecodeGenerator = struct {
 
         // 初始化
         if (for_data.init) |init_idx| {
+            const saved_stack = self.current_stack;
             try self.visitNode(init_idx);
-            try self.emit(.pop, 0, 0);
-            self.popStack();
+            while (self.current_stack > saved_stack) {
+                try self.emit(.pop, 0, 0);
+                self.popStack();
+            }
         }
 
-        try self.emit(.loop_start, 0, 0);
         try self.placeLabel(loop_start);
+        try self.emit(.loop_start, 0, 0);
 
         // 条件
         if (for_data.condition) |cond_idx| {
@@ -477,15 +494,18 @@ pub const BytecodeGenerator = struct {
 
         // 更新
         if (for_data.loop) |loop_idx| {
+            const saved_stack = self.current_stack;
             try self.visitNode(loop_idx);
-            try self.emit(.pop, 0, 0);
-            self.popStack();
+            while (self.current_stack > saved_stack) {
+                try self.emit(.pop, 0, 0);
+                self.popStack();
+            }
         }
 
         try self.emitJump(.jmp, loop_start);
 
-        try self.emit(.loop_end, 0, 0);
         try self.placeLabel(loop_end);
+        try self.emit(.loop_end, 0, 0);
 
         _ = self.loop_stack.pop();
     }
@@ -509,8 +529,8 @@ pub const BytecodeGenerator = struct {
         // 初始化迭代器
         try self.emit(.foreach_init, 0, 0);
 
-        try self.emit(.loop_start, 0, 0);
         try self.placeLabel(loop_start);
+        try self.emit(.loop_start, 0, 0);
 
         // 获取下一个元素
         try self.emitJump(.foreach_next, loop_end);
@@ -1097,15 +1117,25 @@ pub const BytecodeGenerator = struct {
         const saved_locals = self.locals;
         const saved_local_count = self.local_count;
         const saved_instructions = self.instructions;
+        const saved_constants = self.constants;
         const saved_max_stack = self.max_stack;
         const saved_current_stack = self.current_stack;
+        const saved_label_counter = self.label_counter;
+        const saved_labels = self.labels;
+        const saved_pending_jumps = self.pending_jumps;
+        const saved_loop_stack = self.loop_stack;
 
         // 重置状态 - 使用 Unmanaged 版本
         self.locals = .{};
         self.local_count = 0;
         self.instructions = .{};
+        self.constants = .{};
         self.max_stack = 0;
         self.current_stack = 0;
+        self.label_counter = 0;
+        self.labels = .{};
+        self.pending_jumps = .{};
+        self.loop_stack = .{};
 
         // 处理参数
         for (func_data.params) |param_idx| {
@@ -1117,6 +1147,7 @@ pub const BytecodeGenerator = struct {
         // 编译函数体
         try self.visitNode(func_data.body);
         try self.emit(.ret_void, 0, 0);
+        try self.resolveJumps();
 
         // 创建编译后的函数
         const func_name = self.getString(func_data.name);
@@ -1124,7 +1155,7 @@ pub const BytecodeGenerator = struct {
         compiled.* = CompiledFunction{
             .name = func_name,
             .bytecode = try self.instructions.toOwnedSlice(self.allocator),
-            .constants = &[_]Value{},
+            .constants = try self.constants.toOwnedSlice(self.allocator),
             .local_count = self.local_count,
             .arg_count = @intCast(func_data.params.len),
             .max_stack = self.max_stack,
@@ -1141,8 +1172,17 @@ pub const BytecodeGenerator = struct {
         self.local_count = saved_local_count;
         self.instructions.deinit(self.allocator);
         self.instructions = saved_instructions;
+        self.constants.deinit(self.allocator);
+        self.constants = saved_constants;
         self.max_stack = saved_max_stack;
         self.current_stack = saved_current_stack;
+        self.labels.deinit(self.allocator);
+        self.labels = saved_labels;
+        self.pending_jumps.deinit(self.allocator);
+        self.pending_jumps = saved_pending_jumps;
+        self.loop_stack.deinit(self.allocator);
+        self.loop_stack = saved_loop_stack;
+        self.label_counter = saved_label_counter;
     }
 };
 

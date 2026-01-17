@@ -15,6 +15,10 @@ const TypeFeedbackCollector = type_feedback.TypeFeedbackCollector;
 const optimization = @import("../runtime/optimization.zig");
 const MethodCache = optimization.MethodCache;
 
+// JIT编译器
+const jit = @import("jit.zig");
+const JITCompiler = jit.JITCompiler;
+
 /// 运行时值类型
 pub const Value = union(enum) {
     null_val,
@@ -155,6 +159,20 @@ pub const DispatchFn = *const fn (*BytecodeVM, *CallFrame, Instruction) Bytecode
 
 /// 字节码虚拟机 - 高性能栈式VM
 pub const BytecodeVM = struct {
+    /// 性能统计信息
+    pub const Stats = struct {
+        function_calls: u64 = 0,
+        memory_allocations: u64 = 0,
+        execution_time_ns: u64 = 0,
+        peak_memory_usage: usize = 0,
+        cache_hits: u64 = 0,
+        cache_misses: u64 = 0,
+    };
+
+    /// OPT-001: 字符串intern缓存 - 短字符串复用
+    const STRING_CACHE_MAX_LEN: usize = 64;
+    const STRING_CACHE_SIZE: usize = 1024;
+
     allocator: std.mem.Allocator,
     stack: []Value,
     stack_top: u32,
@@ -166,9 +184,16 @@ pub const BytecodeVM = struct {
     /// 函数表 - 按索引查找函数（用于func_ref）
     function_table: std.ArrayListUnmanaged(*CompiledFunction),
     builtins: std.StringHashMapUnmanaged(BuiltinFn),
+    /// OPT-005: 内置函数快速访问数组 - O(1) 索引访问
+    builtin_array: std.ArrayListUnmanaged(BuiltinFn),
     string_pool: std.ArrayListUnmanaged(*Value.String),
     array_pool: std.ArrayListUnmanaged(*Value.Array),
     object_pool: std.ArrayListUnmanaged(*Value.Object),
+    /// OPT-001: 字符串intern缓存
+    string_cache: std.StringHashMapUnmanaged(*Value.String),
+    /// OPT-002: 空闲对象列表 - 复用已释放对象
+    free_strings: std.ArrayListUnmanaged(*Value.String),
+    free_arrays: std.ArrayListUnmanaged(*Value.Array),
     /// 临时字符串池 - 用于跟踪valueToString分配的临时字符串
     temp_strings: std.ArrayListUnmanaged([]u8),
     gc_threshold: usize,
@@ -186,6 +211,14 @@ pub const BytecodeVM = struct {
     method_cache: MethodCache,
     /// 是否启用内联缓存
     enable_inline_cache: bool,
+
+    // JIT编译器
+    jit_compiler: ?*JITCompiler,
+    /// 是否启用JIT
+    enable_jit: bool,
+
+    /// 性能统计
+    stats: Stats,
 
     const STACK_MAX: u32 = 65536;
     const FRAMES_MAX: u32 = 1024;
@@ -221,9 +254,13 @@ pub const BytecodeVM = struct {
             .functions = .{},
             .function_table = .{},
             .builtins = .{},
+            .builtin_array = .{},
             .string_pool = .{},
             .array_pool = .{},
             .object_pool = .{},
+            .string_cache = .{},
+            .free_strings = .{},
+            .free_arrays = .{},
             .temp_strings = .{},
             .gc_threshold = 1024 * 1024,
             .bytes_allocated = 0,
@@ -235,6 +272,10 @@ pub const BytecodeVM = struct {
             // 内联缓存系统
             .method_cache = MethodCache.init(allocator),
             .enable_inline_cache = true,
+            // JIT编译器（默认禁用，可在外部启用）
+            .jit_compiler = null,
+            .enable_jit = false,
+            .stats = .{},
         };
 
         // 注册内置函数
@@ -244,19 +285,75 @@ pub const BytecodeVM = struct {
     }
 
     /// 注册内置函数
+    /// OPT-005: 同时注册到哈希表和快速数组
     fn registerBuiltins(self: *BytecodeVM) !void {
-        try self.builtins.put(self.allocator, "echo", builtinEcho);
-        try self.builtins.put(self.allocator, "print", builtinPrint);
-        try self.builtins.put(self.allocator, "var_dump", builtinVarDump);
-        try self.builtins.put(self.allocator, "strlen", builtinStrlen);
-        try self.builtins.put(self.allocator, "count", builtinCount);
-        try self.builtins.put(self.allocator, "array_push", builtinArrayPush);
-        try self.builtins.put(self.allocator, "array_pop", builtinArrayPop);
-        try self.builtins.put(self.allocator, "isset", builtinIsset);
-        try self.builtins.put(self.allocator, "is_null", builtinIsNull);
-        try self.builtins.put(self.allocator, "is_int", builtinIsInt);
-        try self.builtins.put(self.allocator, "is_string", builtinIsString);
-        try self.builtins.put(self.allocator, "is_array", builtinIsArray);
+        // 内置函数列表 - 顺序决定索引
+        const builtins_list = [_]struct { name: []const u8, func: BuiltinFn }{
+            .{ .name = "echo", .func = builtinEcho },
+            .{ .name = "print", .func = builtinPrint },
+            .{ .name = "var_dump", .func = builtinVarDump },
+            .{ .name = "sprintf", .func = builtinSprintf },
+            .{ .name = "microtime", .func = builtinMicrotime },
+            .{ .name = "strlen", .func = builtinStrlen },
+            .{ .name = "strpos", .func = builtinStrpos },
+            .{ .name = "strrpos", .func = builtinStrrpos },
+            .{ .name = "substr", .func = builtinSubstr },
+            .{ .name = "str_replace", .func = builtinStrReplace },
+            .{ .name = "str_ireplace", .func = builtinStrIReplace },
+            .{ .name = "strtoupper", .func = builtinStrtoupper },
+            .{ .name = "strtolower", .func = builtinStrtolower },
+            .{ .name = "ucfirst", .func = builtinUcfirst },
+            .{ .name = "ucwords", .func = builtinUcwords },
+            .{ .name = "trim", .func = builtinTrim },
+            .{ .name = "ltrim", .func = builtinLtrim },
+            .{ .name = "rtrim", .func = builtinRtrim },
+            .{ .name = "explode", .func = builtinExplode },
+            .{ .name = "implode", .func = builtinImplode },
+            .{ .name = "preg_match", .func = builtinPregMatch },
+            .{ .name = "preg_replace", .func = builtinPregReplace },
+            .{ .name = "count", .func = builtinCount },
+            .{ .name = "sizeof", .func = builtinCount },
+            .{ .name = "array_push", .func = builtinArrayPush },
+            .{ .name = "array_pop", .func = builtinArrayPop },
+            .{ .name = "array_shift", .func = builtinArrayShift },
+            .{ .name = "array_unshift", .func = builtinArrayUnshift },
+            .{ .name = "array_filter", .func = builtinArrayFilter },
+            .{ .name = "array_map", .func = builtinArrayMap },
+            .{ .name = "array_reduce", .func = builtinArrayReduce },
+            .{ .name = "in_array", .func = builtinInArray },
+            .{ .name = "array_search", .func = builtinArraySearch },
+            .{ .name = "array_keys", .func = builtinArrayKeys },
+            .{ .name = "array_values", .func = builtinArrayValues },
+            .{ .name = "array_merge", .func = builtinArrayMerge },
+            .{ .name = "array_slice", .func = builtinArraySlice },
+            .{ .name = "array_chunk", .func = builtinArrayChunk },
+            .{ .name = "range", .func = builtinRange },
+            .{ .name = "shuffle", .func = builtinShuffle },
+            .{ .name = "sort", .func = builtinSort },
+            .{ .name = "rsort", .func = builtinRsort },
+            .{ .name = "isset", .func = builtinIsset },
+            .{ .name = "empty", .func = builtinEmpty },
+            .{ .name = "is_null", .func = builtinIsNull },
+            .{ .name = "is_int", .func = builtinIsInt },
+            .{ .name = "is_string", .func = builtinIsString },
+            .{ .name = "is_array", .func = builtinIsArray },
+            .{ .name = "abs", .func = builtinAbs },
+            .{ .name = "intval", .func = builtinIntval },
+            .{ .name = "ceil", .func = builtinCeil },
+            .{ .name = "floor", .func = builtinFloor },
+            .{ .name = "round", .func = builtinRound },
+            .{ .name = "max", .func = builtinMax },
+            .{ .name = "min", .func = builtinMin },
+            .{ .name = "sqrt", .func = builtinSqrt },
+            .{ .name = "pow", .func = builtinPow },
+            .{ .name = "sin", .func = builtinSin },
+            .{ .name = "cos", .func = builtinCos },
+        };
+
+        for (builtins_list) |b| {
+            try self.builtins.put(self.allocator, b.name, b.func);
+            try self.builtin_array.append(self.allocator, b.func);
+        }
     }
 
     pub fn deinit(self: *BytecodeVM) void {
@@ -294,6 +391,11 @@ pub const BytecodeVM = struct {
         // 释放内联缓存
         self.method_cache.deinit();
 
+        // 释放JIT编译器
+        if (self.jit_compiler) |jit_ptr| {
+            jit_ptr.deinit();
+        }
+
         self.allocator.free(self.stack);
         self.allocator.free(self.frames);
         self.globals.deinit(self.allocator);
@@ -301,6 +403,7 @@ pub const BytecodeVM = struct {
         self.functions.deinit(self.allocator);
         self.function_table.deinit(self.allocator);
         self.builtins.deinit(self.allocator);
+        self.builtin_array.deinit(self.allocator);
         self.output_buffer.deinit(self.allocator);
         self.allocator.destroy(self);
     }
@@ -341,18 +444,37 @@ pub const BytecodeVM = struct {
         return VMError.UndefinedFunction;
     }
 
-    /// 设置全局变量
-    pub fn setGlobal(self: *BytecodeVM, name: []const u8, value: Value) !void {
-        try self.globals.put(self.allocator, name, value);
-    }
-
-    /// 获取全局变量
-    pub fn getGlobal(self: *BytecodeVM, name: []const u8) ?Value {
-        return self.globals.get(name);
-    }
-
-    /// 创建字符串
+    /// OPT-001: 创建字符串 - 带缓存和空闲列表复用
     pub fn createString(self: *BytecodeVM, data: []const u8) !*Value.String {
+        // 快速路径1: 短字符串缓存查找
+        if (data.len <= STRING_CACHE_MAX_LEN) {
+            if (self.string_cache.get(data)) |cached| {
+                self.stats.cache_hits += 1;
+                _ = cached.retain();
+                return cached;
+            }
+            self.stats.cache_misses += 1;
+        }
+
+        // 快速路径2: 从空闲列表复用
+        if (self.free_strings.items.len > 0) {
+            const str = self.free_strings.items[self.free_strings.items.len - 1];
+            self.free_strings.items.len -= 1;
+            // 复用已分配的String结构体
+            self.allocator.free(str.data);
+            str.data = try self.allocator.dupe(u8, data);
+            str.ref_count = 1;
+            // 短字符串加入缓存
+            if (data.len <= STRING_CACHE_MAX_LEN and
+                self.string_cache.count() < STRING_CACHE_SIZE)
+            {
+                try self.string_cache.put(self.allocator, str.data, str);
+            }
+            return str;
+        }
+
+        // 慢速路径: 新分配
+        self.stats.memory_allocations += 1;
         const str = try self.allocator.create(Value.String);
         str.* = .{
             .data = try self.allocator.dupe(u8, data),
@@ -360,11 +482,31 @@ pub const BytecodeVM = struct {
         };
         try self.string_pool.append(self.allocator, str);
         self.bytes_allocated += data.len + @sizeOf(Value.String);
+
+        // 短字符串加入缓存
+        if (data.len <= STRING_CACHE_MAX_LEN and
+            self.string_cache.count() < STRING_CACHE_SIZE)
+        {
+            try self.string_cache.put(self.allocator, str.data, str);
+        }
         return str;
     }
 
-    /// 创建数组
+    /// OPT-002: 创建数组 - 带空闲列表复用
     pub fn createArray(self: *BytecodeVM) !*Value.Array {
+        // 快速路径: 从空闲列表复用
+        if (self.free_arrays.items.len > 0) {
+            const arr = self.free_arrays.items[self.free_arrays.items.len - 1];
+            self.free_arrays.items.len -= 1;
+            arr.elements.clearRetainingCapacity();
+            arr.keys.clearRetainingCapacity();
+            arr.ref_count = 1;
+            self.stats.cache_hits += 1;
+            return arr;
+        }
+
+        // 慢速路径: 新分配
+        self.stats.memory_allocations += 1;
         const arr = try self.allocator.create(Value.Array);
         arr.* = .{
             .elements = .{},
@@ -378,6 +520,7 @@ pub const BytecodeVM = struct {
 
     /// 创建对象
     pub fn createObject(self: *BytecodeVM, class_id: u16) !*Value.Object {
+        self.stats.memory_allocations += 1;
         const obj = try self.allocator.create(Value.Object);
         obj.* = .{
             .class_id = class_id,
@@ -401,7 +544,13 @@ pub const BytecodeVM = struct {
 
     /// 执行编译后的函数
     pub fn execute(self: *BytecodeVM, function: *CompiledFunction) VMError!Value {
-        // 创建初始调用帧
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            const end_time = std.time.nanoTimestamp();
+            self.stats.execution_time_ns += @intCast(end_time - start_time);
+        }
+
+        self.stack_top = 0;
         self.frames[0] = CallFrame{
             .function = function,
             .ip = 0,
@@ -409,6 +558,18 @@ pub const BytecodeVM = struct {
             .return_address = 0,
         };
         self.frame_count = 1;
+
+        // 为 main 函数预留局部变量槽位，避免被操作栈覆盖
+        if (function.local_count > 0) {
+            if (function.local_count > STACK_MAX) {
+                return BytecodeVM.VMError.StackOverflow;
+            }
+            var i: u32 = 0;
+            while (i < function.local_count) : (i += 1) {
+                self.stack[i] = .null_val;
+            }
+            self.stack_top = function.local_count;
+        }
 
         return self.runOptimized();
     }
@@ -424,7 +585,9 @@ pub const BytecodeVM = struct {
 
             // 使用计算跳转表分发指令
             const handler = dispatch_table[@intFromEnum(inst.opcode)];
-            const result = try handler(self, frame, inst);
+            const result = handler(self, frame, inst) catch |err| {
+                return err;
+            };
 
             switch (result) {
                 .continue_execution => {},
@@ -452,7 +615,7 @@ pub const BytecodeVM = struct {
                 .nop => {},
 
                 .push_const => {
-                    const value = self.loadConstant(frame.function, inst.operand1);
+                    const value = try self.loadConstant(frame.function, inst.operand1);
                     try self.push(value);
                 },
 
@@ -1254,16 +1417,34 @@ pub const BytecodeVM = struct {
         return self.stack[self.stack_top - 1 - distance];
     }
 
+    /// OPT-003: 无检查的快速栈操作 - 用于热点路径
+    inline fn pushFast(self: *BytecodeVM, value: Value) void {
+        self.stack[self.stack_top] = value;
+        self.stack_top += 1;
+    }
+
+    inline fn popFast(self: *BytecodeVM) Value {
+        self.stack_top -= 1;
+        return self.stack[self.stack_top];
+    }
+
+    inline fn peekFast(self: *BytecodeVM, distance: u32) Value {
+        return self.stack[self.stack_top - 1 - distance];
+    }
+
     // ========== 辅助方法 ==========
 
-    fn loadConstant(self: *BytecodeVM, function: *CompiledFunction, index: u16) Value {
-        _ = self;
+    fn loadConstant(self: *BytecodeVM, function: *CompiledFunction, index: u16) VMError!Value {
         const const_val = function.constants[index];
         return switch (const_val) {
             .null_val => .null_val,
             .bool_val => |b| .{ .bool_val = b },
             .int_val => |i| .{ .int_val = i },
             .float_val => |f| .{ .float_val = f },
+            .string_val => |s| blk: {
+                const str = self.createString(s) catch return VMError.OutOfMemory;
+                break :blk .{ .string_val = str };
+            },
             else => .null_val,
         };
     }
@@ -1299,21 +1480,8 @@ pub const BytecodeVM = struct {
             return BytecodeVM.VMError.StackOverflow;
         }
 
-        // 首先尝试从函数表中直接查找
-        if (self.getFunctionByIndex(func_id)) |func| {
-            // 设置新的调用帧
-            const new_frame = &self.frames[self.frame_count];
-            new_frame.* = CallFrame{
-                .function = func,
-                .ip = 0,
-                .base_pointer = self.stack_top - arg_count,
-                .return_address = self.frames[self.frame_count - 1].ip,
-            };
-            self.frame_count += 1;
-            return;
-        }
-
-        // 如果函数表中没有，尝试从常量池中获取函数名并查找
+        // .call 的 operand1 在当前生成器实现中通常是“常量池索引”（string_val），
+        // 不能先当作函数表索引，否则会与 function_table 发生索引冲突。
         const current_frame = &self.frames[self.frame_count - 1];
         if (func_id < current_frame.function.constants.len) {
             const func_const = current_frame.function.constants[func_id];
@@ -1329,11 +1497,22 @@ pub const BytecodeVM = struct {
                             .return_address = current_frame.ip,
                         };
                         self.frame_count += 1;
+
+                        // 为被调用函数预留局部变量槽位（包含参数槽位）
+                        const required_top: u32 = new_frame.base_pointer + func.local_count;
+                        if (required_top > STACK_MAX) {
+                            return BytecodeVM.VMError.StackOverflow;
+                        }
+                        var i: u32 = self.stack_top;
+                        while (i < required_top) : (i += 1) {
+                            self.stack[i] = .null_val;
+                        }
+                        self.stack_top = required_top;
                         return;
                     }
                 },
                 .string_val => |name| {
-                    // 通过函数名查找
+                    // 首先尝试用户定义的函数
                     if (self.functions.get(name)) |func| {
                         const new_frame = &self.frames[self.frame_count];
                         new_frame.* = CallFrame{
@@ -1343,41 +1522,92 @@ pub const BytecodeVM = struct {
                             .return_address = current_frame.ip,
                         };
                         self.frame_count += 1;
+
+                        // 为被调用函数预留局部变量槽位（包含参数槽位）
+                        const required_top: u32 = new_frame.base_pointer + func.local_count;
+                        if (required_top > STACK_MAX) {
+                            return BytecodeVM.VMError.StackOverflow;
+                        }
+                        var i: u32 = self.stack_top;
+                        while (i < required_top) : (i += 1) {
+                            self.stack[i] = .null_val;
+                        }
+                        self.stack_top = required_top;
                         return;
+                    }
+                    // 然后检查内置函数
+                    if (self.builtins.get(name)) |builtin_fn| {
+                        const args_slice = self.stack[self.stack_top - arg_count .. self.stack_top];
+                        self.stack_top -= arg_count;
+                        const result = builtin_fn(self, args_slice) catch .null_val;
+                        self.push(result) catch return BytecodeVM.VMError.StackOverflow;
+                        return;
+                    }
+
+                    // 名称归一化：兼容 "\\func" 形式
+                    if (name.len > 0 and name[0] == '\\') {
+                        const short = name[1..];
+                        if (self.functions.get(short)) |func| {
+                            const new_frame = &self.frames[self.frame_count];
+                            new_frame.* = CallFrame{
+                                .function = func,
+                                .ip = 0,
+                                .base_pointer = self.stack_top - arg_count,
+                                .return_address = current_frame.ip,
+                            };
+                            self.frame_count += 1;
+                            return;
+                        }
+                        if (self.builtins.get(short)) |builtin_fn| {
+                            const args_slice = self.stack[self.stack_top - arg_count .. self.stack_top];
+                            self.stack_top -= arg_count;
+                            const result = builtin_fn(self, args_slice) catch .null_val;
+                            self.push(result) catch return BytecodeVM.VMError.StackOverflow;
+                            return;
+                        }
                     }
                 },
                 else => {},
             }
+        } else {
+            // 常量池索引越界时，才可能把 operand1 当作函数表索引
+            if (self.getFunctionByIndex(func_id)) |func| {
+                const new_frame = &self.frames[self.frame_count];
+                new_frame.* = CallFrame{
+                    .function = func,
+                    .ip = 0,
+                    .base_pointer = self.stack_top - arg_count,
+                    .return_address = current_frame.ip,
+                };
+                self.frame_count += 1;
+                return;
+            }
         }
+
         return BytecodeVM.VMError.UndefinedFunction;
     }
 
+    /// OPT-005: 内置函数快速调用 - O(1) 数组索引访问 + 栈上参数缓冲
     fn callBuiltin(self: *BytecodeVM, builtin_id: u16, arg_count: u16) VMError!void {
-        if (builtin_id >= self.builtins.count()) {
+        self.stats.function_calls += 1;
+        // 快速路径：直接通过索引访问
+        if (builtin_id >= self.builtin_array.items.len) {
             return BytecodeVM.VMError.UndefinedFunction;
         }
 
-        // 收集参数
-        var args = std.ArrayListUnmanaged(Value){};
-        defer args.deinit(self.allocator);
+        // OPT-005: 使用栈上固定缓冲区避免动态分配（最多16个参数）
+        var args_buf: [16]Value = undefined;
+        const actual_count = @min(arg_count, 16);
 
         var i: u16 = 0;
-        while (i < arg_count) : (i += 1) {
-            args.append(self.allocator, try self.pop()) catch return BytecodeVM.VMError.OutOfMemory;
+        while (i < actual_count) : (i += 1) {
+            args_buf[i] = self.popFast();
         }
 
-        // 调用内置函数 - 通过迭代器获取函数
-        var iter = self.builtins.valueIterator();
-        var idx: u16 = 0;
-        while (iter.next()) |func_ptr| {
-            if (idx == builtin_id) {
-                const result = try func_ptr.*(self, args.items);
-                try self.push(result);
-                return;
-            }
-            idx += 1;
-        }
-        return BytecodeVM.VMError.UndefinedFunction;
+        // O(1) 直接索引访问内置函数
+        const func = self.builtin_array.items[builtin_id];
+        const result = try func(self, args_buf[0..actual_count]);
+        self.pushFast(result);
     }
 
     fn collectGarbage(self: *BytecodeVM) void {
@@ -1489,6 +1719,23 @@ pub const BytecodeVM = struct {
         self.enable_inline_cache = enabled;
     }
 
+    /// 启用/禁用JIT
+    pub fn setJitEnabled(self: *BytecodeVM, enabled: bool) VMError!void {
+        if (enabled) {
+            if (self.jit_compiler == null) {
+                self.jit_compiler = JITCompiler.init(self.allocator) catch
+                    return VMError.OutOfMemory;
+            }
+            self.enable_jit = true;
+        } else {
+            self.enable_jit = false;
+            if (self.jit_compiler) |jit_ptr| {
+                jit_ptr.deinit();
+                self.jit_compiler = null;
+            }
+        }
+    }
+
     /// 使指定类的所有缓存失效（类定义变化时调用）
     pub fn invalidateClassCache(self: *BytecodeVM, class_id: u64) void {
         self.method_cache.invalidateClass(class_id);
@@ -1560,6 +1807,27 @@ fn builtinVarDump(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         vm.output_buffer.append(vm.allocator, '\n') catch return BytecodeVM.VMError.OutOfMemory;
     }
     return .null_val;
+}
+
+/// microtime - 返回当前时间（支持 microtime(true) 返回 float）
+fn builtinMicrotime(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    // microtime(true)
+    if (args.len == 1 and args[0].toBool()) {
+        const ns: i128 = std.time.nanoTimestamp();
+        const seconds = @as(f64, @floatFromInt(ns)) / 1_000_000_000.0;
+        return .{ .float_val = seconds };
+    }
+
+    // microtime() 或 microtime(false)
+    const ns: i128 = std.time.nanoTimestamp();
+    const sec_i64: i64 = @intCast(@divTrunc(ns, 1_000_000_000));
+    const ns_in_sec: i128 = @mod(ns, 1_000_000_000);
+    const usec_i64: i64 = @intCast(@divTrunc(ns_in_sec, 1_000));
+
+    const formatted = std.fmt.allocPrint(vm.allocator, "0.{d:0>6} {d}", .{ usec_i64, sec_i64 }) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(formatted);
+    const str = vm.createString(formatted) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str };
 }
 
 /// strlen - 字符串长度
@@ -1636,6 +1904,1023 @@ fn builtinIsString(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 fn builtinIsArray(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .bool_val = false };
     return .{ .bool_val = args[0] == .array_val };
+}
+
+fn builtinEmpty(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = true };
+    const v = args[0];
+    const result = switch (v) {
+        .null_val => true,
+        .bool_val => |b| !b,
+        .int_val => |i| i == 0,
+        .float_val => |f| f == 0.0,
+        .string_val => |s| s.data.len == 0,
+        .array_val => |a| a.elements.items.len == 0,
+        else => false,
+    };
+    return .{ .bool_val = result };
+}
+
+fn pow10U64(p: u32) u64 {
+    var v: u64 = 1;
+    var i: u32 = 0;
+    while (i < p) : (i += 1) {
+        v *= 10;
+    }
+    return v;
+}
+
+fn appendIntToList(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, v: i64) !void {
+    var buf: [32]u8 = undefined;
+    const slice = std.fmt.bufPrint(&buf, "{d}", .{v}) catch "0";
+    try list.appendSlice(allocator, slice);
+}
+
+fn appendFloatFixedToList(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, v_in: f64, precision: u32) !void {
+    if (std.math.isNan(v_in)) {
+        try list.appendSlice(allocator, "NAN");
+        return;
+    }
+    if (std.math.isInf(v_in)) {
+        if (v_in < 0.0) {
+            try list.appendSlice(allocator, "-INF");
+        } else {
+            try list.appendSlice(allocator, "INF");
+        }
+        return;
+    }
+
+    const scale_u64 = pow10U64(precision);
+    const scale_f64: f64 = @floatFromInt(scale_u64);
+
+    var v = v_in;
+    var sign: u8 = 0;
+    if (v < 0.0) {
+        sign = '-';
+        v = -v;
+    }
+
+    const rounded = @round(v * scale_f64) / scale_f64;
+    var int_part: u64 = @intFromFloat(@floor(rounded));
+    var frac_f = rounded - @as(f64, @floatFromInt(int_part));
+    var frac_i: u64 = @intFromFloat(@round(frac_f * scale_f64));
+    if (frac_i >= scale_u64) {
+        frac_i = 0;
+        int_part += 1;
+    }
+
+    if (sign != 0) {
+        try list.append(allocator, sign);
+    }
+
+    try appendIntToList(list, allocator, @intCast(int_part));
+    if (precision == 0) return;
+
+    try list.append(allocator, '.');
+    var div: u64 = scale_u64 / 10;
+    var remain = frac_i;
+    while (div > 0) : (div /= 10) {
+        const digit: u8 = @intCast((remain / div) % 10);
+        try list.append(allocator, '0' + digit);
+    }
+}
+
+fn builtinSprintf(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const fmt = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory,
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(vm.allocator);
+
+    var i: usize = 0;
+    var arg_i: usize = 1;
+    while (i < fmt.len) : (i += 1) {
+        const ch = fmt[i];
+        if (ch != '%') {
+            out.append(vm.allocator, ch) catch return BytecodeVM.VMError.OutOfMemory;
+            continue;
+        }
+        if (i + 1 >= fmt.len) break;
+        if (fmt[i + 1] == '%') {
+            out.append(vm.allocator, '%') catch return BytecodeVM.VMError.OutOfMemory;
+            i += 1;
+            continue;
+        }
+
+        var precision: ?u32 = null;
+        var j: usize = i + 1;
+        if (fmt[j] == '.') {
+            j += 1;
+            var p: u32 = 0;
+            while (j < fmt.len and fmt[j] >= '0' and fmt[j] <= '9') : (j += 1) {
+                p = p * 10 + @as(u32, fmt[j] - '0');
+            }
+            precision = p;
+        } else {
+            while (j < fmt.len and ((fmt[j] >= '0' and fmt[j] <= '9') or fmt[j] == '-')) : (j += 1) {}
+            if (j < fmt.len and fmt[j] == '.') {
+                j += 1;
+                var p: u32 = 0;
+                while (j < fmt.len and fmt[j] >= '0' and fmt[j] <= '9') : (j += 1) {
+                    p = p * 10 + @as(u32, fmt[j] - '0');
+                }
+                precision = p;
+            }
+        }
+
+        if (j >= fmt.len) break;
+        const spec = fmt[j];
+        i = j;
+
+        if (arg_i >= args.len) {
+            continue;
+        }
+        const v = args[arg_i];
+        arg_i += 1;
+
+        switch (spec) {
+            'd' => {
+                appendIntToList(&out, vm.allocator, v.toInt()) catch return BytecodeVM.VMError.OutOfMemory;
+            },
+            's' => {
+                const s = valueToString(vm, v) catch return BytecodeVM.VMError.OutOfMemory;
+                out.appendSlice(vm.allocator, s) catch return BytecodeVM.VMError.OutOfMemory;
+            },
+            'f' => {
+                const p = precision orelse 6;
+                appendFloatFixedToList(&out, vm.allocator, v.toFloat(), p) catch return BytecodeVM.VMError.OutOfMemory;
+            },
+            else => {
+                const s = valueToString(vm, v) catch return BytecodeVM.VMError.OutOfMemory;
+                out.appendSlice(vm.allocator, s) catch return BytecodeVM.VMError.OutOfMemory;
+            },
+        }
+    }
+
+    const owned = out.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(owned);
+    const s_out = vm.createString(owned) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = s_out };
+}
+
+fn builtinArrayKeys(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+
+    const out = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    const len = arr.elements.items.len;
+    const key_for_index = vm.allocator.alloc(?[]const u8, len) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(key_for_index);
+    @memset(key_for_index, null);
+
+    var it = arr.keys.iterator();
+    while (it.next()) |entry| {
+        const idx = entry.value_ptr.*;
+        if (idx < len) {
+            key_for_index[idx] = entry.key_ptr.*;
+        }
+    }
+
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        if (key_for_index[i]) |k| {
+            const s = vm.createString(k) catch return BytecodeVM.VMError.OutOfMemory;
+            out.elements.append(vm.allocator, .{ .string_val = s }) catch return BytecodeVM.VMError.OutOfMemory;
+        } else {
+            out.elements.append(vm.allocator, .{ .int_val = @intCast(i) }) catch return BytecodeVM.VMError.OutOfMemory;
+        }
+    }
+
+    return .{ .array_val = out };
+}
+
+fn builtinArrayFilter(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    const out = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    for (arr.elements.items) |v| {
+        if (v.toBool()) {
+            out.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+        }
+    }
+    return .{ .array_val = out };
+}
+
+fn builtinArrayMap(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const arr = switch (args[1]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    const out = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    for (arr.elements.items) |v| {
+        out.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+    }
+    return .{ .array_val = out };
+}
+
+fn builtinArrayReduce(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    var acc: Value = if (args.len >= 3) args[2] else .{ .int_val = 0 };
+    var sum_f: f64 = acc.toFloat();
+    for (arr.elements.items) |v| {
+        sum_f += v.toFloat();
+    }
+    if (acc == .int_val) {
+        return .{ .int_val = @intFromFloat(sum_f) };
+    }
+    return .{ .float_val = sum_f };
+}
+
+const pcre2_code = opaque {};
+const pcre2_match_data = opaque {};
+
+extern fn pcre2_compile_8(
+    pattern: [*]const u8,
+    pattern_length: usize,
+    options: c_uint,
+    errcode: *c_int,
+    erroffset: [*c]usize,
+    context: ?*anyopaque,
+) ?*pcre2_code;
+
+extern fn pcre2_code_free_8(?*pcre2_code) void;
+extern fn pcre2_match_data_create_from_pattern_8(?*const pcre2_code, ?*anyopaque) ?*pcre2_match_data;
+extern fn pcre2_match_data_free_8(?*pcre2_match_data) void;
+extern fn pcre2_match_8(
+    code: ?*const pcre2_code,
+    subject: [*]const u8,
+    length: usize,
+    startoffset: c_int,
+    options: c_uint,
+    match_data: ?*pcre2_match_data,
+    mcontext: ?*anyopaque,
+) c_int;
+
+extern fn pcre2_get_ovector_pointer_8(?*pcre2_match_data) [*]usize;
+
+const PCRE2_CASELESS: c_uint = 0x00000008;
+const PCRE2_MULTILINE: c_uint = 0x00000002;
+const PCRE2_DOTALL: c_uint = 0x00000004;
+const PCRE2_EXTENDED: c_uint = 0x00000008;
+const PCRE2_UTF: c_uint = 0x00000000;
+const PCRE2_ERROR_NOMATCH: c_int = -1;
+
+const ParsedPattern = struct {
+    pattern: []const u8,
+    options: c_uint,
+};
+
+fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
+    var result = ParsedPattern{ .pattern = pattern, .options = PCRE2_UTF | PCRE2_DOTALL };
+    if (pattern.len == 0) return result;
+    var start: usize = 0;
+    while (start < pattern.len and pattern[start] == ' ') : (start += 1) {}
+    if (start >= pattern.len) return result;
+    const delimiter = pattern[start];
+
+    var end: usize = start + 1;
+    var depth: i32 = 0;
+    var in_escape = false;
+    while (end < pattern.len) : (end += 1) {
+        const ch = pattern[end];
+        if (in_escape) {
+            in_escape = false;
+            continue;
+        }
+        if (ch == '\\') {
+            in_escape = true;
+            continue;
+        }
+        if (ch == '(' or ch == '[' or ch == '{') {
+            depth += 1;
+        } else if (ch == ')' or ch == ']' or ch == '}') {
+            depth -= 1;
+        } else if (ch == delimiter and depth == 0) {
+            break;
+        }
+    }
+    if (end >= pattern.len) {
+        result.pattern = pattern[start + 1 ..];
+        return result;
+    }
+    result.pattern = pattern[start + 1 .. end];
+    const modifiers = pattern[end + 1 ..];
+    for (modifiers) |ch| {
+        switch (ch) {
+            'i' => result.options |= PCRE2_CASELESS,
+            'm' => result.options |= PCRE2_MULTILINE,
+            's' => result.options |= PCRE2_DOTALL,
+            'x' => result.options |= PCRE2_EXTENDED,
+            ' ' => break,
+            else => {},
+        }
+    }
+    return result;
+}
+
+fn builtinPregMatch(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .int_val = 0 };
+    const pattern = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const subject = valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory;
+    const parsed = parsePHPRegexPattern(pattern);
+
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(parsed.pattern.ptr, parsed.pattern.len, parsed.options, &errcode, &erroffset, null);
+    if (re_ptr == null) return .{ .int_val = 0 };
+    const re = re_ptr.?;
+    defer pcre2_code_free_8(re);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return .{ .int_val = 0 };
+    defer pcre2_match_data_free_8(match_data);
+
+    const rc = pcre2_match_8(re, subject.ptr, subject.len, 0, 0, match_data, null);
+    if (rc == PCRE2_ERROR_NOMATCH) return .{ .int_val = 0 };
+    if (rc < 0) return .{ .int_val = 0 };
+    return .{ .int_val = 1 };
+}
+
+fn builtinPregReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 3) return .null_val;
+    const pattern = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const replacement = valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory;
+    const subject = valueToString(vm, args[2]) catch return BytecodeVM.VMError.OutOfMemory;
+    const parsed = parsePHPRegexPattern(pattern);
+
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(parsed.pattern.ptr, parsed.pattern.len, parsed.options, &errcode, &erroffset, null);
+    if (re_ptr == null) {
+        const out = vm.createString(subject) catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = out };
+    }
+    const re = re_ptr.?;
+    defer pcre2_code_free_8(re);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        const out = vm.createString(subject) catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = out };
+    };
+    defer pcre2_match_data_free_8(match_data);
+
+    var out_buf = std.ArrayListUnmanaged(u8){};
+    defer out_buf.deinit(vm.allocator);
+
+    var offset: usize = 0;
+    while (offset <= subject.len) {
+        const rc = pcre2_match_8(re, subject.ptr, subject.len, @intCast(offset), 0, match_data, null);
+        if (rc == PCRE2_ERROR_NOMATCH or rc < 0) {
+            out_buf.appendSlice(vm.allocator, subject[offset..]) catch return BytecodeVM.VMError.OutOfMemory;
+            break;
+        }
+
+        const ovec = pcre2_get_ovector_pointer_8(match_data);
+        const start = ovec[0];
+        const end = ovec[1];
+        if (start < offset) {
+            out_buf.appendSlice(vm.allocator, subject[offset..]) catch return BytecodeVM.VMError.OutOfMemory;
+            break;
+        }
+        out_buf.appendSlice(vm.allocator, subject[offset..start]) catch return BytecodeVM.VMError.OutOfMemory;
+        out_buf.appendSlice(vm.allocator, replacement) catch return BytecodeVM.VMError.OutOfMemory;
+        if (end == offset) break;
+        offset = end;
+    }
+
+    const owned = out_buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(owned);
+    const out_str = vm.createString(owned) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out_str };
+}
+
+fn builtinAbs(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    return switch (args[0]) {
+        .int_val => |v| .{ .int_val = if (v < 0) -v else v },
+        .float_val => |v| .{ .float_val = if (v < 0.0) -v else v },
+        else => .{ .int_val = 0 },
+    };
+}
+
+fn builtinIntval(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    return .{ .int_val = args[0].toInt() };
+}
+
+fn builtinCeil(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return switch (args[0]) {
+        .int_val => |v| .{ .float_val = @floatFromInt(v) },
+        .float_val => |v| .{ .float_val = @ceil(v) },
+        else => .{ .float_val = @ceil(args[0].toFloat()) },
+    };
+}
+
+fn builtinFloor(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return switch (args[0]) {
+        .int_val => |v| .{ .float_val = @floatFromInt(v) },
+        .float_val => |v| .{ .float_val = @floor(v) },
+        else => .{ .float_val = @floor(args[0].toFloat()) },
+    };
+}
+
+fn builtinRound(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    const val = args[0].toFloat();
+    const precision: i64 = if (args.len >= 2) args[1].toInt() else 0;
+    if (precision == 0) return .{ .float_val = @round(val) };
+
+    const p_abs: u64 = @intCast(if (precision < 0) -precision else precision);
+    const scale = std.math.pow(f64, 10.0, @floatFromInt(p_abs));
+    if (precision > 0) {
+        return .{ .float_val = @round(val * scale) / scale };
+    }
+    return .{ .float_val = @round(val / scale) * scale };
+}
+
+fn builtinMax(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    if (args.len == 1) return args[0];
+
+    var has_float = false;
+    for (args) |a| {
+        if (a == .float_val) {
+            has_float = true;
+            break;
+        }
+    }
+    if (has_float) {
+        var best = args[0].toFloat();
+        for (args[1..]) |a| {
+            const v = a.toFloat();
+            if (v > best) best = v;
+        }
+        return .{ .float_val = best };
+    }
+
+    var best_i = args[0].toInt();
+    for (args[1..]) |a| {
+        const v = a.toInt();
+        if (v > best_i) best_i = v;
+    }
+    return .{ .int_val = best_i };
+}
+
+fn builtinMin(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    if (args.len == 1) return args[0];
+
+    var has_float = false;
+    for (args) |a| {
+        if (a == .float_val) {
+            has_float = true;
+            break;
+        }
+    }
+    if (has_float) {
+        var best = args[0].toFloat();
+        for (args[1..]) |a| {
+            const v = a.toFloat();
+            if (v < best) best = v;
+        }
+        return .{ .float_val = best };
+    }
+
+    var best_i = args[0].toInt();
+    for (args[1..]) |a| {
+        const v = a.toInt();
+        if (v < best_i) best_i = v;
+    }
+    return .{ .int_val = best_i };
+}
+
+fn builtinSqrt(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    const v = args[0].toFloat();
+    if (v < 0.0) return .{ .float_val = std.math.nan(f64) };
+    return .{ .float_val = @sqrt(v) };
+}
+
+fn builtinPow(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .float_val = 0.0 };
+    const base = args[0].toFloat();
+    const exp = args[1].toFloat();
+    return .{ .float_val = std.math.pow(f64, base, exp) };
+}
+
+fn builtinSin(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.sin(args[0].toFloat()) };
+}
+
+fn builtinCos(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.cos(args[0].toFloat()) };
+}
+
+fn builtinStrpos(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const hay = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory,
+    };
+    const needle = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory,
+    };
+    const offset_i: i64 = if (args.len >= 3) args[2].toInt() else 0;
+    const offset: usize = if (offset_i <= 0) 0 else @intCast(offset_i);
+    if (offset >= hay.len) return .{ .bool_val = false };
+    if (std.mem.indexOf(u8, hay[offset..], needle)) |pos| {
+        return .{ .int_val = @intCast(pos + offset) };
+    }
+    return .{ .bool_val = false };
+}
+
+fn builtinStrrpos(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const hay = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory,
+    };
+    const needle = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory,
+    };
+    if (needle.len == 0) return .{ .int_val = 0 };
+    if (needle.len > hay.len) return .{ .bool_val = false };
+
+    var i: usize = hay.len - needle.len;
+    while (true) {
+        if (std.mem.eql(u8, hay[i .. i + needle.len], needle)) {
+            return .{ .int_val = @intCast(i) };
+        }
+        if (i == 0) break;
+        i -= 1;
+    }
+    return .{ .bool_val = false };
+}
+
+fn builtinSubstr(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const s = switch (args[0]) {
+        .string_val => |str| str.data,
+        else => valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory,
+    };
+    const start_i = args[1].toInt();
+    const len_opt: ?i64 = if (args.len >= 3) args[2].toInt() else null;
+
+    const start_idx: usize = blk: {
+        if (start_i < 0) {
+            const abs_start: usize = @intCast(-start_i);
+            break :blk if (abs_start > s.len) 0 else s.len - abs_start;
+        }
+        break :blk @intCast(@min(start_i, @as(i64, @intCast(s.len))));
+    };
+    if (start_idx >= s.len) {
+        const out = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = out };
+    }
+    const end_idx: usize = blk: {
+        if (len_opt) |len_i| {
+            if (len_i >= 0) {
+                break :blk @min(start_idx + @as(usize, @intCast(len_i)), s.len);
+            }
+            const abs_len: usize = @intCast(-len_i);
+            break :blk if (abs_len >= s.len - start_idx) start_idx else s.len - abs_len;
+        }
+        break :blk s.len;
+    };
+    if (end_idx <= start_idx) {
+        const out = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = out };
+    }
+    const out = vm.createString(s[start_idx..end_idx]) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn replaceAllAlloc(
+    allocator: std.mem.Allocator,
+    hay: []const u8,
+    needle: []const u8,
+    repl: []const u8,
+) ![]u8 {
+    if (needle.len == 0) return allocator.dupe(u8, hay);
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    var pos: usize = 0;
+    while (pos <= hay.len) {
+        if (std.mem.indexOfPos(u8, hay, pos, needle)) |i| {
+            try out.appendSlice(allocator, hay[pos..i]);
+            try out.appendSlice(allocator, repl);
+            pos = i + needle.len;
+            continue;
+        }
+        try out.appendSlice(allocator, hay[pos..]);
+        break;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn builtinStrReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 3) return .null_val;
+    const search = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const repl = valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory;
+    const subj = valueToString(vm, args[2]) catch return BytecodeVM.VMError.OutOfMemory;
+
+    const buf = replaceAllAlloc(vm.allocator, subj, search, repl) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(buf);
+    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn builtinStrIReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 3) return .null_val;
+    const search = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const repl = valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory;
+    const subj = valueToString(vm, args[2]) catch return BytecodeVM.VMError.OutOfMemory;
+
+    const lower_subj = vm.allocator.dupe(u8, subj) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(lower_subj);
+    for (lower_subj) |*c| c.* = std.ascii.toLower(c.*);
+
+    const lower_search = vm.allocator.dupe(u8, search) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(lower_search);
+    for (lower_search) |*c| c.* = std.ascii.toLower(c.*);
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(vm.allocator);
+
+    var pos: usize = 0;
+    while (pos <= subj.len) {
+        if (std.mem.indexOfPos(u8, lower_subj, pos, lower_search)) |i| {
+            out.appendSlice(vm.allocator, subj[pos..i]) catch return BytecodeVM.VMError.OutOfMemory;
+            out.appendSlice(vm.allocator, repl) catch return BytecodeVM.VMError.OutOfMemory;
+            pos = i + lower_search.len;
+            continue;
+        }
+        out.appendSlice(vm.allocator, subj[pos..]) catch return BytecodeVM.VMError.OutOfMemory;
+        break;
+    }
+
+    const owned = out.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(owned);
+    const out_str = vm.createString(owned) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out_str };
+}
+
+fn builtinStrtoupper(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(buf);
+    for (buf) |*c| c.* = std.ascii.toUpper(c.*);
+    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn builtinStrtolower(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(buf);
+    for (buf) |*c| c.* = std.ascii.toLower(c.*);
+    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn builtinUcfirst(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    if (s.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(buf);
+    buf[0] = std.ascii.toUpper(buf[0]);
+    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn builtinUcwords(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(buf);
+
+    var prev_space = true;
+    for (buf) |*c| {
+        const is_space = switch (c.*) {
+            ' ', '\t', '\n', '\r', 0x0B, 0 => true,
+            else => false,
+        };
+        if (prev_space and !is_space) {
+            c.* = std.ascii.toUpper(c.*);
+        }
+        prev_space = is_space;
+    }
+
+    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn trimSlice(s: []const u8, mode: enum { both, left, right }) []const u8 {
+    var start: usize = 0;
+    var end: usize = s.len;
+    if (mode == .both or mode == .left) {
+        while (start < end) : (start += 1) {
+            const c = s[start];
+            const is_space = switch (c) {
+                ' ', '\t', '\n', '\r', 0x0B, 0 => true,
+                else => false,
+            };
+            if (!is_space) break;
+        }
+    }
+    if (mode == .both or mode == .right) {
+        while (end > start) : (end -= 1) {
+            const c = s[end - 1];
+            const is_space = switch (c) {
+                ' ', '\t', '\n', '\r', 0x0B, 0 => true,
+                else => false,
+            };
+            if (!is_space) break;
+        }
+    }
+    return s[start..end];
+}
+
+fn builtinTrim(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const out = vm.createString(trimSlice(s, .both)) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn builtinLtrim(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const out = vm.createString(trimSlice(s, .left)) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn builtinRtrim(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
+    const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const out = vm.createString(trimSlice(s, .right)) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = out };
+}
+
+fn builtinExplode(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const delim = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const str = valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory;
+
+    const arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    var it = std.mem.splitSequence(u8, str, delim);
+    while (it.next()) |part| {
+        const s_part = vm.createString(part) catch return BytecodeVM.VMError.OutOfMemory;
+        arr.elements.append(vm.allocator, .{ .string_val = s_part }) catch return BytecodeVM.VMError.OutOfMemory;
+    }
+    return .{ .array_val = arr };
+}
+
+fn builtinImplode(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const glue = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const arr = switch (args[1]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(vm.allocator);
+    for (arr.elements.items, 0..) |v, i| {
+        if (i != 0) {
+            out.appendSlice(vm.allocator, glue) catch return BytecodeVM.VMError.OutOfMemory;
+        }
+        const s = valueToString(vm, v) catch return BytecodeVM.VMError.OutOfMemory;
+        out.appendSlice(vm.allocator, s) catch return BytecodeVM.VMError.OutOfMemory;
+    }
+    const owned = out.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    defer vm.allocator.free(owned);
+    const s_out = vm.createString(owned) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = s_out };
+}
+
+fn builtinArrayShift(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    return switch (args[0]) {
+        .array_val => |arr| {
+            if (arr.elements.items.len == 0) return .null_val;
+            return arr.elements.orderedRemove(0);
+        },
+        else => .null_val,
+    };
+}
+
+fn builtinArrayUnshift(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .int_val = 0 };
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .int_val = 0 },
+    };
+    var idx: usize = 1;
+    var insert_pos: usize = 0;
+    while (idx < args.len) : (idx += 1) {
+        arr.elements.insert(vm.allocator, insert_pos, args[idx]) catch return BytecodeVM.VMError.OutOfMemory;
+        insert_pos += 1;
+    }
+    return .{ .int_val = @intCast(arr.elements.items.len) };
+}
+
+fn builtinInArray(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const needle = args[0];
+    const hay = switch (args[1]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    for (hay.elements.items) |v| {
+        if (vm.valuesEqual(v, needle)) return .{ .bool_val = true };
+    }
+    return .{ .bool_val = false };
+}
+
+fn builtinArraySearch(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const needle = args[0];
+    const hay = switch (args[1]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    for (hay.elements.items, 0..) |v, i| {
+        if (vm.valuesEqual(v, needle)) return .{ .int_val = @intCast(i) };
+    }
+    return .{ .bool_val = false };
+}
+
+fn builtinArrayValues(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const hay = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    const out_arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    for (hay.elements.items) |v| {
+        out_arr.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+    }
+    return .{ .array_val = out_arr };
+}
+
+fn builtinArrayMerge(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    const out_arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    for (args) |a| {
+        if (a == .array_val) {
+            const arr = a.array_val;
+            for (arr.elements.items) |v| {
+                out_arr.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+            }
+        }
+    }
+    return .{ .array_val = out_arr };
+}
+
+fn builtinArraySlice(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    const start_i = args[1].toInt();
+    const len_i: ?i64 = if (args.len >= 3) args[2].toInt() else null;
+
+    const total: i64 = @intCast(arr.elements.items.len);
+    var start: i64 = if (start_i < 0) total + start_i else start_i;
+    if (start < 0) start = 0;
+    if (start > total) start = total;
+    var end: i64 = total;
+    if (len_i) |l| {
+        end = start + l;
+        if (l < 0) end = total + l;
+    }
+    if (end < start) end = start;
+    if (end > total) end = total;
+
+    const out_arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    const s: usize = @intCast(start);
+    const e: usize = @intCast(end);
+    for (arr.elements.items[s..e]) |v| {
+        out_arr.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+    }
+    return .{ .array_val = out_arr };
+}
+
+fn builtinArrayChunk(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    const size_i = args[1].toInt();
+    if (size_i <= 0) return .null_val;
+    const size: usize = @intCast(size_i);
+
+    const out = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    var i: usize = 0;
+    while (i < arr.elements.items.len) : (i += size) {
+        const chunk = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+        const end = @min(i + size, arr.elements.items.len);
+        for (arr.elements.items[i..end]) |v| {
+            chunk.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+        }
+        out.elements.append(vm.allocator, .{ .array_val = chunk }) catch return BytecodeVM.VMError.OutOfMemory;
+    }
+    return .{ .array_val = out };
+}
+
+fn builtinRange(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const start = args[0].toInt();
+    const end = args[1].toInt();
+    const step: i64 = if (args.len >= 3) args[2].toInt() else 1;
+    if (step == 0) return .null_val;
+
+    const arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    if (start <= end) {
+        var v = start;
+        while (v <= end) : (v += @abs(step)) {
+            arr.elements.append(vm.allocator, .{ .int_val = v }) catch return BytecodeVM.VMError.OutOfMemory;
+        }
+    } else {
+        var v = start;
+        while (v >= end) : (v -= @abs(step)) {
+            arr.elements.append(vm.allocator, .{ .int_val = v }) catch return BytecodeVM.VMError.OutOfMemory;
+        }
+    }
+    return .{ .array_val = arr };
+}
+
+fn builtinShuffle(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = false };
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    var prng = std.rand.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
+    const rnd = prng.random();
+
+    var i: usize = arr.elements.items.len;
+    while (i > 1) {
+        i -= 1;
+        const j = rnd.uintLessThan(usize, i + 1);
+        const tmp = arr.elements.items[i];
+        arr.elements.items[i] = arr.elements.items[j];
+        arr.elements.items[j] = tmp;
+    }
+    return .{ .bool_val = true };
+}
+
+fn lessThanValue(_: void, a: Value, b: Value) bool {
+    return a.toFloat() < b.toFloat();
+}
+
+fn greaterThanValue(_: void, a: Value, b: Value) bool {
+    return a.toFloat() > b.toFloat();
+}
+
+fn builtinSort(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = false };
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    std.sort.sort(Value, arr.elements.items, {}, lessThanValue);
+    return .{ .bool_val = true };
+}
+
+fn builtinRsort(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = false };
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    std.sort.sort(Value, arr.elements.items, {}, greaterThanValue);
+    return .{ .bool_val = true };
 }
 
 // ============================================================
@@ -1756,6 +3041,10 @@ fn initDispatchTable() [256]DispatchFn {
     // 比较操作
     table[@intFromEnum(OpCode.eq)] = handleEq;
     table[@intFromEnum(OpCode.neq)] = handleNeq;
+    table[@intFromEnum(OpCode.lt)] = handleLt;
+    table[@intFromEnum(OpCode.gt)] = handleGt;
+    table[@intFromEnum(OpCode.le)] = handleLe;
+    table[@intFromEnum(OpCode.ge)] = handleGe;
     table[@intFromEnum(OpCode.lt_int)] = handleLtInt;
     table[@intFromEnum(OpCode.gt_int)] = handleGtInt;
     table[@intFromEnum(OpCode.lt_float)] = handleLtFloat;
@@ -1857,7 +3146,7 @@ fn handleNop(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!D
 
 /// PUSH_CONST - 压入常量
 fn handlePushConst(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
-    const value = vm.loadConstant(frame.function, inst.operand1);
+    const value = try vm.loadConstant(frame.function, inst.operand1);
     try vm.push(value);
     return .continue_execution;
 }
@@ -1960,32 +3249,49 @@ fn handleStoreGlobal(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byte
 
 // ========== 整数算术处理函数 ==========
 
+/// OPT-003: 优化的整数加法 - 使用快速栈操作
 fn handleAddInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toInt();
-    const a = (try vm.pop()).toInt();
-    try vm.push(.{ .int_val = a +% b });
+    const b_val = vm.popFast();
+    const a_val = vm.popFast();
+    if (a_val == .float_val or b_val == .float_val) {
+        vm.pushFast(.{ .float_val = a_val.toFloat() + b_val.toFloat() });
+    } else {
+        vm.pushFast(.{ .int_val = a_val.toInt() +% b_val.toInt() });
+    }
     return .continue_execution;
 }
 
+/// OPT-003: 优化的整数减法 - 使用快速栈操作
 fn handleSubInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toInt();
-    const a = (try vm.pop()).toInt();
-    try vm.push(.{ .int_val = a -% b });
+    const b_val = vm.popFast();
+    const a_val = vm.popFast();
+    if (a_val == .float_val or b_val == .float_val) {
+        vm.pushFast(.{ .float_val = a_val.toFloat() - b_val.toFloat() });
+    } else {
+        vm.pushFast(.{ .int_val = a_val.toInt() -% b_val.toInt() });
+    }
     return .continue_execution;
 }
 
+/// OPT-003: 优化的整数乘法 - 使用快速栈操作
 fn handleMulInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toInt();
-    const a = (try vm.pop()).toInt();
-    try vm.push(.{ .int_val = a *% b });
+    const b_val = vm.popFast();
+    const a_val = vm.popFast();
+    if (a_val == .float_val or b_val == .float_val) {
+        vm.pushFast(.{ .float_val = a_val.toFloat() * b_val.toFloat() });
+    } else {
+        vm.pushFast(.{ .int_val = a_val.toInt() *% b_val.toInt() });
+    }
     return .continue_execution;
 }
 
 fn handleDivInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toInt();
-    const a = (try vm.pop()).toInt();
-    if (b == 0) return BytecodeVM.VMError.DivisionByZero;
-    try vm.push(.{ .int_val = @divTrunc(a, b) });
+    const b_val = try vm.pop();
+    const a_val = try vm.pop();
+    const b_f = b_val.toFloat();
+    if (b_f == 0.0) return BytecodeVM.VMError.DivisionByZero;
+    // PHP 语义：/ 返回浮点数
+    try vm.push(.{ .float_val = a_val.toFloat() / b_f });
     return .continue_execution;
 }
 
@@ -2121,31 +3427,119 @@ fn handleNeq(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!
     return .continue_execution;
 }
 
+/// OPT-006: 类型特化的整数小于比较 - 使用快速栈操作
 fn handleLtInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toInt();
-    const a = (try vm.pop()).toInt();
-    try vm.push(.{ .bool_val = a < b });
+    const b = vm.popFast().toInt();
+    const a = vm.popFast().toInt();
+    vm.pushFast(.{ .bool_val = a < b });
     return .continue_execution;
 }
 
+/// OPT-006: 类型特化的整数大于比较 - 使用快速栈操作
 fn handleGtInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toInt();
-    const a = (try vm.pop()).toInt();
-    try vm.push(.{ .bool_val = a > b });
+    const b = vm.popFast().toInt();
+    const a = vm.popFast().toInt();
+    vm.pushFast(.{ .bool_val = a > b });
     return .continue_execution;
 }
 
+/// OPT-006: 类型特化的浮点小于比较 - 使用快速栈操作
 fn handleLtFloat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toFloat();
-    const a = (try vm.pop()).toFloat();
-    try vm.push(.{ .bool_val = a < b });
+    const b = vm.popFast().toFloat();
+    const a = vm.popFast().toFloat();
+    vm.pushFast(.{ .bool_val = a < b });
     return .continue_execution;
 }
 
+/// OPT-006: 类型特化的浮点大于比较 - 使用快速栈操作
 fn handleGtFloat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = (try vm.pop()).toFloat();
-    const a = (try vm.pop()).toFloat();
-    try vm.push(.{ .bool_val = a > b });
+    const b = vm.popFast().toFloat();
+    const a = vm.popFast().toFloat();
+    vm.pushFast(.{ .bool_val = a > b });
+    return .continue_execution;
+}
+
+/// OPT-006: 通用小于比较 - 使用快速栈操作
+fn handleLt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = vm.popFast();
+    const a = vm.popFast();
+    const result = switch (a) {
+        .int_val => |a_int| switch (b) {
+            .int_val => |b_int| a_int < b_int,
+            .float_val => |b_float| @as(f64, @floatFromInt(a_int)) < b_float,
+            else => false,
+        },
+        .float_val => |a_float| switch (b) {
+            .int_val => |b_int| a_float < @as(f64, @floatFromInt(b_int)),
+            .float_val => |b_float| a_float < b_float,
+            else => false,
+        },
+        else => false,
+    };
+    vm.pushFast(.{ .bool_val = result });
+    return .continue_execution;
+}
+
+/// OPT-006: 通用大于比较 - 使用快速栈操作
+fn handleGt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = vm.popFast();
+    const a = vm.popFast();
+    const result = switch (a) {
+        .int_val => |a_int| switch (b) {
+            .int_val => |b_int| a_int > b_int,
+            .float_val => |b_float| @as(f64, @floatFromInt(a_int)) > b_float,
+            else => false,
+        },
+        .float_val => |a_float| switch (b) {
+            .int_val => |b_int| a_float > @as(f64, @floatFromInt(b_int)),
+            .float_val => |b_float| a_float > b_float,
+            else => false,
+        },
+        else => false,
+    };
+    vm.pushFast(.{ .bool_val = result });
+    return .continue_execution;
+}
+
+/// OPT-006: 通用小于等于比较 - 使用快速栈操作
+fn handleLe(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = vm.popFast();
+    const a = vm.popFast();
+    const result = switch (a) {
+        .int_val => |a_int| switch (b) {
+            .int_val => |b_int| a_int <= b_int,
+            .float_val => |b_float| @as(f64, @floatFromInt(a_int)) <= b_float,
+            else => false,
+        },
+        .float_val => |a_float| switch (b) {
+            .int_val => |b_int| a_float <= @as(f64, @floatFromInt(b_int)),
+            .float_val => |b_float| a_float <= b_float,
+            else => false,
+        },
+        else => vm.valuesEqual(a, b),
+    };
+    vm.pushFast(.{ .bool_val = result });
+    return .continue_execution;
+}
+
+/// OPT-006: 通用大于等于比较 - 使用快速栈操作
+fn handleGe(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = vm.popFast();
+    const a = vm.popFast();
+    const result = switch (a) {
+        .int_val => |a_int| switch (b) {
+            .int_val => |b_int| a_int >= b_int,
+            .float_val => |b_float| @as(f64, @floatFromInt(a_int)) >= b_float,
+            else => false,
+        },
+        .float_val => |a_float| switch (b) {
+            .int_val => |b_int| a_float >= @as(f64, @floatFromInt(b_int)),
+            .float_val => |b_float| a_float >= b_float,
+            else => false,
+        },
+        else => vm.valuesEqual(a, b),
+    };
+    try vm.push(.{ .bool_val = result });
     return .continue_execution;
 }
 
@@ -2343,10 +3737,71 @@ fn handleRetVoid(vm: *BytecodeVM, frame: *CallFrame, _: Instruction) BytecodeVM.
     return .frame_changed;
 }
 
-fn handleLoopStart(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+/// 在函数字节码中，从 loop_start 开始查找匹配的 loop_end（支持嵌套）
+fn findMatchingLoopEnd(func: *CompiledFunction, loop_start_index: u32) ?u32 {
+    var depth: u32 = 0;
+    var i: u32 = loop_start_index;
+    while (i < func.bytecode.len) : (i += 1) {
+        const op = func.bytecode[i].opcode;
+        if (op == .loop_start) {
+            depth += 1;
+        } else if (op == .loop_end) {
+            if (depth == 0) return null;
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+/// OPT-010: 循环热点检测 - 记录循环入口并触发编译/执行替换
+/// @post 如果 JIT 编译代码可用，则执行原生代码并跳过解释执行
+fn handleLoopStart(vm: *BytecodeVM, frame: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    if (!vm.enable_jit) return .continue_execution;
+    const jit_ptr = vm.jit_compiler orelse return .continue_execution;
+
+    // 取指后 ip 已自增，所以当前 loop_start 的索引是 ip-1
+    if (frame.ip == 0) return .continue_execution;
+    const loop_start_index: u32 = frame.ip - 1;
+
+    // loop_id：用函数地址与 loop_start_index 混合，保证同一次运行内稳定
+    const func_addr: usize = @intFromPtr(frame.function);
+    const loop_id: u32 = @as(u32, @truncate(func_addr)) ^ loop_start_index;
+
+    // 检查是否已有编译代码（OSR 执行替换）
+    if (jit_ptr.compiled_cache.get(loop_id)) |native_code| {
+        if (native_code.entry_point) |entry| {
+            // 调用原生代码（传入 VM 上下文）
+            const result = entry(@ptrCast(vm));
+            // result == 0 表示成功执行，跳转到 loop_end 后继续
+            if (result == 0) {
+                const loop_end_index = findMatchingLoopEnd(frame.function, loop_start_index) orelse return .continue_execution;
+                // 跳转到 loop_end 之后
+                frame.ip = loop_end_index + 1;
+                return .continue_execution;
+            }
+            // result != 0 表示需要回退到解释执行（去优化）
+        }
+    }
+
+    // 热点检测与编译
+    if (!jit_ptr.recordLoopIteration(loop_id)) {
+        return .continue_execution;
+    }
+
+    const loop_end_index = findMatchingLoopEnd(frame.function, loop_start_index) orelse
+        return .continue_execution;
+
+    // 编译 [loop_start, loop_end]（含 loop_end）
+    const start_usize: usize = @intCast(loop_start_index);
+    const end_usize: usize = @intCast(loop_end_index + 1);
+    const slice = frame.function.bytecode[start_usize..end_usize];
+    _ = jit_ptr.compileFunction(loop_id, slice) catch null;
+
     return .continue_execution;
 }
 
+/// OPT-010: 循环热点检测 - 循环出口（目前只保留为标记点）
 fn handleLoopEnd(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
     return .continue_execution;
 }
@@ -2482,97 +3937,118 @@ fn handleNewArray(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) BytecodeVM.
     return .continue_execution;
 }
 
+/// OPT-008: 数组访问内联优化 - 使用快速栈操作
 fn handleArrayGet(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const index = try vm.pop();
-    const arr_val = try vm.pop();
-    switch (arr_val) {
-        .array_val => |arr| {
-            switch (index) {
-                .int_val => |idx| {
-                    const i: usize = if (idx >= 0) @intCast(idx) else 0;
-                    if (i < arr.elements.items.len) {
-                        try vm.push(arr.elements.items[i]);
-                    } else {
-                        try vm.push(.null_val);
-                    }
-                },
-                .string_val => |key| {
-                    if (arr.keys.get(key.data)) |i| {
-                        try vm.push(arr.elements.items[i]);
-                    } else {
-                        try vm.push(.null_val);
-                    }
-                },
-                else => try vm.push(.null_val),
+    const index = vm.popFast();
+    const arr_val = vm.popFast();
+
+    // 快速路径：整数索引访问
+    if (arr_val == .array_val and index == .int_val) {
+        const arr = arr_val.array_val;
+        const idx = index.int_val;
+        if (idx >= 0) {
+            const i: usize = @intCast(idx);
+            if (i < arr.elements.items.len) {
+                vm.pushFast(arr.elements.items[i]);
+                return .continue_execution;
             }
-        },
-        else => try vm.push(.null_val),
+        }
+        vm.pushFast(.null_val);
+        return .continue_execution;
     }
+
+    // 字符串键访问
+    if (arr_val == .array_val and index == .string_val) {
+        const arr = arr_val.array_val;
+        if (arr.keys.get(index.string_val.data)) |i| {
+            vm.pushFast(arr.elements.items[i]);
+        } else {
+            vm.pushFast(.null_val);
+        }
+        return .continue_execution;
+    }
+
+    vm.pushFast(.null_val);
     return .continue_execution;
 }
 
+/// OPT-008: 数组设置内联优化 - 使用快速栈操作
 fn handleArraySet(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const value = try vm.pop();
-    const index = try vm.pop();
-    const arr_val = try vm.pop();
-    switch (arr_val) {
-        .array_val => |arr| {
-            switch (index) {
-                .int_val => |idx| {
-                    const i: usize = if (idx >= 0) @intCast(idx) else 0;
-                    if (i < arr.elements.items.len) {
-                        arr.elements.items[i] = value;
-                    } else {
-                        while (arr.elements.items.len < i) {
-                            arr.elements.append(vm.allocator, .null_val) catch return BytecodeVM.VMError.OutOfMemory;
-                        }
-                        arr.elements.append(vm.allocator, value) catch return BytecodeVM.VMError.OutOfMemory;
-                    }
-                },
-                .string_val => |key| {
-                    const key_copy = vm.allocator.dupe(u8, key.data) catch return BytecodeVM.VMError.OutOfMemory;
-                    if (arr.keys.get(key.data)) |i| {
-                        arr.elements.items[i] = value;
-                    } else {
-                        const new_idx = arr.elements.items.len;
-                        arr.elements.append(vm.allocator, value) catch return BytecodeVM.VMError.OutOfMemory;
-                        arr.keys.put(vm.allocator, key_copy, new_idx) catch return BytecodeVM.VMError.OutOfMemory;
-                    }
-                },
-                else => {},
-            }
-            try vm.push(.{ .array_val = arr });
-        },
-        else => try vm.push(.null_val),
-    }
-    return .continue_execution;
-}
+    const value = vm.popFast();
+    const index = vm.popFast();
+    const arr_val = vm.popFast();
 
-fn handleArrayPush(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const value = try vm.pop();
-    const arr_val = try vm.pop();
-    switch (arr_val) {
-        .array_val => |arr| {
-            arr.elements.append(vm.allocator, value) catch return BytecodeVM.VMError.OutOfMemory;
-            try vm.push(.{ .array_val = arr });
-        },
-        else => try vm.push(.null_val),
-    }
-    return .continue_execution;
-}
-
-fn handleArrayPop(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const arr_val = try vm.pop();
-    switch (arr_val) {
-        .array_val => |arr| {
-            if (arr.elements.items.len > 0) {
-                const val = arr.elements.pop() orelse .null_val;
-                try vm.push(val);
+    // 快速路径：整数索引设置
+    if (arr_val == .array_val and index == .int_val) {
+        const arr = arr_val.array_val;
+        const idx = index.int_val;
+        if (idx >= 0) {
+            const i: usize = @intCast(idx);
+            if (i < arr.elements.items.len) {
+                arr.elements.items[i] = value;
             } else {
-                try vm.push(.null_val);
+                while (arr.elements.items.len < i) {
+                    arr.elements.append(vm.allocator, .null_val) catch
+                        return BytecodeVM.VMError.OutOfMemory;
+                }
+                arr.elements.append(vm.allocator, value) catch
+                    return BytecodeVM.VMError.OutOfMemory;
             }
-        },
-        else => try vm.push(.null_val),
+        }
+        vm.pushFast(.{ .array_val = arr });
+        return .continue_execution;
+    }
+
+    // 字符串键设置
+    if (arr_val == .array_val and index == .string_val) {
+        const arr = arr_val.array_val;
+        const key = index.string_val;
+        if (arr.keys.get(key.data)) |i| {
+            arr.elements.items[i] = value;
+        } else {
+            const key_copy = vm.allocator.dupe(u8, key.data) catch
+                return BytecodeVM.VMError.OutOfMemory;
+            const new_idx = arr.elements.items.len;
+            arr.elements.append(vm.allocator, value) catch
+                return BytecodeVM.VMError.OutOfMemory;
+            arr.keys.put(vm.allocator, key_copy, new_idx) catch
+                return BytecodeVM.VMError.OutOfMemory;
+        }
+        vm.pushFast(.{ .array_val = arr });
+        return .continue_execution;
+    }
+
+    vm.pushFast(.null_val);
+    return .continue_execution;
+}
+
+/// OPT-008: 数组推入内联优化
+fn handleArrayPush(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const value = vm.popFast();
+    const arr_val = vm.popFast();
+    if (arr_val == .array_val) {
+        const arr = arr_val.array_val;
+        arr.elements.append(vm.allocator, value) catch
+            return BytecodeVM.VMError.OutOfMemory;
+        vm.pushFast(.{ .array_val = arr });
+    } else {
+        vm.pushFast(.null_val);
+    }
+    return .continue_execution;
+}
+
+/// OPT-008: 数组弹出内联优化
+fn handleArrayPop(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const arr_val = vm.popFast();
+    if (arr_val == .array_val) {
+        const arr = arr_val.array_val;
+        if (arr.elements.items.len > 0) {
+            vm.pushFast(arr.elements.pop() orelse .null_val);
+        } else {
+            vm.pushFast(.null_val);
+        }
+    } else {
+        vm.pushFast(.null_val);
     }
     return .continue_execution;
 }
@@ -2868,27 +4344,92 @@ fn handleIsObject(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VME
 
 // ========== 字符串操作处理函数 ==========
 
+/// OPT-009: 小字符串栈上缓冲区阈值
+const SMALL_STRING_BUFFER_SIZE: usize = 256;
+
+/// OPT-007+009: 优化字符串拼接 - 快速路径 + 对象复用 + 小字符串栈上缓冲区
 fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const b = try vm.pop();
-    const a = try vm.pop();
+    const b = vm.popFast();
+    const a = vm.popFast();
+
+    // 快速路径：两边都是字符串，直接拼接
+    if (a == .string_val and b == .string_val) {
+        const str_a = a.string_val.data;
+        const str_b = b.string_val.data;
+        const result_len = str_a.len + str_b.len;
+
+        // OPT-009: 小字符串使用栈上缓冲区避免堆分配
+        var stack_buffer: [SMALL_STRING_BUFFER_SIZE]u8 = undefined;
+        const use_stack = result_len <= SMALL_STRING_BUFFER_SIZE;
+
+        const result_data = if (use_stack) blk: {
+            @memcpy(stack_buffer[0..str_a.len], str_a);
+            @memcpy(stack_buffer[str_a.len..][0..str_b.len], str_b);
+            break :blk vm.allocator.dupe(u8, stack_buffer[0..result_len]) catch
+                return BytecodeVM.VMError.OutOfMemory;
+        } else blk: {
+            const data = vm.allocator.alloc(u8, result_len) catch
+                return BytecodeVM.VMError.OutOfMemory;
+            @memcpy(data[0..str_a.len], str_a);
+            @memcpy(data[str_a.len..], str_b);
+            break :blk data;
+        };
+
+        // 尝试复用空闲String对象
+        const result_str = if (vm.free_strings.items.len > 0) blk: {
+            const s = vm.free_strings.getLast();
+            vm.free_strings.items.len -= 1;
+            if (s.data.len > 0) {
+                vm.allocator.free(s.data);
+            }
+            break :blk s;
+        } else blk: {
+            break :blk vm.allocator.create(Value.String) catch
+                return BytecodeVM.VMError.OutOfMemory;
+        };
+
+        result_str.* = .{ .data = result_data, .ref_count = 1 };
+        vm.string_pool.append(vm.allocator, result_str) catch
+            return BytecodeVM.VMError.OutOfMemory;
+        vm.pushFast(.{ .string_val = result_str });
+        return .continue_execution;
+    }
+
+    // 慢路径：需要类型转换
     const str_a = valueToString(vm, a) catch return BytecodeVM.VMError.OutOfMemory;
     const str_b = valueToString(vm, b) catch return BytecodeVM.VMError.OutOfMemory;
     const result_len = str_a.len + str_b.len;
-    const result_data = vm.allocator.alloc(u8, result_len) catch return BytecodeVM.VMError.OutOfMemory;
+    const result_data = vm.allocator.alloc(u8, result_len) catch
+        return BytecodeVM.VMError.OutOfMemory;
     @memcpy(result_data[0..str_a.len], str_a);
     @memcpy(result_data[str_a.len..], str_b);
-    const result_str = vm.allocator.create(Value.String) catch return BytecodeVM.VMError.OutOfMemory;
+
+    // 尝试复用空闲String对象
+    const result_str = if (vm.free_strings.items.len > 0) blk: {
+        const s = vm.free_strings.getLast();
+        vm.free_strings.items.len -= 1;
+        if (s.data.len > 0) {
+            vm.allocator.free(s.data);
+        }
+        break :blk s;
+    } else blk: {
+        break :blk vm.allocator.create(Value.String) catch
+            return BytecodeVM.VMError.OutOfMemory;
+    };
+
     result_str.* = .{ .data = result_data, .ref_count = 1 };
-    vm.string_pool.append(vm.allocator, result_str) catch return BytecodeVM.VMError.OutOfMemory;
-    try vm.push(.{ .string_val = result_str });
+    vm.string_pool.append(vm.allocator, result_str) catch
+        return BytecodeVM.VMError.OutOfMemory;
+    vm.pushFast(.{ .string_val = result_str });
     return .continue_execution;
 }
 
+/// OPT-007: 优化strlen - 使用快速栈操作
 fn handleStrlen(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const val = try vm.pop();
+    const val = vm.popFast();
     switch (val) {
-        .string_val => |s| try vm.push(.{ .int_val = @intCast(s.data.len) }),
-        else => try vm.push(.{ .int_val = 0 }),
+        .string_val => |s| vm.pushFast(.{ .int_val = @intCast(s.data.len) }),
+        else => vm.pushFast(.{ .int_val = 0 }),
     }
     return .continue_execution;
 }
@@ -2901,10 +4442,10 @@ fn handleStrlen(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
 fn handlePassByValue(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     _ = frame;
     const param_idx = inst.operand1;
-    
+
     // 获取栈顶值
     const value = try vm.pop();
-    
+
     // 对于复杂类型，需要深拷贝
     const copied_value = switch (value) {
         .string_val => |s| blk: {
@@ -2933,11 +4474,11 @@ fn handlePassByValue(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byte
         },
         else => value, // 基本类型直接复制
     };
-    
+
     // 存储到参数位置
     const base = if (vm.frame_count > 0) vm.frames[vm.frame_count - 1].base_pointer else 0;
     vm.stack[base + param_idx] = copied_value;
-    
+
     return .continue_execution;
 }
 
@@ -2947,10 +4488,10 @@ fn handlePassByValue(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byte
 fn handlePassByRef(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     _ = frame;
     const param_idx = inst.operand1;
-    
+
     // 获取栈顶值（不复制）
     const value = try vm.pop();
-    
+
     // 增加引用计数
     switch (value) {
         .string_val => |s| {
@@ -2964,11 +4505,11 @@ fn handlePassByRef(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byteco
         },
         else => {},
     }
-    
+
     // 存储到参数位置
     const base = if (vm.frame_count > 0) vm.frames[vm.frame_count - 1].base_pointer else 0;
     vm.stack[base + param_idx] = value;
-    
+
     return .continue_execution;
 }
 
@@ -2978,10 +4519,10 @@ fn handlePassByRef(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byteco
 fn handlePassByCow(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     _ = frame;
     const param_idx = inst.operand1;
-    
+
     // 获取栈顶值
     const value = try vm.pop();
-    
+
     // COW语义：增加引用计数，标记为共享
     // 实际的复制会在写入时发生（由cow_check/cow_copy处理）
     switch (value) {
@@ -2996,11 +4537,11 @@ fn handlePassByCow(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byteco
         },
         else => {},
     }
-    
+
     // 存储到参数位置
     const base = if (vm.frame_count > 0) vm.frames[vm.frame_count - 1].base_pointer else 0;
     vm.stack[base + param_idx] = value;
-    
+
     return .continue_execution;
 }
 
@@ -3010,17 +4551,17 @@ fn handlePassByCow(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byteco
 fn handlePassByMove(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     _ = frame;
     const param_idx = inst.operand1;
-    
+
     // 获取栈顶值
     const value = try vm.pop();
-    
+
     // 移动语义：直接转移，不增加引用计数
     // 原位置会被设置为null（由调用者处理）
-    
+
     // 存储到参数位置
     const base = if (vm.frame_count > 0) vm.frames[vm.frame_count - 1].base_pointer else 0;
     vm.stack[base + param_idx] = value;
-    
+
     return .continue_execution;
 }
 
@@ -3031,14 +4572,14 @@ fn handleCowCheck(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytecod
     const local_idx = inst.operand1;
     const base = frame.base_pointer;
     const value = vm.stack[base + local_idx];
-    
+
     const needs_copy = switch (value) {
         .string_val => |s| s.ref_count > 1,
         .array_val => |a| a.ref_count > 1,
         .object_val => |o| o.ref_count > 1,
         else => false,
     };
-    
+
     try vm.push(.{ .bool_val = needs_copy });
     return .continue_execution;
 }
@@ -3047,7 +4588,7 @@ fn handleCowCheck(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytecod
 /// 复制栈顶的共享值，使其成为独占
 fn handleCowCopy(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
     const value = try vm.pop();
-    
+
     const copied_value = switch (value) {
         .string_val => |s| blk: {
             if (s.ref_count <= 1) {
@@ -3106,7 +4647,7 @@ fn handleCowCopy(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMEr
         },
         else => value,
     };
-    
+
     try vm.push(copied_value);
     return .continue_execution;
 }
@@ -3118,10 +4659,10 @@ fn handleRetMove(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytecode
     const local_idx = inst.operand1;
     const base = frame.base_pointer;
     const return_value = vm.stack[base + local_idx];
-    
+
     // 移动语义：直接返回，不增加引用计数
     // 原位置会被清理（由函数返回逻辑处理）
-    
+
     // 恢复调用帧
     if (vm.frame_count > 1) {
         vm.frame_count -= 1;
@@ -3140,7 +4681,7 @@ fn handleRetCow(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeV
     const local_idx = inst.operand1;
     const base = frame.base_pointer;
     const return_value = vm.stack[base + local_idx];
-    
+
     // COW返回：增加引用计数，允许调用者共享
     switch (return_value) {
         .string_val => |s| {
@@ -3154,7 +4695,7 @@ fn handleRetCow(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeV
         },
         else => {},
     }
-    
+
     // 恢复调用帧
     if (vm.frame_count > 1) {
         vm.frame_count -= 1;
