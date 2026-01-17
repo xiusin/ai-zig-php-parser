@@ -3214,11 +3214,11 @@ fn valueToString(vm: *BytecodeVM, value: Value) ![]const u8 {
 /// 清理临时字符串池 - 可在适当时机调用以释放内存
 pub fn clearTempStrings(vm: *BytecodeVM) void {
     vm.temp_strings.clearRetainingCapacity();
-    if (vm.arena_alloc_count >= ARENA_RESET_THRESHOLD) {
+    if (vm.arena_alloc_count >= BytecodeVM.ARENA_RESET_THRESHOLD) {
         vm.temp_arena.deinit();
         vm.temp_arena = std.heap.ArenaAllocator.init(vm.allocator);
     } else {
-        vm.temp_arena.reset();
+        _ = vm.temp_arena.reset(.retain_capacity);
     }
     vm.arena_alloc_count = 0;
 }
@@ -3377,6 +3377,12 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.to_bool)] = handleToBool;
     table[@intFromEnum(OpCode.to_string)] = handleToString;
 
+    // 闭包操作
+    table[@intFromEnum(OpCode.make_closure)] = handleMakeClosure;
+    table[@intFromEnum(OpCode.closure_call)] = handleClosureCall;
+    table[@intFromEnum(OpCode.capture_var)] = handleCaptureVar;
+    table[@intFromEnum(OpCode.arrow_fn)] = handleArrowFn;
+
     // 类型检查
     table[@intFromEnum(OpCode.is_null)] = handleIsNull;
     table[@intFromEnum(OpCode.is_int)] = handleIsInt;
@@ -3393,12 +3399,68 @@ fn initDispatchTable() [256]DispatchFn {
 }
 
 /// 无效操作码处理
-fn handleInvalidOpcode(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+fn handleInvalidOpcode(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    const ip: usize = if (frame.ip == 0) 0 else frame.ip - 1;
+    const opcode_u8: u8 = @intFromEnum(inst.opcode);
+
+    std.debug.print(
+        "InvalidOpcode: func='{s}' ip={d} opcode=0x{x:0>2}({s}) op1={d} op2={d} hint={d} tail={any} gc={any} stack_top={d} base={d}\n",
+        .{
+            frame.function.name,
+            ip,
+            opcode_u8,
+            @tagName(inst.opcode),
+            inst.operand1,
+            inst.operand2,
+            @intFromEnum(inst.flags.type_hint),
+            inst.flags.is_tail_call,
+            inst.flags.needs_gc_check,
+            vm.stack_top,
+            frame.base_pointer,
+        },
+    );
+
+    const bc = frame.function.bytecode;
+    const start = if (ip > 3) ip - 3 else 0;
+    const end = @min(ip + 4, bc.len);
+    std.debug.print("  bytecode window [{d}..{d}) (len={d})\n", .{ start, end, bc.len });
+    for (bc[start..end], start..) |winst, idx| {
+        std.debug.print(
+            "  [{d}] 0x{x:0>2}({s}) op1={d} op2={d} hint={d}\n",
+            .{
+                idx,
+                @as(u8, @intFromEnum(winst.opcode)),
+                @tagName(winst.opcode),
+                winst.operand1,
+                winst.operand2,
+                @intFromEnum(winst.flags.type_hint),
+            },
+        );
+    }
+
     return BytecodeVM.VMError.InvalidOpcode;
 }
 
 /// NOP - 空操作
 fn handleNop(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    return .continue_execution;
+}
+
+fn handleCaptureVar(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    return .continue_execution;
+}
+
+fn handleMakeClosure(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    try vm.push(.null_val);
+    return .continue_execution;
+}
+
+fn handleClosureCall(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    return BytecodeVM.VMError.UndefinedFunction;
+}
+
+fn handleArrowFn(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    try vm.push(.null_val);
     return .continue_execution;
 }
 
