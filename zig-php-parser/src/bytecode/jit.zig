@@ -90,8 +90,8 @@ const HotspotTracker = struct {
     function_calls: std.AutoHashMap(u32, u32),
     /// 循环迭代计数表
     loop_iterations: std.AutoHashMap(u32, u32),
-    /// 热点阈值 - 超过此值触发JIT编译
-    hotspot_threshold: u32 = 1000,
+    /// 热点阈值 - 超过此值触发JIT编译（优化：从1000降至100）
+    hotspot_threshold: u32 = 100,
 
     fn init(allocator: std.mem.Allocator) HotspotTracker {
         return .{

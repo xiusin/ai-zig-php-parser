@@ -172,6 +172,7 @@ pub const BytecodeVM = struct {
     /// OPT-001: 字符串intern缓存 - 短字符串复用
     const STRING_CACHE_MAX_LEN: usize = 64;
     const STRING_CACHE_SIZE: usize = 1024;
+    const ARENA_RESET_THRESHOLD: u32 = 10000;
 
     allocator: std.mem.Allocator,
     stack: []Value,
@@ -196,6 +197,10 @@ pub const BytecodeVM = struct {
     free_arrays: std.ArrayListUnmanaged(*Value.Array),
     /// 临时字符串池 - 用于跟踪valueToString分配的临时字符串
     temp_strings: std.ArrayListUnmanaged([]u8),
+    /// OPT-006: Arena分配器 - 批量管理临时字符串，减少分配次数
+    temp_arena: std.heap.ArenaAllocator,
+    /// Arena分配计数器 - 用于定期重置Arena
+    arena_alloc_count: u32,
     gc_threshold: usize,
     bytes_allocated: usize,
     output_buffer: std.ArrayListUnmanaged(u8),
@@ -262,6 +267,8 @@ pub const BytecodeVM = struct {
             .free_strings = .{},
             .free_arrays = .{},
             .temp_strings = .{},
+            .temp_arena = std.heap.ArenaAllocator.init(allocator),
+            .arena_alloc_count = 0,
             .gc_threshold = 1024 * 1024,
             .bytes_allocated = 0,
             .output_buffer = .{},
@@ -320,6 +327,8 @@ pub const BytecodeVM = struct {
             .{ .name = "array_filter", .func = builtinArrayFilter },
             .{ .name = "array_map", .func = builtinArrayMap },
             .{ .name = "array_reduce", .func = builtinArrayReduce },
+            .{ .name = "array_sum", .func = builtinArraySum },
+            .{ .name = "array_product", .func = builtinArrayProduct },
             .{ .name = "in_array", .func = builtinInArray },
             .{ .name = "array_search", .func = builtinArraySearch },
             .{ .name = "array_keys", .func = builtinArrayKeys },
@@ -362,6 +371,9 @@ pub const BytecodeVM = struct {
             self.allocator.free(str);
         }
         self.temp_strings.deinit(self.allocator);
+
+        // OPT-006: 释放Arena分配器
+        self.temp_arena.deinit();
 
         // 释放字符串池
         for (self.string_pool.items) |str| {
@@ -549,6 +561,8 @@ pub const BytecodeVM = struct {
             const end_time = std.time.nanoTimestamp();
             self.stats.execution_time_ns += @intCast(end_time - start_time);
         }
+
+        defer clearTempStrings(self);
 
         self.stack_top = 0;
         self.frames[0] = CallFrame{
@@ -1615,22 +1629,16 @@ pub const BytecodeVM = struct {
         // 1. 标记阶段：遍历栈和全局变量，标记所有可达对象
         // 2. 清除阶段：释放未标记的对象
 
-        // 标记栈上的对象
+        // 标记根对象
         for (self.stack[0..self.stack_top]) |value| {
             self.markValue(value);
         }
-
-        // 标记全局变量
         var iter = self.globals.iterator();
         while (iter.next()) |entry| {
             self.markValue(entry.value_ptr.*);
         }
 
-        // 清理临时字符串池
-        for (self.temp_strings.items) |str| {
-            self.allocator.free(str);
-        }
-        self.temp_strings.clearRetainingCapacity();
+        clearTempStrings(self);
 
         // 重置分配计数
         self.bytes_allocated = 0;
@@ -1962,7 +1970,7 @@ fn appendFloatFixedToList(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.
 
     const rounded = @round(v * scale_f64) / scale_f64;
     var int_part: u64 = @intFromFloat(@floor(rounded));
-    var frac_f = rounded - @as(f64, @floatFromInt(int_part));
+    const frac_f = rounded - @as(f64, @floatFromInt(int_part));
     var frac_i: u64 = @intFromFloat(@round(frac_f * scale_f64));
     if (frac_i >= scale_u64) {
         frac_i = 0;
@@ -1978,7 +1986,7 @@ fn appendFloatFixedToList(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.
 
     try list.append(allocator, '.');
     var div: u64 = scale_u64 / 10;
-    var remain = frac_i;
+    const remain = frac_i;
     while (div > 0) : (div /= 10) {
         const digit: u8 = @intCast((remain / div) % 10);
         try list.append(allocator, '0' + digit);
@@ -2128,21 +2136,187 @@ fn builtinArrayMap(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     return .{ .array_val = out };
 }
 
-fn builtinArrayReduce(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+fn builtinArrayReduce(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len < 2) return .null_val;
     const arr = switch (args[0]) {
         .array_val => |a| a,
         else => return .null_val,
     };
     var acc: Value = if (args.len >= 3) args[2] else .{ .int_val = 0 };
-    var sum_f: f64 = acc.toFloat();
+
+    const items = arr.elements.items;
+    if (items.len == 0) return acc;
+
+    var has_float = (acc == .float_val);
+    if (!has_float) {
+        for (items) |v| {
+            if (v == .float_val) {
+                has_float = true;
+                break;
+            }
+        }
+    }
+
+    if (has_float) {
+        const VecLen = 4;
+        const Vec = @Vector(VecLen, f64);
+        var vec_sum: Vec = @splat(0.0);
+        var i: usize = 0;
+        while (i + VecLen <= items.len) : (i += VecLen) {
+            const v: Vec = .{
+                items[i].toFloat(),
+                items[i + 1].toFloat(),
+                items[i + 2].toFloat(),
+                items[i + 3].toFloat(),
+            };
+            vec_sum += v;
+        }
+        var sum: f64 = acc.toFloat() + @reduce(.Add, vec_sum);
+        while (i < items.len) : (i += 1) {
+            sum += items[i].toFloat();
+        }
+        return .{ .float_val = sum };
+    }
+
+    const VecLen = 4;
+    const Vec = @Vector(VecLen, i64);
+    var vec_sum: Vec = @splat(@as(i64, 0));
+    var i: usize = 0;
+    while (i + VecLen <= items.len) : (i += VecLen) {
+        const v: Vec = .{
+            items[i].toInt(),
+            items[i + 1].toInt(),
+            items[i + 2].toInt(),
+            items[i + 3].toInt(),
+        };
+        vec_sum += v;
+    }
+    var sum_i: i64 = acc.toInt() + @reduce(.Add, vec_sum);
+    while (i < items.len) : (i += 1) {
+        sum_i += items[i].toInt();
+    }
+    return .{ .int_val = sum_i };
+}
+
+/// OPT-007: SIMD优化的数组求和 - 利用向量指令加速批量数学运算
+/// @pre args[0] 必须为 array_val
+/// @post 返回数组所有元素的和
+fn builtinArraySum(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .int_val = 0 },
+    };
+    if (arr.elements.items.len == 0) return .{ .int_val = 0 };
+
+    var has_float = false;
     for (arr.elements.items) |v| {
-        sum_f += v.toFloat();
+        if (v == .float_val) {
+            has_float = true;
+            break;
+        }
     }
-    if (acc == .int_val) {
-        return .{ .int_val = @intFromFloat(sum_f) };
+
+    if (has_float) {
+        // 使用SIMD向量加速浮点求和
+        const VecLen = 4;
+        const Vec = @Vector(VecLen, f64);
+        var vec_sum: Vec = @splat(0.0);
+        var i: usize = 0;
+        const items = arr.elements.items;
+
+        // SIMD批量处理
+        while (i + VecLen <= items.len) : (i += VecLen) {
+            const v: Vec = .{
+                items[i].toFloat(),
+                items[i + 1].toFloat(),
+                items[i + 2].toFloat(),
+                items[i + 3].toFloat(),
+            };
+            vec_sum += v;
+        }
+
+        // 合并向量结果
+        var sum: f64 = @reduce(.Add, vec_sum);
+
+        // 处理剩余元素
+        while (i < items.len) : (i += 1) {
+            sum += items[i].toFloat();
+        }
+        return .{ .float_val = sum };
     }
-    return .{ .float_val = sum_f };
+
+    // 整数求和使用SIMD
+    const VecLen = 4;
+    const Vec = @Vector(VecLen, i64);
+    var vec_sum: Vec = @splat(@as(i64, 0));
+    var i: usize = 0;
+    const items = arr.elements.items;
+
+    while (i + VecLen <= items.len) : (i += VecLen) {
+        const v: Vec = .{
+            items[i].toInt(),
+            items[i + 1].toInt(),
+            items[i + 2].toInt(),
+            items[i + 3].toInt(),
+        };
+        vec_sum += v;
+    }
+
+    var sum: i64 = @reduce(.Add, vec_sum);
+    while (i < items.len) : (i += 1) {
+        sum += items[i].toInt();
+    }
+    return .{ .int_val = sum };
+}
+
+/// OPT-007: SIMD优化的数组乘积
+fn builtinArrayProduct(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 1 };
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .int_val = 1 },
+    };
+    if (arr.elements.items.len == 0) return .{ .int_val = 1 };
+
+    var has_float = false;
+    for (arr.elements.items) |v| {
+        if (v == .float_val) {
+            has_float = true;
+            break;
+        }
+    }
+
+    if (has_float) {
+        const VecLen = 4;
+        const Vec = @Vector(VecLen, f64);
+        var vec_prod: Vec = @splat(1.0);
+        var i: usize = 0;
+        const items = arr.elements.items;
+
+        while (i + VecLen <= items.len) : (i += VecLen) {
+            const v: Vec = .{
+                items[i].toFloat(),
+                items[i + 1].toFloat(),
+                items[i + 2].toFloat(),
+                items[i + 3].toFloat(),
+            };
+            vec_prod *= v;
+        }
+
+        var prod: f64 = @reduce(.Mul, vec_prod);
+        while (i < items.len) : (i += 1) {
+            prod *= items[i].toFloat();
+        }
+        return .{ .float_val = prod };
+    }
+
+    // 整数乘积
+    var prod: i64 = 1;
+    for (arr.elements.items) |v| {
+        prod *= v.toInt();
+    }
+    return .{ .int_val = prod };
 }
 
 const pcre2_code = opaque {};
@@ -2365,17 +2539,47 @@ fn builtinMax(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         }
     }
     if (has_float) {
-        var best = args[0].toFloat();
-        for (args[1..]) |a| {
-            const v = a.toFloat();
+        const VecLen = 4;
+        const Vec = @Vector(VecLen, f64);
+        var i: usize = 1;
+        var best_vec: Vec = @splat(args[0].toFloat());
+
+        while (i + VecLen <= args.len) : (i += VecLen) {
+            const v: Vec = .{
+                args[i].toFloat(),
+                args[i + 1].toFloat(),
+                args[i + 2].toFloat(),
+                args[i + 3].toFloat(),
+            };
+            best_vec = @max(best_vec, v);
+        }
+
+        var best: f64 = @reduce(.Max, best_vec);
+        while (i < args.len) : (i += 1) {
+            const v = args[i].toFloat();
             if (v > best) best = v;
         }
         return .{ .float_val = best };
     }
 
-    var best_i = args[0].toInt();
-    for (args[1..]) |a| {
-        const v = a.toInt();
+    const VecLen = 4;
+    const Vec = @Vector(VecLen, i64);
+    var i: usize = 1;
+    var best_vec: Vec = @splat(args[0].toInt());
+
+    while (i + VecLen <= args.len) : (i += VecLen) {
+        const v: Vec = .{
+            args[i].toInt(),
+            args[i + 1].toInt(),
+            args[i + 2].toInt(),
+            args[i + 3].toInt(),
+        };
+        best_vec = @max(best_vec, v);
+    }
+
+    var best_i: i64 = @reduce(.Max, best_vec);
+    while (i < args.len) : (i += 1) {
+        const v = args[i].toInt();
         if (v > best_i) best_i = v;
     }
     return .{ .int_val = best_i };
@@ -2393,17 +2597,47 @@ fn builtinMin(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         }
     }
     if (has_float) {
-        var best = args[0].toFloat();
-        for (args[1..]) |a| {
-            const v = a.toFloat();
+        const VecLen = 4;
+        const Vec = @Vector(VecLen, f64);
+        var i: usize = 1;
+        var best_vec: Vec = @splat(args[0].toFloat());
+
+        while (i + VecLen <= args.len) : (i += VecLen) {
+            const v: Vec = .{
+                args[i].toFloat(),
+                args[i + 1].toFloat(),
+                args[i + 2].toFloat(),
+                args[i + 3].toFloat(),
+            };
+            best_vec = @min(best_vec, v);
+        }
+
+        var best: f64 = @reduce(.Min, best_vec);
+        while (i < args.len) : (i += 1) {
+            const v = args[i].toFloat();
             if (v < best) best = v;
         }
         return .{ .float_val = best };
     }
 
-    var best_i = args[0].toInt();
-    for (args[1..]) |a| {
-        const v = a.toInt();
+    const VecLen = 4;
+    const Vec = @Vector(VecLen, i64);
+    var i: usize = 1;
+    var best_vec: Vec = @splat(args[0].toInt());
+
+    while (i + VecLen <= args.len) : (i += VecLen) {
+        const v: Vec = .{
+            args[i].toInt(),
+            args[i + 1].toInt(),
+            args[i + 2].toInt(),
+            args[i + 3].toInt(),
+        };
+        best_vec = @min(best_vec, v);
+    }
+
+    var best_i: i64 = @reduce(.Min, best_vec);
+    while (i < args.len) : (i += 1) {
+        const v = args[i].toInt();
         if (v < best_i) best_i = v;
     }
     return .{ .int_val = best_i };
@@ -2588,20 +2822,26 @@ fn builtinStrIReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 fn builtinStrtoupper(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
     const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
-    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
-    defer vm.allocator.free(buf);
-    for (buf) |*c| c.* = std.ascii.toUpper(c.*);
-    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    // 优化：直接分配最终字符串，避免中间缓冲区
+    const buf = vm.allocator.alloc(u8, s.len) catch return BytecodeVM.VMError.OutOfMemory;
+    for (s, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
+    const out = vm.createString(buf) catch {
+        vm.allocator.free(buf);
+        return BytecodeVM.VMError.OutOfMemory;
+    };
     return .{ .string_val = out };
 }
 
 fn builtinStrtolower(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
     const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
-    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
-    defer vm.allocator.free(buf);
-    for (buf) |*c| c.* = std.ascii.toLower(c.*);
-    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    // 优化：直接分配最终字符串，避免中间缓冲区
+    const buf = vm.allocator.alloc(u8, s.len) catch return BytecodeVM.VMError.OutOfMemory;
+    for (s, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    const out = vm.createString(buf) catch {
+        vm.allocator.free(buf);
+        return BytecodeVM.VMError.OutOfMemory;
+    };
     return .{ .string_val = out };
 }
 
@@ -2609,18 +2849,23 @@ fn builtinUcfirst(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
     const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
     if (s.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
-    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
-    defer vm.allocator.free(buf);
+    // 优化：直接分配最终字符串
+    const buf = vm.allocator.alloc(u8, s.len) catch return BytecodeVM.VMError.OutOfMemory;
+    @memcpy(buf, s);
     buf[0] = std.ascii.toUpper(buf[0]);
-    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    const out = vm.createString(buf) catch {
+        vm.allocator.free(buf);
+        return BytecodeVM.VMError.OutOfMemory;
+    };
     return .{ .string_val = out };
 }
 
 fn builtinUcwords(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .string_val = vm.createString("") catch return BytecodeVM.VMError.OutOfMemory };
     const s = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
-    const buf = vm.allocator.dupe(u8, s) catch return BytecodeVM.VMError.OutOfMemory;
-    defer vm.allocator.free(buf);
+    // 优化：直接分配最终字符串
+    const buf = vm.allocator.alloc(u8, s.len) catch return BytecodeVM.VMError.OutOfMemory;
+    @memcpy(buf, s);
 
     var prev_space = true;
     for (buf) |*c| {
@@ -2634,7 +2879,10 @@ fn builtinUcwords(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         prev_space = is_space;
     }
 
-    const out = vm.createString(buf) catch return BytecodeVM.VMError.OutOfMemory;
+    const out = vm.createString(buf) catch {
+        vm.allocator.free(buf);
+        return BytecodeVM.VMError.OutOfMemory;
+    };
     return .{ .string_val = out };
 }
 
@@ -2722,7 +2970,7 @@ fn builtinImplode(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     return .{ .string_val = s_out };
 }
 
-fn builtinArrayShift(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+fn builtinArrayShift(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .null_val;
     return switch (args[0]) {
         .array_val => |arr| {
@@ -2863,25 +3111,25 @@ fn builtinRange(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     const arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
     if (start <= end) {
         var v = start;
-        while (v <= end) : (v += @abs(step)) {
+        while (v <= end) : (v += @intCast(@abs(step))) {
             arr.elements.append(vm.allocator, .{ .int_val = v }) catch return BytecodeVM.VMError.OutOfMemory;
         }
     } else {
         var v = start;
-        while (v >= end) : (v -= @abs(step)) {
+        while (v >= end) : (v -= @intCast(@abs(step))) {
             arr.elements.append(vm.allocator, .{ .int_val = v }) catch return BytecodeVM.VMError.OutOfMemory;
         }
     }
     return .{ .array_val = arr };
 }
 
-fn builtinShuffle(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+fn builtinShuffle(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .bool_val = false };
     const arr = switch (args[0]) {
         .array_val => |a| a,
         else => return .{ .bool_val = false },
     };
-    var prng = std.rand.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
     const rnd = prng.random();
 
     var i: usize = arr.elements.items.len;
@@ -2903,23 +3151,23 @@ fn greaterThanValue(_: void, a: Value, b: Value) bool {
     return a.toFloat() > b.toFloat();
 }
 
-fn builtinSort(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+fn builtinSort(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .bool_val = false };
     const arr = switch (args[0]) {
         .array_val => |a| a,
         else => return .{ .bool_val = false },
     };
-    std.sort.sort(Value, arr.elements.items, {}, lessThanValue);
+    std.mem.sort(Value, arr.elements.items, {}, lessThanValue);
     return .{ .bool_val = true };
 }
 
-fn builtinRsort(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+fn builtinRsort(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .bool_val = false };
     const arr = switch (args[0]) {
         .array_val => |a| a,
         else => return .{ .bool_val = false },
     };
-    std.sort.sort(Value, arr.elements.items, {}, greaterThanValue);
+    std.mem.sort(Value, arr.elements.items, {}, greaterThanValue);
     return .{ .bool_val = true };
 }
 
@@ -2927,9 +3175,8 @@ fn builtinRsort(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 // 辅助函数
 // ============================================================
 
-/// 将Value转换为字符串
-/// 注意：对于int_val和float_val，会分配新内存并添加到temp_strings池中
-/// 这些临时字符串会在VM销毁时统一释放
+/// 将Value转换为字符串（优化版：减少重复分配）
+/// 注意：对于int_val和float_val，使用临时字符串池管理
 fn valueToString(vm: *BytecodeVM, value: Value) ![]const u8 {
     return switch (value) {
         .null_val => "",
@@ -2937,17 +3184,24 @@ fn valueToString(vm: *BytecodeVM, value: Value) ![]const u8 {
         .int_val => |i| blk: {
             var buf: [32]u8 = undefined;
             const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch "0";
-            const result = try vm.allocator.dupe(u8, slice);
-            // 跟踪分配的临时字符串
-            try vm.temp_strings.append(vm.allocator, result);
+
+            // 优化：小数值直接返回静态字符串
+            if (i >= 0 and i <= 9) {
+                const static_digits = "0123456789";
+                break :blk static_digits[@intCast(i)..@intCast(i + 1)];
+            }
+
+            const arena_alloc = vm.temp_arena.allocator();
+            const result = try arena_alloc.dupe(u8, slice);
+            vm.arena_alloc_count += 1;
             break :blk result;
         },
         .float_val => |f| blk: {
             var buf: [64]u8 = undefined;
             const slice = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "0";
-            const result = try vm.allocator.dupe(u8, slice);
-            // 跟踪分配的临时字符串
-            try vm.temp_strings.append(vm.allocator, result);
+            const arena_alloc = vm.temp_arena.allocator();
+            const result = try arena_alloc.dupe(u8, slice);
+            vm.arena_alloc_count += 1;
             break :blk result;
         },
         .string_val => |s| s.data,
@@ -2959,10 +3213,14 @@ fn valueToString(vm: *BytecodeVM, value: Value) ![]const u8 {
 
 /// 清理临时字符串池 - 可在适当时机调用以释放内存
 pub fn clearTempStrings(vm: *BytecodeVM) void {
-    for (vm.temp_strings.items) |str| {
-        vm.allocator.free(str);
-    }
     vm.temp_strings.clearRetainingCapacity();
+    if (vm.arena_alloc_count >= ARENA_RESET_THRESHOLD) {
+        vm.temp_arena.deinit();
+        vm.temp_arena = std.heap.ArenaAllocator.init(vm.allocator);
+    } else {
+        vm.temp_arena.reset();
+    }
+    vm.arena_alloc_count = 0;
 }
 
 /// 调试输出Value
