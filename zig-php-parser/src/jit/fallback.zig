@@ -123,7 +123,7 @@ pub const CompilationFailureRecord = struct {
             .function_name = name_copy,
             .reason = reason,
             .error_message = msg_copy,
-            .timestamp_ns = std.time.nanoTimestamp(),
+            .timestamp_ns = @intCast(std.time.nanoTimestamp()),
             .instruction_offset = instruction_offset,
             .stack_trace = null,
         };
@@ -231,7 +231,7 @@ pub const CompilationLogger = struct {
         const reason = CompilationFailureReason.fromError(err);
         
         // 创建失败记录
-        const record = try CompilationFailureRecord.create(
+        var record = try CompilationFailureRecord.create(
             self.allocator,
             function_name,
             reason,
@@ -241,48 +241,60 @@ pub const CompilationLogger = struct {
         errdefer record.deinit(self.allocator);
         
         // 添加到列表
-        try self.failure_records.append(record);
+        try self.failure_records.append(self.allocator, record);
         
         // 写入日志文件
         if (self.log_file) |file| {
-            try self.writeToFile(file, &record);
+            const last_record = &self.failure_records.items[self.failure_records.items.len - 1];
+            try self.writeToFile(file, last_record);
         }
         
         // 如果启用详细模式，打印到标准错误
         if (self.verbose) {
-            try self.printToStderr(&record);
+            const last_record = &self.failure_records.items[self.failure_records.items.len - 1];
+            try self.printToStderr(last_record);
         }
     }
     
     /// 写入日志文件
     fn writeToFile(self: *CompilationLogger, file: std.fs.File, record: *const CompilationFailureRecord) !void {
         _ = self;
-        const writer = file.writer();
         
-        try writer.print("[{d}] JIT 编译失败\n", .{record.timestamp_ns});
-        try writer.print("  函数: {s}\n", .{record.function_name});
-        try writer.print("  原因: {s}\n", .{record.reason.description()});
-        try writer.print("  错误: {s}\n", .{record.error_message});
+        var buf: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&buf);
+        const allocator = fba.allocator();
+        
+        const msg = try std.fmt.allocPrint(allocator, 
+            "[{d}] JIT 编译失败\n  函数: {s}\n  原因: {s}\n  错误: {s}\n",
+            .{
+                record.timestamp_ns,
+                record.function_name,
+                record.reason.description(),
+                record.error_message,
+            }
+        );
+        
+        try file.writeAll(msg);
         
         if (record.instruction_offset) |offset| {
-            try writer.print("  指令偏移: {d}\n", .{offset});
+            const offset_msg = try std.fmt.allocPrint(allocator, "  指令偏移: {d}\n", .{offset});
+            try file.writeAll(offset_msg);
         }
         
-        try writer.writeAll("\n");
+        try file.writeAll("\n");
     }
     
     /// 打印到标准错误
     fn printToStderr(self: *CompilationLogger, record: *const CompilationFailureRecord) !void {
         _ = self;
-        const stderr = std.io.getStdErr().writer();
         
-        try stderr.print("[JIT 编译失败] 函数: {s}, 原因: {s}\n", .{
+        std.debug.print("[JIT 编译失败] 函数: {s}, 原因: {s}\n", .{
             record.function_name,
             record.reason.description(),
         });
         
         if (record.instruction_offset) |offset| {
-            try stderr.print("  指令偏移: {d}\n", .{offset});
+            std.debug.print("  指令偏移: {d}\n", .{offset});
         }
     }
     

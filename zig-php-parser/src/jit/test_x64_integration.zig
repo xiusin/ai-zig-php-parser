@@ -60,8 +60,9 @@ test "Assembler: comparison and conditional" {
     try asm_.cmp(.rax, .rbx);
     try testing.expect(asm_.code.items.len > 0);
     
-    // SETL al (set if less)
-    try asm_.setcc(.L, .rax);
+    // Note: setcc 需要 8 位寄存器，我们使用 cmov 代替
+    // 测试 cmov 指令
+    try asm_.cmov(.L, .rax, .rbx);
     try testing.expect(asm_.code.items.len > 3);
 }
 

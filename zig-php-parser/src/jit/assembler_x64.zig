@@ -445,6 +445,22 @@ pub const Assembler = struct {
         try self.emitModRM(0b11, 0, reg.code());
     }
     
+    /// CMOVcc dst, src (条件移动)
+    /// @pre dst 和 src 必须是有效寄存器
+    /// @post 如果条件满足，将 src 的值移动到 dst
+    pub fn cmov(self: *Assembler, cond: Condition, dst: Register, src: Register) !void {
+        // REX 前缀（如果需要）
+        const needs_rex = dst.needsRex() or src.needsRex();
+        if (needs_rex) {
+            try self.emitRex(true, dst.needsRex(), false, src.needsRex());
+        }
+        
+        // CMOVcc 指令：0F 40+cc /r
+        try self.code.append(self.allocator, 0x0F);
+        try self.code.append(self.allocator, 0x40 + cond.code());
+        try self.emitModRM(0b11, dst.code(), src.code());
+    }
+    
     // ========================================================================
     // 跳转指令
     // ========================================================================

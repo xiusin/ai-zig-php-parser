@@ -81,7 +81,7 @@ pub const CodeGenX64 = struct {
         return .{
             .allocator = allocator,
             .asm_ = Assembler.init(allocator),
-            .jump_patches = std.ArrayList(JumpPatch).init(allocator),
+            .jump_patches = .{},
             .ip_to_offset = std.AutoHashMap(usize, usize).init(allocator),
         };
     }
@@ -359,11 +359,11 @@ pub const CodeGenX64 = struct {
                     try self.emitPopValue(.rbx);
                     try self.emitPopValue(.rax);
                     try self.asm_.cmp(.rax, .rbx);
-                    try self.asm_.setcc(.L, .al); // AL = (RAX < RBX)
-                    try self.asm_.movImm32(.rax, 0);
-                    try self.asm_.movImm32(.rbx, 1);
-                    // 使用 CMOV 指令选择结果
-                    // 这里简化处理
+                    // 使用条件移动指令
+                    try self.asm_.movImm32(.rax, 0);  // 默认 false
+                    try self.asm_.movImm32(.rcx, 1);  // true 值
+                    // 如果 RAX < RBX，则 RAX = RCX
+                    try self.asm_.cmov(.L, .rax, .rcx);
                     try self.emitPushValue(.rax);
                 },
                 
@@ -372,7 +372,10 @@ pub const CodeGenX64 = struct {
                     try self.emitPopValue(.rbx);
                     try self.emitPopValue(.rax);
                     try self.asm_.cmp(.rax, .rbx);
-                    try self.asm_.setcc(.LE, .al);
+                    // 使用条件移动指令
+                    try self.asm_.movImm32(.rax, 0);  // 默认 false
+                    try self.asm_.movImm32(.rcx, 1);  // true 值
+                    try self.asm_.cmov(.LE, .rax, .rcx);
                     try self.emitPushValue(.rax);
                 },
                 
@@ -381,7 +384,10 @@ pub const CodeGenX64 = struct {
                     try self.emitPopValue(.rbx);
                     try self.emitPopValue(.rax);
                     try self.asm_.cmp(.rax, .rbx);
-                    try self.asm_.setcc(.G, .al);
+                    // 使用条件移动指令
+                    try self.asm_.movImm32(.rax, 0);  // 默认 false
+                    try self.asm_.movImm32(.rcx, 1);  // true 值
+                    try self.asm_.cmov(.G, .rax, .rcx);
                     try self.emitPushValue(.rax);
                 },
                 
@@ -390,7 +396,10 @@ pub const CodeGenX64 = struct {
                     try self.emitPopValue(.rbx);
                     try self.emitPopValue(.rax);
                     try self.asm_.cmp(.rax, .rbx);
-                    try self.asm_.setcc(.GE, .al);
+                    // 使用条件移动指令
+                    try self.asm_.movImm32(.rax, 0);  // 默认 false
+                    try self.asm_.movImm32(.rcx, 1);  // true 值
+                    try self.asm_.cmov(.GE, .rax, .rcx);
                     try self.emitPushValue(.rax);
                 },
                 
@@ -399,7 +408,10 @@ pub const CodeGenX64 = struct {
                     try self.emitPopValue(.rbx);
                     try self.emitPopValue(.rax);
                     try self.asm_.cmp(.rax, .rbx);
-                    try self.asm_.setcc(.E, .al);
+                    // 使用条件移动指令
+                    try self.asm_.movImm32(.rax, 0);  // 默认 false
+                    try self.asm_.movImm32(.rcx, 1);  // true 值
+                    try self.asm_.cmov(.E, .rax, .rcx);
                     try self.emitPushValue(.rax);
                 },
                 
@@ -408,7 +420,10 @@ pub const CodeGenX64 = struct {
                     try self.emitPopValue(.rbx);
                     try self.emitPopValue(.rax);
                     try self.asm_.cmp(.rax, .rbx);
-                    try self.asm_.setcc(.NE, .al);
+                    // 使用条件移动指令
+                    try self.asm_.movImm32(.rax, 0);  // 默认 false
+                    try self.asm_.movImm32(.rcx, 1);  // true 值
+                    try self.asm_.cmov(.NE, .rax, .rcx);
                     try self.emitPushValue(.rax);
                 },
                 
@@ -424,7 +439,7 @@ pub const CodeGenX64 = struct {
                     // 记录跳转补丁
                     const patch_offset = self.asm_.position();
                     try self.asm_.jcc(.E, 0); // 占位符
-                    try self.jump_patches.append(.{
+                    try self.jump_patches.append(self.allocator, .{
                         .inst_offset = patch_offset,
                         .target_ip = @intCast(target_ip),
                         .is_conditional = true,
@@ -443,7 +458,7 @@ pub const CodeGenX64 = struct {
                     
                     const patch_offset = self.asm_.position();
                     try self.asm_.jcc(.NE, 0);
-                    try self.jump_patches.append(.{
+                    try self.jump_patches.append(self.allocator, .{
                         .inst_offset = patch_offset,
                         .target_ip = @intCast(target_ip),
                         .is_conditional = true,
@@ -459,7 +474,7 @@ pub const CodeGenX64 = struct {
                     
                     const patch_offset = self.asm_.position();
                     try self.asm_.jmp(0);
-                    try self.jump_patches.append(.{
+                    try self.jump_patches.append(self.allocator, .{
                         .inst_offset = patch_offset,
                         .target_ip = @intCast(target_ip),
                         .is_conditional = false,
@@ -577,6 +592,6 @@ pub const CodeGenX64 = struct {
         try self.patchJumps();
         
         // 返回生成的代码
-        return try self.asm_.code.toOwnedSlice();
+        return try self.asm_.code.toOwnedSlice(self.allocator);
     }
 };
