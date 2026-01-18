@@ -568,6 +568,42 @@ pub const IRGenerator = struct {
         return self.var_registers.get(name);
     }
 
+    /// Create a constant initializer instruction from a register
+    /// @pre value_reg must be a valid register containing a constant value
+    /// @post returns an Instruction that can be used as a global initializer
+    /// @ownership TRANSFER (caller owns the returned instruction)
+    fn createConstantInitializer(self: *Self, value_reg: Register) !*Instruction {
+        // Find the instruction that produced this register
+        // For constants, we need to extract the constant value from the register
+        
+        // Search through current block's instructions to find the one that produced value_reg
+        if (self.current_block) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |result| {
+                    if (result.id == value_reg.id) {
+                        // Found the instruction - create a copy for the initializer
+                        const init_inst = try self.allocator.create(Instruction);
+                        init_inst.* = .{
+                            .result = value_reg,
+                            .op = inst.op,
+                            .location = inst.location,
+                        };
+                        return init_inst;
+                    }
+                }
+            }
+        }
+        
+        // If not found in current block, create a default null initializer
+        const init_inst = try self.allocator.create(Instruction);
+        init_inst.* = .{
+            .result = value_reg,
+            .op = .const_null,
+            .location = self.current_location,
+        };
+        return init_inst;
+    }
+
     /// Convert InferredType to IR Type
     fn inferredToIRType(self: *const Self, inferred: InferredType) Type {
         _ = self;
@@ -1442,13 +1478,17 @@ pub const IRGenerator = struct {
         // Evaluate constant value (with constant folding)
         const value_reg = try self.generateExpression(const_data.value);
 
+        // Create constant initializer instruction
+        // We need to create a standalone instruction that represents the constant value
+        const init_inst = try self.createConstantInitializer(value_reg);
+
         // Create global constant
         if (self.module) |module| {
             const global = try self.allocator.create(Global);
             global.* = .{
                 .name = const_name,
                 .type_ = value_reg.type_,
-                .initializer = null, // TODO: store constant value
+                .initializer = init_inst,
                 .is_constant = true,
                 .location = self.current_location,
             };

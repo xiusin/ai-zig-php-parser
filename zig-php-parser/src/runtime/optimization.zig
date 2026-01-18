@@ -293,6 +293,27 @@ pub const MethodCache = struct {
         self.global_stats.cache_misses += 1;
         return null;
     }
+    
+    /// 查找函数（用于函数调用缓存）
+    /// @pre cache_key 必须是有效的缓存键
+    /// @post 返回缓存的函数指针或 null
+    pub fn lookupFunction(self: *MethodCache, cache_key: u64) ?*anyopaque {
+        self.global_stats.total_lookups += 1;
+        
+        // 使用缓存键的字符串表示作为查找键
+        var key_buf: [32]u8 = undefined;
+        const key_str = std.fmt.bufPrint(&key_buf, "{d}", .{cache_key}) catch return null;
+        
+        if (self.caches.getPtr(key_str)) |cache| {
+            if (cache.lookup(0)) |func| { // 使用 0 作为类 ID
+                self.global_stats.cache_hits += 1;
+                return func;
+            }
+        }
+        
+        self.global_stats.cache_misses += 1;
+        return null;
+    }
 
     pub fn cacheMethod(self: *MethodCache, method_name: []const u8, class_id: u64, method: *anyopaque) !void {
         const cache = self.caches.getPtr(method_name) orelse blk: {
@@ -301,6 +322,25 @@ pub const MethodCache = struct {
         };
 
         cache.insert(class_id, method);
+        self.global_stats.total_methods_cached += 1;
+    }
+    
+    /// 缓存函数（用于函数调用缓存）
+    /// @pre cache_key 必须是有效的缓存键
+    /// @pre func 必须是有效的函数指针
+    /// @post 函数被缓存
+    pub fn cacheFunction(self: *MethodCache, cache_key: u64, func: *anyopaque) !void {
+        // 使用缓存键的字符串表示作为存储键
+        var key_buf: [32]u8 = undefined;
+        const key_str = try std.fmt.bufPrint(&key_buf, "{d}", .{cache_key});
+        const key_copy = try self.allocator.dupe(u8, key_str);
+        
+        const cache = self.caches.getPtr(key_copy) orelse blk: {
+            try self.caches.put(self.allocator, key_copy, PolymorphicInlineCache.init());
+            break :blk self.caches.getPtr(key_copy).?;
+        };
+        
+        cache.insert(0, func); // 使用 0 作为类 ID
         self.global_stats.total_methods_cached += 1;
     }
 

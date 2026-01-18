@@ -31,6 +31,96 @@ pub const Severity = enum {
     }
 };
 
+/// CWE (Common Weakness Enumeration) identifier
+/// @see https://cwe.mitre.org/
+pub const CWE = enum(u32) {
+    // Memory Safety
+    buffer_overflow = 119,
+    use_after_free = 416,
+    null_pointer_dereference = 476,
+    double_free = 415,
+    memory_leak = 401,
+    uninitialized_memory = 457,
+    
+    // Type Safety
+    type_confusion = 843,
+    improper_type_validation = 1287,
+    
+    // Resource Management
+    resource_exhaustion = 400,
+    improper_resource_shutdown = 404,
+    
+    // Code Quality
+    dead_code = 561,
+    // unreachable_code shares same CWE as dead_code
+    
+    // Concurrency
+    data_race = 362,
+    deadlock = 833,
+    
+    // Input Validation
+    improper_input_validation = 20,
+    integer_overflow = 190,
+    division_by_zero = 369,
+    
+    // Logic Errors
+    incorrect_calculation = 682,
+    off_by_one = 193,
+    
+    // Security
+    injection = 94,
+    path_traversal = 22,
+    
+    // Undefined Behavior
+    undefined_behavior = 758,
+    
+    // Other
+    unknown = 0,
+    
+    pub fn toString(self: CWE) []const u8 {
+        return switch (self) {
+            .buffer_overflow => "CWE-119: Buffer Overflow",
+            .use_after_free => "CWE-416: Use After Free",
+            .null_pointer_dereference => "CWE-476: NULL Pointer Dereference",
+            .double_free => "CWE-415: Double Free",
+            .memory_leak => "CWE-401: Memory Leak",
+            .uninitialized_memory => "CWE-457: Use of Uninitialized Variable",
+            .type_confusion => "CWE-843: Type Confusion",
+            .improper_type_validation => "CWE-1287: Improper Type Validation",
+            .resource_exhaustion => "CWE-400: Resource Exhaustion",
+            .improper_resource_shutdown => "CWE-404: Improper Resource Shutdown",
+            .dead_code => "CWE-561: Dead Code",
+            .data_race => "CWE-362: Data Race",
+            .deadlock => "CWE-833: Deadlock",
+            .improper_input_validation => "CWE-20: Improper Input Validation",
+            .integer_overflow => "CWE-190: Integer Overflow",
+            .division_by_zero => "CWE-369: Division by Zero",
+            .incorrect_calculation => "CWE-682: Incorrect Calculation",
+            .off_by_one => "CWE-193: Off-by-one Error",
+            .injection => "CWE-94: Code Injection",
+            .path_traversal => "CWE-22: Path Traversal",
+            .undefined_behavior => "CWE-758: Undefined Behavior",
+            .unknown => "CWE-0: Unknown",
+        };
+    }
+    
+    pub fn getUrl(self: CWE) []const u8 {
+        var buf: [100]u8 = undefined;
+        const url = std.fmt.bufPrint(&buf, "https://cwe.mitre.org/data/definitions/{d}.html", .{@intFromEnum(self)}) catch return "";
+        return url;
+    }
+};
+
+/// Fix suggestion for a diagnostic
+pub const FixSuggestion = struct {
+    /// Description of the fix
+    description: []const u8,
+    /// Optional code replacement
+    replacement: ?[]const u8 = null,
+    /// Location where the fix should be applied
+    location: ?SourceLocation = null,
+};
+
 /// Source location information
 pub const SourceLocation = struct {
     /// File path or name
@@ -66,8 +156,12 @@ pub const Diagnostic = struct {
     message: []const u8,
     /// Source location where the diagnostic occurred
     location: SourceLocation,
+    /// Optional CWE identifier
+    cwe: ?CWE = null,
     /// Optional hint for fixing the issue
     hint: ?[]const u8 = null,
+    /// Optional fix suggestions
+    fix_suggestions: []const FixSuggestion = &.{},
     /// Optional related notes
     notes: []const Note = &.{},
 
@@ -128,6 +222,65 @@ pub const DiagnosticEngine = struct {
     /// Report an error
     pub fn reportError(self: *Self, location: SourceLocation, comptime fmt: []const u8, args: anytype) void {
         self.report(.@"error", location, fmt, args);
+    }
+
+    /// Report an error with CWE
+    pub fn reportErrorWithCWE(
+        self: *Self,
+        location: SourceLocation,
+        cwe: CWE,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) void {
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+
+        self.diagnostics.append(self.allocator, .{
+            .severity = .@"error",
+            .message = message,
+            .location = location,
+            .cwe = cwe,
+        }) catch return;
+
+        self.error_count += 1;
+    }
+
+    /// Report an error with CWE and fix suggestion
+    pub fn reportErrorWithFix(
+        self: *Self,
+        location: SourceLocation,
+        cwe: CWE,
+        message: []const u8,
+        fix_suggestions: []const FixSuggestion,
+    ) void {
+        self.diagnostics.append(self.allocator, .{
+            .severity = .@"error",
+            .message = message,
+            .location = location,
+            .cwe = cwe,
+            .fix_suggestions = fix_suggestions,
+        }) catch return;
+
+        self.error_count += 1;
+    }
+
+    /// Report a warning with CWE
+    pub fn reportWarningWithCWE(
+        self: *Self,
+        location: SourceLocation,
+        cwe: CWE,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) void {
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+
+        self.diagnostics.append(self.allocator, .{
+            .severity = .warning,
+            .message = message,
+            .location = location,
+            .cwe = cwe,
+        }) catch return;
+
+        self.warning_count += 1;
     }
 
     /// Report a warning
@@ -246,7 +399,7 @@ pub const DiagnosticEngine = struct {
         const color = if (self.use_colors) diag.severity.toColor() else "";
 
         // Print location and severity
-        try writer.print("{s}{}{s}: {s}{s}{s}: {s}\n", .{
+        try writer.print("{s}{any}{s}: {s}{s}{s}: {s}", .{
             bold,
             diag.location,
             reset,
@@ -255,6 +408,13 @@ pub const DiagnosticEngine = struct {
             reset,
             diag.message,
         });
+        
+        // Print CWE if available
+        if (diag.cwe) |cwe| {
+            try writer.print(" [{s}]", .{cwe.toString()});
+        }
+        
+        try writer.writeAll("\n");
 
         // Print source context if available
         if (self.source_lines) |lines| {
@@ -285,11 +445,35 @@ pub const DiagnosticEngine = struct {
             const hint_color = if (self.use_colors) "\x1b[32m" else "";
             try writer.print("    {s}hint{s}: {s}\n", .{ hint_color, reset, hint });
         }
+        
+        // Print fix suggestions
+        if (diag.fix_suggestions.len > 0) {
+            const fix_color = if (self.use_colors) "\x1b[32m" else "";
+            try writer.print("    {s}fix{s}:\n", .{ fix_color, reset });
+            for (diag.fix_suggestions) |fix| {
+                try writer.print("      - {s}\n", .{fix.description});
+                if (fix.replacement) |replacement| {
+                    try writer.print("        {s}suggestion{s}: {s}\n", .{ fix_color, reset, replacement });
+                }
+            }
+        }
+        
+        // Print CWE URL if available
+        if (diag.cwe) |cwe| {
+            if (@intFromEnum(cwe) > 0) {
+                const url_color = if (self.use_colors) "\x1b[34m" else "";
+                try writer.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ 
+                    url_color, 
+                    reset, 
+                    @intFromEnum(cwe) 
+                });
+            }
+        }
 
         // Print related notes
         for (diag.notes) |note| {
             if (note.location) |loc| {
-                try writer.print("    {s}note{s}: {}: {s}\n", .{ color, reset, loc, note.message });
+                try writer.print("    {s}note{s}: {any}: {s}\n", .{ color, reset, loc, note.message });
             } else {
                 try writer.print("    {s}note{s}: {s}\n", .{ color, reset, note.message });
             }
@@ -335,7 +519,7 @@ pub const DiagnosticEngine = struct {
 
         // Print location and severity
         if (diag.location.line > 0) {
-            std.debug.print("{s}{s}:{d}:{d}{s}: {s}{s}{s}: {s}\n", .{
+            std.debug.print("{s}{s}:{d}:{d}{s}: {s}{s}{s}: {s}", .{
                 bold,
                 diag.location.file,
                 diag.location.line,
@@ -347,7 +531,7 @@ pub const DiagnosticEngine = struct {
                 diag.message,
             });
         } else {
-            std.debug.print("{s}{s}{s}: {s}{s}{s}: {s}\n", .{
+            std.debug.print("{s}{s}{s}: {s}{s}{s}: {s}", .{
                 bold,
                 diag.location.file,
                 reset,
@@ -357,6 +541,13 @@ pub const DiagnosticEngine = struct {
                 diag.message,
             });
         }
+        
+        // Print CWE if available
+        if (diag.cwe) |cwe| {
+            std.debug.print(" [{s}]", .{cwe.toString()});
+        }
+        
+        std.debug.print("\n", .{});
 
         // Print source context if available
         if (self.source_lines) |lines| {
@@ -386,6 +577,30 @@ pub const DiagnosticEngine = struct {
         if (diag.hint) |hint| {
             const hint_color = if (self.use_colors) "\x1b[32m" else "";
             std.debug.print("    {s}hint{s}: {s}\n", .{ hint_color, reset, hint });
+        }
+        
+        // Print fix suggestions
+        if (diag.fix_suggestions.len > 0) {
+            const fix_color = if (self.use_colors) "\x1b[32m" else "";
+            std.debug.print("    {s}fix{s}:\n", .{ fix_color, reset });
+            for (diag.fix_suggestions) |fix| {
+                std.debug.print("      - {s}\n", .{fix.description});
+                if (fix.replacement) |replacement| {
+                    std.debug.print("        {s}suggestion{s}: {s}\n", .{ fix_color, reset, replacement });
+                }
+            }
+        }
+        
+        // Print CWE URL if available
+        if (diag.cwe) |cwe| {
+            if (@intFromEnum(cwe) > 0) {
+                const url_color = if (self.use_colors) "\x1b[34m" else "";
+                std.debug.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ 
+                    url_color, 
+                    reset, 
+                    @intFromEnum(cwe) 
+                });
+            }
         }
 
         // Print related notes
@@ -433,6 +648,126 @@ pub fn undefinedSymbol(location: SourceLocation, symbol_name: []const u8, alloca
     };
 }
 
+/// Create a buffer overflow error with CWE and fix suggestion
+pub fn bufferOverflowError(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .@"error",
+        .message = message,
+        .location = location,
+        .cwe = .buffer_overflow,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
+/// Create a null pointer dereference error
+pub fn nullPointerError(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .@"error",
+        .message = message,
+        .location = location,
+        .cwe = .null_pointer_dereference,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
+/// Create a memory leak warning
+pub fn memoryLeakWarning(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .warning,
+        .message = message,
+        .location = location,
+        .cwe = .memory_leak,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
+/// Create a data race error
+pub fn dataRaceError(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .@"error",
+        .message = message,
+        .location = location,
+        .cwe = .data_race,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
+/// Create a dead code warning
+pub fn deadCodeWarning(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .warning,
+        .message = message,
+        .location = location,
+        .cwe = .dead_code,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
+/// Create an integer overflow error
+pub fn integerOverflowError(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .@"error",
+        .message = message,
+        .location = location,
+        .cwe = .integer_overflow,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
+/// Create a division by zero error
+pub fn divisionByZeroError(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .@"error",
+        .message = message,
+        .location = location,
+        .cwe = .division_by_zero,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
+/// Create a type confusion error
+pub fn typeConfusionError(
+    location: SourceLocation,
+    message: []const u8,
+    fix_suggestions: []const FixSuggestion,
+) Diagnostic {
+    return .{
+        .severity = .@"error",
+        .message = message,
+        .location = location,
+        .cwe = .type_confusion,
+        .fix_suggestions = fix_suggestions,
+    };
+}
+
 // Tests
 test "DiagnosticEngine basic usage" {
     const allocator = std.testing.allocator;
@@ -476,4 +811,106 @@ test "Severity toString" {
     try std.testing.expectEqualStrings("error", Severity.@"error".toString());
     try std.testing.expectEqualStrings("warning", Severity.warning.toString());
     try std.testing.expectEqualStrings("note", Severity.note.toString());
+}
+
+test "CWE toString" {
+    try std.testing.expectEqualStrings("CWE-119: Buffer Overflow", CWE.buffer_overflow.toString());
+    try std.testing.expectEqualStrings("CWE-416: Use After Free", CWE.use_after_free.toString());
+    try std.testing.expectEqualStrings("CWE-476: NULL Pointer Dereference", CWE.null_pointer_dereference.toString());
+    try std.testing.expectEqualStrings("CWE-362: Data Race", CWE.data_race.toString());
+}
+
+test "DiagnosticEngine with CWE" {
+    const allocator = std.testing.allocator;
+    var engine = DiagnosticEngine.init(allocator);
+    defer engine.deinit();
+
+    const loc = SourceLocation{ .file = "test.php", .line = 10, .column = 5 };
+    engine.reportErrorWithCWE(loc, .buffer_overflow, "potential buffer overflow detected", .{});
+
+    try std.testing.expectEqual(@as(u32, 1), engine.error_count);
+    try std.testing.expect(engine.hasErrors());
+    
+    const diag = engine.diagnostics.items[0];
+    try std.testing.expectEqual(CWE.buffer_overflow, diag.cwe.?);
+}
+
+test "DiagnosticEngine with fix suggestions" {
+    const allocator = std.testing.allocator;
+    var engine = DiagnosticEngine.init(allocator);
+    defer engine.deinit();
+
+    const loc = SourceLocation{ .file = "test.php", .line = 10, .column = 5 };
+    
+    // 使用静态数组避免内存问题
+    const fix1 = FixSuggestion{
+        .description = "Add bounds checking before array access",
+        .replacement = "if (index < array.len) { ... }",
+    };
+    const fix2 = FixSuggestion{
+        .description = "Use safe array access method",
+        .replacement = "array.get(index)",
+    };
+    const fixes = [_]FixSuggestion{ fix1, fix2 };
+
+    const message = try std.fmt.allocPrint(allocator, "array index out of bounds", .{});
+    engine.reportErrorWithFix(loc, .buffer_overflow, message, &fixes);
+
+    try std.testing.expectEqual(@as(u32, 1), engine.error_count);
+    
+    const diag = engine.diagnostics.items[0];
+    try std.testing.expectEqual(@as(usize, 2), diag.fix_suggestions.len);
+    try std.testing.expectEqualStrings("Add bounds checking before array access", diag.fix_suggestions[0].description);
+}
+
+test "Convenience diagnostic functions" {
+    const allocator = std.testing.allocator;
+    const loc = SourceLocation{ .file = "test.php", .line = 10, .column = 5 };
+    
+    const fixes = [_]FixSuggestion{
+        .{ .description = "Check for null before dereferencing" },
+    };
+    
+    const diag1 = bufferOverflowError(loc, "buffer overflow", &fixes);
+    try std.testing.expectEqual(CWE.buffer_overflow, diag1.cwe.?);
+    try std.testing.expectEqual(Severity.@"error", diag1.severity);
+    
+    const diag2 = nullPointerError(loc, "null pointer", &fixes);
+    try std.testing.expectEqual(CWE.null_pointer_dereference, diag2.cwe.?);
+    
+    const diag3 = dataRaceError(loc, "data race", &fixes);
+    try std.testing.expectEqual(CWE.data_race, diag3.cwe.?);
+    
+    const diag4 = deadCodeWarning(loc, "unreachable code", &fixes);
+    try std.testing.expectEqual(CWE.dead_code, diag4.cwe.?);
+    try std.testing.expectEqual(Severity.warning, diag4.severity);
+    
+    _ = allocator;
+}
+
+test "DiagnosticEngine render with CWE and fixes" {
+    const allocator = std.testing.allocator;
+    var engine = DiagnosticEngine.init(allocator);
+    defer engine.deinit();
+
+    const loc = SourceLocation{ .file = "test.php", .line = 10, .column = 5, .length = 3 };
+    const fix1 = FixSuggestion{
+        .description = "Add null check",
+        .replacement = "if (ptr != null) { ... }",
+    };
+    const fixes = [_]FixSuggestion{fix1};
+
+    const message = try std.fmt.allocPrint(allocator, "potential null pointer dereference", .{});
+    engine.reportErrorWithFix(loc, .null_pointer_dereference, message, &fixes);
+
+    // Test rendering to a buffer
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    
+    try engine.render(fbs.writer());
+    
+    const output = fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, output, "CWE-476") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Add null check") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "https://cwe.mitre.org") != null);
 }

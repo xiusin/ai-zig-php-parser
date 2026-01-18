@@ -1,1092 +1,902 @@
-//! Static Linker for AOT Compiler
+//! 跨文件链接器 (Cross-File Linker)
 //!
-//! This module provides static linking functionality for AOT-compiled PHP programs.
-//! It handles:
-//! - Object code output from LLVM
-//! - Runtime library compilation and linking
-//! - Platform-specific linker invocation
-//! - Dead code elimination
+//! 本模块实现 AOT 编译器的跨文件链接功能，包括：
+//! - 符号表合并：合并多个编译单元的符号表
+//! - 跨文件依赖解析：解析文件间的依赖关系
+//! - 符号引用解析：将符号引用解析到定义位置
+//!
+//! ## 设计原则
+//! - 显式错误处理：所有链接错误必须明确报告
+//! - 内存安全：使用 Allocator 显式管理内存
+//! - 零成本抽象：链接过程不引入运行时开销
+//!
+//! ## 符号解析策略
+//! 1. 收集所有编译单元的符号定义
+//! 2. 构建全局符号表
+//! 3. 解析符号引用
+//! 4. 检测未定义符号和重复定义
+//!
+//! @ownership NON-OWNING (allocator)
+//! @thread-safety ISOLATED (单线程)
+//! @memory-protection 显式 Allocator 传递
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CodeGen = @import("codegen.zig");
-const Target = CodeGen.Target;
-const OptimizeLevel = CodeGen.OptimizeLevel;
-const Diagnostics = @import("diagnostics.zig");
 const IR = @import("ir.zig");
+const Diagnostics = @import("diagnostics.zig");
 
 // ============================================================================
-// Linker Error Types
+// 符号类型定义
 // ============================================================================
 
-pub const LinkerError = error{
-    ObjectFileWriteFailed,
-    RuntimeLibCompileFailed,
-    LinkerInvocationFailed,
-    LinkerFailed,
-    UnsupportedTarget,
-    OutputFileFailed,
-    MissingTool,
-    InvalidObjectCode,
-    RuntimeLibNotFound,
-    SymbolResolutionFailed,
-    OutOfMemory,
-    FileSystemError,
-    ProcessSpawnError,
+/// 符号类型
+pub const SymbolType = enum {
+    function,
+    global_variable,
+    class_type,
+    constant,
+    external,
 };
 
-// ============================================================================
-// Object Code Format
-// ============================================================================
-
-pub const ObjectFormat = enum {
-    elf,
-    macho,
-    coff,
-
-    pub fn fromTarget(target: Target) ObjectFormat {
-        return switch (target.os) {
-            .linux => .elf,
-            .macos => .macho,
-            .windows => .coff,
-        };
-    }
-
-    pub fn objectExtension(self: ObjectFormat) []const u8 {
-        return switch (self) {
-            .elf => ".o",
-            .macho => ".o",
-            .coff => ".obj",
-        };
-    }
-
-    pub fn staticLibExtension(self: ObjectFormat) []const u8 {
-        return switch (self) {
-            .elf => ".a",
-            .macho => ".a",
-            .coff => ".lib",
-        };
-    }
-
-    pub fn executableExtension(self: ObjectFormat) []const u8 {
-        return switch (self) {
-            .elf => "",
-            .macho => "",
-            .coff => ".exe",
-        };
-    }
+/// 符号可见性
+pub const SymbolVisibility = enum {
+    public,
+    private,
+    protected,
+    internal,
 };
 
-// ============================================================================
-// Linker Configuration
-// ============================================================================
-
-pub const LinkerConfig = struct {
-    target: Target,
-    optimize_level: OptimizeLevel,
-    static_link: bool,
-    debug_info: bool,
-    strip_symbols: bool,
-    library_paths: []const []const u8,
-    libraries: []const []const u8,
-    extra_flags: []const []const u8,
-    verbose: bool,
-
-    pub fn default(target: Target) LinkerConfig {
+/// 符号定义
+/// @ownership TRANSFER (name 由调用者管理)
+pub const SymbolDefinition = struct {
+    name: []const u8,
+    type_: SymbolType,
+    visibility: SymbolVisibility,
+    
+    // 定义位置
+    file_path: []const u8,
+    location: Diagnostics.SourceLocation,
+    
+    // IR 引用（可选，用于代码生成）
+    ir_value: ?*anyopaque,
+    
+    // 类型信息（可选）
+    type_info: ?*anyopaque,
+    
+    /// 创建符号定义
+    /// @pre name 和 file_path 必须有效
+    /// @post 返回初始化的符号定义
+    pub fn create(
+        name: []const u8,
+        type_: SymbolType,
+        visibility: SymbolVisibility,
+        file_path: []const u8,
+        location: Diagnostics.SourceLocation,
+    ) SymbolDefinition {
         return .{
-            .target = target,
-            .optimize_level = .debug,
-            .static_link = true,
-            .debug_info = true,
-            .strip_symbols = false,
-            .library_paths = &[_][]const u8{},
-            .libraries = &[_][]const u8{},
-            .extra_flags = &[_][]const u8{},
-            .verbose = false,
+            .name = name,
+            .type_ = type_,
+            .visibility = visibility,
+            .file_path = file_path,
+            .location = location,
+            .ir_value = null,
+            .type_info = null,
         };
+    }
+    
+    /// 检查符号是否可导出
+    /// @post 返回符号是否对外部可见
+    pub fn isExportable(self: *const SymbolDefinition) bool {
+        return self.visibility == .public or self.visibility == .protected;
+    }
+};
+
+/// 符号引用
+/// @ownership NON-OWNING (name 由调用者管理)
+pub const SymbolReference = struct {
+    name: []const u8,
+    type_: SymbolType,
+    
+    // 引用位置
+    file_path: []const u8,
+    location: Diagnostics.SourceLocation,
+    
+    // 解析后的定义
+    resolved_definition: ?*SymbolDefinition,
+    
+    /// 创建符号引用
+    pub fn create(
+        name: []const u8,
+        type_: SymbolType,
+        file_path: []const u8,
+        location: Diagnostics.SourceLocation,
+    ) SymbolReference {
+        return .{
+            .name = name,
+            .type_ = type_,
+            .file_path = file_path,
+            .location = location,
+            .resolved_definition = null,
+        };
+    }
+    
+    /// 检查引用是否已解析
+    pub fn isResolved(self: *const SymbolReference) bool {
+        return self.resolved_definition != null;
     }
 };
 
 // ============================================================================
-// Object Code Buffer
+// 编译单元
 // ============================================================================
 
+/// 编译单元 (Compilation Unit)
+/// 表示单个源文件的编译结果
+/// @ownership TRANSFER (symbols, references)
+pub const CompilationUnit = struct {
+    allocator: Allocator,
+    
+    // 文件信息
+    file_path: []const u8,
+    
+    // 符号定义
+    symbols: std.StringHashMap(SymbolDefinition),
+    
+    // 符号引用
+    references: std.ArrayListUnmanaged(SymbolReference),
+    
+    // 依赖的文件
+    dependencies: std.StringHashMap(void),
+    
+    // IR 模块（可选，用于代码生成）
+    ir_module: ?*anyopaque,
+    
+    /// 初始化编译单元
+    /// @pre allocator 必须有效
+    /// @post 返回初始化的编译单元
+    pub fn init(allocator: Allocator, file_path: []const u8) !CompilationUnit {
+        return .{
+            .allocator = allocator,
+            .file_path = file_path,
+            .symbols = std.StringHashMap(SymbolDefinition).init(allocator),
+            .references = .{},
+            .dependencies = std.StringHashMap(void).init(allocator),
+            .ir_module = null,
+        };
+    }
+    
+    /// 释放资源
+    /// @post 所有资源被正确释放
+    pub fn deinit(self: *CompilationUnit) void {
+        self.symbols.deinit();
+        self.references.deinit(self.allocator);
+        self.dependencies.deinit();
+    }
+    
+    /// 添加符号定义
+    /// @pre symbol.name 必须有效
+    /// @post 符号被添加到符号表
+    pub fn addSymbol(self: *CompilationUnit, symbol: SymbolDefinition) !void {
+        try self.symbols.put(symbol.name, symbol);
+    }
+    
+    /// 添加符号引用
+    /// @pre reference 必须有效
+    /// @post 引用被添加到引用列表
+    pub fn addReference(self: *CompilationUnit, reference: SymbolReference) !void {
+        try self.references.append(self.allocator, reference);
+    }
+    
+    /// 添加依赖
+    /// @pre dep_file_path 必须有效
+    /// @post 依赖被记录
+    pub fn addDependency(self: *CompilationUnit, dep_file_path: []const u8) !void {
+        try self.dependencies.put(dep_file_path, {});
+    }
+    
+    /// 查找符号定义
+    /// @pre name 必须有效
+    /// @post 返回符号定义或 null
+    pub fn findSymbol(self: *const CompilationUnit, name: []const u8) ?*SymbolDefinition {
+        return self.symbols.getPtr(name);
+    }
+};
+
+// ============================================================================
+// 全局符号表
+// ============================================================================
+
+/// 全局符号表
+/// 合并所有编译单元的符号定义
+/// @ownership TRANSFER (symbols)
+/// @concurrency-model ISOLATED
+pub const GlobalSymbolTable = struct {
+    allocator: Allocator,
+    
+    // 符号定义映射：name -> SymbolDefinition
+    symbols: std.StringHashMap(SymbolDefinition),
+    
+    // 重复定义检测：name -> []SymbolDefinition
+    duplicate_definitions: std.StringHashMap(std.ArrayListUnmanaged(SymbolDefinition)),
+    
+    /// 初始化全局符号表
+    /// @pre allocator 必须有效
+    /// @post 返回空的符号表
+    pub fn init(allocator: Allocator) GlobalSymbolTable {
+        return .{
+            .allocator = allocator,
+            .symbols = std.StringHashMap(SymbolDefinition).init(allocator),
+            .duplicate_definitions = std.StringHashMap(std.ArrayListUnmanaged(SymbolDefinition)).init(allocator),
+        };
+    }
+    
+    /// 释放资源
+    /// @post 所有资源被正确释放
+    pub fn deinit(self: *GlobalSymbolTable) void {
+        self.symbols.deinit();
+        
+        var iter = self.duplicate_definitions.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.duplicate_definitions.deinit();
+    }
+    
+    /// 添加符号定义
+    /// @pre symbol 必须有效
+    /// @post 符号被添加，或检测到重复定义
+    pub fn addSymbol(self: *GlobalSymbolTable, symbol: SymbolDefinition) !void {
+        // 检查是否已存在
+        if (self.symbols.get(symbol.name)) |existing| {
+            // 检测到重复定义
+            const dups_ptr = self.duplicate_definitions.getPtr(symbol.name) orelse blk: {
+                var list: std.ArrayListUnmanaged(SymbolDefinition) = .{};
+                try list.append(self.allocator, existing);
+                try self.duplicate_definitions.put(symbol.name, list);
+                break :blk self.duplicate_definitions.getPtr(symbol.name).?;
+            };
+            
+            try dups_ptr.append(self.allocator, symbol);
+        } else {
+            // 首次定义
+            try self.symbols.put(symbol.name, symbol);
+        }
+    }
+    
+    /// 查找符号定义
+    /// @pre name 必须有效
+    /// @post 返回符号定义或 null
+    pub fn findSymbol(self: *const GlobalSymbolTable, name: []const u8) ?*const SymbolDefinition {
+        return self.symbols.getPtr(name);
+    }
+    
+    /// 检查是否有重复定义
+    /// @post 返回是否存在重复定义
+    pub fn hasDuplicateDefinitions(self: *const GlobalSymbolTable) bool {
+        return self.duplicate_definitions.count() > 0;
+    }
+    
+    /// 获取重复定义列表
+    /// @pre name 必须有效
+    /// @post 返回重复定义列表或 null
+    pub fn getDuplicateDefinitions(
+        self: *const GlobalSymbolTable,
+        name: []const u8,
+    ) ?[]const SymbolDefinition {
+        if (self.duplicate_definitions.getPtr(name)) |list| {
+            return list.items;
+        }
+        return null;
+    }
+};
+
+// ============================================================================
+// 目标平台和对象格式
+// ============================================================================
+
+/// 目标平台
+pub const Target = enum {
+    linux_x86_64,
+    linux_aarch64,
+    macos_x86_64,
+    macos_aarch64,
+    windows_x86_64,
+    
+    pub fn getObjectFormat(self: Target) ObjectFormat {
+        return switch (self) {
+            .linux_x86_64, .linux_aarch64 => .elf,
+            .macos_x86_64, .macos_aarch64 => .macho,
+            .windows_x86_64 => .coff,
+        };
+    }
+};
+
+/// 对象文件格式
+pub const ObjectFormat = enum {
+    elf,    // Linux
+    macho,  // macOS
+    coff,   // Windows
+    
+    /// 从目标平台获取对象格式
+    pub fn fromTarget(target: anytype) ObjectFormat {
+        // 支持 linker.Target 和 codegen.Target
+        const target_name = @typeName(@TypeOf(target));
+        if (std.mem.indexOf(u8, target_name, "Target") != null) {
+            // 尝试获取 arch 和 os 字段
+            if (@hasField(@TypeOf(target), "arch") and @hasField(@TypeOf(target), "os")) {
+                // codegen.Target 类型
+                const os_name = @tagName(target.os);
+                if (std.mem.startsWith(u8, os_name, "linux")) {
+                    return .elf;
+                } else if (std.mem.startsWith(u8, os_name, "macos")) {
+                    return .macho;
+                } else if (std.mem.startsWith(u8, os_name, "windows")) {
+                    return .coff;
+                }
+            }
+        }
+        
+        // 默认返回 ELF
+        return .elf;
+    }
+};
+
+/// 对象代码
 pub const ObjectCode = struct {
     data: []const u8,
     format: ObjectFormat,
-    module_name: []const u8,
-    owned: bool,
-
-    const Self = @This();
-
-    pub fn initOwned(allocator: Allocator, data: []const u8, format: ObjectFormat, module_name: []const u8) !Self {
-        const owned_data = try allocator.dupe(u8, data);
-        const owned_name = try allocator.dupe(u8, module_name);
-        return .{
-            .data = owned_data,
-            .format = format,
-            .module_name = owned_name,
-            .owned = true,
-        };
-    }
-
-    pub fn initBorrowed(data: []const u8, format: ObjectFormat, module_name: []const u8) Self {
+    symbols: []const []const u8,
+    
+    /// 创建借用的对象代码（用于测试）
+    pub fn initBorrowed(data: []const u8, format: ObjectFormat, symbol_name: []const u8) ObjectCode {
+        const symbols = &[_][]const u8{symbol_name};
         return .{
             .data = data,
             .format = format,
-            .module_name = module_name,
-            .owned = false,
-        };
-    }
-
-    pub fn deinit(self: *Self, allocator: Allocator) void {
-        if (self.owned) {
-            allocator.free(@constCast(self.data));
-            allocator.free(@constCast(self.module_name));
-        }
-    }
-
-    pub fn isValid(self: *const Self) bool {
-        if (self.data.len == 0) return false;
-        return switch (self.format) {
-            .elf => self.data.len >= 4 and std.mem.eql(u8, self.data[0..4], "\x7fELF"),
-            .macho => self.data.len >= 4 and (std.mem.eql(u8, self.data[0..4], "\xfe\xed\xfa\xce") or
-                std.mem.eql(u8, self.data[0..4], "\xfe\xed\xfa\xcf") or
-                std.mem.eql(u8, self.data[0..4], "\xce\xfa\xed\xfe") or
-                std.mem.eql(u8, self.data[0..4], "\xcf\xfa\xed\xfe")),
-            .coff => self.data.len >= 2 and ((self.data[0] == 0x4d and self.data[1] == 0x5a) or
-                (self.data[0] == 0x64 and self.data[1] == 0x86)),
+            .symbols = symbols,
         };
     }
 };
 
+/// 链接器配置
+pub const LinkerConfig = struct {
+    target: Target,
+    output_format: ObjectFormat,
+    strip_debug: bool = false,
+    optimize: bool = true,
+    
+    pub fn default(target: anytype) LinkerConfig {
+        // 支持 linker.Target 和 codegen.Target
+        const target_type = @TypeOf(target);
+        const target_name = @typeName(target_type);
+        
+        if (std.mem.indexOf(u8, target_name, "codegen.Target") != null) {
+            // codegen.Target - 转换为 linker.Target
+            const os_name = @tagName(target.os);
+            const arch_name = @tagName(target.arch);
+            
+            const linker_target: Target = blk: {
+                if (std.mem.eql(u8, os_name, "linux")) {
+                    if (std.mem.eql(u8, arch_name, "x86_64")) {
+                        break :blk .linux_x86_64;
+                    } else if (std.mem.eql(u8, arch_name, "aarch64")) {
+                        break :blk .linux_aarch64;
+                    }
+                } else if (std.mem.eql(u8, os_name, "macos")) {
+                    if (std.mem.eql(u8, arch_name, "x86_64")) {
+                        break :blk .macos_x86_64;
+                    } else if (std.mem.eql(u8, arch_name, "aarch64")) {
+                        break :blk .macos_aarch64;
+                    }
+                } else if (std.mem.eql(u8, os_name, "windows")) {
+                    break :blk .windows_x86_64;
+                }
+                // 默认
+                break :blk .linux_x86_64;
+            };
+            
+            return .{
+                .target = linker_target,
+                .output_format = linker_target.getObjectFormat(),
+            };
+        } else {
+            // linker.Target
+            return .{
+                .target = target,
+                .output_format = target.getObjectFormat(),
+            };
+        }
+    }
+};
+
 // ============================================================================
-// Static Linker
+// 链接器
 // ============================================================================
 
+/// 链接错误
+pub const LinkerError = error{
+    // 符号错误
+    UndefinedSymbol,
+    DuplicateDefinition,
+    SymbolTypeMismatch,
+    VisibilityViolation,
+    
+    // 依赖错误
+    CircularDependency,
+    MissingDependency,
+    
+    // 内存错误
+    OutOfMemory,
+};
+
+/// 静态链接器
+/// @ownership NON-OWNING (allocator)
+/// @thread-safety ISOLATED
 pub const StaticLinker = struct {
     allocator: Allocator,
+    
+    // 配置
     config: LinkerConfig,
+    
+    // 编译单元列表
+    compilation_units: std.ArrayListUnmanaged(*CompilationUnit),
+    
+    // 全局符号表
+    global_symbols: GlobalSymbolTable,
+    
+    // 诊断引擎
     diagnostics: *Diagnostics.DiagnosticEngine,
-    temp_files: std.ArrayListUnmanaged([]const u8),
-    used_runtime_functions: std.StringHashMapUnmanaged(void),
-
-    const Self = @This();
-
+    
+    /// 初始化链接器
+    /// @pre allocator 和 diagnostics 必须有效
+    /// @post 返回初始化的链接器
     pub fn init(
         allocator: Allocator,
         config: LinkerConfig,
         diagnostics: *Diagnostics.DiagnosticEngine,
-    ) !*Self {
-        const self = try allocator.create(Self);
+    ) !*StaticLinker {
+        const self = try allocator.create(StaticLinker);
         self.* = .{
             .allocator = allocator,
             .config = config,
+            .compilation_units = .{},
+            .global_symbols = GlobalSymbolTable.init(allocator),
             .diagnostics = diagnostics,
-            .temp_files = .{},
-            .used_runtime_functions = .{},
         };
         return self;
     }
-
-    pub fn deinit(self: *Self) void {
-        self.cleanupTempFiles();
-        self.temp_files.deinit(self.allocator);
-        self.used_runtime_functions.deinit(self.allocator);
+    
+    /// 释放资源
+    /// @post 所有资源被正确释放
+    pub fn deinit(self: *StaticLinker) void {
+        self.compilation_units.deinit(self.allocator);
+        self.global_symbols.deinit();
         self.allocator.destroy(self);
     }
-
-    fn cleanupTempFiles(self: *Self) void {
-        for (self.temp_files.items) |path| {
-            std.fs.cwd().deleteFile(path) catch {};
-            self.allocator.free(path);
-        }
-        self.temp_files.clearRetainingCapacity();
-    }
-
-    // Task 9.1: Object Code Output
-    pub fn writeTempObjectFile(self: *Self, object_code: *const ObjectCode) ![]const u8 {
-        const temp_path = try self.generateTempPath(object_code.format.objectExtension());
-        const file = std.fs.cwd().createFile(temp_path, .{}) catch |err| {
-            self.diagnostics.emitError("E007", "Failed to create temp object file", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.ObjectFileWriteFailed;
-        };
-        defer file.close();
-        file.writeAll(object_code.data) catch |err| {
-            self.diagnostics.emitError("E007", "Failed to write object code", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.ObjectFileWriteFailed;
-        };
-        try self.temp_files.append(self.allocator, temp_path);
-        if (self.config.verbose) {
-            std.debug.print("Wrote object file: {s} ({d} bytes)\n", .{ temp_path, object_code.data.len });
-        }
-        return temp_path;
-    }
-
-    fn generateTempPath(self: *Self, extension: []const u8) ![]const u8 {
-        const timestamp = std.time.timestamp();
-        const random = std.crypto.random.int(u32);
-        return std.fmt.allocPrint(self.allocator, "/tmp/php_aot_{d}_{x}{s}", .{ timestamp, random, extension });
-    }
-
-    pub fn writeObjectFile(self: *Self, object_code: *const ObjectCode, output_path: []const u8) !void {
-        const file = std.fs.cwd().createFile(output_path, .{}) catch |err| {
-            self.diagnostics.emitError("E007", "Failed to create object file", Diagnostics.SourceLocation.unknown(), &[_][]const u8{ output_path, @errorName(err) });
-            return LinkerError.ObjectFileWriteFailed;
-        };
-        defer file.close();
-        file.writeAll(object_code.data) catch |err| {
-            self.diagnostics.emitError("E007", "Failed to write object code", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.ObjectFileWriteFailed;
-        };
-        if (self.config.verbose) {
-            std.debug.print("Wrote object file: {s} ({d} bytes)\n", .{ output_path, object_code.data.len });
-        }
-    }
-
-    pub fn generateMockObjectCode(self: *Self, module_name: []const u8) !ObjectCode {
-        const format = ObjectFormat.fromTarget(self.config.target);
-        const header = switch (format) {
-            .elf => try self.generateMinimalELFHeader(),
-            .macho => try self.generateMinimalMachOHeader(),
-            .coff => try self.generateMinimalCOFFHeader(),
-        };
-        // header is already allocated, so we create ObjectCode directly without copying
-        const owned_name = try self.allocator.dupe(u8, module_name);
-        return .{
-            .data = header,
-            .format = format,
-            .module_name = owned_name,
-            .owned = true,
-        };
-    }
-
-    fn generateMinimalELFHeader(self: *Self) ![]const u8 {
-        var header = try self.allocator.alloc(u8, 64);
-        header[0] = 0x7f;
-        header[1] = 'E';
-        header[2] = 'L';
-        header[3] = 'F';
-        header[4] = 2; // 64-bit
-        header[5] = 1; // little endian
-        header[6] = 1; // version
-        @memset(header[7..16], 0);
-        header[16] = 1; // relocatable
-        header[17] = 0;
-        header[18] = 0x3e; // x86_64
-        header[19] = 0;
-        @memset(header[20..64], 0);
-        return header;
-    }
-
-    fn generateMinimalMachOHeader(self: *Self) ![]const u8 {
-        var header = try self.allocator.alloc(u8, 32);
-        header[0] = 0xcf;
-        header[1] = 0xfa;
-        header[2] = 0xed;
-        header[3] = 0xfe;
-        @memset(header[4..32], 0);
-        return header;
-    }
-
-    fn generateMinimalCOFFHeader(self: *Self) ![]const u8 {
-        var header = try self.allocator.alloc(u8, 20);
-        header[0] = 0x64;
-        header[1] = 0x86;
-        @memset(header[2..20], 0);
-        return header;
-    }
-
-    // Task 9.2: Runtime Library Compilation
-    pub const RuntimeLibPaths = struct {
-        static_lib: ?[]const u8,
-        object_files: []const []const u8,
-        system_libs: []const []const u8,
-    };
-
-    /// Runtime library source files
-    pub const RuntimeSourceFiles = struct {
-        /// Main runtime library source
-        pub const runtime_lib = "src/aot/runtime_lib.zig";
-        /// All runtime source files needed for compilation
-        pub const all_sources = &[_][]const u8{
-            "src/aot/runtime_lib.zig",
-        };
-    };
-
-    /// Runtime function categories for selective linking
-    pub const RuntimeFunctionCategory = enum {
-        value_creation,
-        type_conversion,
-        garbage_collection,
-        array_operations,
-        string_operations,
-        object_operations,
-        io_operations,
-        exception_handling,
-        builtin_functions,
-        math_operations,
-    };
-
-    /// Get the list of runtime functions by category
-    pub fn getRuntimeFunctionsByCategory(category: RuntimeFunctionCategory) []const []const u8 {
-        return switch (category) {
-            .value_creation => &[_][]const u8{
-                "php_value_create_null",
-                "php_value_create_bool",
-                "php_value_create_int",
-                "php_value_create_float",
-                "php_value_create_string",
-                "php_value_create_string_raw",
-                "php_value_create_array",
-                "php_value_create_object",
-            },
-            .type_conversion => &[_][]const u8{
-                "php_value_get_type",
-                "php_value_get_type_name",
-                "php_value_to_int",
-                "php_value_to_float",
-                "php_value_to_bool",
-                "php_value_to_string",
-                "php_value_cast",
-                "php_value_clone",
-            },
-            .garbage_collection => &[_][]const u8{
-                "php_gc_retain",
-                "php_gc_release",
-                "php_gc_get_ref_count",
-                "php_gc_is_shared",
-                "php_gc_copy_on_write",
-            },
-            .array_operations => &[_][]const u8{
-                "php_array_create",
-                "php_array_create_with_capacity",
-                "php_array_get",
-                "php_array_get_int",
-                "php_array_get_string",
-                "php_array_set",
-                "php_array_set_int",
-                "php_array_set_string",
-                "php_array_push",
-                "php_array_count",
-                "php_array_key_exists",
-                "php_array_key_exists_int",
-                "php_array_key_exists_string",
-                "php_array_unset",
-                "php_array_unset_int",
-                "php_array_unset_string",
-                "php_array_keys",
-                "php_array_values",
-                "php_array_merge",
-                "php_array_is_empty",
-                "php_array_first",
-                "php_array_last",
-            },
-            .string_operations => &[_][]const u8{
-                "php_string_concat",
-                "php_string_length",
-                "php_string_len",
-                "php_string_interpolate",
-                "php_string_substr",
-                "php_string_strpos",
-                "php_string_strtoupper",
-                "php_string_strtolower",
-                "php_string_trim",
-                "php_string_ltrim",
-                "php_string_rtrim",
-                "php_string_replace",
-                "php_string_explode",
-                "php_string_implode",
-            },
-            .object_operations => &[_][]const u8{
-                "php_object_get_property",
-                "php_object_set_property",
-                "php_object_call_method",
-                "php_object_get_class",
-                "php_object_instanceof",
-            },
-            .io_operations => &[_][]const u8{
-                "php_echo",
-                "php_print",
-                "php_println",
-                "php_printf",
-            },
-            .exception_handling => &[_][]const u8{
-                "php_throw",
-                "php_throw_message",
-                "php_throw_exception",
-                "php_catch",
-                "php_catch_type",
-                "php_has_exception",
-                "php_get_exception",
-                "php_clear_exception",
-                "php_print_stack_trace",
-            },
-            .builtin_functions => &[_][]const u8{
-                "php_builtin_strlen",
-                "php_builtin_count",
-                "php_builtin_var_dump",
-                "php_builtin_print_r",
-                "php_builtin_isset",
-                "php_builtin_empty",
-                "php_builtin_is_null",
-                "php_builtin_is_bool",
-                "php_builtin_is_int",
-                "php_builtin_is_float",
-                "php_builtin_is_string",
-                "php_builtin_is_array",
-                "php_builtin_is_object",
-                "php_builtin_gettype",
-            },
-            .math_operations => &[_][]const u8{
-                "php_math_abs",
-                "php_math_ceil",
-                "php_math_floor",
-                "php_math_round",
-                "php_math_max",
-                "php_math_min",
-                "php_math_pow",
-                "php_math_sqrt",
-                "php_math_rand",
-            },
-        };
-    }
-
-    pub fn getRuntimeLibPaths(self: *Self) RuntimeLibPaths {
-        return switch (self.config.target.os) {
-            .linux => .{
-                .static_lib = "lib/libphp_runtime.a",
-                .object_files = &[_][]const u8{},
-                .system_libs = &[_][]const u8{ "c", "m", "pthread" },
-            },
-            .macos => .{
-                .static_lib = "lib/libphp_runtime.a",
-                .object_files = &[_][]const u8{},
-                .system_libs = &[_][]const u8{"System"},
-            },
-            .windows => .{
-                .static_lib = "lib/php_runtime.lib",
-                .object_files = &[_][]const u8{},
-                .system_libs = &[_][]const u8{ "kernel32", "msvcrt" },
-            },
-        };
-    }
-
-    /// Compile the runtime library for the target platform
-    /// This creates a static library containing all runtime functions
-    pub fn compileRuntimeLib(self: *Self) ![]const u8 {
-        const target = self.config.target;
-        const format = ObjectFormat.fromTarget(target);
-        const lib_path = try std.fmt.allocPrint(
-            self.allocator,
-            "/tmp/php_runtime_{s}_{s}{s}",
-            .{ target.arch.toLLVMArch(), target.os.toLLVMOS(), format.staticLibExtension() },
-        );
-
-        // Check if we can use a pre-built runtime library
-        if (self.findPrebuiltRuntimeLib()) |prebuilt_path| {
-            if (self.config.verbose) {
-                std.debug.print("Using pre-built runtime library: {s}\n", .{prebuilt_path});
-            }
-            // Copy the pre-built library to temp location
-            std.fs.cwd().copyFile(prebuilt_path, std.fs.cwd(), lib_path, .{}) catch {
-                // If copy fails, fall through to create placeholder
-            };
-        }
-
-        // Create placeholder library file (actual compilation would use zig build-lib)
-        const file = std.fs.cwd().createFile(lib_path, .{}) catch |err| {
-            self.diagnostics.emitError("E007", "Failed to create runtime library", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.RuntimeLibCompileFailed;
-        };
-
-        // Write minimal archive header for the target format
-        const archive_header = try self.generateArchiveHeader(format);
-        file.writeAll(archive_header) catch |err| {
-            file.close();
-            self.diagnostics.emitError("E007", "Failed to write runtime library", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.RuntimeLibCompileFailed;
-        };
-        self.allocator.free(archive_header);
-        file.close();
-
-        try self.temp_files.append(self.allocator, lib_path);
-        if (self.config.verbose) {
-            std.debug.print("Compiled runtime library: {s}\n", .{lib_path});
-        }
-        return lib_path;
-    }
-
-    /// Generate minimal archive header for static library
-    fn generateArchiveHeader(self: *Self, format: ObjectFormat) ![]const u8 {
-        return switch (format) {
-            .elf, .macho => blk: {
-                // Unix ar archive format: "!<arch>\n" magic
-                var header = try self.allocator.alloc(u8, 8);
-                @memcpy(header[0..8], "!<arch>\n");
-                break :blk header;
-            },
-            .coff => blk: {
-                // Windows lib format: simplified header
-                var header = try self.allocator.alloc(u8, 8);
-                @memcpy(header[0..8], "!<arch>\n");
-                break :blk header;
-            },
-        };
-    }
-
-    /// Find a pre-built runtime library for the target
-    fn findPrebuiltRuntimeLib(self: *Self) ?[]const u8 {
-        const paths = self.getRuntimeLibPaths();
-        if (paths.static_lib) |lib_path| {
-            if (std.fs.cwd().access(lib_path, .{})) |_| {
-                return lib_path;
-            } else |_| {
-                return null;
-            }
-        }
-        return null;
-    }
-
-    /// Compile runtime library with only the functions that are actually used
-    /// This enables dead code elimination at the runtime library level
-    pub fn compileRuntimeLibSelective(self: *Self, used_functions: *const std.StringHashMapUnmanaged(void)) ![]const u8 {
-        const target = self.config.target;
-        const format = ObjectFormat.fromTarget(target);
-        const lib_path = try std.fmt.allocPrint(
-            self.allocator,
-            "/tmp/php_runtime_selective_{s}_{s}{s}",
-            .{ target.arch.toLLVMArch(), target.os.toLLVMOS(), format.staticLibExtension() },
-        );
-
-        // Determine which categories are needed
-        var needed_categories = std.EnumSet(RuntimeFunctionCategory).initEmpty();
-
-        var iter = used_functions.keyIterator();
-        while (iter.next()) |func_name| {
-            // Map function to category
-            if (std.mem.startsWith(u8, func_name.*, "php_value_create")) {
-                needed_categories.insert(.value_creation);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_value_to") or
-                std.mem.startsWith(u8, func_name.*, "php_value_get") or
-                std.mem.startsWith(u8, func_name.*, "php_value_cast") or
-                std.mem.startsWith(u8, func_name.*, "php_value_clone"))
-            {
-                needed_categories.insert(.type_conversion);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_gc_")) {
-                needed_categories.insert(.garbage_collection);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_array_")) {
-                needed_categories.insert(.array_operations);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_string_")) {
-                needed_categories.insert(.string_operations);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_object_")) {
-                needed_categories.insert(.object_operations);
-            } else if (std.mem.eql(u8, func_name.*, "php_echo") or
-                std.mem.eql(u8, func_name.*, "php_print") or
-                std.mem.eql(u8, func_name.*, "php_println") or
-                std.mem.eql(u8, func_name.*, "php_printf"))
-            {
-                needed_categories.insert(.io_operations);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_throw") or
-                std.mem.startsWith(u8, func_name.*, "php_catch") or
-                std.mem.startsWith(u8, func_name.*, "php_has_exception") or
-                std.mem.startsWith(u8, func_name.*, "php_get_exception") or
-                std.mem.startsWith(u8, func_name.*, "php_clear_exception"))
-            {
-                needed_categories.insert(.exception_handling);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_builtin_")) {
-                needed_categories.insert(.builtin_functions);
-            } else if (std.mem.startsWith(u8, func_name.*, "php_math_")) {
-                needed_categories.insert(.math_operations);
-            }
-        }
-
-        if (self.config.verbose) {
-            std.debug.print("Selective runtime compilation: {d} categories needed\n", .{needed_categories.count()});
-        }
-
-        // Create the library file
-        const file = std.fs.cwd().createFile(lib_path, .{}) catch |err| {
-            self.diagnostics.emitError("E007", "Failed to create selective runtime library", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.RuntimeLibCompileFailed;
-        };
-
-        const archive_header = try self.generateArchiveHeader(format);
-        file.writeAll(archive_header) catch |err| {
-            file.close();
-            self.allocator.free(archive_header);
-            self.diagnostics.emitError("E007", "Failed to write selective runtime library", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.RuntimeLibCompileFailed;
-        };
-        self.allocator.free(archive_header);
-        file.close();
-
-        try self.temp_files.append(self.allocator, lib_path);
-        if (self.config.verbose) {
-            std.debug.print("Compiled selective runtime library: {s}\n", .{lib_path});
-        }
-        return lib_path;
-    }
-
-    /// Get the Zig compiler command for cross-compilation
-    pub fn getZigCompilerCommand(self: *Self) []const u8 {
-        _ = self;
-        return "zig";
-    }
-
-    /// Get target triple for Zig compiler
-    pub fn getZigTargetTriple(self: *Self) []const u8 {
-        return switch (self.config.target.os) {
-            .linux => switch (self.config.target.arch) {
-                .x86_64 => "x86_64-linux-gnu",
-                .aarch64 => "aarch64-linux-gnu",
-                .arm => "arm-linux-gnueabihf",
-            },
-            .macos => switch (self.config.target.arch) {
-                .x86_64 => "x86_64-macos",
-                .aarch64 => "aarch64-macos",
-                .arm => "arm-macos",
-            },
-            .windows => switch (self.config.target.arch) {
-                .x86_64 => "x86_64-windows-msvc",
-                .aarch64 => "aarch64-windows-msvc",
-                .arm => "arm-windows-msvc",
-            },
-        };
-    }
-
-    pub fn runtimeLibExists(self: *const Self) bool {
-        const paths = self.getRuntimeLibPaths();
-        if (paths.static_lib) |lib_path| {
-            return std.fs.cwd().access(lib_path, .{}) != error.FileNotFound;
-        }
-        return false;
-    }
-
-    // Task 9.3: Linker Invocation
-    pub fn link(self: *Self, object_files: []const []const u8, output_path: []const u8) !void {
-        var args = std.ArrayListUnmanaged([]const u8){};
-        defer args.deinit(self.allocator);
-
-        switch (self.config.target.os) {
-            .linux => try self.buildLinuxLinkerArgs(&args, object_files, output_path),
-            .macos => try self.buildMacOSLinkerArgs(&args, object_files, output_path),
-            .windows => try self.buildWindowsLinkerArgs(&args, object_files, output_path),
-        }
-
-        for (self.config.extra_flags) |flag| {
-            try args.append(self.allocator, flag);
-        }
-
-        if (self.config.verbose) {
-            std.debug.print("Linker command: ", .{});
-            for (args.items) |arg| {
-                std.debug.print("{s} ", .{arg});
-            }
-            std.debug.print("\n", .{});
-        }
-
-        try self.executeLinker(args.items);
-        if (self.config.verbose) {
-            std.debug.print("Linked executable: {s}\n", .{output_path});
-        }
-    }
-
-    fn buildLinuxLinkerArgs(self: *Self, args: *std.ArrayListUnmanaged([]const u8), object_files: []const []const u8, output_path: []const u8) !void {
-        if (self.config.static_link) {
-            try args.append(self.allocator, "ld");
-        } else {
-            try args.append(self.allocator, "gcc");
-        }
-        try args.append(self.allocator, "-o");
-        try args.append(self.allocator, output_path);
-        for (object_files) |obj| {
-            try args.append(self.allocator, obj);
-        }
-        const runtime_paths = self.getRuntimeLibPaths();
-        if (runtime_paths.static_lib) |lib| {
-            try args.append(self.allocator, lib);
-        }
-        if (self.config.static_link) {
-            try args.append(self.allocator, "-static");
-        }
-        for (self.config.library_paths) |path| {
-            try args.append(self.allocator, "-L");
-            try args.append(self.allocator, path);
-        }
-        for (runtime_paths.system_libs) |lib| {
-            const lib_flag = try std.fmt.allocPrint(self.allocator, "-l{s}", .{lib});
-            try args.append(self.allocator, lib_flag);
-        }
-        for (self.config.libraries) |lib| {
-            const lib_flag = try std.fmt.allocPrint(self.allocator, "-l{s}", .{lib});
-            try args.append(self.allocator, lib_flag);
-        }
-        if (!self.config.debug_info or self.config.strip_symbols) {
-            try args.append(self.allocator, "-s");
-        }
-        if (self.config.optimize_level == .release_small) {
-            try args.append(self.allocator, "--gc-sections");
-        }
-    }
-
-    fn buildMacOSLinkerArgs(self: *Self, args: *std.ArrayListUnmanaged([]const u8), object_files: []const []const u8, output_path: []const u8) !void {
-        try args.append(self.allocator, "ld");
-        try args.append(self.allocator, "-o");
-        try args.append(self.allocator, output_path);
-        for (object_files) |obj| {
-            try args.append(self.allocator, obj);
-        }
-        const runtime_paths = self.getRuntimeLibPaths();
-        if (runtime_paths.static_lib) |lib| {
-            try args.append(self.allocator, lib);
-        }
-        for (runtime_paths.system_libs) |lib| {
-            const lib_flag = try std.fmt.allocPrint(self.allocator, "-l{s}", .{lib});
-            try args.append(self.allocator, lib_flag);
-        }
-        try args.append(self.allocator, "-syslibroot");
-        try args.append(self.allocator, "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk");
-        try args.append(self.allocator, "-arch");
-        try args.append(self.allocator, switch (self.config.target.arch) {
-            .x86_64 => "x86_64",
-            .aarch64 => "arm64",
-            .arm => "armv7",
-        });
-        try args.append(self.allocator, "-platform_version");
-        try args.append(self.allocator, "macos");
-        try args.append(self.allocator, "11.0");
-        try args.append(self.allocator, "11.0");
-        if (self.config.strip_symbols) {
-            try args.append(self.allocator, "-S");
-        }
-        if (self.config.optimize_level == .release_small or self.config.optimize_level == .release_fast) {
-            try args.append(self.allocator, "-dead_strip");
-        }
-    }
-
-    fn buildWindowsLinkerArgs(self: *Self, args: *std.ArrayListUnmanaged([]const u8), object_files: []const []const u8, output_path: []const u8) !void {
-        try args.append(self.allocator, "lld-link");
-        const out_flag = try std.fmt.allocPrint(self.allocator, "/OUT:{s}", .{output_path});
-        try args.append(self.allocator, out_flag);
-        for (object_files) |obj| {
-            try args.append(self.allocator, obj);
-        }
-        const runtime_paths = self.getRuntimeLibPaths();
-        if (runtime_paths.static_lib) |lib| {
-            try args.append(self.allocator, lib);
-        }
-        for (runtime_paths.system_libs) |lib| {
-            const lib_file = try std.fmt.allocPrint(self.allocator, "{s}.lib", .{lib});
-            try args.append(self.allocator, lib_file);
-        }
-        try args.append(self.allocator, "/SUBSYSTEM:CONSOLE");
-        try args.append(self.allocator, "/ENTRY:mainCRTStartup");
-        if (self.config.debug_info) {
-            try args.append(self.allocator, "/DEBUG");
-        }
-        if (self.config.optimize_level == .release_small) {
-            try args.append(self.allocator, "/OPT:REF");
-            try args.append(self.allocator, "/OPT:ICF");
-        }
-    }
-
-    fn executeLinker(self: *Self, args: []const []const u8) !void {
-        if (args.len == 0) {
-            return LinkerError.LinkerInvocationFailed;
-        }
-        if (!self.isLinkerAvailable(args[0])) {
-            if (self.config.verbose) {
-                std.debug.print("Linker not available, skipping execution\n", .{});
-            }
-            return;
-        }
-        var child = std.process.Child.init(args, self.allocator);
-        child.stderr_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.spawn() catch |err| {
-            self.diagnostics.emitError("E007", "Failed to spawn linker", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.ProcessSpawnError;
-        };
-        const result = child.wait() catch |err| {
-            self.diagnostics.emitError("E007", "Failed to wait for linker", Diagnostics.SourceLocation.unknown(), &[_][]const u8{@errorName(err)});
-            return LinkerError.LinkerInvocationFailed;
-        };
-        if (result.Exited != 0) {
-            self.diagnostics.emitError("E007", "Linker returned non-zero exit code", Diagnostics.SourceLocation.unknown(), &[_][]const u8{});
-            return LinkerError.LinkerFailed;
-        }
-    }
-
-    fn isLinkerAvailable(self: *const Self, linker_name: []const u8) bool {
-        _ = self;
-        const result = std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
-            .argv = &[_][]const u8{ "which", linker_name },
-        }) catch return false;
-        defer std.heap.page_allocator.free(result.stdout);
-        defer std.heap.page_allocator.free(result.stderr);
-        return result.term.Exited == 0;
-    }
-
-    // Task 9.4: Dead Code Elimination
-    pub fn analyzeUsedFunctions(self: *Self, ir_module: *const IR.Module) !void {
-        self.used_runtime_functions.clearRetainingCapacity();
-        for (ir_module.functions.items) |func| {
-            try self.analyzeFunctionUsage(func);
-        }
-        if (self.config.verbose) {
-            std.debug.print("Found {d} used runtime functions\n", .{self.used_runtime_functions.count()});
-        }
-    }
-
-    fn analyzeFunctionUsage(self: *Self, func: *const IR.Function) !void {
-        for (func.blocks.items) |block| {
-            for (block.instructions.items) |inst| {
-                try self.analyzeInstructionUsage(inst);
-            }
-        }
-    }
-
-    fn analyzeInstructionUsage(self: *Self, inst: *const IR.Instruction) !void {
-        switch (inst.op) {
-            .call => |op| {
-                if (isRuntimeFunction(op.func_name)) {
-                    try self.used_runtime_functions.put(self.allocator, op.func_name, {});
-                }
-            },
-            .const_string => try self.used_runtime_functions.put(self.allocator, "php_value_create_string", {}),
-            .array_new => {
-                try self.used_runtime_functions.put(self.allocator, "php_value_create_array", {});
-                try self.used_runtime_functions.put(self.allocator, "php_array_create", {});
-            },
-            .new_object => try self.used_runtime_functions.put(self.allocator, "php_value_create_object", {}),
-            .array_get => try self.used_runtime_functions.put(self.allocator, "php_array_get", {}),
-            .array_set => try self.used_runtime_functions.put(self.allocator, "php_array_set", {}),
-            .array_push => try self.used_runtime_functions.put(self.allocator, "php_array_push", {}),
-            .array_count => try self.used_runtime_functions.put(self.allocator, "php_array_count", {}),
-            .concat => try self.used_runtime_functions.put(self.allocator, "php_string_concat", {}),
-            .strlen => try self.used_runtime_functions.put(self.allocator, "php_string_length", {}),
-            .retain => try self.used_runtime_functions.put(self.allocator, "php_gc_retain", {}),
-            .release => try self.used_runtime_functions.put(self.allocator, "php_gc_release", {}),
-            .cast => try self.used_runtime_functions.put(self.allocator, "php_value_cast", {}),
-            .type_check, .get_type => try self.used_runtime_functions.put(self.allocator, "php_value_get_type", {}),
-            .debug_print => try self.used_runtime_functions.put(self.allocator, "php_echo", {}),
-            else => {},
-        }
-    }
-
+    
+    /// 检查是否是运行时函数
+    /// @post 返回函数名是否以 "php_" 开头
     pub fn isRuntimeFunction(name: []const u8) bool {
         return std.mem.startsWith(u8, name, "php_");
     }
-
-    pub fn getUsedRuntimeFunctionCount(self: *const Self) usize {
-        return self.used_runtime_functions.count();
+    
+    /// 添加编译单元
+    /// @pre unit 必须有效
+    /// @post 编译单元被添加到链接器
+    pub fn addCompilationUnit(self: *StaticLinker, unit: *CompilationUnit) !void {
+        try self.compilation_units.append(self.allocator, unit);
     }
-
-    pub fn isRuntimeFunctionUsed(self: *const Self, name: []const u8) bool {
-        return self.used_runtime_functions.contains(name);
+    
+    /// 执行链接
+    /// @post 所有符号引用被解析，或返回错误
+    pub fn link(self: *StaticLinker) !void {
+        // 1. 合并符号表
+        try self.mergeSymbolTables();
+        
+        // 2. 检测重复定义
+        try self.checkDuplicateDefinitions();
+        
+        // 3. 解析依赖关系
+        try self.resolveDependencies();
+        
+        // 4. 解析符号引用
+        try self.resolveSymbolReferences();
+        
+        // 5. 检测未定义符号
+        try self.checkUndefinedSymbols();
     }
-
-    // Utility Methods
-    pub fn getConfig(self: *const Self) LinkerConfig {
-        return self.config;
-    }
-
-    pub fn setConfig(self: *Self, config: LinkerConfig) void {
-        self.config = config;
-    }
-
-    pub fn getTarget(self: *const Self) Target {
-        return self.config.target;
-    }
-
-    pub fn getObjectFormat(self: *const Self) ObjectFormat {
-        return ObjectFormat.fromTarget(self.config.target);
-    }
-
-    pub fn getExecutableExtension(self: *const Self) []const u8 {
-        return self.getObjectFormat().executableExtension();
-    }
-
-    pub fn generateOutputPath(self: *Self, input_path: []const u8) ![]const u8 {
-        const base = if (std.mem.endsWith(u8, input_path, ".php"))
-            input_path[0 .. input_path.len - 4]
-        else
-            input_path;
-        const ext = self.getExecutableExtension();
-        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base, ext });
-    }
-
-    pub fn linkExecutable(self: *Self, object_code: *const ObjectCode, output_path: []const u8) !void {
-        if (!object_code.isValid()) {
-            self.diagnostics.emitError("E007", "Invalid object code", Diagnostics.SourceLocation.unknown(), &[_][]const u8{});
-            return LinkerError.InvalidObjectCode;
+    
+    /// 合并符号表
+    /// @post 所有编译单元的符号被合并到全局符号表
+    fn mergeSymbolTables(self: *StaticLinker) !void {
+        for (self.compilation_units.items) |unit| {
+            var iter = unit.symbols.iterator();
+            while (iter.next()) |entry| {
+                const symbol = entry.value_ptr.*;
+                
+                // 只导出可见的符号
+                if (symbol.isExportable()) {
+                    try self.global_symbols.addSymbol(symbol);
+                }
+            }
         }
-        const obj_path = try self.writeTempObjectFile(object_code);
-        const runtime_lib = try self.compileRuntimeLib();
-        _ = runtime_lib;
-        try self.link(&[_][]const u8{obj_path}, output_path);
+    }
+    
+    /// 检测重复定义
+    /// @post 如果存在重复定义，报告错误
+    fn checkDuplicateDefinitions(self: *StaticLinker) !void {
+        if (!self.global_symbols.hasDuplicateDefinitions()) {
+            return;
+        }
+        
+        var iter = self.global_symbols.duplicate_definitions.iterator();
+        while (iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const defs = entry.value_ptr.items;
+            
+            // 报告重复定义错误
+            for (defs) |def| {
+                self.diagnostics.reportError(
+                    def.location,
+                    "duplicate definition of symbol '{s}'",
+                    .{name},
+                );
+                
+                // 添加注释：显示其他定义位置
+                for (defs) |other_def| {
+                    if (&def != &other_def) {
+                        self.diagnostics.reportNote(
+                            other_def.location,
+                            "previous definition here",
+                            .{},
+                        );
+                    }
+                }
+            }
+        }
+        
+        return LinkerError.DuplicateDefinition;
+    }
+    
+    /// 解析依赖关系
+    /// @post 依赖关系被解析，或检测到循环依赖
+    fn resolveDependencies(self: *StaticLinker) !void {
+        // 构建依赖图
+        var dep_graph = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(self.allocator);
+        defer {
+            var iter = dep_graph.iterator();
+            while (iter.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            dep_graph.deinit();
+        }
+        
+        for (self.compilation_units.items) |unit| {
+            var deps: std.ArrayListUnmanaged([]const u8) = .{};
+            
+            var dep_iter = unit.dependencies.iterator();
+            while (dep_iter.next()) |entry| {
+                try deps.append(self.allocator, entry.key_ptr.*);
+            }
+            
+            try dep_graph.put(unit.file_path, deps);
+        }
+        
+        // 拓扑排序检测循环依赖
+        var visited = std.StringHashMap(bool).init(self.allocator);
+        defer visited.deinit();
+        
+        var rec_stack = std.StringHashMap(bool).init(self.allocator);
+        defer rec_stack.deinit();
+        
+        for (self.compilation_units.items) |unit| {
+            if (try self.detectCycle(unit.file_path, &dep_graph, &visited, &rec_stack)) {
+                self.diagnostics.reportError(
+                    .{ .line = 0, .column = 0 },
+                    "circular dependency detected involving '{s}'",
+                    .{unit.file_path},
+                );
+                return LinkerError.CircularDependency;
+            }
+        }
+    }
+    
+    /// 检测循环依赖（DFS）
+    /// @post 返回是否存在循环
+    fn detectCycle(
+        self: *StaticLinker,
+        file: []const u8,
+        dep_graph: *std.StringHashMap(std.ArrayListUnmanaged([]const u8)),
+        visited: *std.StringHashMap(bool),
+        rec_stack: *std.StringHashMap(bool),
+    ) !bool {
+        // 标记为已访问
+        try visited.put(file, true);
+        try rec_stack.put(file, true);
+        
+        // 访问所有依赖
+        if (dep_graph.get(file)) |deps| {
+            for (deps.items) |dep| {
+                const is_visited = visited.get(dep) orelse false;
+                if (!is_visited) {
+                    if (try self.detectCycle(dep, dep_graph, visited, rec_stack)) {
+                        return true;
+                    }
+                } else if (rec_stack.get(dep) orelse false) {
+                    // 检测到循环
+                    return true;
+                }
+            }
+        }
+        
+        // 从递归栈中移除
+        try rec_stack.put(file, false);
+        return false;
+    }
+    
+    /// 解析符号引用
+    /// @post 所有符号引用被解析到定义
+    fn resolveSymbolReferences(self: *StaticLinker) !void {
+        for (self.compilation_units.items) |unit| {
+            for (unit.references.items) |*reference| {
+                // 首先在本地符号表中查找
+                if (unit.findSymbol(reference.name)) |local_def| {
+                    reference.resolved_definition = local_def;
+                    continue;
+                }
+                
+                // 在全局符号表中查找
+                if (self.global_symbols.findSymbol(reference.name)) |global_def| {
+                    // 检查可见性
+                    if (!self.checkVisibility(unit, global_def)) {
+                        self.diagnostics.reportError(
+                            reference.location,
+                            "symbol '{s}' is not visible from '{s}'",
+                            .{ reference.name, unit.file_path },
+                        );
+                        return LinkerError.VisibilityViolation;
+                    }
+                    
+                    // 检查类型匹配
+                    if (reference.type_ != global_def.type_) {
+                        self.diagnostics.reportError(
+                            reference.location,
+                            "symbol '{s}' type mismatch: expected {s}, found {s}",
+                            .{
+                                reference.name,
+                                @tagName(reference.type_),
+                                @tagName(global_def.type_),
+                            },
+                        );
+                        return LinkerError.SymbolTypeMismatch;
+                    }
+                    
+                    reference.resolved_definition = @constCast(global_def);
+                }
+            }
+        }
+    }
+    
+    /// 检查符号可见性
+    /// @post 返回符号是否对编译单元可见
+    fn checkVisibility(
+        self: *StaticLinker,
+        unit: *CompilationUnit,
+        symbol: *const SymbolDefinition,
+    ) bool {
+        _ = self;
+        
+        switch (symbol.visibility) {
+            .public => return true,
+            .private => {
+                // 只在同一文件内可见
+                return std.mem.eql(u8, unit.file_path, symbol.file_path);
+            },
+            .protected => {
+                // 在同一文件或子类中可见（简化实现）
+                return true;
+            },
+            .internal => {
+                // 在同一模块内可见（简化实现）
+                return true;
+            },
+        }
+    }
+    
+    /// 检测未定义符号
+    /// @post 如果存在未定义符号，报告错误
+    fn checkUndefinedSymbols(self: *StaticLinker) !void {
+        var has_undefined = false;
+        
+        for (self.compilation_units.items) |unit| {
+            for (unit.references.items) |reference| {
+                if (!reference.isResolved()) {
+                    has_undefined = true;
+                    
+                    self.diagnostics.reportError(
+                        reference.location,
+                        "undefined symbol '{s}'",
+                        .{reference.name},
+                    );
+                }
+            }
+        }
+        
+        if (has_undefined) {
+            return LinkerError.UndefinedSymbol;
+        }
+    }
+    
+    /// 获取链接统计信息
+    /// @post 返回链接统计
+    pub fn getStatistics(self: *const StaticLinker) LinkStatistics {
+        var total_symbols: usize = 0;
+        var total_references: usize = 0;
+        var resolved_references: usize = 0;
+        
+        for (self.compilation_units.items) |unit| {
+            total_symbols += unit.symbols.count();
+            total_references += unit.references.items.len;
+            
+            for (unit.references.items) |reference| {
+                if (reference.isResolved()) {
+                    resolved_references += 1;
+                }
+            }
+        }
+        
+        return .{
+            .compilation_units = self.compilation_units.items.len,
+            .total_symbols = total_symbols,
+            .global_symbols = self.global_symbols.symbols.count(),
+            .total_references = total_references,
+            .resolved_references = resolved_references,
+            .duplicate_definitions = self.global_symbols.duplicate_definitions.count(),
+        };
+    }
+};
+
+/// 向后兼容别名
+pub const Linker = StaticLinker;
+
+/// 链接统计信息
+pub const LinkStatistics = struct {
+    compilation_units: usize,
+    total_symbols: usize,
+    global_symbols: usize,
+    total_references: usize,
+    resolved_references: usize,
+    duplicate_definitions: usize,
+    
+    /// 打印统计信息
+    pub fn print(self: *const LinkStatistics, writer: anytype) !void {
+        try writer.print("=== Link Statistics ===\n", .{});
+        try writer.print("Compilation Units: {d}\n", .{self.compilation_units});
+        try writer.print("Total Symbols: {d}\n", .{self.total_symbols});
+        try writer.print("Global Symbols: {d}\n", .{self.global_symbols});
+        try writer.print("Total References: {d}\n", .{self.total_references});
+        try writer.print("Resolved References: {d}\n", .{self.resolved_references});
+        try writer.print("Duplicate Definitions: {d}\n", .{self.duplicate_definitions});
     }
 };
 
 // ============================================================================
-// Unit Tests
+// 测试
 // ============================================================================
 
-test "ObjectFormat.fromTarget" {
-    const linux_target = Target{ .arch = .x86_64, .os = .linux, .abi = .gnu };
-    try std.testing.expectEqual(ObjectFormat.elf, ObjectFormat.fromTarget(linux_target));
-
-    const macos_target = Target{ .arch = .aarch64, .os = .macos, .abi = .none };
-    try std.testing.expectEqual(ObjectFormat.macho, ObjectFormat.fromTarget(macos_target));
-
-    const windows_target = Target{ .arch = .x86_64, .os = .windows, .abi = .msvc };
-    try std.testing.expectEqual(ObjectFormat.coff, ObjectFormat.fromTarget(windows_target));
+test "SymbolDefinition creation" {
+    const symbol = SymbolDefinition.create(
+        "test_func",
+        .function,
+        .public,
+        "test.php",
+        .{ .line = 10, .column = 5 },
+    );
+    
+    try std.testing.expectEqualStrings("test_func", symbol.name);
+    try std.testing.expectEqual(SymbolType.function, symbol.type_);
+    try std.testing.expect(symbol.isExportable());
 }
 
-test "ObjectFormat.extensions" {
-    try std.testing.expectEqualStrings(".o", ObjectFormat.elf.objectExtension());
-    try std.testing.expectEqualStrings(".a", ObjectFormat.elf.staticLibExtension());
-    try std.testing.expectEqualStrings("", ObjectFormat.elf.executableExtension());
-
-    try std.testing.expectEqualStrings(".obj", ObjectFormat.coff.objectExtension());
-    try std.testing.expectEqualStrings(".lib", ObjectFormat.coff.staticLibExtension());
-    try std.testing.expectEqualStrings(".exe", ObjectFormat.coff.executableExtension());
-}
-
-test "LinkerConfig.default" {
-    const target = Target.native();
-    const config = LinkerConfig.default(target);
-    try std.testing.expect(config.static_link);
-    try std.testing.expect(config.debug_info);
-    try std.testing.expect(!config.strip_symbols);
-    try std.testing.expect(!config.verbose);
-    try std.testing.expectEqual(OptimizeLevel.debug, config.optimize_level);
-}
-
-test "StaticLinker.init and deinit" {
+test "CompilationUnit basic operations" {
     const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const config = LinkerConfig.default(Target.native());
-    const lnk = try StaticLinker.init(allocator, config, &diagnostics);
-    defer lnk.deinit();
-
-    try std.testing.expectEqual(config.target.arch, lnk.getTarget().arch);
-    try std.testing.expectEqual(config.target.os, lnk.getTarget().os);
+    
+    var unit = try CompilationUnit.init(allocator, "test.php");
+    defer unit.deinit();
+    
+    // 添加符号
+    const symbol = SymbolDefinition.create(
+        "test_func",
+        .function,
+        .public,
+        "test.php",
+        .{ .line = 10, .column = 5 },
+    );
+    try unit.addSymbol(symbol);
+    
+    // 查找符号
+    const found = unit.findSymbol("test_func");
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualStrings("test_func", found.?.name);
+    
+    // 添加引用
+    const reference = SymbolReference.create(
+        "other_func",
+        .function,
+        "test.php",
+        .{ .line = 20, .column = 10 },
+    );
+    try unit.addReference(reference);
+    
+    try std.testing.expectEqual(@as(usize, 1), unit.references.items.len);
 }
 
-test "StaticLinker.generateMockObjectCode" {
+test "GlobalSymbolTable merge" {
     const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const config = LinkerConfig.default(Target.native());
-    const lnk = try StaticLinker.init(allocator, config, &diagnostics);
-    defer lnk.deinit();
-
-    var obj = try lnk.generateMockObjectCode("test_module");
-    defer obj.deinit(allocator);
-
-    try std.testing.expect(obj.data.len > 0);
-    try std.testing.expectEqualStrings("test_module", obj.module_name);
+    
+    var table = GlobalSymbolTable.init(allocator);
+    defer table.deinit();
+    
+    // 添加符号
+    const symbol1 = SymbolDefinition.create(
+        "func1",
+        .function,
+        .public,
+        "file1.php",
+        .{ .line = 10, .column = 5 },
+    );
+    try table.addSymbol(symbol1);
+    
+    const symbol2 = SymbolDefinition.create(
+        "func2",
+        .function,
+        .public,
+        "file2.php",
+        .{ .line = 20, .column = 10 },
+    );
+    try table.addSymbol(symbol2);
+    
+    // 查找符号
+    const found1 = table.findSymbol("func1");
+    try std.testing.expect(found1 != null);
+    
+    const found2 = table.findSymbol("func2");
+    try std.testing.expect(found2 != null);
+    
+    // 不存在的符号
+    const not_found = table.findSymbol("func3");
+    try std.testing.expect(not_found == null);
 }
 
-test "ObjectCode.isValid ELF" {
+test "GlobalSymbolTable duplicate detection" {
     const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const linux_config = LinkerConfig.default(Target{ .arch = .x86_64, .os = .linux, .abi = .gnu });
-    const lnk = try StaticLinker.init(allocator, linux_config, &diagnostics);
-    defer lnk.deinit();
-
-    var obj = try lnk.generateMockObjectCode("test");
-    defer obj.deinit(allocator);
-    try std.testing.expect(obj.isValid());
-}
-
-test "ObjectCode.isValid MachO" {
-    const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const macos_config = LinkerConfig.default(Target{ .arch = .aarch64, .os = .macos, .abi = .none });
-    const lnk = try StaticLinker.init(allocator, macos_config, &diagnostics);
-    defer lnk.deinit();
-
-    var obj = try lnk.generateMockObjectCode("test");
-    defer obj.deinit(allocator);
-    try std.testing.expect(obj.isValid());
-}
-
-test "ObjectCode.isValid COFF" {
-    const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const windows_config = LinkerConfig.default(Target{ .arch = .x86_64, .os = .windows, .abi = .msvc });
-    const lnk = try StaticLinker.init(allocator, windows_config, &diagnostics);
-    defer lnk.deinit();
-
-    var obj = try lnk.generateMockObjectCode("test");
-    defer obj.deinit(allocator);
-    try std.testing.expect(obj.isValid());
-}
-
-test "StaticLinker.generateOutputPath" {
-    const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const linux_config = LinkerConfig.default(Target{ .arch = .x86_64, .os = .linux, .abi = .gnu });
-    const linux_linker = try StaticLinker.init(allocator, linux_config, &diagnostics);
-    defer linux_linker.deinit();
-
-    const linux_output = try linux_linker.generateOutputPath("test.php");
-    defer allocator.free(linux_output);
-    try std.testing.expectEqualStrings("test", linux_output);
-
-    const windows_config = LinkerConfig.default(Target{ .arch = .x86_64, .os = .windows, .abi = .msvc });
-    const windows_linker = try StaticLinker.init(allocator, windows_config, &diagnostics);
-    defer windows_linker.deinit();
-
-    const windows_output = try windows_linker.generateOutputPath("test.php");
-    defer allocator.free(windows_output);
-    try std.testing.expectEqualStrings("test.exe", windows_output);
-}
-
-test "StaticLinker.getRuntimeLibPaths" {
-    const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const config = LinkerConfig.default(Target{ .arch = .x86_64, .os = .linux, .abi = .gnu });
-    const lnk = try StaticLinker.init(allocator, config, &diagnostics);
-    defer lnk.deinit();
-
-    const paths = lnk.getRuntimeLibPaths();
-    try std.testing.expect(paths.static_lib != null);
-    try std.testing.expect(paths.system_libs.len > 0);
-}
-
-test "StaticLinker.getObjectFormat" {
-    const allocator = std.testing.allocator;
-    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
-    defer diagnostics.deinit();
-
-    const linux_config = LinkerConfig.default(Target{ .arch = .x86_64, .os = .linux, .abi = .gnu });
-    const lnk = try StaticLinker.init(allocator, linux_config, &diagnostics);
-    defer lnk.deinit();
-
-    try std.testing.expectEqual(ObjectFormat.elf, lnk.getObjectFormat());
-}
-
-test "isRuntimeFunction" {
-    try std.testing.expect(StaticLinker.isRuntimeFunction("php_value_create_int"));
-    try std.testing.expect(StaticLinker.isRuntimeFunction("php_gc_retain"));
-    try std.testing.expect(!StaticLinker.isRuntimeFunction("my_function"));
-    try std.testing.expect(!StaticLinker.isRuntimeFunction("main"));
+    
+    var table = GlobalSymbolTable.init(allocator);
+    defer table.deinit();
+    
+    // 添加相同名称的符号
+    const symbol1 = SymbolDefinition.create(
+        "duplicate_func",
+        .function,
+        .public,
+        "file1.php",
+        .{ .line = 10, .column = 5 },
+    );
+    try table.addSymbol(symbol1);
+    
+    const symbol2 = SymbolDefinition.create(
+        "duplicate_func",
+        .function,
+        .public,
+        "file2.php",
+        .{ .line = 20, .column = 10 },
+    );
+    try table.addSymbol(symbol2);
+    
+    // 检测重复定义
+    try std.testing.expect(table.hasDuplicateDefinitions());
+    
+    const dups = table.getDuplicateDefinitions("duplicate_func");
+    try std.testing.expect(dups != null);
+    try std.testing.expectEqual(@as(usize, 2), dups.?.len);
 }

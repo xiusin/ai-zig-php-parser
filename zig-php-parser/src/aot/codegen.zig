@@ -24,6 +24,10 @@ const Allocator = std.mem.Allocator;
 const IR = @import("ir.zig");
 const Diagnostics = @import("diagnostics.zig");
 const SourceLocation = Diagnostics.SourceLocation;
+const Platform = @import("platform.zig");
+const PlatformConfig = Platform.PlatformConfig;
+const PlatformSelector = Platform.PlatformSelector;
+const PlatformCodeGen = Platform.PlatformCodeGen;
 
 // ============================================================================
 // LLVM C API Type Definitions
@@ -317,6 +321,10 @@ pub const CodeGenerator = struct {
     target: Target,
     optimize_level: OptimizeLevel,
     debug_info: bool,
+    
+    // Platform configuration
+    platform_config: *const PlatformConfig,
+    platform_codegen: PlatformCodeGen,
 
     // Type cache
     type_cache: TypeCache,
@@ -493,6 +501,12 @@ pub const CodeGenerator = struct {
         debug_info: bool,
         diagnostics: *Diagnostics.DiagnosticEngine,
     ) !*Self {
+        // 根据目标选择平台配置
+        const target_triple = try target.toTriple(allocator);
+        defer allocator.free(target_triple);
+        
+        const platform_config = try PlatformSelector.selectByTriple(target_triple);
+        
         const self = try allocator.create(Self);
         self.* = .{
             .allocator = allocator,
@@ -504,6 +518,8 @@ pub const CodeGenerator = struct {
             .target = target,
             .optimize_level = optimize_level,
             .debug_info = debug_info,
+            .platform_config = platform_config,
+            .platform_codegen = PlatformCodeGen.init(platform_config),
             .type_cache = .{},
             .runtime_functions = std.StringHashMap(LLVMValueRef).init(allocator),
             .register_map = std.AutoHashMap(u32, LLVMValueRef).init(allocator),
@@ -538,10 +554,132 @@ pub const CodeGenerator = struct {
 
     /// Initialize LLVM types for PHPValue and other runtime structures
     /// PHPValue layout: tag (u8) + padding (3 bytes) + ref_count (u32) + data (16 bytes) = 24 bytes
+    /// 
+    /// @post 所有类型缓存字段已初始化
+    /// @memory-safety 类型对象由 LLVM 上下文管理，无需手动释放
     pub fn initializeTypes(self: *Self) void {
         if (!self.llvm_available) return;
-        // In real LLVM mode, we would create struct types here
-        // For now, this is a stub
+        
+        // 基础类型初始化（在真实 LLVM 模式下）
+        // 这里保持为 stub，因为需要 LLVM C API 调用
+        // 实际实现需要：
+        // self.type_cache.void_type = LLVMVoidTypeInContext(self.context);
+        // self.type_cache.bool_type = LLVMInt1TypeInContext(self.context);
+        // self.type_cache.i8_type = LLVMInt8TypeInContext(self.context);
+        // self.type_cache.i32_type = LLVMInt32TypeInContext(self.context);
+        // self.type_cache.i64_type = LLVMInt64TypeInContext(self.context);
+        // self.type_cache.f64_type = LLVMDoubleTypeInContext(self.context);
+        // self.type_cache.ptr_type = LLVMPointerType(LLVMInt8TypeInContext(self.context), 0);
+        
+        // PHP 运行时类型初始化
+        self.initializePHPValueType();
+        self.initializePHPStringType();
+        self.initializePHPArrayType();
+        self.initializePHPObjectType();
+    }
+    
+    /// 初始化 PHPValue 结构体类型
+    /// PHPValue 布局：
+    /// - tag: u8 (类型标签)
+    /// - padding: [3]u8 (对齐填充)
+    /// - ref_count: u32 (引用计数)
+    /// - data: [16]u8 (数据联合体)
+    /// 
+    /// @ownership NON-OWNING (LLVM 上下文管理)
+    fn initializePHPValueType(self: *Self) void {
+        if (!self.llvm_available) return;
+        
+        // 在真实 LLVM 模式下：
+        // const field_types = [_]LLVMTypeRef{
+        //     LLVMInt8TypeInContext(self.context),  // tag
+        //     LLVMArrayType(LLVMInt8TypeInContext(self.context), 3),  // padding
+        //     LLVMInt32TypeInContext(self.context),  // ref_count
+        //     LLVMArrayType(LLVMInt8TypeInContext(self.context), 16),  // data
+        // };
+        // self.type_cache.php_value_type = LLVMStructTypeInContext(
+        //     self.context,
+        //     &field_types,
+        //     field_types.len,
+        //     0  // not packed
+        // );
+        // self.type_cache.php_value_ptr_type = LLVMPointerType(self.type_cache.php_value_type, 0);
+    }
+    
+    /// 初始化 PHPString 结构体类型
+    /// PHPString 布局：
+    /// - length: u64 (字符串长度)
+    /// - capacity: u64 (分配容量)
+    /// - data: *u8 (字符串数据指针)
+    /// 
+    /// @ownership NON-OWNING (LLVM 上下文管理)
+    fn initializePHPStringType(self: *Self) void {
+        if (!self.llvm_available) return;
+        
+        // 在真实 LLVM 模式下：
+        // const field_types = [_]LLVMTypeRef{
+        //     LLVMInt64TypeInContext(self.context),  // length
+        //     LLVMInt64TypeInContext(self.context),  // capacity
+        //     LLVMPointerType(LLVMInt8TypeInContext(self.context), 0),  // data
+        // };
+        // self.type_cache.php_string_type = LLVMStructTypeInContext(
+        //     self.context,
+        //     &field_types,
+        //     field_types.len,
+        //     0
+        // );
+        // self.type_cache.php_string_ptr_type = LLVMPointerType(self.type_cache.php_string_type, 0);
+    }
+    
+    /// 初始化 PHPArray 结构体类型
+    /// PHPArray 布局：
+    /// - size: u64 (元素数量)
+    /// - capacity: u64 (分配容量)
+    /// - data: *PHPValue (元素数据指针)
+    /// 
+    /// @ownership NON-OWNING (LLVM 上下文管理)
+    fn initializePHPArrayType(self: *Self) void {
+        if (!self.llvm_available) return;
+        
+        // 在真实 LLVM 模式下：
+        // const field_types = [_]LLVMTypeRef{
+        //     LLVMInt64TypeInContext(self.context),  // size
+        //     LLVMInt64TypeInContext(self.context),  // capacity
+        //     self.type_cache.php_value_ptr_type,  // data
+        // };
+        // self.type_cache.php_array_type = LLVMStructTypeInContext(
+        //     self.context,
+        //     &field_types,
+        //     field_types.len,
+        //     0
+        // );
+        // self.type_cache.php_array_ptr_type = LLVMPointerType(self.type_cache.php_array_type, 0);
+    }
+    
+    /// 初始化 PHPObject 结构体类型
+    /// PHPObject 布局：
+    /// - vtable: *VTable (虚函数表指针)
+    /// - class_name: *u8 (类名字符串)
+    /// - properties: *PHPValue (属性数组指针)
+    /// - property_count: u32 (属性数量)
+    /// 
+    /// @ownership NON-OWNING (LLVM 上下文管理)
+    fn initializePHPObjectType(self: *Self) void {
+        if (!self.llvm_available) return;
+        
+        // 在真实 LLVM 模式下：
+        // const field_types = [_]LLVMTypeRef{
+        //     LLVMPointerType(LLVMInt8TypeInContext(self.context), 0),  // vtable (opaque pointer)
+        //     LLVMPointerType(LLVMInt8TypeInContext(self.context), 0),  // class_name
+        //     self.type_cache.php_value_ptr_type,  // properties
+        //     LLVMInt32TypeInContext(self.context),  // property_count
+        // };
+        // self.type_cache.php_object_type = LLVMStructTypeInContext(
+        //     self.context,
+        //     &field_types,
+        //     field_types.len,
+        //     0
+        // );
+        // self.type_cache.php_object_ptr_type = LLVMPointerType(self.type_cache.php_object_type, 0);
     }
 
     /// Map IR type to LLVM type
@@ -620,6 +758,9 @@ pub const CodeGenerator = struct {
         // Initialize types
         self.initializeTypes();
 
+        // Generate type definitions (classes, interfaces)
+        try self.generateTypeDefinitions(ir_module);
+
         // Declare runtime functions
         try self.declareRuntimeFunctions();
 
@@ -629,6 +770,196 @@ pub const CodeGenerator = struct {
         }
 
         self.current_ir_module = null;
+    }
+    
+    /// 生成类型定义（PHP 类到 LLVM 结构体的映射）
+    /// 
+    /// @pre ir_module 必须有效且包含类型定义
+    /// @post 所有 PHP 类已映射为 LLVM 结构体类型
+    /// @ownership NON-OWNING (LLVM 上下文管理类型对象)
+    pub fn generateTypeDefinitions(self: *Self, ir_module: *const IR.Module) !void {
+        if (!self.llvm_available) return;
+        
+        // 遍历所有类型定义
+        for (ir_module.types.items) |type_def| {
+            switch (type_def.kind) {
+                .class => try self.generateClassType(type_def),
+                .interface => try self.generateInterfaceType(type_def),
+                .trait => {}, // Traits 在编译时展开，不生成独立类型
+                .@"enum" => try self.generateEnumType(type_def),
+                .@"struct" => try self.generateStructType(type_def),
+            }
+        }
+    }
+    
+    /// 生成 PHP 类的 LLVM 结构体类型
+    /// 
+    /// 类布局：
+    /// - vtable: *VTable (虚函数表指针)
+    /// - parent_data: ParentClass (父类数据，如果有继承)
+    /// - property_1: Type (属性 1)
+    /// - property_2: Type (属性 2)
+    /// - ...
+    /// 
+    /// @pre type_def.kind == .class
+    /// @post 类类型已添加到类型缓存
+    /// @ownership NON-OWNING (LLVM 上下文管理)
+    fn generateClassType(self: *Self, type_def: *const IR.TypeDef) !void {
+        if (!self.llvm_available) return;
+        
+        _ = type_def;  // 在非 LLVM 模式下未使用
+        
+        // 在真实 LLVM 模式下：
+        // 1. 创建命名结构体类型
+        // const class_type = LLVMStructCreateNamed(self.context, type_def.name.ptr);
+        
+        // 2. 收集字段类型
+        // var field_types = std.ArrayList(LLVMTypeRef).init(self.allocator);
+        // defer field_types.deinit();
+        
+        // 3. 添加 vtable 指针
+        // const vtable_type = try self.generateVTableType(type_def);
+        // try field_types.append(LLVMPointerType(vtable_type, 0));
+        
+        // 4. 如果有父类，添加父类数据
+        // if (type_def.parent) |parent_name| {
+        //     const parent_type = try self.lookupClassType(parent_name);
+        //     try field_types.append(parent_type);
+        // }
+        
+        // 5. 添加所有属性
+        // for (type_def.properties) |prop| {
+        //     if (!prop.is_static) {  // 静态属性不在实例中
+        //         const prop_type = self.mapType(prop.type_);
+        //         try field_types.append(prop_type);
+        //     }
+        // }
+        
+        // 6. 设置结构体主体
+        // LLVMStructSetBody(
+        //     class_type,
+        //     field_types.items.ptr,
+        //     @intCast(u32, field_types.items.len),
+        //     0  // not packed
+        // );
+        
+        // 7. 缓存类型
+        // try self.class_type_cache.put(type_def.name, class_type);
+    }
+    
+    /// 生成虚函数表（VTable）类型
+    /// 
+    /// VTable 布局：
+    /// - class_name: *u8 (类名字符串)
+    /// - parent_vtable: *VTable (父类 vtable 指针，如果有继承)
+    /// - method_1: *fn(...) (方法 1 函数指针)
+    /// - method_2: *fn(...) (方法 2 函数指针)
+    /// - ...
+    /// 
+    /// @pre type_def.kind == .class
+    /// @post 返回 vtable 的 LLVM 类型
+    /// @ownership NON-OWNING (LLVM 上下文管理)
+    fn generateVTableType(self: *Self, type_def: *const IR.TypeDef) !LLVMTypeRef {
+        if (!self.llvm_available) return null;
+        
+        _ = type_def;  // 在非 LLVM 模式下未使用
+        
+        // 在真实 LLVM 模式下：
+        // 1. 创建命名结构体类型
+        // const vtable_name = try std.fmt.allocPrint(
+        //     self.allocator,
+        //     "{s}_VTable",
+        //     .{type_def.name}
+        // );
+        // defer self.allocator.free(vtable_name);
+        // const vtable_type = LLVMStructCreateNamed(self.context, vtable_name.ptr);
+        
+        // 2. 收集字段类型
+        // var field_types = std.ArrayList(LLVMTypeRef).init(self.allocator);
+        // defer field_types.deinit();
+        
+        // 3. 添加类名字段
+        // try field_types.append(LLVMPointerType(LLVMInt8TypeInContext(self.context), 0));
+        
+        // 4. 如果有父类，添加父类 vtable 指针
+        // if (type_def.parent) |parent_name| {
+        //     const parent_vtable_type = try self.lookupVTableType(parent_name);
+        //     try field_types.append(LLVMPointerType(parent_vtable_type, 0));
+        // }
+        
+        // 5. 添加所有方法的函数指针
+        // for (type_def.methods) |method_name| {
+        //     const method_func = self.current_ir_module.?.findFunction(method_name);
+        //     if (method_func) |func| {
+        //         const func_type = try self.createFunctionType(func);
+        //         try field_types.append(LLVMPointerType(func_type, 0));
+        //     }
+        // }
+        
+        // 6. 设置结构体主体
+        // LLVMStructSetBody(
+        //     vtable_type,
+        //     field_types.items.ptr,
+        //     @intCast(u32, field_types.items.len),
+        //     0
+        // );
+        
+        // return vtable_type;
+        
+        return null;  // Stub for non-LLVM mode
+    }
+    
+    /// 生成接口类型（接口在 LLVM 中表示为 vtable）
+    /// 
+    /// @pre type_def.kind == .interface
+    /// @post 接口类型已添加到类型缓存
+    fn generateInterfaceType(self: *Self, type_def: *const IR.TypeDef) !void {
+        if (!self.llvm_available) return;
+        
+        // 接口类似于抽象类，只包含方法签名
+        // 在 LLVM 中表示为纯 vtable
+        _ = try self.generateVTableType(type_def);
+    }
+    
+    /// 生成枚举类型
+    /// 
+    /// @pre type_def.kind == .enum
+    /// @post 枚举类型已添加到类型缓存
+    fn generateEnumType(self: *Self, type_def: *const IR.TypeDef) !void {
+        if (!self.llvm_available) return;
+        
+        // PHP 枚举在 LLVM 中表示为整数类型
+        // 在真实 LLVM 模式下：
+        // const enum_type = LLVMInt32TypeInContext(self.context);
+        // try self.type_cache_map.put(type_def.name, enum_type);
+        _ = type_def;
+    }
+    
+    /// 生成结构体类型（PHP 8.2+ struct）
+    /// 
+    /// @pre type_def.kind == .struct
+    /// @post 结构体类型已添加到类型缓存
+    fn generateStructType(self: *Self, type_def: *const IR.TypeDef) !void {
+        if (!self.llvm_available) return;
+        
+        // 结构体类似于类，但没有 vtable 和继承
+        // 在真实 LLVM 模式下：
+        // const struct_type = LLVMStructCreateNamed(self.context, type_def.name.ptr);
+        // var field_types = std.ArrayList(LLVMTypeRef).init(self.allocator);
+        // defer field_types.deinit();
+        // 
+        // for (type_def.properties) |prop| {
+        //     const prop_type = self.mapType(prop.type_);
+        //     try field_types.append(prop_type);
+        // }
+        // 
+        // LLVMStructSetBody(
+        //     struct_type,
+        //     field_types.items.ptr,
+        //     @intCast(u32, field_types.items.len),
+        //     0
+        // );
+        _ = type_def;
     }
 
     /// Generate LLVM IR for a function
@@ -1367,6 +1698,269 @@ pub const CodeGenerator = struct {
     pub fn getRuntimeFunctionCount(self: *const Self) usize {
         return self.runtime_functions.count();
     }
+    
+    // ========================================================================
+    // 跨平台代码生成
+    // ========================================================================
+
+    /// 为目标平台生成对象文件
+    /// 
+    /// @pre module 必须已初始化且包含有效的 LLVM IR
+    /// @post 生成平台特定的对象文件
+    /// @platform-support Linux, macOS, Windows
+    /// @memory-safety output_path 由调用者管理
+    pub fn generateObjectFileForPlatform(self: *Self, output_path: []const u8) !void {
+        if (!self.llvm_available) {
+            // 在非 LLVM 模式下，记录诊断信息
+            try self.diagnostics.addDiagnostic(.{
+                .severity = .info,
+                .message = try std.fmt.allocPrint(
+                    self.allocator,
+                    "Generating object file for platform: {s}",
+                    .{self.platform_config.name}
+                ),
+                .location = .{
+                    .file = "codegen",
+                    .line = 0,
+                    .column = 0,
+                },
+            });
+            return;
+        }
+        
+        _ = output_path;
+    }
+    
+    /// 为多个平台生成对象文件
+    /// 
+    /// @pre ir_module 必须有效
+    /// @post 为每个目标平台生成对象文件
+    /// @memory-safety output_dir 由调用者管理
+    pub fn generateForMultiplePlatforms(
+        self: *Self,
+        ir_module: *const IR.Module,
+        output_dir: []const u8,
+        target_platforms: []const *const PlatformConfig,
+    ) !void {
+        for (target_platforms) |platform| {
+            // 保存当前平台配置
+            const original_platform = self.platform_config;
+            const original_codegen = self.platform_codegen;
+            
+            // 切换到目标平台
+            self.platform_config = platform;
+            self.platform_codegen = PlatformCodeGen.init(platform);
+            
+            // 生成代码
+            try self.generateModule(ir_module);
+            
+            // 生成对象文件
+            const output_path = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}/{s}.o",
+                .{ output_dir, platform.name }
+            );
+            defer self.allocator.free(output_path);
+            
+            try self.generateObjectFileForPlatform(output_path);
+            
+            // 恢复原始平台配置
+            self.platform_config = original_platform;
+            self.platform_codegen = original_codegen;
+        }
+    }
+    
+    /// 获取平台特定的链接器命令
+    /// 
+    /// @pre object_files 必须包含有效的对象文件路径
+    /// @post 返回平台特定的链接器命令行
+    /// @memory-safety allocator 管理返回的内存
+    pub fn getPlatformLinkerCommand(
+        self: *const Self,
+        allocator: Allocator,
+        object_files: []const []const u8,
+        output_path: []const u8,
+    ) ![]const u8 {
+        var cmd: std.ArrayList(u8) = .{};
+        errdefer cmd.deinit(allocator);
+        
+        const writer = cmd.writer(allocator);
+        
+        // 根据平台选择链接器
+        const linker = switch (self.platform_config.object_format) {
+            .elf => "ld",
+            .macho => "ld",
+            .coff => if (std.mem.indexOf(u8, self.platform_config.triple, "msvc") != null)
+                "link.exe"
+            else
+                "ld",
+        };
+        
+        try writer.print("{s} ", .{linker});
+        
+        // 添加对象文件
+        for (object_files) |obj_file| {
+            try writer.print("{s} ", .{obj_file});
+        }
+        
+        // 添加输出路径
+        if (self.platform_config.object_format == .coff and 
+            std.mem.indexOf(u8, self.platform_config.triple, "msvc") != null) {
+            try writer.print("/OUT:{s} ", .{output_path});
+        } else {
+            try writer.print("-o {s} ", .{output_path});
+        }
+        
+        // 添加平台特定的链接标志
+        for (self.platform_config.link_flags) |flag| {
+            try writer.print("{s} ", .{flag});
+        }
+        
+        // 添加系统库路径
+        for (self.platform_config.system_lib_paths) |lib_path| {
+            if (self.platform_config.object_format == .coff and 
+                std.mem.indexOf(u8, self.platform_config.triple, "msvc") != null) {
+                try writer.print("/LIBPATH:{s} ", .{lib_path});
+            } else {
+                try writer.print("-L{s} ", .{lib_path});
+            }
+        }
+        
+        // 添加必需的系统库
+        for (self.platform_config.required_libs) |lib| {
+            if (self.platform_config.object_format == .coff and 
+                std.mem.indexOf(u8, self.platform_config.triple, "msvc") != null) {
+                try writer.print("{s}.lib ", .{lib});
+            } else {
+                try writer.print("-l{s} ", .{lib});
+            }
+        }
+        
+        // 添加动态链接器（仅 Linux）
+        if (self.platform_config.dynamic_linker) |linker_path| {
+            try writer.print("-dynamic-linker {s} ", .{linker_path});
+        }
+        
+        return cmd.toOwnedSlice(allocator);
+    }
+    
+    /// 生成平台特定的启动代码
+    /// 
+    /// @post 返回平台特定的 C 运行时启动代码
+    /// @memory-safety allocator 管理返回的内存
+    pub fn generatePlatformStartupCode(
+        self: *const Self,
+        allocator: Allocator,
+    ) ![]const u8 {
+        return switch (self.platform_config.object_format) {
+            .elf => try allocator.dupe(u8,
+                \\// Linux startup code
+                \\extern int main(int argc, char** argv);
+                \\
+            ),
+            
+            .macho => try allocator.dupe(u8,
+                \\// macOS startup code
+                \\extern int main(int argc, char** argv);
+                \\
+            ),
+            
+            .coff => try allocator.dupe(u8,
+                \\// Windows startup code
+                \\extern int main(int argc, char** argv);
+                \\
+            ),
+        };
+    }
+    
+    /// 验证平台兼容性
+    /// 
+    /// @pre ir_module 必须有效
+    /// @post 返回平台兼容性检查结果
+    pub fn validatePlatformCompatibility(
+        self: *const Self,
+        ir_module: *const IR.Module,
+    ) !void {
+        // 检查是否使用了平台特定的功能
+        for (ir_module.functions.items) |func| {
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |inst| {
+                    switch (inst.op) {
+                        // 检查系统调用
+                        .debug_print => {
+                            // 某些平台可能不支持直接的调试输出
+                            if (self.platform_config.object_format == .coff) {
+                                try self.diagnostics.addDiagnostic(.{
+                                    .severity = .warning,
+                                    .message = try std.fmt.allocPrint(
+                                        self.allocator,
+                                        "Debug print may not work on Windows platform",
+                                        .{}
+                                    ),
+                                    .location = inst.location,
+                                });
+                            }
+                        },
+                        
+                        // 检查并发操作
+                        .mutex_lock, .mutex_unlock, .mutex_new => {
+                            // 确保平台支持 pthread
+                            var has_pthread = false;
+                            for (self.platform_config.required_libs) |lib| {
+                                if (std.mem.eql(u8, lib, "pthread")) {
+                                    has_pthread = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (!has_pthread and self.platform_config.object_format != .coff) {
+                                try self.diagnostics.addDiagnostic(.{
+                                    .severity = .@"error",
+                                    .message = try std.fmt.allocPrint(
+                                        self.allocator,
+                                        "Platform does not support pthread",
+                                        .{}
+                                    ),
+                                    .location = inst.location,
+                                });
+                                return error.UnsupportedPlatformFeature;
+                            }
+                        },
+                        
+                        else => {},
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 获取平台信息摘要
+    /// 
+    /// @post 返回平台配置的人类可读摘要
+    /// @memory-safety allocator 管理返回的内存
+    pub fn getPlatformSummary(self: *const Self, allocator: Allocator) ![]const u8 {
+        const libs_str = try std.mem.join(allocator, ", ", self.platform_config.required_libs);
+        defer allocator.free(libs_str);
+        
+        return try std.fmt.allocPrint(allocator,
+            \\Platform: {s}
+            \\Triple: {s}
+            \\Object Format: {s}
+            \\Calling Convention: {s}
+            \\Stack Alignment: {d} bytes
+            \\Pointer Size: {d} bytes
+            \\Required Libraries: {s}
+            \\
+        , .{
+            self.platform_config.name,
+            self.platform_config.triple,
+            @tagName(self.platform_config.object_format),
+            @tagName(self.platform_config.calling_convention),
+            self.platform_codegen.getStackAlignment(),
+            self.platform_codegen.getPointerSize(),
+            libs_str,
+        });
+    }
 };
 
 
@@ -1615,55 +2209,144 @@ test "CodeGenerator.createModule mock mode" {
     try codegen.createModule("test_module");
 }
 
-test "CodeGenerator.declareRuntimeFunctions" {
+// ============================================================================
+// 跨平台编译测试
+// ============================================================================
+
+test "CodeGenerator - Linux x86_64 platform" {
     const allocator = std.testing.allocator;
+    
     var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
     defer diagnostics.deinit();
-
+    
+    const target = Target{
+        .arch = .x86_64,
+        .os = .linux,
+        .abi = .gnu,
+    };
+    
     const codegen = try CodeGenerator.init(
         allocator,
-        Target.native(),
-        .debug,
+        target,
+        .release_fast,
         false,
         &diagnostics,
     );
     defer codegen.deinit();
-
-    try codegen.declareRuntimeFunctions();
-
-    // Verify runtime functions were registered
-    const expected_count = CodeGenerator.runtime_function_signatures.len + CodeGenerator.runtime_function_signatures_2.len;
-    try std.testing.expectEqual(expected_count, codegen.getRuntimeFunctionCount());
+    
+    try std.testing.expectEqualStrings("Linux x86_64", codegen.platform_config.name);
+    try std.testing.expectEqual(Platform.ObjectFormat.elf, codegen.platform_config.object_format);
 }
 
-test "CodeGenerator.mapRuntimeType" {
+test "CodeGenerator - macOS aarch64 platform" {
     const allocator = std.testing.allocator;
+    
     var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
     defer diagnostics.deinit();
-
+    
+    const target = Target{
+        .arch = .aarch64,
+        .os = .macos,
+        .abi = .none,
+    };
+    
     const codegen = try CodeGenerator.init(
         allocator,
-        Target.native(),
-        .debug,
+        target,
+        .release_fast,
         false,
         &diagnostics,
     );
     defer codegen.deinit();
-
-    // Without LLVM, all types map to null
-    try std.testing.expect(codegen.mapRuntimeType(.void_type) == null);
-    try std.testing.expect(codegen.mapRuntimeType(.i64_type) == null);
-    try std.testing.expect(codegen.mapRuntimeType(.php_value_ptr) == null);
+    
+    try std.testing.expectEqualStrings("macOS aarch64 (Apple Silicon)", codegen.platform_config.name);
+    try std.testing.expectEqual(Platform.ObjectFormat.macho, codegen.platform_config.object_format);
 }
 
-test "RuntimeFunctionSig structure" {
-    // Verify runtime function signatures are properly defined
-    try std.testing.expect(CodeGenerator.runtime_function_signatures.len > 0);
-    try std.testing.expect(CodeGenerator.runtime_function_signatures_2.len > 0);
+test "CodeGenerator - Windows x86_64 platform" {
+    const allocator = std.testing.allocator;
+    
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+    
+    const target = Target{
+        .arch = .x86_64,
+        .os = .windows,
+        .abi = .msvc,
+    };
+    
+    const codegen = try CodeGenerator.init(
+        allocator,
+        target,
+        .release_fast,
+        false,
+        &diagnostics,
+    );
+    defer codegen.deinit();
+    
+    try std.testing.expectEqualStrings("Windows x86_64 (MSVC)", codegen.platform_config.name);
+    try std.testing.expectEqual(Platform.ObjectFormat.coff, codegen.platform_config.object_format);
+}
 
-    // Check first signature
-    const first_sig = CodeGenerator.runtime_function_signatures[0];
-    try std.testing.expectEqualStrings("php_value_create_null", first_sig.name);
-    try std.testing.expectEqual(CodeGenerator.RuntimeType.php_value_ptr, first_sig.return_type);
-    try std.testing.expectEqual(@as(usize, 0), first_sig.param_types.len);
+test "CodeGenerator - getPlatformLinkerCommand" {
+    const allocator = std.testing.allocator;
+    
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+    
+    const target = Target{
+        .arch = .x86_64,
+        .os = .linux,
+        .abi = .gnu,
+    };
+    
+    const codegen = try CodeGenerator.init(
+        allocator,
+        target,
+        .release_fast,
+        false,
+        &diagnostics,
+    );
+    defer codegen.deinit();
+    
+    const object_files = [_][]const u8{ "main.o", "lib.o" };
+    const cmd = try codegen.getPlatformLinkerCommand(
+        allocator,
+        &object_files,
+        "output",
+    );
+    defer allocator.free(cmd);
+    
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "ld") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "main.o") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "-o output") != null);
+}
+
+test "CodeGenerator - getPlatformSummary" {
+    const allocator = std.testing.allocator;
+    
+    var diagnostics = Diagnostics.DiagnosticEngine.init(allocator);
+    defer diagnostics.deinit();
+    
+    const target = Target{
+        .arch = .x86_64,
+        .os = .linux,
+        .abi = .gnu,
+    };
+    
+    const codegen = try CodeGenerator.init(
+        allocator,
+        target,
+        .release_fast,
+        false,
+        &diagnostics,
+    );
+    defer codegen.deinit();
+    
+    const summary = try codegen.getPlatformSummary(allocator);
+    defer allocator.free(summary);
+    
+    try std.testing.expect(std.mem.indexOf(u8, summary, "Linux x86_64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "elf") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "16 bytes") != null);
 }

@@ -2,10 +2,16 @@ const std = @import("std");
 const CodeCache = @import("code_cache.zig").CodeCache;
 const Assembler = @import("assembler_arm64.zig").Assembler;
 const Register = @import("assembler_arm64.zig").Register;
+const CodeGenX64 = @import("codegen_x64.zig").CodeGenX64;
+const TypeInfo = @import("codegen_x64.zig").TypeInfo;
 const func_mod = @import("../runtime/func.zig");
 const CompiledFunc = func_mod.CompiledFunc;
 const opcode_mod = @import("../runtime/opcode.zig");
 const OpCode = opcode_mod.OpCode;
+const HotspotDetector = @import("hotspot_detector.zig").HotspotDetector;
+const FallbackManager = @import("fallback.zig").FallbackManager;
+const JITCompilationError = @import("fallback.zig").JITCompilationError;
+const builtin = @import("builtin");
 
 const JumpPatch = struct {
     inst_idx: usize,
@@ -13,13 +19,92 @@ const JumpPatch = struct {
     is_cond: bool,
 };
 
+/// 目标架构
+pub const TargetArch = enum {
+    x86_64,
+    aarch64,
+    
+    /// 获取当前平台的目标架构
+    pub fn current() TargetArch {
+        return switch (builtin.cpu.arch) {
+            .x86_64 => .x86_64,
+            .aarch64 => .aarch64,
+            else => .x86_64, // 默认使用 x86_64
+        };
+    }
+};
+
 pub const Compiler = struct {
     allocator: std.mem.Allocator,
+    hotspot_detector: ?*HotspotDetector,
+    target_arch: TargetArch,
+    codegen_x64: ?*CodeGenX64,
+    fallback_manager: ?*FallbackManager,
 
     pub fn init(allocator: std.mem.Allocator) Compiler {
         return .{
             .allocator = allocator,
+            .hotspot_detector = null,
+            .target_arch = TargetArch.current(),
+            .codegen_x64 = null,
+            .fallback_manager = null,
         };
+    }
+    
+    /// 初始化编译器并启用热点检测
+    pub fn initWithHotspotDetector(
+        allocator: std.mem.Allocator,
+        detector: *HotspotDetector
+    ) Compiler {
+        return .{
+            .allocator = allocator,
+            .hotspot_detector = detector,
+            .target_arch = TargetArch.current(),
+            .codegen_x64 = null,
+            .fallback_manager = null,
+        };
+    }
+    
+    /// 初始化编译器并启用回退管理器
+    pub fn initWithFallback(
+        allocator: std.mem.Allocator,
+        fallback_manager: *FallbackManager,
+    ) Compiler {
+        return .{
+            .allocator = allocator,
+            .hotspot_detector = null,
+            .target_arch = TargetArch.current(),
+            .codegen_x64 = null,
+            .fallback_manager = fallback_manager,
+        };
+    }
+    
+    /// 初始化编译器并启用热点检测和回退管理器
+    pub fn initWithHotspotAndFallback(
+        allocator: std.mem.Allocator,
+        detector: *HotspotDetector,
+        fallback_manager: *FallbackManager,
+    ) Compiler {
+        return .{
+            .allocator = allocator,
+            .hotspot_detector = detector,
+            .target_arch = TargetArch.current(),
+            .codegen_x64 = null,
+            .fallback_manager = fallback_manager,
+        };
+    }
+    
+    /// 设置目标架构
+    pub fn setTargetArch(self: *Compiler, arch: TargetArch) void {
+        self.target_arch = arch;
+    }
+    
+    /// 清理资源
+    pub fn deinit(self: *Compiler) void {
+        if (self.codegen_x64) |codegen| {
+            codegen.deinit();
+            self.allocator.destroy(codegen);
+        }
     }
 
     pub const JitResult = struct {
@@ -28,11 +113,102 @@ pub const Compiler = struct {
     };
 
     pub fn compile(self: *Compiler, code_cache: *CodeCache, func: *const CompiledFunc, tf: *const anyopaque, osr_ip: ?usize) !?JitResult {
+        // 检查热点检测器
+        if (self.hotspot_detector) |detector| {
+            // 检查是否为热点函数
+            if (!detector.isHotspot(func.name)) {
+                // 不是热点，不编译
+                return null;
+            }
+        }
+        
         // Only compile if name starts with "jit_" or "sum" (for test)
         if (std.mem.startsWith(u8, func.name, "jit_") or std.mem.eql(u8, func.name, "sum") or std.mem.eql(u8, func.name, "main")) {
-            return try self.compileFunc(code_cache, func, tf, osr_ip);
+            // 根据目标架构选择编译器，并捕获编译错误
+            const result = switch (self.target_arch) {
+                .x86_64 => self.compileFuncX64(code_cache, func, tf, osr_ip),
+                .aarch64 => self.compileFunc(code_cache, func, tf, osr_ip),
+            };
+            
+            // 处理编译错误
+            if (result) |r| {
+                return r;
+            } else |err| {
+                // 如果有回退管理器，记录失败
+                if (self.fallback_manager) |manager| {
+                    const error_msg = self.getErrorMessage(err);
+                    const should_fallback = try manager.handleCompilationFailure(
+                        func.name,
+                        err,
+                        error_msg,
+                        null,
+                    );
+                    
+                    if (should_fallback) {
+                        // 回退到解释执行
+                        return null;
+                    }
+                }
+                
+                // 如果没有回退管理器或回退被禁用，传播错误
+                return err;
+            }
         }
         return null;
+    }
+    
+    /// 获取错误消息
+    fn getErrorMessage(self: *Compiler, err: anyerror) []const u8 {
+        _ = self;
+        return switch (err) {
+            error.OutOfMemory => "内存不足",
+            error.CodeCacheFull => "代码缓存已满",
+            error.UnsupportedInstruction => "遇到不支持的指令",
+            error.RegisterAllocationFailed => "寄存器分配失败",
+            error.CodeGenerationFailed => "代码生成失败",
+            error.InvalidTargetArchitecture => "无效的目标架构",
+            error.TypeInferenceFailed => "类型推断失败",
+            error.OptimizationFailed => "优化失败",
+            else => "未知编译错误",
+        };
+    }
+    
+    /// x86-64 编译实现
+    fn compileFuncX64(self: *Compiler, code_cache: *CodeCache, func: *const CompiledFunc, tf: *const anyopaque, osr_ip: ?usize) !JitResult {
+        _ = tf;
+        _ = osr_ip;
+        
+        // 初始化 x86-64 代码生成器（如果还没有）
+        if (self.codegen_x64 == null) {
+            const codegen = try self.allocator.create(CodeGenX64);
+            codegen.* = CodeGenX64.init(self.allocator);
+            self.codegen_x64 = codegen;
+        }
+        
+        const codegen = self.codegen_x64.?;
+        
+        // 准备类型信息（简化版本 - 假设所有都是整数）
+        const type_info = try self.allocator.alloc(TypeInfo, 10);
+        defer self.allocator.free(type_info);
+        @memset(type_info, .int);
+        
+        // 生成代码
+        const generated_code = try codegen.generateFunction(func, type_info);
+        defer self.allocator.free(generated_code);
+        
+        // 写入代码缓存
+        code_cache.unprotect();
+        defer code_cache.protect();
+        
+        const cached_code = try code_cache.allocate(generated_code.len);
+        @memcpy(cached_code, generated_code);
+        
+        code_cache.flush(cached_code);
+        
+        return JitResult{
+            .code = @ptrCast(@alignCast(cached_code.ptr)),
+            .osr_entry_offset = 0,
+        };
     }
 
     fn compileFunc(self: *Compiler, code_cache: *CodeCache, func: *const CompiledFunc, tf: *const anyopaque, osr_ip: ?usize) !JitResult {

@@ -69,7 +69,7 @@ pub const BytecodeOptimizer = struct {
     }
 
     /// 常量折叠 - 编译时计算常量表达式
-    fn constantFolding(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
+    pub fn constantFolding(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
         var i: usize = 0;
         while (i + 2 < func.bytecode.len) {
             const inst1 = func.bytecode[i];
@@ -78,6 +78,12 @@ pub const BytecodeOptimizer = struct {
 
             // 模式：push_const, push_const, add_int -> push_const (folded)
             if (inst1.opcode == .push_const and inst2.opcode == .push_const) {
+                // 检查常量索引是否有效
+                if (inst1.operand1 >= func.constants.len or inst2.operand1 >= func.constants.len) {
+                    i += 1;
+                    continue;
+                }
+                
                 const val1 = func.constants[inst1.operand1];
                 const val2 = func.constants[inst2.operand1];
 
@@ -229,11 +235,51 @@ pub const BytecodeOptimizer = struct {
         return Value{ .float_val = result };
     }
 
-    fn addConstant(_: *BytecodeOptimizer, func: *CompiledFunction, value: Value) !u16 {
-        // 简化实现：直接添加到常量池末尾
-        _ = func;
-        _ = value;
-        return 0;
+    /// 添加常量到常量池（完整实现：去重 + 高效索引）
+    /// @pre value 必须有效
+    /// @post 返回常量在常量池中的索引
+    /// @ownership NON-OWNING (value)
+    pub fn addConstant(self: *BytecodeOptimizer, func: *CompiledFunction, value: Value) !u16 {
+        // 1. 检查常量池中是否已存在相同值（去重）
+        for (func.constants, 0..) |existing, idx| {
+            if (self.valuesEqual(existing, value)) {
+                return @as(u16, @intCast(idx));
+            }
+        }
+        
+        // 2. 不存在，添加到常量池
+        const new_constants = try self.allocator.alloc(Value, func.constants.len + 1);
+        @memcpy(new_constants[0..func.constants.len], func.constants);
+        new_constants[func.constants.len] = value;
+        
+        // 3. 释放旧常量池，更新指针
+        if (func.constants.len > 0) {
+            self.allocator.free(func.constants);
+        }
+        func.constants = new_constants;
+        
+        return @as(u16, @intCast(func.constants.len - 1));
+    }
+    
+    /// 比较两个Value是否相等
+    /// @pre val1 和 val2 必须有效
+    /// @post 返回是否相等
+    fn valuesEqual(_: *BytecodeOptimizer, val1: Value, val2: Value) bool {
+        // 检查类型是否相同
+        if (@as(std.meta.Tag(Value), val1) != @as(std.meta.Tag(Value), val2)) {
+            return false;
+        }
+        
+        return switch (val1) {
+            .null_val => true,
+            .bool_val => |b1| val2.bool_val == b1,
+            .int_val => |int1| val2.int_val == int1,
+            .float_val => |f1| val2.float_val == f1,
+            .string_val => |s1| std.mem.eql(u8, s1, val2.string_val),
+            .array_val => false, // 数组常量不去重（复杂度高）
+            .class_ref => |c1| val2.class_ref == c1,
+            .func_ref => |f1| val2.func_ref == f1,
+        };
     }
 
     /// 死代码消除 - 移除不可达代码
@@ -322,8 +368,10 @@ pub const BytecodeOptimizer = struct {
         }
     }
 
-    /// 循环优化 - 循环不变代码外提
-    fn loopOptimization(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
+    /// 循环优化 - 循环不变代码外提（完整实现）
+    /// @pre func 必须有效
+    /// @post 循环不变代码被提升到循环外
+    pub fn loopOptimization(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
         // 查找循环
         var i: usize = 0;
         while (i < func.bytecode.len) {
@@ -348,11 +396,179 @@ pub const BytecodeOptimizer = struct {
         }
     }
 
-    fn optimizeLoop(_: *BytecodeOptimizer, func: *CompiledFunction, start: usize, end: usize) !void {
-        // 循环不变代码检测（简化实现）
+    /// 优化单个循环（完整实现）
+    /// @pre loop_start < loop_end < func.bytecode.len
+    /// @post 循环不变代码被提升
+    fn optimizeLoop(self: *BytecodeOptimizer, func: *CompiledFunction, start: usize, end: usize) !void {
+        // 1. 分析循环内的指令，识别不变代码
+        var invariant_instructions: std.ArrayListUnmanaged(usize) = .{};
+        defer invariant_instructions.deinit(self.allocator);
+        
+        // 2. 构建定义-使用链
+        var def_use = try self.buildDefUseChain(func, start, end);
+        defer def_use.deinit();
+        
+        // 3. 识别循环不变量
+        var i = start + 1;
+        while (i < end) : (i += 1) {
+            const inst = func.bytecode[i];
+            
+            // 检查指令是否为循环不变
+            if (try self.isLoopInvariant(func, inst, start, end, def_use)) {
+                try invariant_instructions.append(self.allocator, i);
+            }
+        }
+        
+        // 4. 提升不变代码到循环前
+        if (invariant_instructions.items.len > 0) {
+            try self.hoistInstructions(func, invariant_instructions.items, start);
+        }
+    }
+    
+    /// 构建定义-使用链
+    /// @pre func, start, end 必须有效
+    /// @post 返回变量的定义和使用位置映射
+    fn buildDefUseChain(
+        self: *BytecodeOptimizer,
+        func: *CompiledFunction,
+        start: usize,
+        end: usize
+    ) !std.AutoHashMap(u16, DefUseInfo) {
+        var chain = std.AutoHashMap(u16, DefUseInfo).init(self.allocator);
+        
+        var i = start;
+        while (i < end) : (i += 1) {
+            const inst = func.bytecode[i];
+            
+            // 记录定义
+            switch (inst.opcode) {
+                .store_local, .store_global => {
+                    const var_id = inst.operand1;
+                    var info = chain.get(var_id) orelse DefUseInfo{
+                        .definitions = std.ArrayListUnmanaged(usize){},
+                        .uses = std.ArrayListUnmanaged(usize){},
+                    };
+                    try info.definitions.append(self.allocator, i);
+                    try chain.put(var_id, info);
+                },
+                
+                // 记录使用
+                .push_local, .push_global => {
+                    const var_id = inst.operand1;
+                    var info = chain.get(var_id) orelse DefUseInfo{
+                        .definitions = std.ArrayListUnmanaged(usize){},
+                        .uses = std.ArrayListUnmanaged(usize){},
+                    };
+                    try info.uses.append(self.allocator, i);
+                    try chain.put(var_id, info);
+                },
+                
+                else => {},
+            }
+        }
+        
+        return chain;
+    }
+    
+    /// 定义-使用信息
+    const DefUseInfo = struct {
+        definitions: std.ArrayListUnmanaged(usize),
+        uses: std.ArrayListUnmanaged(usize),
+        
+        pub fn deinit(self: *DefUseInfo, allocator: std.mem.Allocator) void {
+            self.definitions.deinit(allocator);
+            self.uses.deinit(allocator);
+        }
+    };
+    
+    /// 判断指令是否为循环不变
+    /// @pre inst, start, end, def_use 必须有效
+    /// @post 返回指令是否不依赖循环变量
+    fn isLoopInvariant(
+        _: *BytecodeOptimizer,
+        func: *CompiledFunction,
+        inst: Instruction,
+        start: usize,
+        end: usize,
+        def_use: std.AutoHashMap(u16, DefUseInfo)
+    ) !bool {
         _ = func;
-        _ = start;
-        _ = end;
+        
+        // 1. 不能有副作用（调用、I/O、异常）
+        if (inst.opcode.isCall() or inst.opcode == .throw or inst.opcode == .yield_val) {
+            return false;
+        }
+        
+        // 2. 不能修改循环变量
+        switch (inst.opcode) {
+            .store_local, .store_global => return false,
+            else => {},
+        }
+        
+        // 3. 操作数必须是常量或循环外定义的变量
+        switch (inst.opcode) {
+            .push_local, .push_global => {
+                const var_id = inst.operand1;
+                if (def_use.get(var_id)) |info| {
+                    // 检查所有定义是否都在循环外
+                    for (info.definitions.items) |def_pos| {
+                        if (def_pos >= start and def_pos < end) {
+                            return false; // 在循环内定义
+                        }
+                    }
+                }
+            },
+            
+            .push_const => {
+                // 常量总是不变的
+                return true;
+            },
+            
+            else => {},
+        }
+        
+        return true;
+    }
+    
+    /// 提升指令到循环前
+    /// @pre positions 必须有效且排序
+    /// @post 指令被移动到 loop_start 之前
+    fn hoistInstructions(
+        self: *BytecodeOptimizer,
+        func: *CompiledFunction,
+        positions: []const usize,
+        loop_start: usize
+    ) !void {
+        // 1. 收集要提升的指令
+        var hoisted: std.ArrayListUnmanaged(Instruction) = .{};
+        defer hoisted.deinit(self.allocator);
+        
+        for (positions) |pos| {
+            try hoisted.append(self.allocator, func.bytecode[pos]);
+            // 将原位置标记为nop
+            func.bytecode[pos] = Instruction.init(.nop, 0, 0);
+        }
+        
+        // 2. 在循环前插入提升的指令
+        // 注意：这需要重新分配字节码数组
+        const new_len = func.bytecode.len + hoisted.items.len;
+        const new_bytecode = try self.allocator.alloc(Instruction, new_len);
+        
+        // 复制循环前的代码
+        @memcpy(new_bytecode[0..loop_start], func.bytecode[0..loop_start]);
+        
+        // 插入提升的指令
+        @memcpy(new_bytecode[loop_start..loop_start + hoisted.items.len], hoisted.items);
+        
+        // 复制循环及之后的代码
+        @memcpy(
+            new_bytecode[loop_start + hoisted.items.len..],
+            func.bytecode[loop_start..]
+        );
+        
+        // 更新字节码
+        self.allocator.free(func.bytecode);
+        func.bytecode = new_bytecode;
     }
 
     /// 尾调用优化 - 将尾递归转换为循环
@@ -373,27 +589,151 @@ pub const BytecodeOptimizer = struct {
         }
     }
 
-    /// 强度削减 - 用低开销操作替换高开销操作
-    fn strengthReduction(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
-        for (func.bytecode, 0..) |*inst, i| {
-            _ = i;
+    /// 强度削减 - 用低开销操作替换高开销操作（完整实现）
+    /// @pre func 必须有效
+    /// @post 高开销操作被替换为等价的低开销操作
+    pub fn strengthReduction(self: *BytecodeOptimizer, func: *CompiledFunction) !void {
+        var i: usize = 0;
+        while (i + 1 < func.bytecode.len) : (i += 1) {
+            const inst = func.bytecode[i];
+            
             switch (inst.opcode) {
-                // 乘以2的幂 -> 左移
+                // 乘法优化
                 .mul_int => {
-                    // 检查是否乘以2的幂（需要检查常量池）
-                    // 简化：这里只做标记，实际实现需要检查操作数
+                    // 检查前一条指令是否为push_const
+                    if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
+                        const const_idx = func.bytecode[i - 1].operand1;
+                        if (const_idx < func.constants.len) {
+                            const val = func.constants[const_idx];
+                            if (val == .int_val) {
+                                const n = val.int_val;
+                                
+                                // 乘以0 -> pop + push_int_0
+                                if (n == 0) {
+                                    func.bytecode[i - 1] = Instruction.init(.pop, 0, 0);
+                                    func.bytecode[i] = Instruction.init(.push_int_0, 0, 0);
+                                    self.stats.constants_folded += 1;
+                                }
+                                // 乘以2的幂 -> 左移
+                                else if (n > 0 and (n & (n - 1)) == 0) {
+                                    // 计算移位量
+                                    const shift = @ctz(n);
+                                    
+                                    // 创建移位量常量
+                                    const shift_val = Value{ .int_val = shift };
+                                    const shift_idx = try self.addConstant(func, shift_val);
+                                    
+                                    // 替换为左移
+                                    func.bytecode[i - 1] = Instruction.init(.push_const, shift_idx, 0);
+                                    func.bytecode[i] = Instruction.init(.shl, 0, 0);
+                                    
+                                    self.stats.constants_folded += 1;
+                                }
+                            }
+                        }
+                    }
                 },
+                
+                // 浮点乘法优化
+                .mul_float => {
+                    if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
+                        const const_idx = func.bytecode[i - 1].operand1;
+                        if (const_idx < func.constants.len) {
+                            const val = func.constants[const_idx];
+                            if (val == .float_val) {
+                                const f = val.float_val;
+                                // 乘以0.0 -> pop + push_int_0
+                                if (f == 0.0) {
+                                    func.bytecode[i - 1] = Instruction.init(.pop, 0, 0);
+                                    func.bytecode[i] = Instruction.init(.push_int_0, 0, 0);
+                                    self.stats.constants_folded += 1;
+                                }
+                            }
+                        }
+                    }
+                },
+                
                 // 除以2的幂 -> 右移
                 .div_int => {
-                    // 类似处理
+                    if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
+                        const const_idx = func.bytecode[i - 1].operand1;
+                        if (const_idx < func.constants.len) {
+                            const val = func.constants[const_idx];
+                            if (val == .int_val) {
+                                const n = val.int_val;
+                                if (n > 0 and (n & (n - 1)) == 0) {
+                                    const shift = @ctz(n);
+                                    const shift_val = Value{ .int_val = shift };
+                                    const shift_idx = try self.addConstant(func, shift_val);
+                                    
+                                    func.bytecode[i - 1] = Instruction.init(.push_const, shift_idx, 0);
+                                    func.bytecode[i] = Instruction.init(.shr, 0, 0);
+                                    
+                                    self.stats.constants_folded += 1;
+                                }
+                            }
+                        }
+                    }
                 },
+                
                 // 模2的幂 -> 位与
                 .mod_int => {
-                    // x % 2^n -> x & (2^n - 1)
+                    if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
+                        const const_idx = func.bytecode[i - 1].operand1;
+                        if (const_idx < func.constants.len) {
+                            const val = func.constants[const_idx];
+                            if (val == .int_val) {
+                                const n = val.int_val;
+                                if (n > 0 and (n & (n - 1)) == 0) {
+                                    // x % 2^n -> x & (2^n - 1)
+                                    const mask = n - 1;
+                                    const mask_val = Value{ .int_val = mask };
+                                    const mask_idx = try self.addConstant(func, mask_val);
+                                    
+                                    func.bytecode[i - 1] = Instruction.init(.push_const, mask_idx, 0);
+                                    func.bytecode[i] = Instruction.init(.bit_and, 0, 0);
+                                    
+                                    self.stats.constants_folded += 1;
+                                }
+                            }
+                        }
+                    }
                 },
+                
+                // 幂运算优化
+                .pow_int => {
+                    if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
+                        const const_idx = func.bytecode[i - 1].operand1;
+                        if (const_idx < func.constants.len) {
+                            const val = func.constants[const_idx];
+                            if (val == .int_val) {
+                                const exp = val.int_val;
+                                
+                                // x^0 -> 1
+                                if (exp == 0) {
+                                    func.bytecode[i - 1] = Instruction.init(.pop, 0, 0);
+                                    func.bytecode[i] = Instruction.init(.push_int_1, 0, 0);
+                                    self.stats.constants_folded += 1;
+                                }
+                                // x^1 -> x
+                                else if (exp == 1) {
+                                    func.bytecode[i - 1] = Instruction.init(.nop, 0, 0);
+                                    func.bytecode[i] = Instruction.init(.nop, 0, 0);
+                                    self.stats.dead_code_removed += 2;
+                                }
+                                // x^2 -> x * x
+                                else if (exp == 2) {
+                                    func.bytecode[i - 1] = Instruction.init(.dup, 0, 0);
+                                    func.bytecode[i] = Instruction.init(.mul_int, 0, 0);
+                                    self.stats.constants_folded += 1;
+                                }
+                            }
+                        }
+                    }
+                },
+                
                 else => {},
             }
-            _ = self;
         }
     }
 

@@ -348,6 +348,13 @@ pub const CompiledFunction = struct {
     flags: FunctionFlags,
     line_table: []LineInfo,
     exception_table: []ExceptionEntry,
+    
+    // 新增：参数信息（用于完整的参数处理）
+    param_info: []ParameterInfo = &[_]ParameterInfo{},
+    param_count: u16 = 0,
+    min_args: u16 = 0,
+    max_args: u16 = 0,
+    is_variadic: bool = false,
 
     pub const FunctionFlags = packed struct {
         is_generator: bool = false,
@@ -358,6 +365,29 @@ pub const CompiledFunction = struct {
         is_static: bool = false,
         is_closure: bool = false,
         _padding: u1 = 0,
+    };
+    
+    /// 参数信息
+    pub const ParameterInfo = struct {
+        name: []const u8,
+        pass_mode: PassMode,
+        default_value: ?Value,
+        type_hint: ?TypeHint,
+        
+        pub const PassMode = enum {
+            by_value,
+            by_reference,
+        };
+        
+        pub const TypeHint = enum {
+            int,
+            float,
+            string,
+            array,
+            object,
+            bool,
+            mixed,
+        };
     };
 
     pub const LineInfo = struct {
@@ -385,6 +415,11 @@ pub const CompiledFunction = struct {
             .flags = .{},
             .line_table = &[_]LineInfo{},
             .exception_table = &[_]ExceptionEntry{},
+            .param_info = &[_]ParameterInfo{},
+            .param_count = 0,
+            .min_args = 0,
+            .max_args = 0,
+            .is_variadic = false,
         };
         return func;
     }
@@ -397,6 +432,9 @@ pub const CompiledFunction = struct {
         allocator.free(self.constants);
         allocator.free(self.line_table);
         allocator.free(self.exception_table);
+        if (self.param_info.len > 0) {
+            allocator.free(self.param_info);
+        }
         allocator.destroy(self);
     }
 };

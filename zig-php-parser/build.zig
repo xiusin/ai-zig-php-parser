@@ -63,6 +63,9 @@ pub fn build(b: *std.Build) void {
         "src/runtime/coroutine_error_handling.zig",
         "src/runtime/coroutine_debugging.zig",
         "src/runtime/test_error_handling_property.zig",
+        // JIT tests
+        "src/jit/test_fallback_properties.zig",
+        "src/jit/test_fallback_integration.zig",
     };
 
     // Add all test files
@@ -79,6 +82,23 @@ pub fn build(b: *std.Build) void {
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);
     }
+    
+    // Bytecode optimizer property tests
+    const optimizer_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bytecode/test_optimizer_properties.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    optimizer_test.linkLibC();
+    const run_optimizer_test = b.addRunArtifact(optimizer_test);
+    test_step.dependOn(&run_optimizer_test.step);
+    
+    // TODO: VM and GC property tests need module path fixes
+    // Temporarily disabled until module dependencies are resolved
+    // - src/bytecode/test_vm_properties.zig
+    // - src/bytecode/test_gc_properties.zig
 
     // PHP compatibility tests
     const compat_test_step = b.step("test-compat", "Run PHP compatibility tests");
