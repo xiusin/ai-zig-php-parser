@@ -299,17 +299,17 @@ test "property: marking time complexity is O(n)" {
     
     for (sizes, 0..) |size, i| {
         // 创建对象
-        var objects = std.ArrayList(*GCObjectHeader).init(allocator);
+        var objects: std.ArrayList(*GCObjectHeader) = .{};
         defer {
             for (objects.items) |obj| {
                 allocator.free(@as([*]u8, @ptrCast(obj))[0..64]);
             }
-            objects.deinit();
+            objects.deinit(allocator);
         }
         
         for (0..size) |_| {
             const obj = try createSimpleObject(allocator, 64);
-            try objects.append(obj);
+            try objects.append(allocator, obj);
         }
         
         // 测量标记时间
@@ -369,10 +369,10 @@ test "property: mark reset works correctly" {
     var marker = GCMarker.init(allocator);
     
     // 创建并标记对象
-    var obj1 = try createSimpleObject(allocator, 64);
+    const obj1 = try createSimpleObject(allocator, 64);
     defer allocator.free(@as([*]u8, @ptrCast(obj1))[0..64]);
     
-    var obj2 = try createSimpleObject(allocator, 64);
+    const obj2 = try createSimpleObject(allocator, 64);
     defer allocator.free(@as([*]u8, @ptrCast(obj2))[0..64]);
     
     const roots = [_]*GCObjectHeader{ obj1, obj2 };
@@ -409,17 +409,17 @@ test "benchmark: large object graph marking" {
     
     // 创建大量对象
     const object_count = 1000;
-    var objects = std.ArrayList(*GCObjectHeader).init(allocator);
+    var objects: std.ArrayList(*GCObjectHeader) = .{};
     defer {
         for (objects.items) |obj| {
             allocator.free(@as([*]u8, @ptrCast(obj))[0..64]);
         }
-        objects.deinit();
+        objects.deinit(allocator);
     }
     
     for (0..object_count) |_| {
         const obj = try createSimpleObject(allocator, 64);
-        try objects.append(obj);
+        try objects.append(allocator, obj);
     }
     
     // 测量标记时间

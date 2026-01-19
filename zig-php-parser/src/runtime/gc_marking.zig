@@ -69,8 +69,7 @@ pub const GCMarker = struct {
         // white = 未访问
         // gray = 已发现但未扫描子对象
         // black = 已完全扫描
-        while (worklist.items.len > 0) {
-            const current = worklist.pop();
+        while (worklist.pop()) |current| {
             // 更新统计
             if (worklist.items.len > self.stats.max_worklist_depth) {
                 self.stats.max_worklist_depth = worklist.items.len;
@@ -121,6 +120,7 @@ pub const GCMarker = struct {
     /// @pre obj 必须是有效的 GC 对象
     /// @post 如果对象有类型信息，返回 TypedGCObject，否则返回 null
     fn tryGetTypedObject(self: *GCMarker, obj: *GCObjectHeader) ?*TypedGCObject {
+        _ = self;
         
         // 检查对象头前面是否有类型标签
         // 这需要在分配时正确设置
@@ -183,6 +183,7 @@ pub const GCMarker = struct {
     /// @pre obj 是一个对齐的指针
     /// @post 返回对象是否可能是有效的 GC 对象
     fn isLikelyValidObject(self: *GCMarker, obj: *GCObjectHeader) bool {
+        _ = self;
         
         // 基本的合理性检查
         // 1. 大小必须合理（至少包含头部，不超过 1GB）
@@ -217,6 +218,7 @@ pub const GCMarker = struct {
     /// @pre objects 包含所有需要重置的对象
     /// @post 所有对象的标记都被重置为 white
     pub fn resetMarks(self: *GCMarker, objects: []const *GCObjectHeader) void {
+        _ = self;
         for (objects) |obj| {
             obj.mark = .white;
             obj.forwarded = false;
@@ -330,7 +332,7 @@ test "gc marker basic" {
     // 创建一些测试对象
     var obj1 = GCObjectHeader.init(64);
     var obj2 = GCObjectHeader.init(128);
-    var obj3 = GCObjectHeader.init(256);
+    const obj3 = GCObjectHeader.init(256);
     
     // 设置根对象
     const roots = [_]*GCObjectHeader{ &obj1, &obj2 };
