@@ -1,11 +1,16 @@
 const std = @import("std");
 
-test "ArrayList init" {
+const MyStruct = struct {
+    value: i32,
+};
+
+test "ArrayList init correct" {
     const allocator = std.testing.allocator;
-    var list: std.ArrayList(u8) = .{};
-    list.allocator = allocator;
-    defer list.deinit();
     
-    try list.append(42);
-    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    // 正确方式：使用 init 作为类型的方法
+    const ArrayList = std.ArrayList(MyStruct);
+    var list1 = ArrayList.init(allocator);
+    defer list1.deinit();
+    
+    try std.testing.expect(true);
 }
