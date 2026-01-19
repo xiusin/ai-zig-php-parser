@@ -418,13 +418,13 @@ pub const OldGeneration = struct {
         var free_block_count: usize = 0;
         
         // 第一步：收集所有空闲块并按地址排序
-        var all_blocks = std.ArrayList(*FreeBlock).init(self.backing_allocator) catch return;
-        defer all_blocks.deinit();
+        var all_blocks = std.ArrayList(*FreeBlock){};
+        defer all_blocks.deinit(self.backing_allocator);
         
         for (self.free_lists) |maybe_block| {
             var block = maybe_block;
             while (block) |b| {
-                all_blocks.append(b) catch return;
+                all_blocks.append(self.backing_allocator, b) catch return;
                 total_free += b.size;
                 free_block_count += 1;
                 block = b.next;

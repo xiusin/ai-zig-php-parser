@@ -60,6 +60,20 @@ const FastCompiler = fast_compiler.FastCompiler;
 
 const CapturedVar = struct { name: []const u8, value: Value, is_reference: bool = false };
 
+/// Shutdown function entry for register_shutdown_function()
+const ShutdownFunction = struct {
+    callback: Value, // Function or callable to execute
+    args: []Value, // Arguments to pass to the callback
+    
+    pub fn deinit(self: *ShutdownFunction, allocator: std.mem.Allocator) void {
+        self.callback.release(allocator);
+        for (self.args) |arg| {
+            arg.release(allocator);
+        }
+        allocator.free(self.args);
+    }
+};
+
 /// Generator状态 - 用于跟踪yield语句的执行状态
 pub const GeneratorState = struct {
     allocator: std.mem.Allocator,
@@ -1576,10 +1590,51 @@ fn debugPrintBacktraceFn(vm: *VM, args: []const Value) !Value {
 
 // register_shutdown_function() - Register a function to execute at shutdown
 fn registerShutdownFunctionFn(vm: *VM, args: []const Value) !Value {
-    _ = vm;
-    _ = args;
-    // TODO: Implement shutdown function registry
-    // For now, just return true to indicate the function was registered
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(
+            vm.allocator,
+            1,
+            @intCast(args.len),
+            "register_shutdown_function",
+            "builtin",
+            0
+        );
+        _ = try vm.throwException(exception);
+        return Value.initNull();
+    }
+    
+    const callback = args[0];
+    
+    // Verify callback is callable
+    if (!callback.isCallable()) {
+        const exception = try ExceptionFactory.createTypeError(
+            vm.allocator,
+            "register_shutdown_function() expects parameter 1 to be a valid callback",
+            "builtin",
+            0
+        );
+        _ = try vm.throwException(exception);
+        return Value.initNull();
+    }
+    
+    // Copy callback arguments (skip first argument which is the callback itself)
+    const callback_args = if (args.len > 1) 
+        try vm.allocator.dupe(Value, args[1..])
+    else
+        try vm.allocator.alloc(Value, 0);
+    
+    // Retain all values
+    _ = callback.retain();
+    for (callback_args) |arg| {
+        _ = arg.retain();
+    }
+    
+    // Register the shutdown function
+    try vm.shutdown_functions.append(vm.allocator, .{
+        .callback = callback,
+        .args = callback_args,
+    });
+    
     return Value.initBool(true);
 }
 
@@ -1948,6 +2003,9 @@ pub const VM = struct {
 
     // Builtin function registry with category-based organization
     builtin_registry: BuiltinRegistry,
+    
+    // Shutdown function registry for register_shutdown_function()
+    shutdown_functions: std.ArrayList(ShutdownFunction),
 
     // Per-coroutine error state for isolation (managed by coroutine context)
     preg_last_error: i32 = 0, // PCRE2 error code
@@ -2012,6 +2070,8 @@ pub const VM = struct {
             // Initialize builtin function registry
             .builtin_registry = BuiltinRegistry.init(allocator),
             .recursion_depth = 0,
+            // Shutdown function registry
+            .shutdown_functions = std.ArrayList(ShutdownFunction){},
             // Initialize high-performance optimization modules
             .fast_pool_manager = fast_pool.PoolManager.init(allocator),
             .fast_string_pool = undefined, // Will be initialized below
@@ -2097,6 +2157,9 @@ pub const VM = struct {
         if (self.optimization_flags.enable_opcode_caching) {
             self.logPerformanceStats();
         }
+        
+        // 0. Execute shutdown functions (before any cleanup)
+        self.executeShutdownFunctions();
 
         // 1. Clean up builtin http resources (stops servers, joins threads)
         builtin_http.cleanup();
@@ -2143,6 +2206,12 @@ pub const VM = struct {
 
         // 5.5. Clean up builtin function registry
         self.builtin_registry.deinit();
+        
+        // 5.6. Clean up shutdown functions
+        for (self.shutdown_functions.items) |*func| {
+            func.deinit(self.allocator);
+        }
+        self.shutdown_functions.deinit(self.allocator);
 
         // 6. Clean up classes, interfaces, traits, structs
         // Must be done after global (objects destroyed) but before strings
@@ -2551,6 +2620,62 @@ pub const VM = struct {
     /// Get builtin functions by category
     pub fn getBuiltinFunctionsByCategory(self: *VM, category: builtin_registry.Category) []const *const builtin_registry.BuiltinFunction {
         return self.builtin_registry.getFunctionsByCategory(category);
+    }
+
+    /// Execute all registered shutdown functions in LIFO order
+    /// Called automatically during VM deinit before any cleanup
+    pub fn executeShutdownFunctions(self: *VM) void {
+        // Execute shutdown functions in reverse order (LIFO - Last In First Out)
+        // This ensures that functions registered later are executed first
+        var i: usize = self.shutdown_functions.items.len;
+        while (i > 0) {
+            i -= 1;
+            const func = &self.shutdown_functions.items[i];
+            
+            // Call the callback with its arguments
+            // We catch and log errors but don't crash - shutdown functions should be resilient
+            const result = switch (func.callback.getTag()) {
+                .native_function => blk: {
+                    const function: *const fn (*VM, []const Value) anyerror!Value = @ptrCast(@alignCast(func.callback.getAsNativeFunc()));
+                    break :blk function(self, func.args) catch |err| {
+                        std.log.err("Error executing shutdown function (native): {}", .{err});
+                        continue;
+                    };
+                },
+                .user_function => blk: {
+                    break :blk self.callUserFunction(func.callback.getAsUserFunc().data, func.args) catch |err| {
+                        std.log.err("Error executing shutdown function (user): {}", .{err});
+                        continue;
+                    };
+                },
+                .closure => blk: {
+                    break :blk self.callClosure(func.callback.getAsClosure().data, func.args) catch |err| {
+                        std.log.err("Error executing shutdown function (closure): {}", .{err});
+                        continue;
+                    };
+                },
+                .arrow_function => blk: {
+                    break :blk self.callArrowFunction(func.callback.getAsArrowFunc().data, func.args) catch |err| {
+                        std.log.err("Error executing shutdown function (arrow): {}", .{err});
+                        continue;
+                    };
+                },
+                .string => blk: {
+                    const func_name = func.callback.getAsString().data.data;
+                    break :blk self.callUserFunc(func_name, func.args) catch |err| {
+                        std.log.err("Error executing shutdown function (string): {}", .{err});
+                        continue;
+                    };
+                },
+                else => {
+                    std.log.err("Invalid shutdown function callback type", .{});
+                    continue;
+                },
+            };
+            
+            // Release the result value
+            result.release(self.allocator);
+        }
     }
 
     // Performance monitoring and optimization methods

@@ -271,22 +271,41 @@ pub const MixedValueArray = struct {
         self.mask = new_size - 1;
 
         // 重新插入所有有效条目
-        // 注意：我们这里只是重建哈希表索引，entries 数组保持不变（除非我们需要压缩）
         // 如果 deleted_count 过高，我们应该同时压缩 entries
         
         if (self.deleted_count > 0) {
-            // TODO: 实现压缩逻辑 (Compact)
-            // 目前简化为：只重建索引
-        }
-
-        for (self.entries.items, 0..) |*entry, i| {
-            // Skip deleted entries (value type check needed ideally, but for now assume all in entries are valid unless marked)
-            // 在此实现中，我们暂时不标记删除，只追加。真正删除需要 tombstone。
-            // 假设目前只有添加操作。
+            // 实现压缩逻辑：移除已删除的条目
+            // 创建新的 entries 数组，只包含有效条目
+            var new_entries = std.ArrayList(Entry).init(self.allocator);
+            errdefer new_entries.deinit();
             
-            const idx = entry.hash & self.mask;
-            entry.next = self.hash_table[idx];
-            self.hash_table[idx] = @intCast(i);
+            // 复制所有有效条目（跳过已删除的）
+            for (self.entries.items) |entry| {
+                // 检查条目是否有效（非删除标记）
+                // 删除的条目通常用特殊值标记，这里我们检查 hash 是否为 0
+                if (entry.hash != 0 or entry.next != INVALID_INDEX or @intFromEnum(entry.value.val) != 0) {
+                    try new_entries.append(entry);
+                }
+            }
+            
+            // 替换旧的 entries 数组
+            self.entries.deinit();
+            self.entries = new_entries;
+            self.deleted_count = 0;
+            
+            // 重建哈希表索引
+            for (self.entries.items, 0..) |*entry, i| {
+                const idx = entry.hash & self.mask;
+                entry.next = self.hash_table[idx];
+                self.hash_table[idx] = @intCast(i);
+            }
+        } else {
+            // 没有删除的条目，只需重建索引
+            for (self.entries.items, 0..) |*entry, i| {
+                const idx = entry.hash & self.mask;
+                entry.next = self.hash_table[idx];
+                self.hash_table[idx] = @intCast(i);
+            }
         }
 
         self.allocator.free(old_table);

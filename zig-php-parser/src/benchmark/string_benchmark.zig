@@ -104,25 +104,62 @@ pub const StringBenchmark = struct {
         const start_time = std.time.nanoTimestamp();
         
         const search_results = try self.runSearchTests();
+        const search_ext_results = try self.runSearchExtTests();
         const transform_results = try self.runTransformTests();
+        const transform_ext_results = try self.runTransformExtTests();
         const split_results = try self.runSplitTests();
         const compare_results = try self.runCompareTests();
         const trim_results = try self.runTrimTests();
         const encode_results = try self.runEncodeTests();
+        const encode_ext_results = try self.runEncodeExtTests();
         const format_results = try self.runFormatTests();
+        const format_ext_results = try self.runFormatExtTests();
         const parse_results = try self.runParseTests();
+        const parse_ext_results = try self.runParseExtTests();
+        const misc_ext_results = try self.runMiscExtTests();
+        
+        // 合并搜索结果
+        var all_search = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
+        try all_search.appendSlice(search_results);
+        try all_search.appendSlice(search_ext_results);
+        const merged_search = try all_search.toOwnedSlice();
+        
+        // 合并转换结果
+        var all_transform = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
+        try all_transform.appendSlice(transform_results);
+        try all_transform.appendSlice(transform_ext_results);
+        const merged_transform = try all_transform.toOwnedSlice();
+        
+        // 合并编码结果
+        var all_encode = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
+        try all_encode.appendSlice(encode_results);
+        try all_encode.appendSlice(encode_ext_results);
+        try all_encode.appendSlice(misc_ext_results);
+        const merged_encode = try all_encode.toOwnedSlice();
+        
+        // 合并格式化结果
+        var all_format = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
+        try all_format.appendSlice(format_results);
+        try all_format.appendSlice(format_ext_results);
+        const merged_format = try all_format.toOwnedSlice();
+        
+        // 合并解析结果
+        var all_parse = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
+        try all_parse.appendSlice(parse_results);
+        try all_parse.appendSlice(parse_ext_results);
+        const merged_parse = try all_parse.toOwnedSlice();
         
         const end_time = std.time.nanoTimestamp();
         
         return StringBenchmarkResult{
-            .search_results = search_results,
-            .transform_results = transform_results,
+            .search_results = merged_search,
+            .transform_results = merged_transform,
             .split_results = split_results,
             .compare_results = compare_results,
             .trim_results = trim_results,
-            .encode_results = encode_results,
-            .format_results = format_results,
-            .parse_results = parse_results,
+            .encode_results = merged_encode,
+            .format_results = merged_format,
+            .parse_results = merged_parse,
             .total_time_ns = @intCast(end_time - start_time),
             .timestamp = std.time.timestamp(),
         };
@@ -138,7 +175,7 @@ pub const StringBenchmark = struct {
             std.debug.print("\n=== 字符串查找与替换性能测试 ===\n", .{});
         }
         
-        var results = std.ArrayList(StringOpResult).init(self.allocator);
+        var results = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
         
         try results.append(try self.testStrlen());
         try results.append(try self.testStrpos());
@@ -333,7 +370,7 @@ pub const StringBenchmark = struct {
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
             // 不区分大小写查找
-            var haystack_lower = try self.allocator.alloc(u8, haystack.len);
+            const haystack_lower = try self.allocator.alloc(u8, haystack.len);
             defer self.allocator.free(haystack_lower);
             _ = std.ascii.lowerString(haystack_lower, haystack);
             
@@ -498,7 +535,7 @@ pub const StringBenchmark = struct {
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
             // 转换为小写后替换
-            var haystack_lower = try self.allocator.alloc(u8, haystack.len);
+            const haystack_lower = try self.allocator.alloc(u8, haystack.len);
             defer self.allocator.free(haystack_lower);
             _ = std.ascii.lowerString(haystack_lower, haystack);
             
@@ -690,3 +727,232 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
+    
+    // ========================================================================
+    // 字符串查找扩展测试
+    // ========================================================================
+    
+    /// 运行字符串查找扩展测试
+    pub fn runSearchExtTests(self: *Self) ![]StringOpResult {
+        const search_ext = @import("string_benchmark_search_ext.zig");
+        var search_ext_tests = search_ext.StringSearchExtTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+            .generate_php_scripts = self.config.generate_php_scripts,
+            .script_output_dir = self.config.script_output_dir,
+        };
+        return try search_ext_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串转换测试
+    // ========================================================================
+    
+    /// 运行字符串转换测试
+    pub fn runTransformTests(self: *Self) ![]StringOpResult {
+        const transforms = @import("string_benchmark_transforms.zig");
+        var transform_tests = transforms.StringTransformTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+            .generate_php_scripts = self.config.generate_php_scripts,
+            .script_output_dir = self.config.script_output_dir,
+        };
+        return try transform_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串转换扩展测试
+    // ========================================================================
+    
+    /// 运行字符串转换扩展测试
+    pub fn runTransformExtTests(self: *Self) ![]StringOpResult {
+        const transform_ext = @import("string_benchmark_transform_ext.zig");
+        var transform_ext_tests = transform_ext.StringTransformExtTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+            .generate_php_scripts = self.config.generate_php_scripts,
+            .script_output_dir = self.config.script_output_dir,
+        };
+        return try transform_ext_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串分割与连接测试
+    // ========================================================================
+    
+    /// 运行字符串分割测试
+    pub fn runSplitTests(self: *Self) ![]StringOpResult {
+        const splits = @import("string_benchmark_split.zig");
+        var split_tests = splits.StringSplitTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+        };
+        return try split_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串比较测试
+    // ========================================================================
+    
+    /// 运行字符串比较测试
+    pub fn runCompareTests(self: *Self) ![]StringOpResult {
+        const misc = @import("string_benchmark_misc.zig");
+        var compare_tests = misc.StringCompareTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+        };
+        return try compare_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串修剪测试
+    // ========================================================================
+    
+    /// 运行字符串修剪测试
+    pub fn runTrimTests(self: *Self) ![]StringOpResult {
+        const misc = @import("string_benchmark_misc.zig");
+        var trim_tests = misc.StringTrimTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+        };
+        return try trim_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串编码测试
+    // ========================================================================
+    
+    /// 运行字符串编码测试
+    pub fn runEncodeTests(self: *Self) ![]StringOpResult {
+        const misc = @import("string_benchmark_misc.zig");
+        var encode_tests = misc.StringEncodeTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+        };
+        return try encode_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串编码扩展测试
+    // ========================================================================
+    
+    /// 运行字符串编码扩展测试
+    pub fn runEncodeExtTests(self: *Self) ![]StringOpResult {
+        const encode_ext = @import("string_benchmark_encode_ext.zig");
+        var encode_ext_tests = encode_ext.StringEncodeExtTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+            .generate_php_scripts = self.config.generate_php_scripts,
+            .script_output_dir = self.config.script_output_dir,
+        };
+        return try encode_ext_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串格式化测试
+    // ========================================================================
+    
+    /// 运行字符串格式化测试
+    pub fn runFormatTests(self: *Self) ![]StringOpResult {
+        const misc = @import("string_benchmark_misc.zig");
+        var format_tests = misc.StringFormatTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+        };
+        return try format_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串格式化扩展测试
+    // ========================================================================
+    
+    /// 运行字符串格式化扩展测试
+    pub fn runFormatExtTests(self: *Self) ![]StringOpResult {
+        const format_ext = @import("string_benchmark_format_ext.zig");
+        var format_ext_tests = format_ext.StringFormatExtTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+            .generate_php_scripts = self.config.generate_php_scripts,
+            .script_output_dir = self.config.script_output_dir,
+        };
+        return try format_ext_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串解析测试
+    // ========================================================================
+    
+    /// 运行字符串解析测试
+    pub fn runParseTests(self: *Self) ![]StringOpResult {
+        const misc = @import("string_benchmark_misc.zig");
+        var parse_tests = misc.StringParseTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+        };
+        return try parse_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串解析扩展测试
+    // ========================================================================
+    
+    /// 运行字符串解析扩展测试
+    pub fn runParseExtTests(self: *Self) ![]StringOpResult {
+        const parse_ext = @import("string_benchmark_parse_ext.zig");
+        var parse_ext_tests = parse_ext.StringParseExtTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+            .generate_php_scripts = self.config.generate_php_scripts,
+            .script_output_dir = self.config.script_output_dir,
+        };
+        return try parse_ext_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 字符串其他扩展测试
+    // ========================================================================
+    
+    /// 运行字符串其他扩展测试
+    pub fn runMiscExtTests(self: *Self) ![]StringOpResult {
+        const misc_ext = @import("string_benchmark_misc_ext.zig");
+        var misc_ext_tests = misc_ext.StringMiscExtTests{
+            .allocator = self.allocator,
+            .iterations = self.config.iterations,
+            .verbose = self.config.verbose,
+            .generate_php_scripts = self.config.generate_php_scripts,
+            .script_output_dir = self.config.script_output_dir,
+        };
+        return try misc_ext_tests.runAll();
+    }
+    
+    // ========================================================================
+    // 辅助函数
+    // ========================================================================
+    
+    /// 生成 PHP 测试脚本
+    fn generatePhpScript(self: *Self, test_name: []const u8, script_content: []const u8) !void {
+        const file_path = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/{s}.php",
+            .{ self.config.script_output_dir, test_name },
+        );
+        defer self.allocator.free(file_path);
+        
+        const file = try std.fs.cwd().createFile(file_path, .{});
+        defer file.close();
+        
+        try file.writeAll(script_content);
+    }
+};

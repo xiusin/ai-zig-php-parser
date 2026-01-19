@@ -95,10 +95,29 @@ pub fn build(b: *std.Build) void {
     const run_optimizer_test = b.addRunArtifact(optimizer_test);
     test_step.dependOn(&run_optimizer_test.step);
     
-    // TODO: VM and GC property tests need module path fixes
-    // Temporarily disabled until module dependencies are resolved
-    // - src/bytecode/test_vm_properties.zig
-    // - src/bytecode/test_gc_properties.zig
+    // VM property tests
+    const vm_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bytecode/test_vm_properties.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    vm_test.linkLibC();
+    const run_vm_test = b.addRunArtifact(vm_test);
+    test_step.dependOn(&run_vm_test.step);
+    
+    // GC property tests
+    const gc_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bytecode/test_gc_properties.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    gc_test.linkLibC();
+    const run_gc_test = b.addRunArtifact(gc_test);
+    test_step.dependOn(&run_gc_test.step);
 
     // PHP compatibility tests
     const compat_test_step = b.step("test-compat", "Run PHP compatibility tests");
@@ -142,6 +161,30 @@ pub fn build(b: *std.Build) void {
     bench_cmd.addArg("examples/hello.php");
     bench_step.dependOn(&bench_cmd.step);
 
+    // String benchmark tests
+    const string_bench_step = b.step("bench-string", "Run string benchmark tests");
+    
+    // 创建基准测试模块
+    const benchmark_module = b.createModule(.{
+        .root_source_file = b.path("src/benchmark/string_benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    
+    const string_bench_exe = b.addExecutable(.{
+        .name = "string-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/benchmarks/run_string_benchmark.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    string_bench_exe.root_module.addImport("string_benchmark", benchmark_module);
+    string_bench_exe.linkLibC();
+    
+    const string_bench_cmd = b.addRunArtifact(string_bench_exe);
+    string_bench_step.dependOn(&string_bench_cmd.step);
+
     // Memory leak check
     const leak_check_step = b.step("leak-check", "Check for memory leaks");
     const leak_check_exe = b.addExecutable(.{
@@ -157,6 +200,133 @@ pub fn build(b: *std.Build) void {
     const leak_check_cmd = b.addRunArtifact(leak_check_exe);
     leak_check_cmd.addArg("examples/hello.php");
     leak_check_step.dependOn(&leak_check_cmd.step);
+
+    // Array benchmark tests
+    const array_bench_step = b.step("bench-array", "Run array benchmark tests");
+    
+    const array_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("src/benchmark/array_benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    
+    const array_bench_exe = b.addExecutable(.{
+        .name = "array-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/benchmarks/run_array_benchmark.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    array_bench_exe.root_module.addImport("array_benchmark", array_benchmark_module);
+    array_bench_exe.linkLibC();
+    
+    const array_bench_cmd = b.addRunArtifact(array_bench_exe);
+    array_bench_step.dependOn(&array_bench_cmd.step);
+
+    // JIT benchmark tests
+    const jit_bench_step = b.step("bench-jit", "Run JIT benchmark tests");
+    
+    const jit_bench_exe = b.addExecutable(.{
+        .name = "jit-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark/jit_benchmark.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    jit_bench_exe.linkLibC();
+    
+    const jit_bench_cmd = b.addRunArtifact(jit_bench_exe);
+    jit_bench_step.dependOn(&jit_bench_cmd.step);
+
+    // AOT benchmark tests
+    const aot_bench_step = b.step("bench-aot", "Run AOT benchmark tests");
+    
+    const aot_bench_exe = b.addExecutable(.{
+        .name = "aot-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark/aot_benchmark.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    aot_bench_exe.linkLibC();
+    
+    const aot_bench_cmd = b.addRunArtifact(aot_bench_exe);
+    aot_bench_step.dependOn(&aot_bench_cmd.step);
+
+    // All benchmarks
+    const bench_all_step = b.step("bench-all", "Run all benchmarks");
+    bench_all_step.dependOn(string_bench_step);
+    bench_all_step.dependOn(array_bench_step);
+    bench_all_step.dependOn(jit_bench_step);
+    bench_all_step.dependOn(aot_bench_step);
+
+    // Performance regression check
+    const perf_check_step = b.step("perf-check", "Check for performance regressions");
+    
+    const perf_cli_exe = b.addExecutable(.{
+        .name = "perf-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark/perf_cli.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    perf_cli_exe.linkLibC();
+    
+    b.installArtifact(perf_cli_exe);
+    
+    const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
+    perf_check_cmd.addArg("check");
+    perf_check_cmd.step.dependOn(bench_all_step);
+    perf_check_step.dependOn(&perf_check_cmd.step);
+
+    // Update performance baselines
+    const perf_update_step = b.step("perf-update", "Update performance baselines");
+    
+    const perf_update_cmd = b.addRunArtifact(perf_cli_exe);
+    perf_update_cmd.addArg("update");
+    perf_update_cmd.step.dependOn(bench_all_step);
+    perf_update_step.dependOn(&perf_update_cmd.step);
+
+    // List performance baselines
+    const perf_list_step = b.step("perf-list", "List performance baselines");
+    
+    const perf_list_cmd = b.addRunArtifact(perf_cli_exe);
+    perf_list_cmd.addArg("list");
+    perf_list_step.dependOn(&perf_list_cmd.step);
+
+    // Regression detector tests
+    const regression_test_step = b.step("test-regression", "Test regression detector");
+    
+    const regression_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark/regression_detector.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    
+    const run_regression_test = b.addRunArtifact(regression_test);
+    regression_test_step.dependOn(&run_regression_test.step);
+    test_step.dependOn(&run_regression_test.step);
+
+    // CI integration tests
+    const ci_test_step = b.step("test-ci", "Test CI integration");
+    
+    const ci_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark/ci_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    
+    const run_ci_test = b.addRunArtifact(ci_test);
+    ci_test_step.dependOn(&run_ci_test.step);
+    test_step.dependOn(&run_ci_test.step);
 
     // Clean step
     const clean_step = b.step("clean", "Clean build artifacts");
