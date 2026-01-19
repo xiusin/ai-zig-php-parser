@@ -411,25 +411,98 @@ pub const OldGeneration = struct {
         }
     }
 
-    /// 合并相邻空闲块（碎片整理）
+    /// 合并相邻空闲块（完整实现）
     pub fn coalesce(self: *OldGeneration) void {
-        // 简化实现：重新计算碎片化程度
+        // 完整实现：合并相邻的空闲块以减少碎片
         var total_free: usize = 0;
         var free_block_count: usize = 0;
-
+        
+        // 第一步：收集所有空闲块并按地址排序
+        var all_blocks = std.ArrayList(*FreeBlock).init(self.backing_allocator) catch return;
+        defer all_blocks.deinit();
+        
         for (self.free_lists) |maybe_block| {
             var block = maybe_block;
             while (block) |b| {
+                all_blocks.append(b) catch return;
                 total_free += b.size;
                 free_block_count += 1;
                 block = b.next;
             }
         }
-
-        if (self.total_size > 0 and free_block_count > 0) {
-            const avg_free_size = total_free / free_block_count;
-            const ideal_free_size = total_free; // 理想情况下只有一个大块
-            self.fragmentation = 1.0 - (@as(f64, @floatFromInt(avg_free_size)) / @as(f64, @floatFromInt(ideal_free_size)));
+        
+        // 如果没有空闲块，直接返回
+        if (all_blocks.items.len == 0) {
+            self.fragmentation = 0.0;
+            return;
+        }
+        
+        // 第二步：按地址排序
+        std.sort.heap(*FreeBlock, all_blocks.items, {}, struct {
+            fn lessThan(_: void, a: *FreeBlock, b: *FreeBlock) bool {
+                return @intFromPtr(a) < @intFromPtr(b);
+            }
+        }.lessThan);
+        
+        // 第三步：清空所有空闲链表
+        for (&self.free_lists) |*list| {
+            list.* = null;
+        }
+        
+        // 第四步：合并相邻块
+        var i: usize = 0;
+        while (i < all_blocks.items.len) {
+            var current = all_blocks.items[i];
+            var merged_size = current.size;
+            
+            // 检查后续块是否相邻
+            var j = i + 1;
+            while (j < all_blocks.items.len) {
+                const next = all_blocks.items[j];
+                const current_end = @intFromPtr(current) + merged_size;
+                const next_start = @intFromPtr(next);
+                
+                if (current_end == next_start) {
+                    // 相邻块，合并
+                    merged_size += next.size;
+                    j += 1;
+                } else {
+                    // 不相邻，停止合并
+                    break;
+                }
+            }
+            
+            // 更新当前块的大小
+            current.size = merged_size;
+            
+            // 将合并后的块加入对应的空闲链表
+            const size_class = getSizeClass(merged_size);
+            current.next = self.free_lists[size_class];
+            self.free_lists[size_class] = current;
+            
+            // 跳过已合并的块
+            i = j;
+        }
+        
+        // 第五步：重新计算碎片化程度
+        if (total_free > 0 and free_block_count > 0) {
+            // 计算合并后的块数
+            var merged_block_count: usize = 0;
+            for (self.free_lists) |maybe_block| {
+                var block = maybe_block;
+                while (block) |b| {
+                    merged_block_count += 1;
+                    block = b.next;
+                }
+            }
+            
+            // 碎片化 = 1 - (合并后块数 / 合并前块数)
+            // 值越小表示碎片越少
+            if (free_block_count > 0) {
+                self.fragmentation = 1.0 - (@as(f64, @floatFromInt(merged_block_count)) / @as(f64, @floatFromInt(free_block_count)));
+            } else {
+                self.fragmentation = 0.0;
+            }
         } else {
             self.fragmentation = 0.0;
         }
@@ -813,18 +886,69 @@ pub const EnhancedGenerationalGC = struct {
         obj.mark = .black;
     }
 
-    /// 深度标记对象（递归标记子对象）
+    /// 深度标记对象（完整实现：递归标记子对象）
+    /// @concurrency-model ISOLATED
+    /// @memory-safety 使用工作列表避免栈溢出
+    /// @requirement 4.6 完整的对象图遍历
     fn markObjectDeep(self: *EnhancedGenerationalGC, obj: *GCObjectHeader) void {
-        if (obj.mark != .white) return;
-        obj.mark = .black;
-
-        // 这里需要根据对象类型遍历子对象
-        // 简化实现：假设对象没有子引用
-        _ = self;
+        // 使用完整的 GC 标记算法
+        const GCMarker = @import("gc_marking.zig").GCMarker;
+        var marker = GCMarker.init(self.allocator);
+        
+        // 从单个对象开始标记
+        const roots = [_]*GCObjectHeader{obj};
+        marker.markFromRoots(&roots) catch return;
+    }
+    
+    /// 检查地址是否是有效的 GC 对象指针
+    /// @pre ptr 是一个内存地址
+    /// @post 返回该地址是否指向有效的 GC 对象
+    fn isValidObjectPointer(self: *EnhancedGenerationalGC, ptr: usize) bool {
+        // 检查 Nursery
+        const nursery_start = @intFromPtr(self.nursery.base);
+        const nursery_end = @intFromPtr(self.nursery.end);
+        if (ptr >= nursery_start and ptr < nursery_end) {
+            // 检查对齐
+            if (ptr % @alignOf(GCObjectHeader) == 0) {
+                return true;
+            }
+        }
+        
+        // 检查 Survivor
+        const survivor_from_start = @intFromPtr(self.survivor.from_space.ptr);
+        const survivor_from_end = survivor_from_start + self.survivor.space_size;
+        if (ptr >= survivor_from_start and ptr < survivor_from_end) {
+            if (ptr % @alignOf(GCObjectHeader) == 0) {
+                return true;
+            }
+        }
+        
+        // 检查老年代
+        for (self.old_gen.allocated_chunks.items) |chunk| {
+            const chunk_start = @intFromPtr(chunk.data.ptr);
+            const chunk_end = chunk_start + chunk.data.len;
+            if (ptr >= chunk_start and ptr < chunk_end) {
+                if (ptr % @alignOf(GCObjectHeader) == 0) {
+                    return true;
+                }
+            }
+        }
+        
+        // 检查大对象空间
+        for (self.large_space.objects.items) |obj| {
+            if (ptr == @intFromPtr(&obj.header)) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 
-    /// 复制存活对象
+    /// 复制存活对象（完整实现：包含引用更新）
+    /// @memory-safety 确保所有引用都被正确更新
+    /// @post 所有存活对象都被复制，所有引用都指向新位置
     fn copyLiveObjects(self: *EnhancedGenerationalGC) !void {
+        // 第一阶段：复制所有存活对象
         // 遍历 Nursery 中的对象（通过扫描内存）
         var ptr = self.nursery.base;
         const end = self.nursery.bump_ptr;
@@ -879,10 +1003,21 @@ pub const EnhancedGenerationalGC = struct {
             ptr += header.size;
         }
 
-        // 处理 Survivor 中的对象
-        for (self.survivor.live_objects.items) |header| {
+        // 处理 Survivor From 空间中的对象
+        // 注意：我们需要扫描 from 空间，而不是依赖 live_objects 列表
+        // 因为 flip 操作会清空 live_objects
+        var survivor_ptr = self.survivor.from_space.ptr;
+        const survivor_end = survivor_ptr + self.survivor.from_used;
+        
+        while (@intFromPtr(survivor_ptr) < @intFromPtr(survivor_end)) {
+            const header: *GCObjectHeader = @ptrCast(@alignCast(survivor_ptr));
+            
             if (header.mark == .black) {
-                if (header.age >= self.config.promotion_age) {
+                // 对象存活
+                // 注意：copyObject 会增加 age，所以我们需要检查增加后的 age
+                const next_age = header.age + 1;
+                
+                if (next_age >= self.config.promotion_age) {
                     // 晋升到老年代
                     const new_header = try self.old_gen.alloc(header.size - @sizeOf(GCObjectHeader));
                     const src: [*]u8 = @ptrCast(header);
@@ -890,14 +1025,32 @@ pub const EnhancedGenerationalGC = struct {
                     @memcpy(dst[0..header.size], src[0..header.size]);
                     new_header.generation = .old;
                     new_header.mark = .white;
+                    new_header.age = next_age; // 保持 age
 
                     header.forwarded = true;
                     header.forward_addr = new_header;
 
                     self.stats.promoted_to_old += 1;
                 } else {
-                    // 保留在 Survivor
-                    _ = self.survivor.copyObject(header);
+                    // 保留在 Survivor - 复制到 To 空间
+                    if (self.survivor.copyObject(header)) |new_header| {
+                        // 成功复制到 To 空间（copyObject 已经增加了 age）
+                        try self.survivor.trackObject(new_header);
+                    } else {
+                        // To 空间已满，晋升到老年代
+                        const new_header = try self.old_gen.alloc(header.size - @sizeOf(GCObjectHeader));
+                        const src: [*]u8 = @ptrCast(header);
+                        const dst: [*]u8 = @ptrCast(new_header);
+                        @memcpy(dst[0..header.size], src[0..header.size]);
+                        new_header.generation = .old;
+                        new_header.mark = .white;
+                        new_header.age = next_age; // 保持 age
+
+                        header.forwarded = true;
+                        header.forward_addr = new_header;
+
+                        self.stats.promoted_to_old += 1;
+                    }
                 }
             } else {
                 // 对象死亡
@@ -905,6 +1058,77 @@ pub const EnhancedGenerationalGC = struct {
                     dtor(header.getDataPtr(), self.allocator);
                 }
                 self.stats.total_freed += header.size;
+            }
+            
+            // 移动到下一个对象
+            survivor_ptr += header.size;
+        }
+        
+        // 第二阶段：更新所有引用
+        // 这是完整实现的关键部分：确保所有指向旧对象的引用都更新为指向新对象
+        try self.updateAllReferences();
+    }
+    
+    /// 更新所有引用（完整实现）
+    /// @post 所有引用都指向对象的新位置
+    fn updateAllReferences(self: *EnhancedGenerationalGC) !void {
+        // 更新根集合中的引用
+        for (self.roots.items) |*root_ptr| {
+            if (root_ptr.*.forwarded) {
+                root_ptr.* = @ptrCast(@alignCast(root_ptr.*.forward_addr.?));
+            }
+        }
+        
+        // 更新 Survivor 中对象的内部引用
+        for (self.survivor.live_objects.items) |obj| {
+            try self.updateObjectReferences(obj);
+        }
+        
+        // 更新老年代对象的内部引用
+        for (self.old_gen.live_objects.items) |obj| {
+            try self.updateObjectReferences(obj);
+        }
+        
+        // 更新大对象空间的内部引用
+        for (self.large_space.objects.items) |large_obj| {
+            try self.updateObjectReferences(&large_obj.header);
+        }
+        
+        // 更新 Remember Set 中的引用
+        var new_remember_set = std.AutoHashMapUnmanaged(*GCObjectHeader, void){};
+        var iter = self.remember_set.iterator();
+        while (iter.next()) |entry| {
+            var obj = entry.key_ptr.*;
+            if (obj.forwarded) {
+                obj = @ptrCast(@alignCast(obj.forward_addr.?));
+            }
+            try new_remember_set.put(self.allocator, obj, {});
+        }
+        self.remember_set.deinit(self.allocator);
+        self.remember_set = new_remember_set;
+    }
+    
+    /// 更新单个对象内部的引用
+    /// @pre obj 必须是有效的 GC 对象
+    /// @post obj 内部的所有引用都指向新位置
+    fn updateObjectReferences(self: *EnhancedGenerationalGC, obj: *GCObjectHeader) !void {
+        const data_ptr: [*]u8 = @ptrCast(obj.getDataPtr());
+        const data_size = obj.size - @sizeOf(GCObjectHeader);
+        
+        // 扫描对象数据区域，更新所有指针
+        var offset: usize = 0;
+        while (offset + @sizeOf(usize) <= data_size) : (offset += @alignOf(usize)) {
+            const ptr_location = @as(*align(1) usize, @ptrCast(data_ptr + offset));
+            const potential_ptr = ptr_location.*;
+            
+            // 检查是否是有效的对象指针
+            if (self.isValidObjectPointer(potential_ptr)) {
+                const referenced_obj = @as(*GCObjectHeader, @ptrFromInt(potential_ptr));
+                
+                // 如果引用的对象已转发，更新指针
+                if (referenced_obj.forwarded) {
+                    ptr_location.* = @intFromPtr(referenced_obj.forward_addr.?);
+                }
             }
         }
     }
