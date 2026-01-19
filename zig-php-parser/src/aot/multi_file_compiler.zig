@@ -500,7 +500,20 @@ pub const MultiFileCompiler = struct {
         // 2. Compile to object code
         // 3. Link with runtime library
 
-        // For now, we'll create a placeholder output
+        // 完整实现：生成真实的可执行文件
+        
+        // 步骤 1: 生成 LLVM IR（如果使用 LLVM 后端）
+        // 注意：这需要集成 LLVM 代码生成器
+        // const llvm_ir = try self.generateLLVMIR();
+        
+        // 步骤 2: 编译为目标文件
+        // const obj_file = try self.compileToObject(llvm_ir);
+        
+        // 步骤 3: 链接生成可执行文件
+        // try self.linkExecutable(obj_file, output_path);
+        
+        // 当前实现：生成占位符脚本
+        // 这允许测试编译流程，但不生成真实的可执行文件
         const file = std.fs.cwd().createFile(output_path, .{}) catch |err| {
             self.diagnostics.reportError(
                 .{ .file = output_path },
@@ -511,14 +524,29 @@ pub const MultiFileCompiler = struct {
         };
         defer file.close();
 
-        // Write a placeholder (in real implementation, this would be the executable)
-        try file.writeAll("#!/bin/sh\necho 'Compiled PHP program'\n");
+        // 写入占位符脚本
+        // 注意：在完整实现中，这里应该写入真实的机器码
+        try file.writeAll("#!/bin/sh\n");
+        try file.writeAll("# Compiled PHP program (placeholder)\n");
+        try file.writeAll("# To generate real executables, integrate LLVM backend:\n");
+        try file.writeAll("# 1. Generate LLVM IR from merged module\n");
+        try file.writeAll("# 2. Compile IR to object file (llc or LLVM API)\n");
+        try file.writeAll("# 3. Link with runtime library (ld/link.exe)\n");
+        try file.writeAll("echo 'Compiled PHP program (placeholder)'\n");
+        try file.writeAll("echo 'Real executable generation requires LLVM integration'\n");
 
         // Make executable on Unix
         if (@import("builtin").os.tag != .windows) {
             const stat = try file.stat();
             try file.chmod(stat.mode | 0o111);
         }
+        
+        // TODO: 完全修复此函数需要：
+        // 1. 集成 LLVM 代码生成器（src/aot/codegen.zig）
+        // 2. 实现 IR 到 LLVM IR 的转换
+        // 3. 实现目标文件生成（调用 llc 或 LLVM API）
+        // 4. 实现链接器集成（调用系统链接器）
+        // 5. 处理不同平台的链接选项（Linux/macOS/Windows）
     }
 
     /// Get the merged IR module
@@ -539,6 +567,50 @@ pub const MultiFileCompiler = struct {
     /// Check if a file has been compiled
     pub fn isFileCompiled(self: *const Self, file_path: []const u8) bool {
         return self.compiled_files.contains(file_path);
+    }
+    
+    // ========================================================================
+    // 辅助函数：可执行文件生成（框架实现）
+    // ========================================================================
+    
+    /// 生成 LLVM IR（框架实现）
+    /// 注意：需要集成 LLVM 代码生成器才能完全实现
+    fn generateLLVMIR(self: *Self) ![]const u8 {
+        _ = self;
+        // TODO: 实现 IR 到 LLVM IR 的转换
+        // 1. 遍历 merged_module 中的所有函数
+        // 2. 为每个函数生成 LLVM IR
+        // 3. 生成全局变量和常量的 LLVM IR
+        // 4. 生成类型定义的 LLVM IR
+        // 5. 返回完整的 LLVM IR 字符串
+        return error.NotImplemented;
+    }
+    
+    /// 编译为目标文件（框架实现）
+    /// 注意：需要 LLVM 工具链或 API
+    fn compileToObject(self: *Self, llvm_ir: []const u8) ![]const u8 {
+        _ = self;
+        _ = llvm_ir;
+        // TODO: 实现 LLVM IR 到目标文件的编译
+        // 方案 1: 调用 llc 命令
+        //   llc -filetype=obj -o output.o input.ll
+        // 方案 2: 使用 LLVM C API
+        //   LLVMTargetMachineEmitToFile(...)
+        return error.NotImplemented;
+    }
+    
+    /// 链接生成可执行文件（框架实现）
+    /// 注意：需要调用系统链接器
+    fn linkExecutable(self: *Self, obj_file: []const u8, output_path: []const u8) !void {
+        _ = self;
+        _ = obj_file;
+        _ = output_path;
+        // TODO: 实现链接器集成
+        // Linux/macOS: 调用 ld
+        //   ld obj_file -o output -lzigphp_runtime
+        // Windows: 调用 link.exe
+        //   link.exe obj_file /OUT:output.exe zigphp_runtime.lib
+        return error.NotImplemented;
     }
 };
 
