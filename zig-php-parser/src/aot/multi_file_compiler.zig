@@ -336,20 +336,18 @@ pub const MultiFileCompiler = struct {
             return false;
         };
 
-        // Create IR generator for this file
-        var ir_generator = IRGenerator.init(
-            self.allocator,
-            self.global_symbol_table,
-            self.type_inferencer,
-            self.diagnostics,
-        );
-        defer ir_generator.deinit();
-
-        // For now, we'll create a placeholder module since we don't have
-        // the actual parser integration here. In a real implementation,
-        // we would parse the source and generate IR.
+        // Create IR module for this file
         const module = try self.allocator.create(IR.Module);
         module.* = IR.Module.init(self.allocator, file_path, file_path);
+        errdefer {
+            module.deinit();
+            self.allocator.destroy(module);
+        }
+
+        // Parse source and generate IR
+        // 注意：这里需要真实的 PHP 解析器
+        // 当前实现：从源代码中提取函数和类定义，生成基本的 IR
+        try self.parseAndGenerateIR(module, source, file_path);
 
         // Store compiled file
         try self.compiled_files.put(self.allocator, file_path, .{
@@ -363,6 +361,131 @@ pub const MultiFileCompiler = struct {
         try self.registerFileSymbols(file_path, source);
 
         return true;
+    }
+    
+    /// Parse source code and generate IR
+    /// 这是一个简化的实现，用于演示 IR 生成流程
+    /// 在完整实现中，应该使用真实的 PHP 解析器
+    fn parseAndGenerateIR(self: *Self, module: *IR.Module, source: []const u8, file_path: []const u8) !void {
+        var i: usize = 0;
+        var line: u32 = 1;
+        var col: u32 = 1;
+
+        while (i < source.len) {
+            if (source[i] == '\n') {
+                line += 1;
+                col = 1;
+                i += 1;
+                continue;
+            }
+
+            // Look for function declarations
+            if (self.matchKeyword(source[i..], "function")) {
+                i += 8; // Skip "function"
+                // Skip whitespace
+                while (i < source.len and (source[i] == ' ' or source[i] == '\t')) {
+                    i += 1;
+                }
+                // Extract function name
+                const name_start = i;
+                while (i < source.len and (std.ascii.isAlphanumeric(source[i]) or source[i] == '_')) {
+                    i += 1;
+                }
+                if (i > name_start) {
+                    const func_name = source[name_start..i];
+                    
+                    // Create IR function
+                    const func = try self.allocator.create(IR.Function);
+                    func.* = IR.Function.init(self.allocator, func_name);
+                    func.location = .{ .file = file_path, .line = line, .column = col };
+                    func.is_exported = true;
+                    
+                    // Create entry block
+                    const entry_block = try func.createBlock("entry");
+                    
+                    // Parse function parameters (simplified)
+                    if (i < source.len and source[i] == '(') {
+                        i += 1;
+                        while (i < source.len and source[i] != ')') {
+                            // Skip whitespace
+                            while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == ',')) {
+                                i += 1;
+                            }
+                            // Extract parameter name
+                            if (i < source.len and source[i] == '$') {
+                                i += 1;
+                                const param_start = i;
+                                while (i < source.len and (std.ascii.isAlphanumeric(source[i]) or source[i] == '_')) {
+                                    i += 1;
+                                }
+                                if (i > param_start) {
+                                    const param_name = source[param_start..i];
+                                    try func.addParam(.{
+                                        .name = param_name,
+                                        .type_ = .dynamic,
+                                        .has_default = false,
+                                        .is_variadic = false,
+                                        .is_reference = false,
+                                    });
+                                }
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        if (i < source.len and source[i] == ')') {
+                            i += 1;
+                        }
+                    }
+                    
+                    // Generate basic function body IR
+                    // 在完整实现中，这里应该解析函数体并生成真实的 IR 指令
+                    // 当前实现：生成一个简单的返回指令
+                    const ret_inst = try self.allocator.create(IR.Instruction);
+                    ret_inst.* = .{
+                        .result = null,
+                        .op = .{ .ret = null },
+                        .location = .{ .file = file_path, .line = line, .column = col },
+                    };
+                    try entry_block.appendInstruction(ret_inst);
+                    
+                    // Add function to module
+                    try module.addFunction(func);
+                }
+            }
+            // Look for class declarations
+            else if (self.matchKeyword(source[i..], "class")) {
+                i += 5; // Skip "class"
+                // Skip whitespace
+                while (i < source.len and (source[i] == ' ' or source[i] == '\t')) {
+                    i += 1;
+                }
+                // Extract class name
+                const name_start = i;
+                while (i < source.len and (std.ascii.isAlphanumeric(source[i]) or source[i] == '_')) {
+                    i += 1;
+                }
+                if (i > name_start) {
+                    const class_name = source[name_start..i];
+                    
+                    // Create IR type definition
+                    const type_def = try self.allocator.create(IR.TypeDef);
+                    type_def.* = .{
+                        .name = class_name,
+                        .kind = .class,
+                        .parent = null,
+                        .interfaces = &.{},
+                        .properties = &.{},
+                        .methods = &.{},
+                        .location = .{ .file = file_path, .line = line, .column = col },
+                    };
+                    
+                    try module.addTypeDef(type_def);
+                }
+            } else {
+                col += 1;
+                i += 1;
+            }
+        }
     }
 
     /// Register symbols from a file in the global symbol table
@@ -651,66 +774,217 @@ pub const MultiFileCompiler = struct {
     
     /// 生成单个函数的 LLVM IR（完整实现）
     /// @pre func 必须是有效的 IR 函数
-    /// @post 生成完整的 LLVM IR 函数定义
-    fn generateLLVMFunction(self: *Self, writer: anytype, func: anytype) !void {
+    /// @post 生成完整的 LLVM IR 函数定义，包含真实的指令翻译
+    fn generateLLVMFunction(self: *Self, writer: anytype, func: *IR.Function) !void {
         // 函数签名
         try writer.print("define void @{s}(", .{func.name});
         
         // 生成参数列表
-        for (func.parameters, 0..) |param, i| {
+        for (func.params.items, 0..) |param, i| {
             if (i > 0) try writer.writeAll(", ");
             // PHP 值统一使用 i64 表示（NaN-boxing 或 tagged union）
             try writer.print("i64 %{s}", .{param.name});
         }
         
         try writer.writeAll(") {\n");
-        try writer.writeAll("entry:\n");
         
-        // 为每个参数分配栈空间
-        for (func.parameters) |param| {
-            try writer.print("  %{s}.addr = alloca i64\n", .{param.name});
-            try writer.print("  store i64 %{s}, i64* %{s}.addr\n", .{param.name, param.name});
-        }
-        
-        // 生成函数体
-        // 由于我们没有完整的 IR 结构，这里生成一个基本的函数体框架
-        // 实际实现中应该遍历 IR 指令并生成对应的 LLVM IR
-        
-        // 示例：调用 PHP 运行时函数
-        try writer.writeAll("  ; Function body\n");
-        
-        // 如果函数名是 main 或 __main，生成特殊的入口逻辑
-        if (std.mem.eql(u8, func.name, "main") or std.mem.eql(u8, func.name, "__main")) {
-            try writer.writeAll("  ; Main function entry point\n");
-            try writer.writeAll("  ; Initialize PHP runtime\n");
-            try writer.writeAll("  call void @php_runtime_init()\n");
-            try writer.writeAll("  ; Execute PHP code\n");
+        // 生成所有基本块
+        for (func.blocks.items) |block| {
+            // 基本块标签
+            try writer.print("{s}:\n", .{block.label});
             
-            // 示例：打印 "Hello from PHP"
-            try writer.writeAll("  %str = call i8* @php_alloc(i64 16)\n");
-            try writer.writeAll("  ; Store string data\n");
-            try writer.writeAll("  call void @php_print(i8* %str)\n");
-            try writer.writeAll("  call void @php_free(i8* %str)\n");
-        } else {
-            // 普通函数：生成基本的函数体
-            try writer.writeAll("  ; User function implementation\n");
-            
-            // 如果有参数，可以生成一些基本的操作
-            if (func.parameters.len > 0) {
-                try writer.writeAll("  ; Process parameters\n");
-                for (func.parameters) |param| {
-                    try writer.print("  %{s}.val = load i64, i64* %{s}.addr\n", .{param.name, param.name});
-                }
+            // 生成块中的所有指令
+            for (block.instructions.items) |inst| {
+                try self.generateLLVMInstruction(writer, inst);
             }
             
-            // 生成返回值（PHP 函数默认返回 null，表示为 0）
-            try writer.writeAll("  ; Return null (0)\n");
+            // 生成终止指令
+            if (block.terminator) |term| {
+                try self.generateLLVMTerminator(writer, term);
+            }
         }
         
-        try writer.writeAll("  ret void\n");
-        try writer.writeAll("}\n\n");
+        // 如果函数没有显式返回，添加默认返回
+        if (func.blocks.items.len == 0 or 
+            (func.blocks.items[func.blocks.items.len - 1].terminator == null)) {
+            try writer.writeAll("  ret void\n");
+        }
         
+        try writer.writeAll("}\n\n");
+    }
+    
+    /// 生成单条 LLVM IR 指令
+    fn generateLLVMInstruction(self: *Self, writer: anytype, inst: *IR.Instruction) !void {
         _ = self;
+        
+        switch (inst.op) {
+            // 算术操作
+            .add => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i64 @php_add(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .sub => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i64 @php_sub(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .mul => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i64 @php_mul(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .div => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i64 @php_div(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .mod => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i64 @php_mod(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            
+            // 比较操作
+            .eq => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i1 @php_eq(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .ne => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i1 @php_ne(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .lt => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i1 @php_lt(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .le => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i1 @php_le(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .gt => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i1 @php_gt(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .ge => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i1 @php_ge(i64 %{d}, i64 %{d})\n",
+                        .{ result.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            
+            // 内存操作
+            .alloca => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = alloca i64, i64 {d}\n",
+                        .{ result.id, op.size });
+                }
+            },
+            .load => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = load i64, i64* %{d}\n",
+                        .{ result.id, op.address.id });
+                }
+            },
+            .store => |op| {
+                try writer.print("  store i64 %{d}, i64* %{d}\n",
+                    .{ op.value.id, op.address.id });
+            },
+            
+            // 常量
+            .const_int => |val| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = add i64 0, {d}\n",
+                        .{ result.id, val });
+                }
+            },
+            .const_bool => |val| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = add i64 0, {d}\n",
+                        .{ result.id, if (val) 1 else 0 });
+                }
+            },
+            
+            // 函数调用
+            .call => |op| {
+                if (inst.result) |result| {
+                    try writer.print("  %{d} = call i64 @{s}(", .{ result.id, op.function });
+                    for (op.args, 0..) |arg, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writer.print("i64 %{d}", .{arg.id});
+                    }
+                    try writer.writeAll(")\n");
+                } else {
+                    try writer.print("  call void @{s}(", .{op.function});
+                    for (op.args, 0..) |arg, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writer.print("i64 %{d}", .{arg.id});
+                    }
+                    try writer.writeAll(")\n");
+                }
+            },
+            
+            // 打印操作
+            .print => |op| {
+                try writer.print("  call void @php_print(i64 %{d})\n", .{op.value.id});
+            },
+            
+            // 其他操作暂时跳过
+            else => {
+                try writer.writeAll("  ; Unsupported instruction\n");
+            },
+        }
+    }
+    
+    /// 生成 LLVM IR 终止指令
+    fn generateLLVMTerminator(self: *Self, writer: anytype, term: IR.Terminator) !void {
+        _ = self;
+        
+        switch (term) {
+            .ret => |reg| {
+                if (reg) |val| {
+                    try writer.print("  ret i64 %{d}\n", .{val.id});
+                } else {
+                    try writer.writeAll("  ret void\n");
+                }
+            },
+            .br => |target| {
+                try writer.print("  br label %{s}\n", .{target.label});
+            },
+            .cond_br => |op| {
+                try writer.print("  br i1 %{d}, label %{s}, label %{s}\n",
+                    .{ op.cond.id, op.then_block.label, op.else_block.label });
+            },
+            .switch_ => |op| {
+                try writer.print("  switch i64 %{d}, label %{s} [\n", .{ op.value.id, op.default.label });
+                for (op.cases) |case| {
+                    try writer.print("    i64 {d}, label %{s}\n", .{ case.value, case.block.label });
+                }
+                try writer.writeAll("  ]\n");
+            },
+            .unreachable_ => {
+                try writer.writeAll("  unreachable\n");
+            },
+            .throw => |reg| {
+                try writer.print("  call void @php_throw(i64 %{d})\n", .{reg.id});
+                try writer.writeAll("  unreachable\n");
+            },
+        }
     }
     
     /// 编译 LLVM IR 为目标文件
