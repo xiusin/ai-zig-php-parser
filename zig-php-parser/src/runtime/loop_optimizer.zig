@@ -1,6 +1,7 @@
 // 简单的循环优化器 - 检测简单的for循环并使用FastValue优化
 const std = @import("std");
-const ast = @import("../compiler/ast.zig");
+const compiler = @import("compiler");
+const ast = compiler.ast;
 const types = @import("types.zig");
 const Value = types.Value;
 

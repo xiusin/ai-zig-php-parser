@@ -49,7 +49,7 @@ test "Property 8.2: AOTCompiler syntax mode initialization" {
             .syntax_mode = .php,
         };
         var compiler = try AOTCompiler.init(allocator, opts);
-        defer compiler.deinit();
+        defer fast_compiler.deinit();
 
         try testing.expectEqual(SyntaxMode.php, compiler.getSyntaxMode());
         try testing.expect(compiler.getSyntaxConfig().isPhpMode());
@@ -63,7 +63,7 @@ test "Property 8.2: AOTCompiler syntax mode initialization" {
             .syntax_mode = .go,
         };
         var compiler = try AOTCompiler.init(allocator, opts);
-        defer compiler.deinit();
+        defer fast_compiler.deinit();
 
         try testing.expectEqual(SyntaxMode.go, compiler.getSyntaxMode());
         try testing.expect(compiler.getSyntaxConfig().isGoMode());
@@ -157,7 +157,7 @@ test "Property 8.6: Syntax mode preservation through lifecycle" {
             .syntax_mode = mode,
         };
         var compiler = try AOTCompiler.init(allocator, opts);
-        defer compiler.deinit();
+        defer fast_compiler.deinit();
 
         // Mode should be preserved
         try testing.expectEqual(mode, compiler.getSyntaxMode());

@@ -1,16 +1,18 @@
 const std = @import("std");
-const ast = @import("compiler/ast.zig");
-const parser = @import("compiler/parser.zig");
-const vm = @import("runtime/vm.zig");
-const types = @import("runtime/types.zig");
+const compiler = @import("compiler");
+const runtime = @import("runtime");
+const ast = compiler.ast;
+const parser = compiler.parser;
+const vm = runtime.vm;
+const types = runtime.types;
 const Value = types.Value;
-const Environment = @import("runtime/environment.zig");
-const PHPContext = @import("compiler/parser.zig").PHPContext;
+const environment = runtime.environment;
+const PHPContext = compiler.PHPContext;
 const ExecutionMode = vm.ExecutionMode;
 const aot = @import("aot/root.zig");
 const aot_runtime = @import("aot/runtime_lib.zig");
-const SyntaxMode = @import("compiler/syntax_mode.zig").SyntaxMode;
-const SyntaxConfig = @import("compiler/syntax_mode.zig").SyntaxConfig;
+const SyntaxMode = compiler.SyntaxMode;
+const SyntaxConfig = compiler.SyntaxConfig;
 const config_loader = @import("config/loader.zig");
 const ConfigLoader = config_loader.ConfigLoader;
 
@@ -278,7 +280,7 @@ pub fn main() !void {
     } else "<?php echo 42;";
 
     // Detect syntax directive in the source code
-    const syntax_mode_module = @import("compiler/syntax_mode.zig");
+    const syntax_mode_module = compiler.syntax_mode;
     const directive_result = syntax_mode_module.detectSyntaxDirective(php_code);
     const effective_syntax_mode: SyntaxMode = if (directive_result.found and directive_result.mode != null)
         directive_result.mode.?
@@ -455,14 +457,14 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     }
 
     // Use the AOTCompiler for the full compilation pipeline
-    var compiler = try aot.AOTCompiler.init(allocator, options);
-    defer compiler.deinit();
+    var aot_compiler = try aot.AOTCompiler.init(allocator, options);
+    defer aot_compiler.deinit();
 
     // Set the pre-parsed AST
-    try compiler.setAST(ir_nodes, string_table);
+    try aot_compiler.setAST(ir_nodes, string_table);
 
     // Set source for diagnostics
-    try compiler.getDiagnostics().setSource(source);
+    try aot_compiler.getDiagnostics().setSource(source);
 
     if (options.dump_ir) {
         std.debug.print("\n=== IR Dump ===\n", .{});
@@ -471,10 +473,10 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         var symbol_table = try aot.SymbolTable.init(allocator);
         defer symbol_table.deinit();
 
-        var type_inferencer = aot.TypeInferenceMod.TypeInferencer.init(allocator, &symbol_table, compiler.getDiagnostics());
+        var type_inferencer = aot.TypeInferenceMod.TypeInferencer.init(allocator, &symbol_table, aot_compiler.getDiagnostics());
 
         // Initialize IR generator
-        var ir_generator = aot.IRGenerator.init(allocator, &symbol_table, &type_inferencer, compiler.getDiagnostics());
+        var ir_generator = aot.IRGenerator.init(allocator, &symbol_table, &type_inferencer, aot_compiler.getDiagnostics());
         defer ir_generator.deinit();
 
         // Generate IR - pass the root node index
@@ -501,8 +503,8 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     }
 
     // Report compilation status
-    if (compiler.hasErrors()) {
-        compiler.printDiagnostics();
+    if (aot_compiler.hasErrors()) {
+        aot_compiler.printDiagnostics();
         return;
     }
 
@@ -626,7 +628,7 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
 }
 
 /// Convert parser token to IR generator token
-fn convertToken(token: @import("compiler/token.zig").Token) aot.IRGeneratorMod.Token {
+fn convertToken(token: compiler.Token) aot.IRGeneratorMod.Token {
     return .{
         .tag = convertTokenTag(token.tag),
         .start = @intCast(token.loc.start),
@@ -637,7 +639,7 @@ fn convertToken(token: @import("compiler/token.zig").Token) aot.IRGeneratorMod.T
 }
 
 /// Convert parser token tag to IR generator token tag
-fn convertTokenTag(tag: @import("compiler/token.zig").Token.Tag) aot.IRGeneratorMod.TokenTag {
+fn convertTokenTag(tag: compiler.Token.Tag) aot.IRGeneratorMod.TokenTag {
     return switch (tag) {
         .t_lnumber => .integer_literal,
         .t_dnumber => .float_literal,

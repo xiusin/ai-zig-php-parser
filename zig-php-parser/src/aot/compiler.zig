@@ -16,9 +16,9 @@
 //!
 //! ```zig
 //! var compiler = try AOTCompiler.init(allocator, options);
-//! defer compiler.deinit();
+//! defer fc.deinit();
 //!
-//! try compiler.compile();
+//! try fc.compile();
 //! ```
 
 const std = @import("std");
@@ -1165,10 +1165,10 @@ test "AOTCompiler initializes syntax config from options" {
             .input_file = "test.php",
             .syntax_mode = .php,
         };
-        var compiler = try AOTCompiler.init(allocator, opts);
-        defer compiler.deinit();
+        var aot_compiler = try AOTCompiler.init(allocator, opts);
+        defer aot_compiler.deinit();
         
-        try std.testing.expectEqual(SyntaxMode.php, compiler.getSyntaxMode());
+        try std.testing.expectEqual(SyntaxMode.php, aot_compiler.getSyntaxMode());
         try std.testing.expect(compiler.getSyntaxConfig().isPhpMode());
     }
     
@@ -1179,7 +1179,7 @@ test "AOTCompiler initializes syntax config from options" {
             .syntax_mode = .go,
         };
         var compiler = try AOTCompiler.init(allocator, opts);
-        defer compiler.deinit();
+        defer fc.deinit();
         
         try std.testing.expectEqual(SyntaxMode.go, compiler.getSyntaxMode());
         try std.testing.expect(compiler.getSyntaxConfig().isGoMode());

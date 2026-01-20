@@ -121,7 +121,7 @@ test "编译器集成类型推断" {
     
     // 创建编译器并集成类型推断
     var compiler = Compiler.initWithTypeInference(allocator, inference_ptr);
-    defer compiler.deinit();
+    defer fast_compiler.deinit();
     
     // 验证编译器有类型推断引擎
     try testing.expect(compiler.type_inference != null);

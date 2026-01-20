@@ -14,8 +14,8 @@ const ParallelCompiler = @import("parallel_compiler.zig").ParallelCompiler;
 const CompilationTask = @import("parallel_compiler.zig").CompilationTask;
 const Compiler = @import("compiler.zig").Compiler;
 const CodeCache = @import("code_cache.zig").CodeCache;
-const CompiledFunc = @import("../runtime/func.zig").CompiledFunc;
-const OpCode = @import("../runtime/opcode.zig").OpCode;
+const CompiledFunc = @import("runtime").func.zig.CompiledFunc;
+const OpCode = @import("runtime").opcode.zig.OpCode;
 const HotspotDetector = @import("hotspot_detector.zig").HotspotDetector;
 
 /// 属性测试框架
@@ -202,10 +202,10 @@ test "属性 38: 并行编译加速比 (2-4倍)" {
     const serial_start = std.time.nanoTimestamp();
     {
         var compiler = Compiler.initWithHotspotDetector(allocator, &hotspot_detector);
-        defer compiler.deinit();
+        defer fast_compiler.deinit();
         
         for (funcs.items) |func| {
-            _ = try compiler.compile(&code_cache, func, @ptrCast(&[_]u8{}), null);
+            _ = try fast_compiler.compile(&code_cache, func, @ptrCast(&[_]u8{}), null);
         }
     }
     const serial_end = std.time.nanoTimestamp();

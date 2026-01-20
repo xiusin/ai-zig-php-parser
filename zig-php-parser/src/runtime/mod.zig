@@ -6,6 +6,7 @@ pub const types = @import("types.zig");
 pub const vm = @import("vm.zig");
 pub const func = @import("func.zig");
 pub const opcode = @import("opcode.zig");
+pub const environment = @import("environment.zig");
 
 // 内存管理
 pub const gc = @import("gc.zig");
@@ -19,6 +20,7 @@ pub const loop_optimizer = @import("loop_optimizer.zig");
 pub const fast_vm = @import("fast_vm.zig");
 pub const fast_compiler = @import("fast_compiler.zig");
 pub const fast_runtime = @import("fast_runtime.zig");
+pub const fast_string = @import("fast_string.zig");
 
 // 并发支持
 pub const concurrency = @import("concurrency.zig");

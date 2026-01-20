@@ -1,10 +1,11 @@
 const std = @import("std");
-const ast = @import("../compiler/ast.zig");
-const Token = @import("../compiler/token.zig").Token;
+const compiler = @import("compiler");
+const ast = compiler.ast;
+const Token = compiler.Token;
 const Environment = @import("environment.zig").Environment;
 const types = @import("types.zig");
 const Value = types.Value;
-const parser_mod = @import("../compiler/parser.zig");
+const parser_mod = compiler.parser;
 const PHPContext = parser_mod.PHPContext;
 const Parser = parser_mod.Parser;
 const exceptions = @import("exceptions.zig");
@@ -28,20 +29,20 @@ const builtin_http = @import("builtin_http.zig");
 const builtin_io = @import("builtin_io.zig");
 const coroutine = @import("coroutine.zig");
 const gc = @import("gc.zig");
-const syntax_mode = @import("../compiler/syntax_mode.zig");
+const syntax_mode = compiler.syntax_mode;
 pub const SyntaxMode = syntax_mode.SyntaxMode;
 pub const SyntaxConfig = syntax_mode.SyntaxConfig;
 
 // Extension system imports
-const extension_registry = @import("../extension/registry.zig");
-const extension_api = @import("../extension/api.zig");
+const extension_registry = @import("extension").registry.zig;
+const extension_api = @import("extension").api.zig;
 pub const ExtensionRegistry = extension_registry.ExtensionRegistry;
 
 // Bytecode VM imports for execution mode switching
-const bytecode_vm = @import("../bytecode/vm.zig");
+const bytecode_vm = @import("bytecode").vm.zig;
 const BytecodeVM = bytecode_vm.BytecodeVM;
 // BytecodeGenerator for AST-to-bytecode compilation
-const bytecode_generator = @import("../bytecode/generator.zig");
+const bytecode_generator = @import("bytecode").generator.zig;
 const BytecodeGenerator = bytecode_generator.BytecodeGenerator;
 
 // Performance optimization modules
@@ -4981,10 +4982,10 @@ pub const VM = struct {
         };
 
         // 创建 FastCompiler 并编译 AST
-        var compiler = FastCompiler.init(self.allocator, self.context);
-        defer compiler.deinit();
+        var fc = FastCompiler.init(self.allocator, self.context);
+        defer fc.deinit();
 
-        const compiled_func = compiler.compile(node) catch |err| {
+        const compiled_func = fc.compile(node) catch |err| {
             std.debug.print("FastVM compilation failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
@@ -5106,11 +5107,9 @@ pub const VM = struct {
         const right = self.evaluateNodeFast(rhs_idx);
         defer self.releaseValue(right);
 
-        const token = @import("../compiler/token.zig").Token;
-
         // 使用 Value 的快速算术操作 (支持 48 位整数)
         switch (binary_expr.op) {
-            token.Tag.plus => {
+            Token.Tag.plus => {
                 // 快速路径：两个整数
                 if (left.isInt() and right.isInt()) {
                     return Value.addIntFast(left, right);
@@ -5118,86 +5117,86 @@ pub const VM = struct {
                 // 通用路径：带溢出检查
                 return Value.addGeneric(left, right);
             },
-            token.Tag.minus => {
+            Token.Tag.minus => {
                 if (left.isInt() and right.isInt()) {
                     return Value.subIntFast(left, right);
                 }
                 return Value.subGeneric(left, right);
             },
-            token.Tag.asterisk => {
+            Token.Tag.asterisk => {
                 if (left.isInt() and right.isInt()) {
                     return Value.mulIntFast(left, right);
                 }
                 return Value.mulGeneric(left, right);
             },
-            token.Tag.slash => {
+            Token.Tag.slash => {
                 return Value.divGeneric(left, right);
             },
-            token.Tag.percent => {
+            Token.Tag.percent => {
                 return self.evaluateModulo(left, right) catch Value.initNull();
             },
-            token.Tag.dot => {
+            Token.Tag.dot => {
                 return self.concatenateStrings(left, right) catch Value.initNull();
             },
-            token.Tag.equal_equal => {
+            Token.Tag.equal_equal => {
                 // 快速路径：整数比较
                 if (left.isInt() and right.isInt()) {
                     return Value.eqIntFast(left, right);
                 }
                 return Value.initBool(self.valuesEqual(left, right));
             },
-            token.Tag.bang_equal => {
+            Token.Tag.bang_equal => {
                 if (left.isInt() and right.isInt()) {
                     return Value.initBool(left.asInt() != right.asInt());
                 }
                 return Value.initBool(!self.valuesEqual(left, right));
             },
-            token.Tag.equal_equal_equal => {
+            Token.Tag.equal_equal_equal => {
                 return Value.initBool(self.valuesStrictEqual(left, right));
             },
-            token.Tag.bang_equal_equal => {
+            Token.Tag.bang_equal_equal => {
                 return Value.initBool(!self.valuesStrictEqual(left, right));
             },
-            token.Tag.less => {
+            Token.Tag.less => {
                 if (left.isInt() and right.isInt()) {
                     return Value.ltIntFast(left, right);
                 }
                 const res = self.compareValues(left, right, binary_expr.op) catch 0;
                 return Value.initBool(res != 0);
             },
-            token.Tag.less_equal => {
+            Token.Tag.less_equal => {
                 if (left.isInt() and right.isInt()) {
                     return Value.leIntFast(left, right);
                 }
                 const res = self.compareValues(left, right, binary_expr.op) catch 0;
                 return Value.initBool(res != 0);
             },
-            token.Tag.greater => {
+            Token.Tag.greater => {
                 if (left.isInt() and right.isInt()) {
                     return Value.gtIntFast(left, right);
                 }
                 const res = self.compareValues(left, right, binary_expr.op) catch 0;
                 return Value.initBool(res != 0);
             },
-            token.Tag.greater_equal => {
+            Token.Tag.greater_equal => {
                 if (left.isInt() and right.isInt()) {
                     return Value.geIntFast(left, right);
                 }
                 const res = self.compareValues(left, right, binary_expr.op) catch 0;
                 return Value.initBool(res != 0);
             },
-            token.Tag.spaceship => {
+            Token.Tag.spaceship => {
                 const res = self.compareValues(left, right, binary_expr.op) catch 0;
                 return Value.initInt(res);
             },
             // 位操作快速路径
-            token.Tag.ampersand => {
+            Token.Tag.ampersand => {
                 if (left.isInt() and right.isInt()) {
                     return Value.bitAndFast(left, right);
                 }
                 return Value.initInt(left.toInt() & right.toInt());
             },
-            token.Tag.pipe => {
+            Token.Tag.pipe => {
                 if (left.isInt() and right.isInt()) {
                     return Value.bitOrFast(left, right);
                 }
@@ -5272,7 +5271,7 @@ pub const VM = struct {
         return Value.initBool(false);
     }
 
-    fn evaluateMagicConstant(self: *VM, kind: @import("../compiler/ast.zig").MagicConstantKind) !Value {
+    fn evaluateMagicConstant(self: *VM, kind: ast.MagicConstantKind) !Value {
         return switch (kind) {
             .dir => blk: {
                 // Return directory of current file
@@ -5378,14 +5377,13 @@ pub const VM = struct {
     }
 
     fn computeCompoundOp(self: *VM, op: anytype, left: Value, right: Value) !Value {
-        const token = @import("../compiler/token.zig").Token;
         return switch (op) {
-            token.Tag.plus_equal => self.evaluateAddition(left, right),
-            token.Tag.minus_equal => self.evaluateSubtraction(left, right),
-            token.Tag.asterisk_equal => self.evaluateMultiplication(left, right),
-            token.Tag.slash_equal => self.evaluateDivision(left, right),
-            token.Tag.percent_equal => self.evaluateModulo(left, right),
-            token.Tag.dot_equal => self.concatenateStrings(left, right),
+            Token.Tag.plus_equal => self.evaluateAddition(left, right),
+            Token.Tag.minus_equal => self.evaluateSubtraction(left, right),
+            Token.Tag.asterisk_equal => self.evaluateMultiplication(left, right),
+            Token.Tag.slash_equal => self.evaluateDivision(left, right),
+            Token.Tag.percent_equal => self.evaluateModulo(left, right),
+            Token.Tag.dot_equal => self.concatenateStrings(left, right),
             else => Value.initNull(),
         };
     }

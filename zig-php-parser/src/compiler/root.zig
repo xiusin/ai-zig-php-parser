@@ -2,7 +2,8 @@ const std = @import("std");
 pub const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
 const token = @import("token.zig");
-const fast_string = @import("../runtime/fast_string.zig");
+const runtime = @import("runtime");
+const fast_string = runtime.fast_string;
 
 pub const Error = struct {
     msg: []const u8,

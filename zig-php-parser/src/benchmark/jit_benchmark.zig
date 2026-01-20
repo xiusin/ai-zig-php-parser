@@ -9,11 +9,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Compiler = @import("../jit/compiler.zig").Compiler;
-const CodeCache = @import("../jit/code_cache.zig").CodeCache;
-const HotspotDetector = @import("../jit/hotspot_detector.zig").HotspotDetector;
-const CompiledFunc = @import("../runtime/func.zig").CompiledFunc;
-const OpCode = @import("../runtime/opcode.zig").OpCode;
+const Compiler = @import("jit").compiler.zig.Compiler;
+const CodeCache = @import("jit").code_cache.zig.CodeCache;
+const HotspotDetector = @import("jit").hotspot_detector.zig.HotspotDetector;
+const CompiledFunc = @import("runtime").func.zig.CompiledFunc;
+const OpCode = @import("runtime").opcode.zig.OpCode;
 
 /// JIT 性能测试配置
 pub const JITBenchmarkConfig = struct {
@@ -217,7 +217,7 @@ pub const JITBenchmark = struct {
     
     /// 清理资源
     pub fn deinit(self: *Self) void {
-        self.compiler.deinit();
+        self.fast_compiler.deinit();
         self.code_cache.deinit();
         self.hotspot_detector.deinit();
         self.results.deinit();
@@ -233,7 +233,7 @@ pub const JITBenchmark = struct {
         
         // 测量编译时间
         const start = std.time.nanoTimestamp();
-        const compile_result = self.compiler.compile(&self.code_cache, func, &{}, null) catch |err| {
+        const compile_result = self.fast_compiler.compile(&self.code_cache, func, &{}, null) catch |err| {
             const end = std.time.nanoTimestamp();
             const compile_time = @as(u64, @intCast(end - start));
             

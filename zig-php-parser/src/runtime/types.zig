@@ -1685,7 +1685,8 @@ pub const StructInstance = struct {
 
             // Execute body
             if (method.body) |body_ptr| {
-                const ast = @import("../compiler/ast.zig");
+                const compiler = @import("compiler");
+                const ast = compiler.ast;
                 const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
                 return try vm_instance.run(body_node);
             }
@@ -2232,7 +2233,8 @@ pub const PHPObject = struct {
 
         // Check if this is a generator function (contains yield)
         if (method.?.body) |body_ptr| {
-            const ast = @import("../compiler/ast.zig");
+            const compiler = @import("compiler");
+            const ast = compiler.ast;
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
 
             // Check if body contains yield
@@ -3344,7 +3346,8 @@ pub const Closure = struct {
 
         // Execute closure body
         if (self.function.body) |body_ptr| {
-            const ast = @import("../compiler/ast.zig");
+            const compiler = @import("compiler");
+            const ast = compiler.ast;
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
             const result = vm_instance.eval(body_node) catch |err| {
                 if (err == error.Return) {
@@ -3613,7 +3616,8 @@ pub const ArrowFunction = struct {
 
         // Execute arrow function body
         if (self.body) |body_ptr| {
-            const ast = @import("../compiler/ast.zig");
+            const compiler = @import("compiler");
+            const ast = compiler.ast;
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
             return try vm_instance.eval(body_node);
         }

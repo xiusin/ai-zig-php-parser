@@ -9,17 +9,17 @@
 //! 5. 超级指令优化
 
 const std = @import("std");
-const ast = @import("../compiler/ast.zig");
-const parser_mod = @import("../compiler/parser.zig");
-const root_mod = @import("../compiler/root.zig");
-const Token = @import("../compiler/token.zig").Token;
+const compiler_mod = @import("compiler");
+const ast = compiler_mod.ast;
+const parser_mod = compiler_mod.parser;
+const Token = compiler_mod.Token;
 const fast_vm = @import("fast_vm.zig");
 const fast_value = @import("fast_value.zig");
 
 const FastValue = fast_value.FastValue;
 const OpCode = fast_vm.OpCode;
+const PHPContext = parser_mod.PHPContext;
 const CompiledFunc = fast_vm.CompiledFunc;
-const PHPContext = root_mod.PHPContext;
 
 /// 编译错误
 pub const CompileError = error{
@@ -519,15 +519,15 @@ test "FastCompiler simple arithmetic" {
     var context = PHPContext.init(arena.allocator());
     defer context.deinit();
     
-    var compiler = FastCompiler.init(allocator, &context);
-    defer compiler.deinit();
+    var fast_compiler = FastCompiler.init(allocator, &context);
+    defer fast_compiler.deinit();
     
     // 手动构建简单测试
-    try compiler.emitOp(.push_1);
-    try compiler.emitOp(.push_int);
-    try compiler.emitInt32(2);
-    try compiler.emitOp(.add_i);
-    try compiler.emitOp(.halt);
+    try fast_compiler.emitOp(.push_1);
+    try fast_compiler.emitOp(.push_int);
+    try fast_compiler.emitInt32(2);
+    try fast_compiler.emitOp(.add_i);
+    try fast_compiler.emitOp(.halt);
     
     try std.testing.expect(compiler.code.items.len > 0);
 }
@@ -541,25 +541,25 @@ test "FastCompiler loop compilation" {
     var context = PHPContext.init(arena.allocator());
     defer context.deinit();
     
-    var compiler = FastCompiler.init(allocator, &context);
-    defer compiler.deinit();
+    var fast_compiler = FastCompiler.init(allocator, &context);
+    defer fast_compiler.deinit();
     
     // 模拟循环: while (i < 10) { i++ }
     const loop_start = compiler.newLabel();
     const loop_end = compiler.newLabel();
     
     compiler.markLabel(loop_start);
-    try compiler.emitOp(.push_local);
-    try compiler.emitByte(0);
-    try compiler.emitOp(.push_int);
-    try compiler.emitInt32(10);
-    try compiler.emitOp(.lt);
-    try compiler.emitJump(.jz, loop_end);
-    try compiler.emitOp(.load_inc_store);
-    try compiler.emitByte(0);
-    try compiler.emitJump(.jmp, loop_start);
+    try fast_compiler.emitOp(.push_local);
+    try fast_compiler.emitByte(0);
+    try fast_compiler.emitOp(.push_int);
+    try fast_compiler.emitInt32(10);
+    try fast_compiler.emitOp(.lt);
+    try fast_compiler.emitJump(.jz, loop_end);
+    try fast_compiler.emitOp(.load_inc_store);
+    try fast_compiler.emitByte(0);
+    try fast_compiler.emitJump(.jmp, loop_start);
     compiler.markLabel(loop_end);
-    try compiler.emitOp(.halt);
+    try fast_compiler.emitOp(.halt);
     
     try compiler.resolveJumps();
     

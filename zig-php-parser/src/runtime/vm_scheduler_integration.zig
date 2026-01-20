@@ -44,7 +44,7 @@ const std = @import("std");
 const VM = @import("vm.zig").VM;
 const Value = @import("types.zig").Value;
 const Scheduler = @import("scheduler.zig").Scheduler;
-const ast = @import("../compiler/ast.zig");
+const ast = @import("compiler").ast.zig;
 
 /// VM与调度器集成
 pub const VMSchedulerIntegration = struct {

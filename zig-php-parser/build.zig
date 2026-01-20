@@ -14,13 +14,17 @@ pub fn build(b: *std.Build) void {
     
     // 编译器模块
     const compiler_mod = b.createModule(.{
-        .root_source_file = b.path("src/compiler/ast.zig"),
+        .root_source_file = b.path("src/compiler/mod.zig"),
     });
     
     // 运行时模块
     const runtime_mod = b.createModule(.{
         .root_source_file = b.path("src/runtime/mod.zig"),
     });
+    
+    // 模块相互依赖
+    runtime_mod.addImport("compiler", compiler_mod);
+    compiler_mod.addImport("runtime", runtime_mod);
     
     // 字节码模块
     const bytecode_mod = b.createModule(.{

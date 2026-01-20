@@ -11,9 +11,9 @@ const TypeInfo = @import("codegen_x64.zig").TypeInfo;
 const Compiler = @import("compiler.zig").Compiler;
 const TargetArch = @import("compiler.zig").TargetArch;
 const CodeCache = @import("code_cache.zig").CodeCache;
-const func_mod = @import("../runtime/func.zig");
+const func_mod = @import("runtime").func.zig;
 const CompiledFunc = func_mod.CompiledFunc;
-const opcode_mod = @import("../runtime/opcode.zig");
+const opcode_mod = @import("runtime").opcode.zig;
 const OpCode = opcode_mod.OpCode;
 
 // ============================================================================
@@ -417,7 +417,7 @@ test "CodeGenX64: strength reduction optimization" {
 test "Compiler: x86-64 target selection" {
     const allocator = testing.allocator;
     var compiler = Compiler.init(allocator);
-    defer compiler.deinit();
+    defer fast_compiler.deinit();
     
     // 设置目标架构为 x86-64
     compiler.setTargetArch(.x86_64);

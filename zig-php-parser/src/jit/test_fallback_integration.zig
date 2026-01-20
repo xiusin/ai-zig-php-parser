@@ -18,7 +18,7 @@ test "Compiler and FallbackManager integration" {
     
     // 创建编译器并关联回退管理器
     var compiler = Compiler.initWithFallback(testing.allocator, &fallback_manager);
-    defer compiler.deinit();
+    defer fast_compiler.deinit();
     
     // 验证编译器正确关联了回退管理器
     try testing.expect(compiler.fallback_manager != null);

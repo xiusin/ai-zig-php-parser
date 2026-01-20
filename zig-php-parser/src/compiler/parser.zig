@@ -5,7 +5,7 @@ const SyntaxConfig = @import("syntax_mode.zig").SyntaxConfig;
 const Token = @import("token.zig").Token;
 const ast = @import("ast.zig");
 pub const PHPContext = @import("root.zig").PHPContext;
-const extension_api = @import("../extension/api.zig");
+const extension_api = @import("extension").api.zig;
 
 /// Syntax hooks interface for extension system
 /// Allows extensions to hook into the parsing process for custom syntax

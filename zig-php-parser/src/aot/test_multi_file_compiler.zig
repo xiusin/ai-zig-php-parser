@@ -285,7 +285,7 @@ test "multi-file compiler symbol registration" {
     };
 
     const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer compiler.deinit();
+    defer fc.deinit();
 
     // Register some symbols
     const source =
@@ -313,7 +313,7 @@ test "multi-file compiler multiple files symbol registration" {
     };
 
     const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer compiler.deinit();
+    defer fc.deinit();
 
     // Register symbols from first file
     const source1 =
@@ -389,7 +389,7 @@ test "multi-file compiler add include paths" {
     };
 
     const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer compiler.deinit();
+    defer fc.deinit();
 
     try compiler.addIncludePath("/usr/share/php");
     try compiler.addIncludePath("/var/www/lib");
@@ -509,7 +509,7 @@ test "multi-file compiler initialization and cleanup" {
     };
 
     const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer compiler.deinit();
+    defer fc.deinit();
 
     try testing.expectEqual(@as(usize, 0), compiler.getCompiledFileCount());
     try testing.expect(compiler.getMergedModule() == null);

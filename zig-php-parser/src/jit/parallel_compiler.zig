@@ -237,7 +237,7 @@ const WorkerThread = struct {
             const task = self.compiler.queue.take() orelse break;
             
             // 执行编译
-            _ = self.compiler.compileTask(task) catch |err| {
+            _ = self.fast_compiler.compileTask(task) catch |err| {
                 std.debug.print("Worker {d}: 编译失败: {}\n", .{self.id, err});
             };
         }
@@ -496,7 +496,7 @@ pub const ParallelCompiler = struct {
         
         // 创建编译器实例
         var compiler = Compiler.init(self.allocator);
-        defer compiler.deinit();
+        defer fast_compiler.deinit();
         
         // 设置热点检测器和回退管理器
         if (self.hotspot_detector) |detector| {
@@ -507,7 +507,7 @@ pub const ParallelCompiler = struct {
         }
         
         // 执行编译
-        const jit_result = compiler.compile(
+        const jit_result = fast_compiler.compile(
             self.code_cache,
             task.func,
             task.type_profile orelse @as(*const anyopaque, @ptrCast(&[_]u8{})),

@@ -26,7 +26,7 @@ const ExpressionEvaluator = @import("expression_evaluator.zig").ExpressionEvalua
 const MAX_BREAKPOINTS: usize = 256;
 
 /// 最大监视变量数
-const MAX_WATCHES: usize = 128
+const MAX_WATCHES: usize = 128;
 
 /// 最大调用栈深度
 const MAX_CALL_STACK_DEPTH: usize = 1024;

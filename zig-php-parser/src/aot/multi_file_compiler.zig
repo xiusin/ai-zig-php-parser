@@ -10,9 +10,9 @@
 //!
 //! ```zig
 //! var compiler = try MultiFileCompiler.init(allocator, options, diagnostics);
-//! defer compiler.deinit();
+//! defer fc.deinit();
 //!
-//! const result = try compiler.compile("main.php");
+//! const result = try fc.compile("main.php");
 //! ```
 
 const std = @import("std");
@@ -1165,7 +1165,7 @@ test "MultiFileCompiler initialization" {
     };
 
     const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer compiler.deinit();
+    defer fc.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), compiler.getCompiledFileCount());
     try std.testing.expect(compiler.getMergedModule() == null);
@@ -1182,7 +1182,7 @@ test "MultiFileCompiler add include path" {
     };
 
     const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer compiler.deinit();
+    defer fc.deinit();
 
     try compiler.addIncludePath("/usr/share/php");
     try compiler.addIncludePath("/var/www/lib");
@@ -1201,7 +1201,7 @@ test "MultiFileCompiler.matchKeyword" {
     };
 
     const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer compiler.deinit();
+    defer fc.deinit();
 
     try std.testing.expect(compiler.matchKeyword("function test()", "function"));
     try std.testing.expect(compiler.matchKeyword("class MyClass", "class"));

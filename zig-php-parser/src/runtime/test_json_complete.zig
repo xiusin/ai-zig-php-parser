@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const Value = @import("../compiler/value.zig").Value;
+const Value = @import("compiler").value.zig.Value;
 const MemoryManager = @import("memory_manager.zig").MemoryManager;
 const JsonFunctions = @import("stdlib_ext.zig").JsonFunctions;
 
