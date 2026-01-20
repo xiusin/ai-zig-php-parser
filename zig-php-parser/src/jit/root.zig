@@ -27,6 +27,15 @@ pub const SIMDCapabilities = @import("simd.zig").SIMDCapabilities;
 pub const SIMDInstructionSet = @import("simd.zig").SIMDInstructionSet;
 pub const SIMDVectorizer = @import("simd.zig").SIMDVectorizer;
 
+// 调试信息模块
+pub const DebugInfoManager = @import("debug_info.zig").DebugInfoManager;
+pub const DebugInfoBuilder = @import("debug_info.zig").DebugInfoBuilder;
+pub const SourceLocation = @import("debug_info.zig").SourceLocation;
+pub const AddressRange = @import("debug_info.zig").AddressRange;
+pub const CodeMapping = @import("debug_info.zig").CodeMapping;
+pub const DebugSymbol = @import("debug_info.zig").DebugSymbol;
+pub const SymbolType = @import("debug_info.zig").SymbolType;
+
 test {
     _ = CodeCache;
     _ = Assembler;
@@ -35,4 +44,6 @@ test {
     _ = RegisterAllocator;
     _ = @import("test_register_allocator_properties.zig");
     _ = @import("test_simd_properties.zig");
+    _ = @import("debug_info.zig");
+    _ = @import("test_debug_info_integration.zig");
 }

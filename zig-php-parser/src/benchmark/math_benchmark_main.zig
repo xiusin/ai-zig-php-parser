@@ -83,8 +83,7 @@ pub fn main() !void {
 }
 
 fn printHelp() !void {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.writeAll(
+    std.debug.print(
         \\数学运算性能测试
         \\
         \\用法: math_benchmark [选项]
@@ -100,5 +99,5 @@ fn printHelp() !void {
         \\  math_benchmark --iterations 50000 --verbose
         \\  math_benchmark --output results/report.md
         \\
-    );
+    , .{});
 }

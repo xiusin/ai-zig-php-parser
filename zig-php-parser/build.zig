@@ -9,6 +9,34 @@ pub fn build(b: *std.Build) void {
     // The bug causes "Instruction does not dominate all uses" LLVM error in Debug mode
     const exe_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
 
+    // ========== 定义共享模块 ==========
+    // 这些模块用于解决 Zig 0.15.2 不推荐使用 `../` 跨目录导入的问题
+    
+    // 编译器模块
+    const compiler_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/ast.zig"),
+    });
+    
+    // 运行时模块
+    const runtime_mod = b.createModule(.{
+        .root_source_file = b.path("src/runtime/mod.zig"),
+    });
+    
+    // 字节码模块
+    const bytecode_mod = b.createModule(.{
+        .root_source_file = b.path("src/bytecode/vm.zig"),
+    });
+    
+    // JIT 模块
+    const jit_mod = b.createModule(.{
+        .root_source_file = b.path("src/jit/compiler.zig"),
+    });
+    
+    // 扩展模块
+    const extension_mod = b.createModule(.{
+        .root_source_file = b.path("src/extension/api.zig"),
+    });
+
     // Main executable
     const exe = b.addExecutable(.{
         .name = "php-interpreter",
@@ -18,7 +46,20 @@ pub fn build(b: *std.Build) void {
             .optimize = exe_optimize,
         }),
     });
+    
+    // 添加模块导入到主可执行文件
+    exe.root_module.addImport("compiler", compiler_mod);
+    exe.root_module.addImport("runtime", runtime_mod);
+    exe.root_module.addImport("bytecode", bytecode_mod);
+    exe.root_module.addImport("jit", jit_mod);
+    exe.root_module.addImport("extension", extension_mod);
     exe.linkLibC();
+    // 添加模块导入
+    exe.root_module.addImport("compiler", compiler_mod);
+    exe.root_module.addImport("runtime", runtime_mod);
+    exe.root_module.addImport("bytecode", bytecode_mod);
+    exe.root_module.addImport("jit", jit_mod);
+    exe.root_module.addImport("extension", extension_mod);
     // Detect platform for Homebrew PCRE2 paths
     const pcre2_prefix = if (builtin.target.cpu.arch == .aarch64) "/opt/homebrew/opt/pcre2" else "/usr/local/opt/pcre2";
     exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
@@ -36,6 +77,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // 添加模块导入到 AOT 测试
+    aot_test.root_module.addImport("compiler", compiler_mod);
+    aot_test.root_module.addImport("runtime", runtime_mod);
+    aot_test.root_module.addImport("bytecode", bytecode_mod);
+    aot_test.root_module.addImport("jit", jit_mod);
+    aot_test.root_module.addImport("extension", extension_mod);
     const run_aot_test = b.addRunArtifact(aot_test);
     aot_test_step.dependOn(&run_aot_test.step);
 
@@ -78,6 +125,19 @@ pub fn build(b: *std.Build) void {
             }),
         });
         test_exe.linkLibC();
+    // 添加模块导入
+    test_exe.root_module.addImport("compiler", compiler_mod);
+    test_exe.root_module.addImport("runtime", runtime_mod);
+    test_exe.root_module.addImport("bytecode", bytecode_mod);
+    test_exe.root_module.addImport("jit", jit_mod);
+    test_exe.root_module.addImport("extension", extension_mod);
+        
+        // 添加模块导入
+        test_exe.root_module.addImport("compiler", compiler_mod);
+        test_exe.root_module.addImport("runtime", runtime_mod);
+        test_exe.root_module.addImport("bytecode", bytecode_mod);
+        test_exe.root_module.addImport("jit", jit_mod);
+        test_exe.root_module.addImport("extension", extension_mod);
 
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);
@@ -92,6 +152,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     optimizer_test.linkLibC();
+    // 添加模块导入
+    optimizer_test.root_module.addImport("compiler", compiler_mod);
+    optimizer_test.root_module.addImport("runtime", runtime_mod);
+    optimizer_test.root_module.addImport("bytecode", bytecode_mod);
+    optimizer_test.root_module.addImport("jit", jit_mod);
+    optimizer_test.root_module.addImport("extension", extension_mod);
+    // 添加模块导入
+    optimizer_test.root_module.addImport("compiler", compiler_mod);
+    optimizer_test.root_module.addImport("runtime", runtime_mod);
+    optimizer_test.root_module.addImport("bytecode", bytecode_mod);
+    optimizer_test.root_module.addImport("jit", jit_mod);
+    optimizer_test.root_module.addImport("extension", extension_mod);
     const run_optimizer_test = b.addRunArtifact(optimizer_test);
     test_step.dependOn(&run_optimizer_test.step);
     
@@ -104,6 +176,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     vm_test.linkLibC();
+    // 添加模块导入
+    vm_test.root_module.addImport("compiler", compiler_mod);
+    vm_test.root_module.addImport("runtime", runtime_mod);
+    vm_test.root_module.addImport("bytecode", bytecode_mod);
+    vm_test.root_module.addImport("jit", jit_mod);
+    vm_test.root_module.addImport("extension", extension_mod);
+    // 添加模块导入
+    vm_test.root_module.addImport("compiler", compiler_mod);
+    vm_test.root_module.addImport("runtime", runtime_mod);
+    vm_test.root_module.addImport("bytecode", bytecode_mod);
+    vm_test.root_module.addImport("jit", jit_mod);
+    vm_test.root_module.addImport("extension", extension_mod);
     const run_vm_test = b.addRunArtifact(vm_test);
     test_step.dependOn(&run_vm_test.step);
     
@@ -116,6 +200,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     gc_test.linkLibC();
+    // 添加模块导入
+    gc_test.root_module.addImport("compiler", compiler_mod);
+    gc_test.root_module.addImport("runtime", runtime_mod);
+    gc_test.root_module.addImport("bytecode", bytecode_mod);
+    gc_test.root_module.addImport("jit", jit_mod);
+    gc_test.root_module.addImport("extension", extension_mod);
+    // 添加模块导入
+    gc_test.root_module.addImport("compiler", compiler_mod);
+    gc_test.root_module.addImport("runtime", runtime_mod);
+    gc_test.root_module.addImport("bytecode", bytecode_mod);
+    gc_test.root_module.addImport("jit", jit_mod);
+    gc_test.root_module.addImport("extension", extension_mod);
     const run_gc_test = b.addRunArtifact(gc_test);
     test_step.dependOn(&run_gc_test.step);
 
@@ -140,6 +236,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     docs_exe.linkLibC();
+    // 添加模块导入
+    docs_exe.root_module.addImport("compiler", compiler_mod);
+    docs_exe.root_module.addImport("runtime", runtime_mod);
+    docs_exe.root_module.addImport("bytecode", bytecode_mod);
+    docs_exe.root_module.addImport("jit", jit_mod);
+    docs_exe.root_module.addImport("extension", extension_mod);
 
     const docs_cmd = b.addRunArtifact(docs_exe);
     docs_cmd.addArg("--help");
@@ -156,6 +258,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     bench_exe.linkLibC();
+    // 添加模块导入
+    bench_exe.root_module.addImport("compiler", compiler_mod);
+    bench_exe.root_module.addImport("runtime", runtime_mod);
+    bench_exe.root_module.addImport("bytecode", bytecode_mod);
+    bench_exe.root_module.addImport("jit", jit_mod);
+    bench_exe.root_module.addImport("extension", extension_mod);
 
     const bench_cmd = b.addRunArtifact(bench_exe);
     bench_cmd.addArg("examples/hello.php");
@@ -181,6 +289,12 @@ pub fn build(b: *std.Build) void {
     });
     string_bench_exe.root_module.addImport("string_benchmark", benchmark_module);
     string_bench_exe.linkLibC();
+    // 添加模块导入
+    string_bench_exe.root_module.addImport("compiler", compiler_mod);
+    string_bench_exe.root_module.addImport("runtime", runtime_mod);
+    string_bench_exe.root_module.addImport("bytecode", bytecode_mod);
+    string_bench_exe.root_module.addImport("jit", jit_mod);
+    string_bench_exe.root_module.addImport("extension", extension_mod);
     
     const string_bench_cmd = b.addRunArtifact(string_bench_exe);
     string_bench_step.dependOn(&string_bench_cmd.step);
@@ -196,6 +310,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     leak_check_exe.linkLibC();
+    // 添加模块导入
+    leak_check_exe.root_module.addImport("compiler", compiler_mod);
+    leak_check_exe.root_module.addImport("runtime", runtime_mod);
+    leak_check_exe.root_module.addImport("bytecode", bytecode_mod);
+    leak_check_exe.root_module.addImport("jit", jit_mod);
+    leak_check_exe.root_module.addImport("extension", extension_mod);
 
     const leak_check_cmd = b.addRunArtifact(leak_check_exe);
     leak_check_cmd.addArg("examples/hello.php");
@@ -220,6 +340,12 @@ pub fn build(b: *std.Build) void {
     });
     array_bench_exe.root_module.addImport("array_benchmark", array_benchmark_module);
     array_bench_exe.linkLibC();
+    // 添加模块导入
+    array_bench_exe.root_module.addImport("compiler", compiler_mod);
+    array_bench_exe.root_module.addImport("runtime", runtime_mod);
+    array_bench_exe.root_module.addImport("bytecode", bytecode_mod);
+    array_bench_exe.root_module.addImport("jit", jit_mod);
+    array_bench_exe.root_module.addImport("extension", extension_mod);
     
     const array_bench_cmd = b.addRunArtifact(array_bench_exe);
     array_bench_step.dependOn(&array_bench_cmd.step);
@@ -236,6 +362,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     jit_bench_exe.linkLibC();
+    // 添加模块导入
+    jit_bench_exe.root_module.addImport("compiler", compiler_mod);
+    jit_bench_exe.root_module.addImport("runtime", runtime_mod);
+    jit_bench_exe.root_module.addImport("bytecode", bytecode_mod);
+    jit_bench_exe.root_module.addImport("jit", jit_mod);
+    jit_bench_exe.root_module.addImport("extension", extension_mod);
     
     const jit_bench_cmd = b.addRunArtifact(jit_bench_exe);
     jit_bench_step.dependOn(&jit_bench_cmd.step);
@@ -252,6 +384,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     aot_bench_exe.linkLibC();
+    // 添加模块导入
+    aot_bench_exe.root_module.addImport("compiler", compiler_mod);
+    aot_bench_exe.root_module.addImport("runtime", runtime_mod);
+    aot_bench_exe.root_module.addImport("bytecode", bytecode_mod);
+    aot_bench_exe.root_module.addImport("jit", jit_mod);
+    aot_bench_exe.root_module.addImport("extension", extension_mod);
     
     const aot_bench_cmd = b.addRunArtifact(aot_bench_exe);
     aot_bench_step.dependOn(&aot_bench_cmd.step);
@@ -275,6 +413,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     perf_cli_exe.linkLibC();
+    // 添加模块导入
+    perf_cli_exe.root_module.addImport("compiler", compiler_mod);
+    perf_cli_exe.root_module.addImport("runtime", runtime_mod);
+    perf_cli_exe.root_module.addImport("bytecode", bytecode_mod);
+    perf_cli_exe.root_module.addImport("jit", jit_mod);
+    perf_cli_exe.root_module.addImport("extension", extension_mod);
     
     b.installArtifact(perf_cli_exe);
     

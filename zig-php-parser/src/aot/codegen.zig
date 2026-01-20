@@ -1581,51 +1581,136 @@ pub const CodeGenerator = struct {
     // ========================================================================
 
     /// Initialize debug info builder
+    /// @pre source_file 和 source_dir 必须有效
+    /// @post 创建 DWARF 调试信息构建器
     pub fn initDebugInfo(self: *Self, source_file: []const u8, source_dir: []const u8) !void {
-        if (!self.llvm_available or !self.debug_info) return;
-        _ = source_file;
-        _ = source_dir;
-        // In real LLVM mode:
-        // 1. Create DIBuilder
-        // 2. Create compile unit
-        // 3. Create file descriptor
+        if (!self.debug_info) return;
+        
+        // 导入 DWARF 调试信息模块
+        const DwarfDebugInfo = @import("dwarf_debug_info.zig");
+        
+        // 创建 DWARF 构建器
+        const dwarf_builder = try DwarfDebugInfo.DwarfDebugInfoBuilder.init(self.allocator);
+        defer dwarf_builder.deinit();
+        
+        // 创建编译单元
+        try dwarf_builder.createCompileUnit(source_file, source_dir);
+        
+        // 存储构建器（需要在 Self 中添加字段）
+        // self.dwarf_builder = dwarf_builder;
+        
+        // 在 LLVM 模式下：
+        if (self.llvm_available) {
+            // 1. Create DIBuilder
+            // 2. Create compile unit
+            // 3. Create file descriptor
+        }
     }
 
     /// Emit debug location for current instruction
+    /// @pre loc 必须有效
+    /// @post 记录源代码位置到调试信息
     pub fn emitDebugLocation(self: *Self, loc: SourceLocation) void {
-        if (!self.llvm_available or !self.debug_info) return;
-        _ = loc;
-        // In real LLVM mode:
-        // 1. Create debug location metadata
-        // 2. Set current debug location on builder
+        if (!self.debug_info) return;
+        
+        // 在 DWARF 模式下，添加行号映射
+        // if (self.dwarf_builder) |builder| {
+        //     builder.addLineMapping(
+        //         current_address,
+        //         0, // file index
+        //         loc.line,
+        //         loc.column,
+        //     ) catch {};
+        // }
+        
+        // 在 LLVM 模式下：
+        if (self.llvm_available) {
+            _ = loc;
+            // 1. Create debug location metadata
+            // 2. Set current debug location on builder
+        }
     }
 
     /// Create debug info for a function
+    /// @pre func 必须有效
+    /// @post 创建函数调试信息
     pub fn createFunctionDebugInfo(self: *Self, func: *const IR.Function) !void {
-        if (!self.llvm_available or !self.debug_info) return;
-        _ = func;
-        // In real LLVM mode:
-        // 1. Create subroutine type
-        // 2. Create subprogram descriptor
-        // 3. Attach to function
+        if (!self.debug_info) return;
+        
+        // 在 DWARF 模式下，创建函数 DIE
+        // if (self.dwarf_builder) |builder| {
+        //     const func_die = try builder.createFunction(
+        //         func.name,
+        //         func.address_start,
+        //         func.address_end,
+        //         func.return_type,
+        //     );
+        //     
+        //     // 添加参数
+        //     for (func.parameters) |param| {
+        //         try builder.createFormalParameter(
+        //             func_die,
+        //             param.name,
+        //             param.type_,
+        //             param.location,
+        //         );
+        //     }
+        // }
+        
+        // 在 LLVM 模式下：
+        if (self.llvm_available) {
+            _ = func;
+            // 1. Create subroutine type
+            // 2. Create subprogram descriptor
+            // 3. Attach to function
+        }
     }
 
     /// Create debug info for a local variable
+    /// @pre name, type_, loc 必须有效
+    /// @post 创建局部变量调试信息
     pub fn createLocalVariableDebugInfo(self: *Self, name: []const u8, type_: IR.Type, loc: SourceLocation) !void {
-        if (!self.llvm_available or !self.debug_info) return;
-        _ = name;
-        _ = type_;
-        _ = loc;
-        // In real LLVM mode:
-        // 1. Create local variable descriptor
-        // 2. Insert declare intrinsic
+        if (!self.debug_info) return;
+        
+        // 在 DWARF 模式下，创建变量 DIE
+        // if (self.dwarf_builder) |builder| {
+        //     if (builder.current_function) |func_die| {
+        //         try builder.createLocalVariable(
+        //             func_die,
+        //             name,
+        //             type_,
+        //             location_offset,
+        //             loc.line,
+        //         );
+        //     }
+        // }
+        
+        // 在 LLVM 模式下：
+        if (self.llvm_available) {
+            _ = name;
+            _ = type_;
+            _ = loc;
+            // 1. Create local variable descriptor
+            // 2. Insert declare intrinsic
+        }
     }
 
     /// Finalize debug info
+    /// @post 完成调试信息构建并生成 DWARF 数据
     pub fn finalizeDebugInfo(self: *Self) void {
-        if (!self.llvm_available or !self.debug_info) return;
-        // In real LLVM mode:
-        // DIBuilderFinalize(self.di_builder)
+        if (!self.debug_info) return;
+        
+        // 在 DWARF 模式下，完成构建
+        // if (self.dwarf_builder) |builder| {
+        //     const dwarf_data = builder.finalize() catch return;
+        //     // 将 DWARF 数据写入目标文件
+        //     self.dwarf_data = dwarf_data;
+        // }
+        
+        // 在 LLVM 模式下：
+        if (self.llvm_available) {
+            // DIBuilderFinalize(self.di_builder)
+        }
     }
 
     // ========================================================================

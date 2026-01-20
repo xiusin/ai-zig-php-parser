@@ -146,6 +146,15 @@ pub const SourceLocation = struct {
             try writer.print("{s}", .{self.file});
         }
     }
+    
+    /// Convert to string for display
+    pub fn toString(self: SourceLocation, allocator: std.mem.Allocator) ![]const u8 {
+        if (self.line > 0) {
+            return std.fmt.allocPrint(allocator, "{s}:{d}:{d}", .{ self.file, self.line, self.column });
+        } else {
+            return std.fmt.allocPrint(allocator, "{s}", .{self.file});
+        }
+    }
 };
 
 /// A single diagnostic message
@@ -399,9 +408,13 @@ pub const DiagnosticEngine = struct {
         const color = if (self.use_colors) diag.severity.toColor() else "";
 
         // Print location and severity
-        try writer.print("{s}{any}{s}: {s}{s}{s}: {s}", .{
-            bold,
-            diag.location,
+        try writer.print("{s}", .{bold});
+        if (diag.location.line > 0) {
+            try writer.print("{s}:{d}:{d}", .{ diag.location.file, diag.location.line, diag.location.column });
+        } else {
+            try writer.print("{s}", .{diag.location.file});
+        }
+        try writer.print("{s}: {s}{s}{s}: {s}", .{
             reset,
             color,
             diag.severity.toString(),

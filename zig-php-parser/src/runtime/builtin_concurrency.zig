@@ -251,14 +251,22 @@ pub fn callSharedDataMethod(vm: anytype, obj: *types.PHPObject, method_name: []c
         if (args.len < 2 or args[0].getTag() != .string) return error.InvalidArgument;
 
         const key = args[0].getAsString().data.data;
-        try shared.set(key, args[1]);
+        // 将 Value 转换为字符串
+        const value_str = if (args[1].getTag() == .string)
+            args[1].getAsString().data.data
+        else
+            try std.fmt.allocPrint(vm.allocator, "{any}", .{args[1]});
+        defer if (args[1].getTag() != .string) vm.allocator.free(value_str);
+        
+        try shared.set(key, value_str);
         return Value.initNull();
     } else if (std.mem.eql(u8, method_name, "get")) {
         if (args.len < 1 or args[0].getTag() != .string) return error.InvalidArgument;
 
         const key = args[0].getAsString().data.data;
-        if (shared.get(key)) |value| {
-            return value;
+        if (shared.get(key)) |value_str| {
+            // 将字符串转换为 Value
+            return try Value.initString(vm.allocator, value_str);
         }
         return Value.initNull();
     } else if (std.mem.eql(u8, method_name, "remove")) {
@@ -284,7 +292,6 @@ pub fn callSharedDataMethod(vm: anytype, obj: *types.PHPObject, method_name: []c
         return Value.initInt(@intCast(count));
     }
 
-    _ = vm;
     return error.MethodNotFound;
 }
 
@@ -313,8 +320,7 @@ pub fn channelConstructor(vm: anytype, args: []Value) !Value {
     else
         0;
 
-    const channel = try vm.allocator.create(concurrency.PHPChannel);
-    channel.* = concurrency.PHPChannel.init(vm.allocator, capacity);
+    const channel = try concurrency.PHPChannel.init(vm.allocator, capacity);
 
     const class = vm.classes.get("Channel").?;
     const box = try vm.memory_manager.allocObject(class);
@@ -332,7 +338,7 @@ pub fn callChannelMethod(vm: anytype, obj: *types.PHPObject, method_name: []cons
         try channel.send(args[0]);
         return Value.initNull();
     } else if (std.mem.eql(u8, method_name, "recv")) {
-        if (channel.recv()) |value| {
+        if (try channel.recv()) |value| {
             return value;
         }
         return Value.initNull();

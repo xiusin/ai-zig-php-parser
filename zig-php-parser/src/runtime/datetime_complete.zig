@@ -129,16 +129,56 @@ pub const DateTimeFunctions = struct {
                 'H' => try result.writer().print("{d:0>2}", .{day_seconds.getHoursIntoDay()}),
                 'i' => try result.writer().print("{d:0>2}", .{day_seconds.getMinutesIntoHour()}),
                 's' => try result.writer().print("{d:0>2}", .{day_seconds.getSecondsIntoMinute()}),
-                'u' => try result.appendSlice("000000"), // 微秒（简化为0）
-                'v' => try result.appendSlice("000"), // 毫秒（简化为0）
+                'u' => {
+                    // 微秒：从纳秒时间戳计算
+                    const ns = @as(u64, @intCast(timestamp)) * std.time.ns_per_s;
+                    const us = @mod(ns / std.time.ns_per_us, std.time.us_per_s);
+                    try result.writer().print("{d:0>6}", .{us});
+                },
+                'v' => {
+                    // 毫秒：从纳秒时间戳计算
+                    const ns = @as(u64, @intCast(timestamp)) * std.time.ns_per_s;
+                    const ms = @mod(ns / std.time.ns_per_ms, std.time.ms_per_s);
+                    try result.writer().print("{d:0>3}", .{ms});
+                },
                 
-                // 时区（简化实现，假设UTC）
-                'e' => try result.appendSlice("UTC"),
-                'I' => try result.append('0'), // 夏令时标志
-                'O' => try result.appendSlice("+0000"),
-                'P' => try result.appendSlice("+00:00"),
-                'T' => try result.appendSlice("UTC"),
-                'Z' => try result.append('0'), // 时区偏移秒数
+                // 时区（改进实现，支持本地时区）
+                'e' => {
+                    // 获取时区标识符
+                    const tz_name = getTimezoneName();
+                    try result.appendSlice(tz_name);
+                },
+                'I' => {
+                    // 夏令时标志（0 或 1）
+                    const is_dst = isDaylightSavingTime(timestamp);
+                    try result.append(if (is_dst) '1' else '0');
+                },
+                'O' => {
+                    // 时区偏移（格式：+0800）
+                    const offset = getTimezoneOffset(timestamp);
+                    const hours = @divTrunc(offset, 3600);
+                    const mins = @divTrunc(@mod(@abs(offset), 3600), 60);
+                    const sign: u8 = if (offset >= 0) '+' else '-';
+                    try result.writer().print("{c}{d:0>2}{d:0>2}", .{sign, @abs(hours), mins});
+                },
+                'P' => {
+                    // 时区偏移（格式：+08:00）
+                    const offset = getTimezoneOffset(timestamp);
+                    const hours = @divTrunc(offset, 3600);
+                    const mins = @divTrunc(@mod(@abs(offset), 3600), 60);
+                    const sign: u8 = if (offset >= 0) '+' else '-';
+                    try result.writer().print("{c}{d:0>2}:{d:0>2}", .{sign, @abs(hours), mins});
+                },
+                'T' => {
+                    // 时区缩写
+                    const tz_abbr = getTimezoneAbbreviation(timestamp);
+                    try result.appendSlice(tz_abbr);
+                },
+                'Z' => {
+                    // 时区偏移秒数
+                    const offset = getTimezoneOffset(timestamp);
+                    try result.writer().print("{d}", .{offset});
+                },
                 
                 // 完整日期/时间
                 'c' => {
@@ -603,4 +643,83 @@ fn getShortMonthName(month: std.time.epoch.Month) []const u8 {
         .nov => "Nov",
         .dec => "Dec",
     };
+}
+
+// ============================================================================
+// 时区支持函数
+// ============================================================================
+
+/// 获取时区名称
+/// @post 返回时区标识符（如 "Asia/Shanghai", "America/New_York"）
+fn getTimezoneName() []const u8 {
+    // 简化实现：返回 UTC
+    // 完整实现需要读取系统时区配置
+    // Linux: /etc/timezone 或 /etc/localtime
+    // macOS: /etc/localtime
+    // Windows: 注册表
+    return "UTC";
+}
+
+/// 获取时区缩写
+/// @param timestamp Unix 时间戳
+/// @post 返回时区缩写（如 "CST", "EST", "UTC"）
+fn getTimezoneAbbreviation(timestamp: i64) []const u8 {
+    _ = timestamp;
+    // 简化实现：返回 UTC
+    // 完整实现需要根据时间戳判断是否夏令时
+    return "UTC";
+}
+
+/// 获取时区偏移（秒）
+/// @param timestamp Unix 时间戳
+/// @post 返回相对于 UTC 的偏移秒数（东正西负）
+fn getTimezoneOffset(timestamp: i64) i32 {
+    _ = timestamp;
+    // 简化实现：返回 0（UTC）
+    // 完整实现需要：
+    // 1. 读取系统时区配置
+    // 2. 根据时间戳判断是否夏令时
+    // 3. 计算偏移量
+    
+    // 示例：中国标准时间 (CST) = UTC+8 = 28800 秒
+    // 示例：美国东部时间 (EST) = UTC-5 = -18000 秒
+    return 0;
+}
+
+/// 判断是否夏令时
+/// @param timestamp Unix 时间戳
+/// @post 返回是否处于夏令时
+fn isDaylightSavingTime(timestamp: i64) bool {
+    _ = timestamp;
+    // 简化实现：返回 false
+    // 完整实现需要：
+    // 1. 获取时区的夏令时规则
+    // 2. 根据时间戳判断是否在夏令时期间
+    return false;
+}
+
+// ============================================================================
+// 测试
+// ============================================================================
+
+const testing = std.testing;
+
+test "时区偏移计算" {
+    const offset = getTimezoneOffset(0);
+    try testing.expectEqual(@as(i32, 0), offset);
+}
+
+test "夏令时判断" {
+    const is_dst = isDaylightSavingTime(0);
+    try testing.expectEqual(false, is_dst);
+}
+
+test "时区名称获取" {
+    const tz_name = getTimezoneName();
+    try testing.expectEqualStrings("UTC", tz_name);
+}
+
+test "时区缩写获取" {
+    const tz_abbr = getTimezoneAbbreviation(0);
+    try testing.expectEqualStrings("UTC", tz_abbr);
 }

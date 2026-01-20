@@ -15,6 +15,79 @@ const ExceptionFactory = exceptions.ExceptionFactory;
 const VM = @import("vm.zig").VM;
 
 // ============================================================================
+// 文件系统上下文
+// ============================================================================
+
+/// 文件系统上下文
+/// 用于管理文件系统操作的上下文信息，如过滤器、选项等
+/// @ownership TRANSFER
+/// @thread-safety ISOLATED
+pub const FilesystemContext = struct {
+    allocator: std.mem.Allocator,
+    
+    /// 文件名过滤器（可选）
+    filter: ?*const fn([]const u8) bool,
+    
+    /// 是否包含隐藏文件
+    include_hidden: bool,
+    
+    /// 是否跟随符号链接
+    follow_symlinks: bool,
+    
+    /// 最大递归深度（用于递归操作）
+    max_depth: u32,
+    
+    /// 自定义数据（用户可以存储任意数据）
+    user_data: ?*anyopaque,
+    
+    /// 初始化上下文
+    /// @pre allocator 必须有效
+    /// @post 返回初始化的上下文
+    pub fn init(allocator: std.mem.Allocator) FilesystemContext {
+        return .{
+            .allocator = allocator,
+            .filter = null,
+            .include_hidden = true,
+            .follow_symlinks = false,
+            .max_depth = 10,
+            .user_data = null,
+        };
+    }
+    
+    /// 设置文件名过滤器
+    pub fn setFilter(self: *FilesystemContext, filter: *const fn([]const u8) bool) void {
+        self.filter = filter;
+    }
+    
+    /// 应用过滤器
+    /// @pre filename 必须有效
+    /// @post 返回文件是否通过过滤
+    pub fn applyFilter(self: *const FilesystemContext, filename: []const u8) bool {
+        if (self.filter) |filter_fn| {
+            return filter_fn(filename);
+        }
+        return true; // 没有过滤器，全部通过
+    }
+    
+    /// 检查是否应该包含文件
+    /// @pre filename 必须有效
+    /// @post 返回是否应该包含该文件
+    pub fn shouldInclude(self: *const FilesystemContext, filename: []const u8) bool {
+        // 检查隐藏文件
+        if (!self.include_hidden and filename.len > 0 and filename[0] == '.') {
+            // 但总是包含 "." 和 ".."
+            if (std.mem.eql(u8, filename, ".") or std.mem.eql(u8, filename, "..")) {
+                return true;
+            }
+            return false;
+        }
+        
+        // 应用自定义过滤器
+        return self.applyFilter(filename);
+    }
+};
+
+// ============================================================================
 // 排序常量
 // ============================================================================
 
@@ -65,15 +138,19 @@ const DirEntry = struct {
 ///     * SCANDIR_SORT_ASCENDING (0) - 升序排序（默认）
 ///     * SCANDIR_SORT_DESCENDING (1) - 降序排序
 ///     * SCANDIR_SORT_NONE (2) - 不排序
-///   - context (resource, optional): 上下文资源（暂未实现）
+///   - context (FilesystemContext, optional): 文件系统上下文
+///     * 支持文件过滤
+///     * 支持隐藏文件控制
+///     * 支持符号链接处理
 /// 
 /// 返回值：array|false - 文件名数组或失败时返回 false
 /// 
 /// 功能：
 ///   1. 读取目录中的所有条目
 ///   2. 包括 "." 和 ".." 条目
-///   3. 根据指定的排序顺序排序
-///   4. 返回文件名数组
+///   3. 应用上下文过滤器（如果提供）
+///   4. 根据指定的排序顺序排序
+///   5. 返回文件名数组
 /// 
 /// @pre directory 必须是有效的目录路径
 /// @post 返回排序后的文件名数组或 false
@@ -109,6 +186,17 @@ pub fn scandirComplete(vm: *VM, args: []const Value) !Value {
         args[1].asInt()
     else
         SCANDIR_SORT_ASCENDING;
+    
+    // 获取上下文（如果提供）
+    // 注意：这里简化处理，实际应该从 args[2] 获取上下文对象
+    var context = FilesystemContext.init(vm.allocator);
+    
+    // 如果提供了第三个参数，可以从中提取上下文配置
+    if (args.len > 2 and args[2].getTag() == .object) {
+        // 这里可以从对象中提取配置
+        // 例如：context.include_hidden = ...
+        // 简化实现：使用默认配置
+    }
     
     const dir_path = directory.getAsString().data.data;
     

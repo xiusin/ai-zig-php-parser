@@ -4,10 +4,13 @@ const Assembler = @import("assembler_arm64.zig").Assembler;
 const Register = @import("assembler_arm64.zig").Register;
 const CodeGenX64 = @import("codegen_x64.zig").CodeGenX64;
 const TypeInfo = @import("codegen_x64.zig").TypeInfo;
-const func_mod = @import("../runtime/func.zig");
-const CompiledFunc = func_mod.CompiledFunc;
-const opcode_mod = @import("../runtime/opcode.zig");
-const OpCode = opcode_mod.OpCode;
+const TypeInference = @import("type_inference.zig").TypeInference;
+const InlineDecisionEngine = @import("inline_decision.zig").InlineDecisionEngine;
+const InlineConfig = @import("inline_decision.zig").InlineConfig;
+const PerfCounterManager = @import("perf_counter.zig").PerfCounterManager;
+const imports = @import("imports.zig");
+const CompiledFunc = imports.CompiledFunc;
+const OpCode = imports.OpCode;
 const HotspotDetector = @import("hotspot_detector.zig").HotspotDetector;
 const FallbackManager = @import("fallback.zig").FallbackManager;
 const JITCompilationError = @import("fallback.zig").JITCompilationError;
@@ -40,6 +43,9 @@ pub const Compiler = struct {
     target_arch: TargetArch,
     codegen_x64: ?*CodeGenX64,
     fallback_manager: ?*FallbackManager,
+    type_inference: ?*TypeInference,
+    inline_engine: ?*InlineDecisionEngine,
+    perf_manager: ?*PerfCounterManager,
 
     pub fn init(allocator: std.mem.Allocator) Compiler {
         return .{
@@ -48,6 +54,9 @@ pub const Compiler = struct {
             .target_arch = TargetArch.current(),
             .codegen_x64 = null,
             .fallback_manager = null,
+            .type_inference = null,
+            .inline_engine = null,
+            .perf_manager = null,
         };
     }
     
@@ -62,6 +71,7 @@ pub const Compiler = struct {
             .target_arch = TargetArch.current(),
             .codegen_x64 = null,
             .fallback_manager = null,
+            .type_inference = null,
         };
     }
     
@@ -76,6 +86,7 @@ pub const Compiler = struct {
             .target_arch = TargetArch.current(),
             .codegen_x64 = null,
             .fallback_manager = fallback_manager,
+            .type_inference = null,
         };
     }
     
@@ -91,6 +102,22 @@ pub const Compiler = struct {
             .target_arch = TargetArch.current(),
             .codegen_x64 = null,
             .fallback_manager = fallback_manager,
+            .type_inference = null,
+        };
+    }
+    
+    /// 初始化编译器并启用类型推断
+    pub fn initWithTypeInference(
+        allocator: std.mem.Allocator,
+        type_inference: *TypeInference,
+    ) Compiler {
+        return .{
+            .allocator = allocator,
+            .hotspot_detector = null,
+            .target_arch = TargetArch.current(),
+            .codegen_x64 = null,
+            .fallback_manager = null,
+            .type_inference = type_inference,
         };
     }
     
@@ -105,6 +132,15 @@ pub const Compiler = struct {
             codegen.deinit();
             self.allocator.destroy(codegen);
         }
+        if (self.type_inference) |inference| {
+            inference.deinit();
+            self.allocator.destroy(inference);
+        }
+        if (self.perf_manager) |manager| {
+            manager.deinit();
+            self.allocator.destroy(manager);
+        }
+        // inline_engine 不需要 deinit，因为它没有动态分配的资源
     }
 
     pub const JitResult = struct {
@@ -187,10 +223,48 @@ pub const Compiler = struct {
         
         const codegen = self.codegen_x64.?;
         
-        // 准备类型信息（简化版本 - 假设所有都是整数）
-        const type_info = try self.allocator.alloc(TypeInfo, 10);
-        defer self.allocator.free(type_info);
-        @memset(type_info, .int);
+        // 准备类型信息
+        var type_info: []TypeInfo = undefined;
+        var should_free_type_info = false;
+        
+        if (self.type_inference) |inference| {
+            // 使用类型推断引擎
+            // 从函数中提取变量名（简化版本 - 假设有局部变量）
+            var var_names = std.ArrayList([]const u8){};
+            defer var_names.deinit(self.allocator);
+            
+            // 为每个局部变量槽位生成名称
+            var i: usize = 0;
+            while (i < 10) : (i += 1) {
+                const var_name = try std.fmt.allocPrint(self.allocator, "local_{d}", .{i});
+                try var_names.append(self.allocator, var_name);
+            }
+            defer {
+                for (var_names.items) |name| {
+                    self.allocator.free(name);
+                }
+            }
+            
+            // 推断类型
+            var inferred_types = try inference.inferTypes(var_names.items);
+            defer inferred_types.deinit();
+            
+            // 转换为 TypeInfo 数组
+            type_info = try self.allocator.alloc(TypeInfo, var_names.items.len);
+            should_free_type_info = true;
+            
+            for (var_names.items, 0..) |var_name, idx| {
+                const inferred = inferred_types.get(var_name) orelse .dynamic;
+                type_info[idx] = convertToCodeGenTypeInfo(inferred);
+            }
+        } else {
+            // 回退到硬编码（假设所有都是整数）
+            type_info = try self.allocator.alloc(TypeInfo, 10);
+            should_free_type_info = true;
+            @memset(type_info, .int);
+        }
+        
+        defer if (should_free_type_info) self.allocator.free(type_info);
         
         // 生成代码
         const generated_code = try codegen.generateFunction(func, type_info);
@@ -208,6 +282,20 @@ pub const Compiler = struct {
         return JitResult{
             .code = @ptrCast(@alignCast(cached_code.ptr)),
             .osr_entry_offset = 0,
+        };
+    }
+    
+    /// 转换类型推断的 TypeInfo 到代码生成的 TypeInfo
+    fn convertToCodeGenTypeInfo(inferred: @import("type_inference.zig").TypeInfo) TypeInfo {
+        return switch (inferred) {
+            .int => .int,
+            .float => .float,
+            .bool => .bool,
+            .string => .string,
+            .array => .array,
+            .object => .object,
+            .null_type => .null_type,
+            .unknown, .dynamic => .unknown,
         };
     }
 

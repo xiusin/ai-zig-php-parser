@@ -1722,8 +1722,7 @@ pub fn php_echo(val: *PHPValue) void {
     defer php_gc_release(str_val);
 
     if (str_val.data.string_ptr) |str| {
-        const stdout = std.io.getStdOut().writer();
-        stdout.writeAll(str.data[0..str.length]) catch {};
+        std.debug.print("{s}", .{str.data[0..str.length]});
     }
 }
 
@@ -1736,8 +1735,7 @@ pub fn php_print(val: *PHPValue) i64 {
 /// Print with newline
 pub fn php_println(val: *PHPValue) void {
     php_echo(val);
-    const stdout = std.io.getStdOut().writer();
-    stdout.writeAll("\n") catch {};
+    std.debug.print("\n", .{});
 }
 
 /// Print formatted string (printf-style)
@@ -1779,38 +1777,43 @@ pub fn php_builtin_count(val: *PHPValue) *PHPValue {
 
 /// var_dump - Dump variable information
 pub fn php_builtin_var_dump(val: *PHPValue) void {
-    const stdout = std.io.getStdOut().writer();
-    dumpValue(stdout, val, 0) catch {};
+    // 使用 ArrayList 作为缓冲区
+    const allocator = getGlobalAllocator();
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    
+    dumpValue(buffer.writer(), val, 0) catch {};
+    std.debug.print("{s}", .{buffer.items});
 }
 
 /// print_r - Print human-readable representation
 pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
-    if (return_output) {
-        const allocator = getGlobalAllocator();
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
+    const allocator = getGlobalAllocator();
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
 
-        printValue(buffer.writer(), val, 0) catch {};
+    printValue(buffer.writer(), val, 0) catch {};
+    
+    if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
-        const stdout = std.io.getStdOut().writer();
-        printValue(stdout, val, 0) catch {};
+        std.debug.print("{s}", .{buffer.items});
         return php_value_create_bool(true);
     }
 }
 
 /// var_export - Output or return a parsable string representation
 pub fn php_builtin_var_export(val: *PHPValue, return_output: bool) *PHPValue {
-    if (return_output) {
-        const allocator = getGlobalAllocator();
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
+    const allocator = getGlobalAllocator();
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
 
-        exportValue(buffer.writer(), val) catch {};
+    exportValue(buffer.writer(), val) catch {};
+    
+    if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
-        const stdout = std.io.getStdOut().writer();
-        exportValue(stdout, val) catch {};
+        std.debug.print("{s}", .{buffer.items});
         return php_value_create_null();
     }
 }

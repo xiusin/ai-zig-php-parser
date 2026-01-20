@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Value = @import("types.zig").Value;
+const ExpressionEvaluator = @import("expression_evaluator.zig").ExpressionEvaluator;
 
 // ============================================================================
 // 常量配置
@@ -84,7 +85,7 @@ pub const Breakpoint = struct {
     }
 
     /// 检查是否应该触发
-    pub fn shouldTrigger(self: *Breakpoint, vm: *anyopaque) bool {
+    pub fn shouldTrigger(self: *Breakpoint, vm: *anyopaque, evaluator: *ExpressionEvaluator) bool {
         if (!self.enabled) return false;
 
         // 检查忽略次数
@@ -94,11 +95,22 @@ pub const Breakpoint = struct {
 
         // 检查条件
         if (self.condition) |cond| {
-            // 这里应该评估条件表达式
-            // 暂时简化实现
-            _ = cond;
-            _ = vm;
-            return true;
+            // 使用表达式评估器评估条件
+            _ = vm; // 可以从 VM 中提取变量值设置到 evaluator
+            
+            const result = evaluator.evaluate(cond) catch {
+                // 评估失败，默认触发
+                return true;
+            };
+            
+            // 将结果转换为布尔值
+            return switch (result.getTag()) {
+                .boolean => result.asBool(),
+                .integer => result.asInt() != 0,
+                .float => result.asFloat() != 0.0,
+                .null_type => false,
+                else => true,
+            };
         }
 
         return true;

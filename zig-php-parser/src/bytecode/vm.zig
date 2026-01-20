@@ -6,13 +6,14 @@ const CompiledFunction = instruction.CompiledFunction;
 const ConstValue = instruction.Value;
 
 // 类型反馈系统
-const type_feedback = @import("../runtime/type_feedback.zig");
+const runtime = @import("runtime");
+const type_feedback = runtime.type_feedback;
 const TypeTag = type_feedback.TypeTag;
 const TypeFeedback = type_feedback.TypeFeedback;
 const TypeFeedbackCollector = type_feedback.TypeFeedbackCollector;
 
 // 内联缓存优化
-const optimization = @import("../runtime/optimization.zig");
+const optimization = runtime.optimization;
 const MethodCache = optimization.MethodCache;
 
 // JIT编译器

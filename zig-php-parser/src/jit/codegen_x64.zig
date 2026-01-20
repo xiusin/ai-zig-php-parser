@@ -7,10 +7,9 @@ const Assembler = @import("assembler_x64.zig").Assembler;
 const Register = @import("assembler_x64.zig").Register;
 const Condition = @import("assembler_x64.zig").Condition;
 const CodeCache = @import("code_cache.zig").CodeCache;
-const func_mod = @import("../runtime/func.zig");
-const CompiledFunc = func_mod.CompiledFunc;
-const opcode_mod = @import("../runtime/opcode.zig");
-const OpCode = opcode_mod.OpCode;
+const imports = @import("imports.zig");
+const CompiledFunc = imports.CompiledFunc;
+const OpCode = imports.OpCode;
 
 /// 类型信息
 pub const TypeInfo = enum {

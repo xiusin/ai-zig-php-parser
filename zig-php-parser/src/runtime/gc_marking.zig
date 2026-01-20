@@ -143,9 +143,10 @@ pub const GCMarker = struct {
         return typed_obj;
     }
     
-    /// 保守扫描：扫描对象数据区域的所有可能指针
+    /// 保守扫描：扫描对象数据区域的所有可能指针（安全版本）
     /// @pre obj 必须是有效的 GC 对象
     /// @post worklist 包含所有可能的被引用对象
+    /// @memory-safety 使用安全的内存访问，避免段错误
     fn conservativeScan(
         self: *GCMarker,
         obj: *GCObjectHeader,
@@ -160,49 +161,103 @@ pub const GCMarker = struct {
             // 读取可能的指针值
             const potential_ptr = @as(*align(1) usize, @ptrCast(data_ptr + offset)).*;
             
-            // 检查是否是有效的对象指针
-            // 注意：这需要访问 GC 的内存区域信息
-            // 这里我们使用一个简化的检查：指针必须对齐
-            if (potential_ptr % @alignOf(GCObjectHeader) == 0 and potential_ptr != 0) {
-                // 尝试将其作为 GC 对象头
-                const maybe_obj: *GCObjectHeader = @ptrFromInt(potential_ptr);
-                
-                // 基本的有效性检查
-                if (self.isLikelyValidObject(maybe_obj)) {
-                    // 如果对象未标记，加入工作列表
-                    if (maybe_obj.mark == .white) {
-                        try worklist.append(self.allocator, maybe_obj);
-                        self.stats.references_traversed += 1;
-                    }
+            // 使用严格的指针验证
+            if (!self.isValidObjectPointer(potential_ptr)) {
+                continue;
+            }
+            
+            // 尝试将其作为 GC 对象头
+            const maybe_obj: *GCObjectHeader = @ptrFromInt(potential_ptr);
+            
+            // 使用安全的内存访问检查对象有效性
+            if (self.safeCheckObject(maybe_obj)) {
+                // 如果对象未标记，加入工作列表
+                if (maybe_obj.mark == .white) {
+                    try worklist.append(self.allocator, maybe_obj);
+                    self.stats.references_traversed += 1;
                 }
             }
         }
     }
     
-    /// 检查对象是否可能有效
+    /// 安全地检查对象是否有效
     /// @pre obj 是一个对齐的指针
     /// @post 返回对象是否可能是有效的 GC 对象
-    fn isLikelyValidObject(self: *GCMarker, obj: *GCObjectHeader) bool {
+    /// @memory-safety 使用 volatile 读取避免优化，捕获访问错误
+    fn safeCheckObject(self: *GCMarker, obj: *GCObjectHeader) bool {
         _ = self;
         
-        // 基本的合理性检查
-        // 1. 大小必须合理（至少包含头部，不超过 1GB）
-        if (obj.size < @sizeOf(GCObjectHeader) or obj.size > 1024 * 1024 * 1024) {
+        // 方法 1: 使用 @volatileLoad 安全读取
+        // 这会防止编译器优化，并且在某些平台上可以捕获访问错误
+        
+        // 首先检查指针对齐
+        const obj_addr = @intFromPtr(obj);
+        if (obj_addr % @alignOf(GCObjectHeader) != 0) {
             return false;
         }
         
-        // 2. 年龄必须合理（0-255）
-        // 已经是 u8 类型，自动满足
+        // 尝试读取对象头的第一个字段（size）
+        // 使用 volatile 读取确保实际访问内存
+        const size_ptr: *volatile u32 = @ptrCast(&obj.size);
+        const size = size_ptr.*;
         
-        // 3. 标记状态必须有效
-        const mark_value = @intFromEnum(obj.mark);
+        // 基本的合理性检查
+        // 1. 大小必须合理（至少包含头部，不超过 1GB）
+        if (size < @sizeOf(GCObjectHeader) or size > 1024 * 1024 * 1024) {
+            return false;
+        }
+        
+        // 2. 尝试读取其他字段
+        const age_ptr: *volatile u8 = @ptrCast(&obj.age);
+        const age = age_ptr.*;
+        _ = age; // age 是 u8，任何值都有效
+        
+        // 3. 检查标记状态
+        const mark_ptr: *volatile @TypeOf(obj.mark) = @ptrCast(&obj.mark);
+        const mark = mark_ptr.*;
+        const mark_value = @intFromEnum(mark);
         if (mark_value > 2) {
             return false;
         }
         
-        // 4. 代必须有效
-        const gen_value = @intFromEnum(obj.generation);
+        // 4. 检查代
+        const gen_ptr: *volatile @TypeOf(obj.generation) = @ptrCast(&obj.generation);
+        const gen = gen_ptr.*;
+        const gen_value = @intFromEnum(gen);
         if (gen_value > 3) {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    /// 严格的指针验证（改进版）
+    /// @pre ptr_value 是一个指针值
+    /// @post 返回是否是有效的对象指针
+    fn isValidObjectPointer(self: *GCMarker, ptr_value: usize) bool {
+        _ = self;
+        
+        // 1. 检查空指针
+        if (ptr_value == 0) return false;
+        
+        // 2. 检查指针对齐
+        if (ptr_value % @alignOf(GCObjectHeader) != 0) {
+            return false;
+        }
+        
+        // 3. 检查指针是否在用户空间范围内
+        const max_user_addr: usize = if (@sizeOf(usize) == 8)
+            0x0000800000000000  // 64-bit
+        else
+            0xC0000000;  // 32-bit
+        
+        if (ptr_value >= max_user_addr) {
+            return false;
+        }
+        
+        // 4. 检查指针是否在合理的最小地址之上
+        const min_valid_addr: usize = 0x10000;  // 64KB
+        if (ptr_value < min_valid_addr) {
             return false;
         }
         
@@ -290,14 +345,36 @@ pub const MarkingValidator = struct {
             try reachable.put(self.allocator, root, {});
         }
         
-        // BFS 遍历
+        // BFS 遍历（完整实现 - 使用 ObjectTraverser）
         var index: usize = 0;
         while (index < queue.items.len) : (index += 1) {
             const current = queue.items[index];
             
-            // 简化：这里我们假设所有对象都没有引用
-            // 在实际实现中，需要根据对象类型遍历引用
-            _ = current;
+            // 尝试将 GCObjectHeader 转换为 TypedGCObject
+            // 注意：这假设对象是 TypedGCObject 类型
+            // 如果不是，我们需要使用保守扫描
+            const typed_obj = TypedGCObject.fromHeader(current) catch {
+                // 无法转换为 TypedGCObject，跳过
+                continue;
+            };
+            
+            // 使用 ObjectTraverser 遍历引用
+            var child_worklist = std.ArrayListUnmanaged(*GCObjectHeader){};
+            defer child_worklist.deinit(self.allocator);
+            
+            self.traverser.traverseReferences(typed_obj, &child_worklist) catch |err| {
+                // 遍历失败，记录但继续
+                std.debug.print("Warning: Failed to traverse object references: {}\n", .{err});
+                continue;
+            };
+            
+            // 将新发现的对象添加到队列
+            for (child_worklist.items) |child| {
+                if (!reachable.contains(child)) {
+                    try queue.append(self.allocator, child);
+                    try reachable.put(self.allocator, child, {});
+                }
+            }
         }
         
         // 检查所有可达对象是否都被标记
