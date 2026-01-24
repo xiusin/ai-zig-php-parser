@@ -529,7 +529,7 @@ test "FastCompiler simple arithmetic" {
     try fast_compiler.emitOp(.add_i);
     try fast_compiler.emitOp(.halt);
     
-    try std.testing.expect(compiler.code.items.len > 0);
+    try std.testing.expect(fast_compiler.code.items.len > 0);
 }
 
 test "FastCompiler loop compilation" {
@@ -545,10 +545,10 @@ test "FastCompiler loop compilation" {
     defer fast_compiler.deinit();
     
     // 模拟循环: while (i < 10) { i++ }
-    const loop_start = compiler.newLabel();
-    const loop_end = compiler.newLabel();
+    const loop_start = fast_compiler.newLabel();
+    const loop_end = fast_compiler.newLabel();
     
-    compiler.markLabel(loop_start);
+    fast_compiler.markLabel(loop_start);
     try fast_compiler.emitOp(.push_local);
     try fast_compiler.emitByte(0);
     try fast_compiler.emitOp(.push_int);
@@ -558,10 +558,10 @@ test "FastCompiler loop compilation" {
     try fast_compiler.emitOp(.load_inc_store);
     try fast_compiler.emitByte(0);
     try fast_compiler.emitJump(.jmp, loop_start);
-    compiler.markLabel(loop_end);
+    fast_compiler.markLabel(loop_end);
     try fast_compiler.emitOp(.halt);
     
-    try compiler.resolveJumps();
+    try fast_compiler.resolveJumps();
     
-    try std.testing.expect(compiler.code.items.len > 0);
+    try std.testing.expect(fast_compiler.code.items.len > 0);
 }

@@ -28,18 +28,34 @@ pub fn build(b: *std.Build) void {
     
     // 字节码模块
     const bytecode_mod = b.createModule(.{
-        .root_source_file = b.path("src/bytecode/vm.zig"),
+        .root_source_file = b.path("src/bytecode/mod.zig"),
     });
+    
+    // bytecode 需要访问 runtime 和 compiler
+    bytecode_mod.addImport("runtime", runtime_mod);
+    bytecode_mod.addImport("compiler", compiler_mod);
     
     // JIT 模块
     const jit_mod = b.createModule(.{
-        .root_source_file = b.path("src/jit/compiler.zig"),
+        .root_source_file = b.path("src/jit/mod.zig"),
     });
+    
+    // jit 需要访问 runtime 和 compiler
+    jit_mod.addImport("runtime", runtime_mod);
+    jit_mod.addImport("compiler", compiler_mod);
     
     // 扩展模块
     const extension_mod = b.createModule(.{
-        .root_source_file = b.path("src/extension/api.zig"),
+        .root_source_file = b.path("src/extension/mod.zig"),
     });
+    
+    // runtime 需要访问其他模块
+    runtime_mod.addImport("bytecode", bytecode_mod);
+    runtime_mod.addImport("jit", jit_mod);
+    runtime_mod.addImport("extension", extension_mod);
+    
+    // 添加 extension 模块到 compiler
+    compiler_mod.addImport("extension", extension_mod);
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -404,6 +420,40 @@ pub fn build(b: *std.Build) void {
     bench_all_step.dependOn(array_bench_step);
     bench_all_step.dependOn(jit_bench_step);
     bench_all_step.dependOn(aot_bench_step);
+
+    // Terminator debug test - TEMPORARILY DISABLED
+    // const terminator_debug = b.addExecutable(.{
+    //     .name = "test_terminator_debug",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("test_terminator_debug.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //         .imports = &.{
+    //             .{ .name = "Compiler", .module = compiler_mod },
+    //             .{ .name = "Runtime", .module = runtime_mod },
+    //             .{ .name = "Bytecode", .module = bytecode_mod },
+    //             .{ .name = "JIT", .module = jit_mod },
+    //             .{ .name = "Extension", .module = extension_mod },
+    //             .{ .name = "AOT", .module = b.createModule(.{
+    //                 .root_source_file = b.path("src/aot/root.zig"),
+    //                 .target = target,
+    //                 .optimize = optimize,
+    //                 .imports = &.{
+    //                     .{ .name = "compiler", .module = compiler_mod },
+    //                     .{ .name = "runtime", .module = runtime_mod },
+    //                     .{ .name = "bytecode", .module = bytecode_mod },
+    //                     .{ .name = "jit", .module = jit_mod },
+    //                     .{ .name = "extension", .module = extension_mod },
+    //                 },
+    //             }) },
+    //         },
+    //     }),
+    // });
+    // b.installArtifact(terminator_debug);
+    
+    // const terminator_debug_step = b.step("test-terminator", "Run terminator debug test");
+    // const run_terminator_debug = b.addRunArtifact(terminator_debug);
+    // terminator_debug_step.dependOn(&run_terminator_debug.step);
 
     // Performance regression check
     const perf_check_step = b.step("perf-check", "Check for performance regressions");

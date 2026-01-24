@@ -1164,11 +1164,11 @@ test "MultiFileCompiler initialization" {
         .input_file = "test.php",
     };
 
-    const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer fc.deinit();
+    const multi_compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
+    defer multi_compiler.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), compiler.getCompiledFileCount());
-    try std.testing.expect(compiler.getMergedModule() == null);
+    try std.testing.expectEqual(@as(usize, 0), multi_compiler.getCompiledFileCount());
+    try std.testing.expect(multi_compiler.getMergedModule() == null);
 }
 
 test "MultiFileCompiler add include path" {
@@ -1181,13 +1181,13 @@ test "MultiFileCompiler add include path" {
         .input_file = "test.php",
     };
 
-    const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer fc.deinit();
+    const multi_compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
+    defer multi_compiler.deinit();
 
-    try compiler.addIncludePath("/usr/share/php");
-    try compiler.addIncludePath("/var/www/lib");
+    try multi_compiler.addIncludePath("/usr/share/php");
+    try multi_compiler.addIncludePath("/var/www/lib");
 
-    try std.testing.expectEqual(@as(usize, 2), compiler.include_paths.items.len);
+    try std.testing.expectEqual(@as(usize, 2), multi_compiler.include_paths.items.len);
 }
 
 test "MultiFileCompiler.matchKeyword" {
@@ -1200,11 +1200,11 @@ test "MultiFileCompiler.matchKeyword" {
         .input_file = "test.php",
     };
 
-    const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer fc.deinit();
+    const multi_compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
+    defer multi_compiler.deinit();
 
-    try std.testing.expect(compiler.matchKeyword("function test()", "function"));
-    try std.testing.expect(compiler.matchKeyword("class MyClass", "class"));
-    try std.testing.expect(!compiler.matchKeyword("functional", "function"));
-    try std.testing.expect(!compiler.matchKeyword("classes", "class"));
+    try std.testing.expect(multi_compiler.matchKeyword("function test()", "function"));
+    try std.testing.expect(multi_compiler.matchKeyword("class MyClass", "class"));
+    try std.testing.expect(!multi_compiler.matchKeyword("functional", "function"));
+    try std.testing.expect(!multi_compiler.matchKeyword("classes", "class"));
 }

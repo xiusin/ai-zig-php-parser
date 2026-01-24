@@ -206,7 +206,6 @@ pub fn extractFaultAddress(info: *const std.posix.siginfo_t) ?usize {
             return null;
         },
         else => {
-            _ = info;
             return null;
         },
     };

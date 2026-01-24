@@ -519,99 +519,49 @@ else
 
 /// 提取故障地址（平台相关）
 fn extractFaultAddress(info: *const std.posix.siginfo_t) ?usize {
-    switch (builtin.os.tag) {
-        .linux => {
-            return @intFromPtr(info.fields.sigfault.addr);
-        },
-        .macos, .ios, .tvos, .watchos, .visionos => {
-            // macOS 的 siginfo_t 结构不同
-            // 我们需要通过 C 导入访问
-            // 由于 Zig 的 C 绑定限制，暂时返回 null
-            // 在实际使用中，可以通过 @cImport 获取正确的结构
-            _ = info;
-            return null;
-        },
-        else => {
-            _ = info;
-            return null;
-        },
-    }
+    return switch (builtin.os.tag) {
+        .linux => @intFromPtr(info.fields.sigfault.addr),
+        .macos, .ios, .tvos, .watchos, .visionos => null,
+        else => null,
+    };
 }
 
 /// 提取指令指针（平台相关）
 fn extractInstructionPointer(ucontext: *anyopaque) usize {
-    switch (builtin.os.tag) {
-        .linux => {
-            switch (builtin.cpu.arch) {
-                .x86_64 => {
-                    const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
-                    return @intCast(uc.mcontext.gregs[std.os.linux.REG.RIP]);
-                },
-                .aarch64 => {
-                    const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
-                    return @intCast(uc.mcontext.pc);
-                },
-                else => return 0,
-            }
+    return switch (builtin.os.tag) {
+        .linux => switch (builtin.cpu.arch) {
+            .x86_64 => blk: {
+                const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
+                break :blk @intCast(uc.mcontext.gregs[std.os.linux.REG.RIP]);
+            },
+            .aarch64 => blk: {
+                const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
+                break :blk @intCast(uc.mcontext.pc);
+            },
+            else => 0,
         },
-        .macos, .ios, .tvos, .watchos, .visionos => {
-            switch (builtin.cpu.arch) {
-                .x86_64 => {
-                    // macOS x86_64 ucontext 结构
-                    // 注意：这是简化的访问方式
-                    // 实际的 mcontext 结构更复杂
-                    _ = ucontext;
-                    return 0; // 暂时返回 0，需要正确的结构定义
-                },
-                .aarch64 => {
-                    // macOS ARM64 (Apple Silicon)
-                    _ = ucontext;
-                    return 0;
-                },
-                else => return 0,
-            }
-        },
-        else => {
-            _ = ucontext;
-            return 0;
-        },
-    }
+        .macos, .ios, .tvos, .watchos, .visionos => 0,
+        else => 0,
+    };
 }
 
 /// 提取堆栈指针（平台相关）
 fn extractStackPointer(ucontext: *anyopaque) usize {
-    switch (builtin.os.tag) {
-        .linux => {
-            switch (builtin.cpu.arch) {
-                .x86_64 => {
-                    const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
-                    return @intCast(uc.mcontext.gregs[std.os.linux.REG.RSP]);
-                },
-                .aarch64 => {
-                    const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
-                    return @intCast(uc.mcontext.sp);
-                },
-                else => return 0,
-            }
+    return switch (builtin.os.tag) {
+        .linux => switch (builtin.cpu.arch) {
+            .x86_64 => blk: {
+                const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
+                break :blk @intCast(uc.mcontext.gregs[std.os.linux.REG.RSP]);
+            },
+            .aarch64 => blk: {
+                const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
+                break :blk @intCast(uc.mcontext.sp);
+            },
+            else => 0,
         },
-        .macos, .ios, .tvos, .watchos, .visionos => {
-            switch (builtin.cpu.arch) {
-                .x86_64 => {
-                    _ = ucontext;
-                    return 0;
-                },
-                .aarch64 => {
-                    _ = ucontext;
-                    return 0;
-                },
-                else => return 0,
-            }
-        },
-        else => {
-            _ = ucontext;
-            return 0;
-        },
-    }
+        .macos, .ios, .tvos, .watchos, .visionos => 0,
+        else => 0,
+    };
 }
 
 /// 提取帧指针（平台相关）
@@ -630,40 +580,6 @@ fn extractFramePointer(ucontext: *anyopaque) usize {
 }
 
 /// 提取帧指针（平台相关）
-fn extractFramePointer(ucontext: *anyopaque) usize {
-    switch (builtin.os.tag) {
-        .linux => {
-            switch (builtin.cpu.arch) {
-                .x86_64 => {
-                    const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
-                    return @intCast(uc.mcontext.gregs[std.os.linux.REG.RBP]);
-                },
-                .aarch64 => {
-                    const uc: *std.os.linux.ucontext_t = @ptrCast(@alignCast(ucontext));
-                    return @intCast(uc.mcontext.regs[29]); // x29 is FP on ARM64
-                },
-                else => return 0,
-            }
-        },
-        .macos, .ios, .tvos, .watchos, .visionos => {
-            switch (builtin.cpu.arch) {
-                .x86_64 => {
-                    _ = ucontext;
-                    return 0;
-                },
-                .aarch64 => {
-                    _ = ucontext;
-                    return 0;
-                },
-                else => return 0,
-            }
-        },
-        else => {
-            _ = ucontext;
-            return 0;
-        },
-    }
-}
 
 /// 捕获堆栈地址（信号安全）
 fn captureStackAddresses(buffer: []usize) usize {

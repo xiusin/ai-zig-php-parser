@@ -284,8 +284,8 @@ test "multi-file compiler symbol registration" {
         .input_file = "test.php",
     };
 
-    const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer fc.deinit();
+    const multi_compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
+    defer multi_compiler.deinit();
 
     // Register some symbols
     const source =
@@ -294,10 +294,10 @@ test "multi-file compiler symbol registration" {
         \\class MyClass {}
     ;
 
-    try compiler.registerFileSymbols("test.php", source);
+    try multi_compiler.registerFileSymbols("test.php", source);
 
     // Check that symbols were registered
-    const symbol_table = compiler.getGlobalSymbolTable();
+    const symbol_table = multi_compiler.getGlobalSymbolTable();
     try testing.expect(symbol_table.lookupFunction("myFunction") != null);
     try testing.expect(symbol_table.lookupClass("MyClass") != null);
 }
@@ -312,8 +312,8 @@ test "multi-file compiler multiple files symbol registration" {
         .input_file = "main.php",
     };
 
-    const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer fc.deinit();
+    const multi_compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
+    defer multi_compiler.deinit();
 
     // Register symbols from first file
     const source1 =
@@ -321,7 +321,7 @@ test "multi-file compiler multiple files symbol registration" {
         \\function helperFunc() {}
         \\class HelperClass {}
     ;
-    try compiler.registerFileSymbols("helpers.php", source1);
+    try multi_compiler.registerFileSymbols("helpers.php", source1);
 
     // Register symbols from second file
     const source2 =
@@ -329,10 +329,10 @@ test "multi-file compiler multiple files symbol registration" {
         \\function mainFunc() {}
         \\class MainClass {}
     ;
-    try compiler.registerFileSymbols("main.php", source2);
+    try multi_compiler.registerFileSymbols("main.php", source2);
 
     // Check that all symbols were registered
-    const symbol_table = compiler.getGlobalSymbolTable();
+    const symbol_table = multi_compiler.getGlobalSymbolTable();
     try testing.expect(symbol_table.lookupFunction("helperFunc") != null);
     try testing.expect(symbol_table.lookupClass("HelperClass") != null);
     try testing.expect(symbol_table.lookupFunction("mainFunc") != null);
@@ -388,13 +388,13 @@ test "multi-file compiler add include paths" {
         .input_file = "test.php",
     };
 
-    const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer fc.deinit();
+    const multi_compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
+    defer multi_compiler.deinit();
 
-    try compiler.addIncludePath("/usr/share/php");
-    try compiler.addIncludePath("/var/www/lib");
+    try multi_compiler.addIncludePath("/usr/share/php");
+    try multi_compiler.addIncludePath("/var/www/lib");
 
-    try testing.expectEqual(@as(usize, 2), compiler.include_paths.items.len);
+    try testing.expectEqual(@as(usize, 2), multi_compiler.include_paths.items.len);
 }
 
 // ============================================================================
@@ -508,10 +508,10 @@ test "multi-file compiler initialization and cleanup" {
         .verbose = false,
     };
 
-    const compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
-    defer fc.deinit();
+    const multi_compiler = try MultiFileCompiler.init(allocator, options, &diagnostics);
+    defer multi_compiler.deinit();
 
-    try testing.expectEqual(@as(usize, 0), compiler.getCompiledFileCount());
-    try testing.expect(compiler.getMergedModule() == null);
-    try testing.expect(!compiler.isFileCompiled("main.php"));
+    try testing.expectEqual(@as(usize, 0), multi_compiler.getCompiledFileCount());
+    try testing.expect(multi_compiler.getMergedModule() == null);
+    try testing.expect(!multi_compiler.isFileCompiled("main.php"));
 }

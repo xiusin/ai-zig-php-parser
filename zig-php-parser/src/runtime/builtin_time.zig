@@ -41,8 +41,6 @@ pub const TimeBuiltins = struct {
     /// PHP microtime() - Returns current time with microseconds
     /// Requirements: 1.4, 1.5
     pub fn microtime(vm: *anyopaque, args: []const Value) !Value {
-        _ = vm;
-        
         if (args.len == 0) {
             // Return string format "msec sec"
             const t = Time.now();

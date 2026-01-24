@@ -399,8 +399,8 @@ pub const Debugger = struct {
         self.state = .paused;
     }
 
-    /// 继续
-    pub fn resume(self: *Debugger) void {
+    /// 继续执行
+    pub fn continueExecution(self: *Debugger) void {
         self.state = .running;
         self.stats.continue_count += 1;
     }
@@ -538,7 +538,7 @@ test "debugger basic" {
     try std.testing.expect(debugger.isPaused());
 
     // 继续
-    debugger.resume();
+    debugger.continueExecution();
     try std.testing.expect(!debugger.isPaused());
 
     // 获取统计

@@ -34,16 +34,14 @@ pub const SyntaxMode = syntax_mode.SyntaxMode;
 pub const SyntaxConfig = syntax_mode.SyntaxConfig;
 
 // Extension system imports
-const extension_registry = @import("extension").registry.zig;
-const extension_api = @import("extension").api.zig;
-pub const ExtensionRegistry = extension_registry.ExtensionRegistry;
+const extension = @import("extension");
+pub const ExtensionRegistry = extension.ExtensionRegistry;
 
 // Bytecode VM imports for execution mode switching
-const bytecode_vm = @import("bytecode").vm.zig;
-const BytecodeVM = bytecode_vm.BytecodeVM;
+const bytecode = @import("bytecode");
+const BytecodeVM = bytecode.BytecodeVM;
 // BytecodeGenerator for AST-to-bytecode compilation
-const bytecode_generator = @import("bytecode").generator.zig;
-const BytecodeGenerator = bytecode_generator.BytecodeGenerator;
+const BytecodeGenerator = bytecode.BytecodeGenerator;
 
 // Performance optimization modules
 const fast_pool = @import("fast_pool.zig");
@@ -3255,7 +3253,7 @@ pub const VM = struct {
 
     /// Create an object from an extension class definition
     /// Requirements: 10.2, 10.3, 10.4
-    fn createExtensionObject(self: *VM, ext_class: extension_api.ExtensionClass) !Value {
+    fn createExtensionObject(self: *VM, ext_class: extension.ExtensionClass) !Value {
         // Create a dynamic PHPClass from the extension class definition
         const php_class = try self.createPHPClassFromExtension(ext_class);
 
@@ -3274,7 +3272,7 @@ pub const VM = struct {
     }
 
     /// Create a PHPClass from an extension class definition
-    fn createPHPClassFromExtension(self: *VM, ext_class: extension_api.ExtensionClass) !*types.PHPClass {
+    fn createPHPClassFromExtension(self: *VM, ext_class: extension.ExtensionClass) !*types.PHPClass {
         // Check if we already have this class registered
         if (self.classes.get(ext_class.name)) |existing| {
             return existing;
@@ -3336,10 +3334,10 @@ pub const VM = struct {
 
     /// Call an extension object's constructor
     /// Requirements: 10.2
-    pub fn callExtensionConstructor(self: *VM, object_value: Value, ext_class: extension_api.ExtensionClass, args: []const Value) !void {
+    pub fn callExtensionConstructor(self: *VM, object_value: Value, ext_class: extension.ExtensionClass, args: []const Value) !void {
         if (ext_class.constructor) |ctor| {
             // Convert args to extension values
-            var ext_args = try self.allocator.alloc(extension_api.ExtensionValue, args.len);
+            var ext_args = try self.allocator.alloc(extension.ExtensionValue, args.len);
             defer self.allocator.free(ext_args);
 
             for (args, 0..) |arg, i| {
@@ -4722,7 +4720,7 @@ pub const VM = struct {
 
     /// Call an extension function with proper argument validation
     /// Requirements: 9.2, 9.3
-    fn callExtensionFunction(self: *VM, ext_func: extension_api.ExtensionFunction, args: []const Value) !Value {
+    fn callExtensionFunction(self: *VM, ext_func: extension.ExtensionFunction, args: []const Value) !Value {
         // Validate argument count
         if (args.len < ext_func.min_args) {
             const error_msg = try std.fmt.allocPrint(
@@ -4761,7 +4759,7 @@ pub const VM = struct {
         }
 
         // Convert Value array to ExtensionValue array
-        var ext_args = try self.allocator.alloc(extension_api.ExtensionValue, args.len);
+        var ext_args = try self.allocator.alloc(extension.ExtensionValue, args.len);
         defer self.allocator.free(ext_args);
 
         for (args, 0..) |arg, i| {
@@ -4790,13 +4788,13 @@ pub const VM = struct {
     }
 
     /// Convert a VM Value to an ExtensionValue (opaque u64)
-    fn valueToExtensionValue(_: *VM, value: Value) extension_api.ExtensionValue {
+    fn valueToExtensionValue(_: *VM, value: Value) extension.ExtensionValue {
         // Store pointer to value data as u64
         return @intFromPtr(&value);
     }
 
     /// Convert an ExtensionValue (opaque u64) back to a VM Value
-    fn extensionValueToValue(_: *VM, ext_value: extension_api.ExtensionValue) Value {
+    fn extensionValueToValue(_: *VM, ext_value: extension.ExtensionValue) Value {
         // This is unsafe but required for extension API compatibility
         const ptr: *const Value = @ptrFromInt(ext_value);
         return ptr.*;
@@ -5030,7 +5028,7 @@ pub const VM = struct {
     }
 
     /// 转换字节码VM的Value到树遍历VM的Value
-    fn convertBytecodeValue(self: *VM, bv: bytecode_vm.Value) !Value {
+    fn convertBytecodeValue(self: *VM, bv: bytecode.Value) !Value {
         return switch (bv) {
             .null_val => Value.initNull(),
             .bool_val => |b| Value.initBool(b),

@@ -93,6 +93,13 @@ pub const TokenTag = enum(u8) {
     question_question,
     plus_plus,
     minus_minus,
+    // Compound assignment operators
+    plus_equal,
+    minus_equal,
+    asterisk_equal,
+    slash_equal,
+    percent_equal,
+    dot_equal,
     // Other
     eof,
     _,
@@ -167,6 +174,7 @@ pub const Node = struct {
         block,
         expression_stmt,
         assignment,
+        compound_assignment,
         echo_stmt,
         return_stmt,
         break_stmt,
@@ -259,6 +267,7 @@ pub const Node = struct {
         break_stmt: struct { level: ?Index },
         continue_stmt: struct { level: ?Index },
         assignment: struct { target: Index, value: Index },
+        compound_assignment: struct { target: Index, op: TokenTag, value: Index },
         binary_expr: struct { lhs: Index, op: TokenTag, rhs: Index },
         unary_expr: struct { op: TokenTag, expr: Index },
         postfix_expr: struct { op: TokenTag, expr: Index },
@@ -389,9 +398,14 @@ pub const IRGenerator = struct {
         module.* = Module.init(self.allocator, module_name, source_file);
         self.module = module;
 
+        // Debug: Print root node info
+        std.debug.print("[IR Generator] Processing root node at index {d}\n", .{root_index});
+        std.debug.print("[IR Generator] Total nodes: {d}\n", .{nodes.len});
+        
         // Process root node at the specified index
         if (root_index < nodes.len and nodes[root_index].tag == .root) {
             const root_data = nodes[root_index].data.root;
+            std.debug.print("[IR Generator] Root has {d} statements\n", .{root_data.stmts.len});
 
             // Separate function declarations from top-level statements
             var top_level_stmts = std.ArrayListUnmanaged(Node.Index){};
@@ -399,6 +413,8 @@ pub const IRGenerator = struct {
 
             for (root_data.stmts) |stmt_idx| {
                 const stmt_node = self.getNode(stmt_idx) orelse continue;
+                std.debug.print("[IR Generator] Statement {d}: tag = {s}\n", .{stmt_idx, @tagName(stmt_node.tag)});
+                
                 if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
                     stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl)
                 {
@@ -410,10 +426,14 @@ pub const IRGenerator = struct {
                 }
             }
 
+            std.debug.print("[IR Generator] Top-level statements: {d}\n", .{top_level_stmts.items.len});
+
             // Create __main__ function for top-level statements if any
             if (top_level_stmts.items.len > 0) {
                 try self.generateMainFunction(top_level_stmts.items);
             }
+        } else {
+            std.debug.print("[IR Generator] ERROR: Root node not found or invalid tag\n", .{});
         }
 
         return module;
@@ -629,6 +649,7 @@ pub const IRGenerator = struct {
             .for_stmt => try self.generateForStmt(node),
             .for_range_stmt => try self.generateForRangeStmt(node),
             .foreach_stmt => try self.generateForeachStmt(node),
+            .switch_stmt => try self.generateSwitchStmt(node),
             .try_stmt => try self.generateTryStmt(node),
             .throw_stmt => try self.generateThrowStmt(node),
             .return_stmt => try self.generateReturnStmt(node),
@@ -641,6 +662,7 @@ pub const IRGenerator = struct {
                 _ = try self.generateExpression(index);
             },
             .assignment => try self.generateAssignment(node),
+            .compound_assignment => try self.generateCompoundAssignment(node),
             .list_assignment => try self.generateListAssignment(node),
             .list_empty => {}, // Empty slot - no code generation needed
             .block => try self.generateBlock(node),
@@ -1150,22 +1172,39 @@ pub const IRGenerator = struct {
         // Create blocks
         const cond_block = try self.createBlock("foreach_cond");
         const body_block = try self.createBlock("foreach_body");
+        const increment_block = try self.createBlock("foreach_increment");
         const exit_block = try self.createBlock("foreach_exit");
 
-        // Initialize iterator (simplified - actual implementation would use runtime calls)
+        // Create index variable (starts at 0)
+        const i64_type_ptr = try self.allocator.create(Type);
+        i64_type_ptr.* = Type{ .i64 = {} };
+        const index_type = Type{ .ptr = i64_type_ptr };
+        const index_ptr = try self.emitWithResult(
+            .{ .alloca = .{ .type_ = .i64, .count = 1 } },
+            index_type
+        );
+        const zero_reg = try self.emitWithResult(.{ .const_int = 0 }, .i64);
+        _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = zero_reg } }, null);
+
+        // Get array length once
+        const length_reg = try self.emitWithResult(.{ .array_count = .{ .operand = iterable_reg } }, .i64);
+
+        // Jump to condition check
         self.setTerminator(.{ .br = cond_block });
 
+        // Push loop context for break/continue
         try self.loop_stack.append(self.allocator, .{
             .break_block = exit_block,
-            .continue_block = cond_block,
+            .continue_block = increment_block,  // ✅ 修复：continue跳到increment块
         });
 
-        // Condition check (simplified)
+        // Condition check: index < length
         self.setCurrentBlock(cond_block);
-        // In real implementation, this would call iterator->valid()
-        const has_more = try self.emitWithResult(.{ .array_count = .{ .operand = iterable_reg } }, .i64);
-        const zero_reg = try self.emitWithResult(.{ .const_int = 0 }, .i64);
-        const cond_reg = try self.emitWithResult(.{ .gt = .{ .lhs = has_more, .rhs = zero_reg } }, .bool);
+        const index_reg = try self.emitWithResult(
+            .{ .load = .{ .ptr = index_ptr, .type_ = .i64 } },
+            .i64
+        );
+        const cond_reg = try self.emitWithResult(.{ .lt = .{ .lhs = index_reg, .rhs = length_reg } }, .bool);
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
             .then_block = body_block,
@@ -1175,29 +1214,178 @@ pub const IRGenerator = struct {
         // Body
         self.setCurrentBlock(body_block);
 
-        // Set up key variable if present
+        // Load current index
+        const current_index = try self.emitWithResult(
+            .{ .load = .{ .ptr = index_ptr, .type_ = .i64 } },
+            .i64
+        );
+
+        // Get key if needed
         if (foreach_data.key) |key_idx| {
             const key_node = self.getNode(key_idx);
             if (key_node != null and key_node.?.tag == .variable) {
                 const key_name = self.getString(key_node.?.data.variable.name);
-                _ = try self.getOrCreateVarRegister(key_name, .php_value);
+                const key_var = try self.getOrCreateVarRegister(key_name, .php_value);
+                // For now, use index as key (works for numeric arrays)
+                const key_value = try self.emitWithResult(.{ .cast = .{ .value = current_index, .from_type = .i64, .to_type = .php_value } }, .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = key_var, .value = key_value } }, null);
             }
         }
 
-        // Set up value variable
+        // Get value
         const value_node = self.getNode(foreach_data.value);
         if (value_node != null and value_node.?.tag == .variable) {
             const value_name = self.getString(value_node.?.data.variable.name);
-            _ = try self.getOrCreateVarRegister(value_name, .php_value);
+            const value_var = try self.getOrCreateVarRegister(value_name, .php_value);
+            // Get array element at current index
+            const index_value = try self.emitWithResult(.{ .cast = .{ .value = current_index, .from_type = .i64, .to_type = .php_value } }, .php_value);
+            const element = try self.emitWithResult(.{ .array_get = .{ .array = iterable_reg, .key = index_value } }, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = element } }, null);
         }
 
+        // Generate loop body
         try self.generateStatement(foreach_data.body);
+
+        // Jump to increment block if not terminated
         if (!self.isBlockTerminated()) {
-            self.setTerminator(.{ .br = cond_block });
+            self.setTerminator(.{ .br = increment_block });
         }
+
+        // Increment block: increment index and jump back to condition
+        self.setCurrentBlock(increment_block);
+        const current_idx = try self.emitWithResult(
+            .{ .load = .{ .ptr = index_ptr, .type_ = .i64 } },
+            .i64
+        );
+        const one_reg = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+        const next_idx = try self.emitWithResult(.{ .add = .{ .lhs = current_idx, .rhs = one_reg } }, .i64);
+        _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = next_idx } }, null);
+        
+        // Jump back to condition
+        self.setTerminator(.{ .br = cond_block });
 
         _ = self.loop_stack.pop();
         self.setCurrentBlock(exit_block);
+    }
+
+    /// Generate IR for switch statement
+    fn generateSwitchStmt(self: *Self, node: *const Node) !void {
+        const switch_data = node.data.switch_stmt;
+        
+        // 生成switch表达式
+        const value_reg = try self.generateExpression(switch_data.expression);
+        
+        // 创建merge块（switch之后继续执行的地方）
+        const merge_block = try self.createBlock("switch.merge");
+        
+        // 创建default块（如果有default case）
+        const default_block = if (switch_data.default) |_|
+            try self.createBlock("switch.default")
+        else
+            merge_block;
+        
+        // 为每个case创建基本块
+        var case_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+        defer case_blocks.deinit(self.allocator);
+        
+        for (switch_data.cases, 0..) |_, i| {
+            const label = try std.fmt.allocPrint(self.allocator, "switch.case.{d}", .{i});
+            defer self.allocator.free(label);
+            const block = try self.createBlock(label);
+            try case_blocks.append(self.allocator, block);
+        }
+        
+        // 构建switch cases数组
+        var ir_cases = std.ArrayListUnmanaged(Terminator.SwitchCase){};
+        defer ir_cases.deinit(self.allocator);
+        
+        for (switch_data.cases, 0..) |case_idx, i| {
+            const case_node = self.getNode(case_idx).?;
+            const case_data = case_node.data.case;
+            
+            // 计算case值（必须是常量）
+            const case_value_node = self.getNode(case_data.condition).?;
+            const case_const = self.getConstantValue(case_value_node);
+            
+            const case_value: i64 = if (case_const) |c| blk: {
+                if (c.int_val) |val| {
+                    break :blk val;
+                } else if (c.float_val) |val| {
+                    break :blk @intFromFloat(val);
+                } else if (c.bool_val) |val| {
+                    break :blk if (val) 1 else 0;
+                } else {
+                    break :blk 0;
+                }
+            } else 0;
+            
+            try ir_cases.append(self.allocator, .{
+                .value = case_value,
+                .block = case_blocks.items[i],
+            });
+        }
+        
+        // 生成switch终止指令
+        const cases_slice = try self.allocator.dupe(Terminator.SwitchCase, ir_cases.items);
+        self.setTerminator(.{ .switch_ = .{
+            .value = value_reg,
+            .cases = cases_slice,
+            .default = default_block,
+        } });
+        
+        // Push loop context for break (switch可以使用break)
+        try self.loop_stack.append(self.allocator, .{
+            .break_block = merge_block,
+            .continue_block = merge_block, // switch中的continue无意义，指向merge
+        });
+        
+        // 生成每个case的代码
+        for (switch_data.cases, 0..) |case_idx, i| {
+            self.current_block = case_blocks.items[i];
+            const case_node = self.getNode(case_idx).?;
+            const case_data = case_node.data.case;
+            
+            for (case_data.body) |stmt_idx| {
+                try self.generateStatement(stmt_idx);
+                if (self.isBlockTerminated()) break;
+            }
+            
+            // 如果没有break，fall through到下一个case或merge
+            if (!self.isBlockTerminated()) {
+                if (i + 1 < case_blocks.items.len) {
+                    // Fall through到下一个case
+                    self.setTerminator(.{ .br = case_blocks.items[i + 1] });
+                } else if (switch_data.default != null) {
+                    // Fall through到default
+                    self.setTerminator(.{ .br = default_block });
+                } else {
+                    // 跳转到merge
+                    self.setTerminator(.{ .br = merge_block });
+                }
+            }
+        }
+        
+        // 生成default块
+        if (switch_data.default) |default_idx| {
+            self.current_block = default_block;
+            const default_node = self.getNode(default_idx).?;
+            const default_data = default_node.data.default;
+            
+            for (default_data.body) |stmt_idx| {
+                try self.generateStatement(stmt_idx);
+                if (self.isBlockTerminated()) break;
+            }
+            
+            if (!self.isBlockTerminated()) {
+                self.setTerminator(.{ .br = merge_block });
+            }
+        }
+        
+        // Pop loop context
+        _ = self.loop_stack.pop();
+        
+        // 继续在merge块
+        self.current_block = merge_block;
     }
 
     /// Generate IR for try-catch-finally statement
@@ -1443,6 +1631,66 @@ pub const IRGenerator = struct {
         }
     }
 
+    /// Generate IR for compound assignment (+=, -=, *=, /=, %=, .=)
+    /// Compound assignment: $a += $b is equivalent to $a = $a + $b
+    fn generateCompoundAssignment(self: *Self, node: *const Node) !void {
+        const compound_data = node.data.compound_assignment;
+        const op_tag = compound_data.op;
+
+        // Get target node
+        const target_node = self.getNode(compound_data.target) orelse return;
+
+        // Generate current value of target (read)
+        const current_value = try self.generateExpression(compound_data.target);
+
+        // Generate right-hand side value
+        const rhs_value = try self.generateExpression(compound_data.value);
+
+        // Perform the operation based on the operator
+        const result_reg = switch (op_tag) {
+            .plus_equal => try self.emitWithResult(.{ .add = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+            .minus_equal => try self.emitWithResult(.{ .sub = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+            .asterisk_equal => try self.emitWithResult(.{ .mul = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+            .slash_equal => try self.emitWithResult(.{ .div = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+            .percent_equal => try self.emitWithResult(.{ .mod = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .dot_equal => try self.emitWithResult(.{ .concat = .{ .lhs = current_value, .rhs = rhs_value } }, .php_string),
+            else => return error.UnsupportedCompoundOperator,
+        };
+
+        // Store the result back to the target (write)
+        switch (target_node.tag) {
+            .variable => {
+                const var_name = self.getString(target_node.data.variable.name);
+                const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
+                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+
+                // Update symbol table
+                try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
+            },
+            .array_access => {
+                const array_reg = try self.generateExpression(target_node.data.array_access.target);
+                if (target_node.data.array_access.index) |idx| {
+                    const key_reg = try self.generateExpression(idx);
+                    _ = try self.emit(.{ .array_set = .{
+                        .array = array_reg,
+                        .key = key_reg,
+                        .value = result_reg,
+                    } }, null);
+                }
+            },
+            .property_access => {
+                const obj_reg = try self.generateExpression(target_node.data.property_access.target);
+                const prop_name = self.getString(target_node.data.property_access.property_name);
+                _ = try self.emit(.{ .property_set = .{
+                    .object = obj_reg,
+                    .property_name = prop_name,
+                    .value = result_reg,
+                } }, null);
+            },
+            else => {},
+        }
+    }
+
     /// Generate IR for list() destructuring assignment
     fn generateListAssignment(self: *Self, node: *const Node) !void {
         const list_data = node.data.list_assignment;
@@ -1585,6 +1833,67 @@ pub const IRGenerator = struct {
                 break :blk self.generateExpression(assign_data.value);
             },
 
+            // Compound assignment as expression
+            .compound_assignment => blk: {
+                const compound_data = node.data.compound_assignment;
+                
+                // Get target node
+                const target_node = self.getNode(compound_data.target) orelse {
+                    break :blk try self.emitWithResult(.const_null, .php_value);
+                };
+
+                // Generate current value of target (read)
+                const current_value = try self.generateExpression(compound_data.target);
+
+                // Generate right-hand side value
+                const rhs_value = try self.generateExpression(compound_data.value);
+
+                // Perform the operation based on the operator
+                const result_reg = switch (compound_data.op) {
+                    .plus_equal => try self.emitWithResult(.{ .add = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+                    .minus_equal => try self.emitWithResult(.{ .sub = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+                    .asterisk_equal => try self.emitWithResult(.{ .mul = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+                    .slash_equal => try self.emitWithResult(.{ .div = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+                    .percent_equal => try self.emitWithResult(.{ .mod = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+                    .dot_equal => try self.emitWithResult(.{ .concat = .{ .lhs = current_value, .rhs = rhs_value } }, .php_string),
+                    else => try self.emitWithResult(.const_null, .php_value),
+                };
+
+                // Store the result back to the target (write)
+                switch (target_node.tag) {
+                    .variable => {
+                        const var_name = self.getString(target_node.data.variable.name);
+                        const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
+                        _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+                        try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
+                    },
+                    .array_access => {
+                        const array_reg = try self.generateExpression(target_node.data.array_access.target);
+                        if (target_node.data.array_access.index) |idx| {
+                            const key_reg = try self.generateExpression(idx);
+                            _ = try self.emit(.{ .array_set = .{
+                                .array = array_reg,
+                                .key = key_reg,
+                                .value = result_reg,
+                            } }, null);
+                        }
+                    },
+                    .property_access => {
+                        const obj_reg = try self.generateExpression(target_node.data.property_access.target);
+                        const prop_name = self.getString(target_node.data.property_access.property_name);
+                        _ = try self.emit(.{ .property_set = .{
+                            .object = obj_reg,
+                            .property_name = prop_name,
+                            .value = result_reg,
+                        } }, null);
+                    },
+                    else => {},
+                }
+
+                // Return the result value
+                break :blk result_reg;
+            },
+
             else => self.emitWithResult(.const_null, .php_value),
         };
     }
@@ -1630,8 +1939,16 @@ pub const IRGenerator = struct {
 
         // Look up variable register
         if (self.lookupVarRegister(var_name)) |ptr_reg| {
-            // Load value from variable
-            return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+            // 从指针类型中提取指向的类型
+            // Extract the pointed-to type from the pointer type
+            const load_type = switch (ptr_reg.type_) {
+                .ptr => |inner_type| inner_type.*,
+                else => .php_value, // 默认为php_value / Default to php_value
+            };
+            
+            // 使用正确的类型生成load指令
+            // Generate load instruction with the correct type
+            return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = load_type } }, load_type);
         }
 
         // Variable not found - create it with null value
@@ -1720,6 +2037,32 @@ pub const IRGenerator = struct {
             return folded_reg;
         }
 
+        // 处理前置递增递减运算符
+        if (unary_data.op == .plus_plus or unary_data.op == .minus_minus) {
+            // 生成表达式（获取变量的值）
+            const operand_reg = try self.generateExpression(unary_data.expr);
+
+            // 生成递增/递减操作
+            const one_reg = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+            const new_value = switch (unary_data.op) {
+                .plus_plus => try self.emitWithResult(.{ .add = .{ .lhs = operand_reg, .rhs = one_reg } }, operand_reg.type_),
+                .minus_minus => try self.emitWithResult(.{ .sub = .{ .lhs = operand_reg, .rhs = one_reg } }, operand_reg.type_),
+                else => unreachable,
+            };
+
+            // 存储回变量
+            const expr_node = self.getNode(unary_data.expr);
+            if (expr_node != null and expr_node.?.tag == .variable) {
+                const var_name = self.getString(expr_node.?.data.variable.name);
+                if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                    _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = new_value } }, null);
+                }
+            }
+
+            // 前置运算符返回新值
+            return new_value;
+        }
+
         const operand_reg = try self.generateExpression(unary_data.expr);
 
         return switch (unary_data.op) {
@@ -1734,12 +2077,14 @@ pub const IRGenerator = struct {
     /// Generate IR for postfix expression (++, --)
     fn generatePostfixExpr(self: *Self, node: *const Node) !Register {
         const postfix_data = node.data.postfix_expr;
+        
+        // 生成表达式（获取变量的值）
         const operand_reg = try self.generateExpression(postfix_data.expr);
 
-        // Get the original value (for postfix, we return the original)
-        const original_reg = operand_reg;
+        // 在SSA形式中，operand_reg是不可变的，所以它就是原始值
+        // 我们可以直接使用它作为返回值
 
-        // Generate increment/decrement
+        // 生成递增/递减操作（创建新的寄存器）
         const one_reg = try self.emitWithResult(.{ .const_int = 1 }, .i64);
         const new_value = switch (postfix_data.op) {
             .plus_plus => try self.emitWithResult(.{ .add = .{ .lhs = operand_reg, .rhs = one_reg } }, operand_reg.type_),
@@ -1747,7 +2092,7 @@ pub const IRGenerator = struct {
             else => operand_reg,
         };
 
-        // Store back to variable
+        // 存储回变量
         const expr_node = self.getNode(postfix_data.expr);
         if (expr_node != null and expr_node.?.tag == .variable) {
             const var_name = self.getString(expr_node.?.data.variable.name);
@@ -1756,7 +2101,8 @@ pub const IRGenerator = struct {
             }
         }
 
-        return original_reg;
+        // 后置运算符返回原始值（operand_reg在SSA中是不可变的）
+        return operand_reg;
     }
 
     /// Generate IR for ternary expression

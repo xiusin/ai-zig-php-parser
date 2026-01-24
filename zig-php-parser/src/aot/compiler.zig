@@ -101,6 +101,9 @@ const LinkerConfig = LinkerMod.LinkerConfig;
 const OptimizerMod = @import("optimizer.zig");
 const IROptimizer = OptimizerMod.IROptimizer;
 const IROptimizeLevel = OptimizerMod.OptimizeLevel;
+const NativeLinkerMod = @import("native_linker.zig");
+const NativeLinker = NativeLinkerMod.NativeLinker;
+const NativeLinkerConfig = NativeLinkerMod.NativeLinkerConfig;
 
 // Root module for shared types
 const root = @import("root.zig");
@@ -136,22 +139,15 @@ pub const CompileOptions = struct {
     syntax_mode: SyntaxMode = .php,
 
     /// Get the output file path, deriving from input if not specified
+    /// 默认输出文件名统一为 "hello"，用户可通过 --output 参数自定义
     pub fn getOutputPath(self: *const CompileOptions, allocator: Allocator) ![]const u8 {
         if (self.output_file) |out| {
             return try allocator.dupe(u8, out);
         }
 
-        // Derive output name from input file
-        const input = self.input_file;
-        const basename = std.fs.path.basename(input);
-
-        // Remove .php extension if present
-        if (std.mem.endsWith(u8, basename, ".php")) {
-            const name_without_ext = basename[0 .. basename.len - 4];
-            return try allocator.dupe(u8, name_without_ext);
-        }
-
-        return try allocator.dupe(u8, basename);
+        // 统一默认输出文件名为 "hello"
+        // 这样用户不需要每次授予执行权限
+        return try allocator.dupe(u8, "hello");
     }
 };
 
@@ -447,6 +443,7 @@ pub const AOTCompiler = struct {
     codegen: ?*CodeGenerator,
     linker: ?*StaticLinker,
     optimizer: ?*IROptimizer,
+    native_linker: ?*NativeLinker,
     /// Syntax configuration derived from options
     syntax_config: SyntaxConfig,
 
@@ -454,6 +451,8 @@ pub const AOTCompiler = struct {
     source: ?[]const u8,
     /// Parsed AST nodes
     ast_nodes: ?[]const IRGeneratorMod.Node,
+    /// Root node index in AST
+    root_index: u32,
     /// String table from parser
     string_table: ?[]const []const u8,
     /// Generated IR module
@@ -483,9 +482,11 @@ pub const AOTCompiler = struct {
             .codegen = null,
             .linker = null,
             .optimizer = null,
+            .native_linker = null,
             .syntax_config = syntax_config,
             .source = null,
             .ast_nodes = null,
+            .root_index = 0,
             .string_table = null,
             .ir_module = null,
         };
@@ -527,6 +528,11 @@ pub const AOTCompiler = struct {
         // Free linker
         if (self.linker) |lnk| {
             lnk.deinit();
+        }
+
+        // Free native linker
+        if (self.native_linker) |nl| {
+            nl.deinit();
         }
 
         // Free AST nodes
@@ -594,19 +600,61 @@ pub const AOTCompiler = struct {
             self.diagnostics,
         );
 
-        // Initialize linker
+        // Initialize linker (for symbol resolution) - 使用简化配置
+        const linker_target: LinkerMod.Target = switch (self.options.target.os) {
+            .linux => switch (self.options.target.arch) {
+                .x86_64 => .linux_x86_64,
+                .aarch64 => .linux_aarch64,
+                else => .linux_x86_64,
+            },
+            .macos => switch (self.options.target.arch) {
+                .x86_64 => .macos_x86_64,
+                .aarch64 => .macos_aarch64,
+                else => .macos_aarch64,
+            },
+            .windows => .windows_x86_64,
+        };
+        
         const linker_config = LinkerConfig{
-            .target = self.options.target.toCodeGenTarget(),
-            .optimize_level = self.options.optimize_level.toCodeGenLevel(),
+            .target = linker_target,
+            .output_format = linker_target.getObjectFormat(),
+            .strip_debug = self.options.optimize_level == .release_small,
+            .optimize = self.options.optimize_level != .debug,
+        };
+        self.linker = try StaticLinker.init(self.allocator, linker_config, self.diagnostics);
+
+        // Initialize native linker (for actual executable generation)
+        const native_config = NativeLinkerConfig{
+            .target = .{
+                .arch = switch (self.options.target.arch) {
+                    .x86_64 => .x86_64,
+                    .aarch64 => .aarch64,
+                    .arm => .arm,
+                },
+                .os = switch (self.options.target.os) {
+                    .linux => .linux,
+                    .macos => .macos,
+                    .windows => .windows,
+                },
+                .abi = switch (self.options.target.abi) {
+                    .gnu => .gnu,
+                    .musl => .musl,
+                    .msvc => .msvc,
+                    .none => .none,
+                },
+            },
+            .optimize_level = switch (self.options.optimize_level) {
+                .debug => .debug,
+                .release_safe => .release_safe,
+                .release_fast => .release_fast,
+                .release_small => .release_small,
+            },
             .static_link = self.options.static_link,
             .debug_info = self.options.debug_info,
             .strip_symbols = self.options.optimize_level == .release_small,
-            .library_paths = &[_][]const u8{},
-            .libraries = &[_][]const u8{},
-            .extra_flags = &[_][]const u8{},
             .verbose = self.options.verbose,
         };
-        self.linker = try StaticLinker.init(self.allocator, linker_config, self.diagnostics);
+        self.native_linker = try NativeLinker.init(self.allocator, native_config, self.diagnostics);
     }
 
     /// Main compilation entry point
@@ -730,11 +778,12 @@ pub const AOTCompiler = struct {
 
     /// Set pre-parsed AST nodes and string table
     /// This is used when the parser is invoked externally (e.g., from main.zig)
-    pub fn setAST(self: *Self, nodes: []const IRGeneratorMod.Node, string_table: []const []const u8) !void {
+    pub fn setAST(self: *Self, nodes: []const IRGeneratorMod.Node, string_table: []const []const u8, root_index: u32) !void {
         // Copy nodes to our allocator
         const owned_nodes = try self.allocator.alloc(IRGeneratorMod.Node, nodes.len);
         @memcpy(owned_nodes, nodes);
         self.ast_nodes = owned_nodes;
+        self.root_index = root_index;
 
         // Copy string table to our allocator
         const owned_table = try self.allocator.alloc([]const u8, string_table.len);
@@ -744,13 +793,12 @@ pub const AOTCompiler = struct {
         self.string_table = owned_table;
 
         if (self.options.verbose) {
-            std.debug.print("  AST set: {d} nodes, {d} strings\n", .{ nodes.len, string_table.len });
+            std.debug.print("  AST set: {d} nodes, {d} strings, root_index = {d}\n", .{ nodes.len, string_table.len, root_index });
         }
     }
 
     /// Parse source into AST
-    /// Note: This method requires the parser module to be available.
-    /// When testing the AOT module in isolation, use setAST() instead.
+    /// Integrates with the compiler module's parser
     fn parseSource(self: *Self) !void {
         if (self.source == null) {
             self.diagnostics.reportError(
@@ -772,11 +820,12 @@ pub const AOTCompiler = struct {
             return;
         }
 
-        // Parser integration is handled externally via setAST()
-        // This allows the AOT module to be tested independently
+        // AOT 编译器目前需要外部提供 AST
+        // 这是因为 Parser 在 compiler 模块中，而 AOT 在独立模块中
+        // 为了避免循环依赖，Parser 集成需要在 main.zig 中完成
         self.diagnostics.reportError(
             .{ .file = self.options.input_file },
-            "parser not available - use setAST() to provide pre-parsed AST",
+            "parser integration required - AOT compiler needs pre-parsed AST from main.zig",
             .{},
         );
     }
@@ -793,7 +842,7 @@ pub const AOTCompiler = struct {
         }
 
         if (self.options.verbose) {
-            std.debug.print("  Generating IR...\n", .{});
+            std.debug.print("  Generating IR from root index {d}...\n", .{self.root_index});
         }
 
         const ir_gen = self.ir_generator orelse {
@@ -805,10 +854,11 @@ pub const AOTCompiler = struct {
             return;
         };
 
-        // Generate IR module
-        self.ir_module = ir_gen.generate(
+        // Generate IR module using the correct root index
+        self.ir_module = ir_gen.generateFromRoot(
             self.ast_nodes.?,
             self.string_table.?,
+            self.root_index,
             self.options.input_file,
             self.options.input_file,
         ) catch |err| {
@@ -919,41 +969,44 @@ pub const AOTCompiler = struct {
             std.debug.print("  Linking executable: {s}\n", .{output_path});
         }
 
-        const linker = self.linker orelse {
+        const native_linker = self.native_linker orelse {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
-                "linker not initialized",
+                "native linker not initialized",
                 .{},
             );
             return;
         };
 
-        // Generate mock object code for now (actual LLVM output would be used)
-        var object_code = linker.generateMockObjectCode(self.options.input_file) catch |err| {
+        const ir_module = self.ir_module orelse {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
-                "object code generation failed: {s}",
-                .{@errorName(err)},
-            );
-            return;
-        };
-        defer object_code.deinit(self.allocator);
-
-        // Write object file
-        const obj_path = linker.writeTempObjectFile(&object_code) catch |err| {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "failed to write object file: {s}",
-                .{@errorName(err)},
+                "no IR module available for linking",
+                .{},
             );
             return;
         };
 
-        // Link with runtime library
-        linker.link(&[_][]const u8{obj_path}, output_path) catch |err| {
+        // 生成 Zig 代码
+        const zig_code = native_linker.generateZigCode(ir_module) catch |err| {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
-                "linking failed: {s}",
+                "Zig code generation failed: {s}",
+                .{@errorName(err)},
+            );
+            return;
+        };
+        defer self.allocator.free(zig_code);
+
+        if (self.options.verbose) {
+            std.debug.print("  Generated Zig code ({d} bytes)\n", .{zig_code.len});
+        }
+
+        // 编译为可执行文件
+        native_linker.compileToExecutable(zig_code, output_path) catch |err| {
+            self.diagnostics.reportError(
+                .{ .file = self.options.input_file },
+                "executable generation failed: {s}",
                 .{@errorName(err)},
             );
             return;
@@ -1079,7 +1132,7 @@ test "CompileOptions.getOutputPath" {
         try std.testing.expectEqualStrings("myapp", path);
     }
 
-    // Test deriving from input
+    // Test deriving from input - 现在统一输出为 "hello"
     {
         const opts = CompileOptions{
             .input_file = "hello.php",
@@ -1089,14 +1142,14 @@ test "CompileOptions.getOutputPath" {
         try std.testing.expectEqualStrings("hello", path);
     }
 
-    // Test input without .php extension
+    // Test input without .php extension - 现在统一输出为 "hello"
     {
         const opts = CompileOptions{
             .input_file = "script",
         };
         const path = try opts.getOutputPath(allocator);
         defer allocator.free(path);
-        try std.testing.expectEqualStrings("script", path);
+        try std.testing.expectEqualStrings("hello", path);
     }
 }
 
@@ -1169,7 +1222,7 @@ test "AOTCompiler initializes syntax config from options" {
         defer aot_compiler.deinit();
         
         try std.testing.expectEqual(SyntaxMode.php, aot_compiler.getSyntaxMode());
-        try std.testing.expect(compiler.getSyntaxConfig().isPhpMode());
+        try std.testing.expect(aot_compiler.getSyntaxConfig().isPhpMode());
     }
     
     // Test with Go mode
@@ -1178,10 +1231,10 @@ test "AOTCompiler initializes syntax config from options" {
             .input_file = "test.php",
             .syntax_mode = .go,
         };
-        var compiler = try AOTCompiler.init(allocator, opts);
-        defer fc.deinit();
+        var aot_compiler = try AOTCompiler.init(allocator, opts);
+        defer aot_compiler.deinit();
         
-        try std.testing.expectEqual(SyntaxMode.go, compiler.getSyntaxMode());
-        try std.testing.expect(compiler.getSyntaxConfig().isGoMode());
+        try std.testing.expectEqual(SyntaxMode.go, aot_compiler.getSyntaxMode());
+        try std.testing.expect(aot_compiler.getSyntaxConfig().isGoMode());
     }
 }

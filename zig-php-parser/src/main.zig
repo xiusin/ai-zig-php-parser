@@ -389,9 +389,9 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         std.debug.print("  Syntax mode: {s}\n", .{options.syntax_mode.toString()});
     }
 
-    // Read source file
+    // 读取源文件
     const file = std.fs.cwd().openFile(options.input_file, .{}) catch |err| {
-        std.debug.print("Error: cannot open file '{s}': {s}\n", .{ options.input_file, @errorName(err) });
+        std.debug.print("Error: Cannot open file '{s}': {s}\n", .{ options.input_file, @errorName(err) });
         return;
     };
     defer file.close();
@@ -399,55 +399,42 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     const file_size = try file.getEndPos();
     const source = try allocator.allocSentinel(u8, file_size, 0);
     defer allocator.free(source);
+
     _ = try file.readAll(source);
 
-    // Parse the source
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    var context = PHPContext.init(arena.allocator());
+    // 创建 PHP 上下文和 Parser
+    var context = PHPContext.init(allocator);
+    defer context.deinit();
 
-    // Convert AOT SyntaxMode to compiler SyntaxMode for parser
-    const parser_syntax_mode: SyntaxMode = switch (options.syntax_mode) {
-        .php => .php,
-        .go => .go,
+    const syntax_mode = switch (options.syntax_mode) {
+        .php => SyntaxMode.php,
+        .go => SyntaxMode.go,
     };
 
-    var p = try parser.Parser.initWithMode(arena.allocator(), &context, source, parser_syntax_mode);
-    const program = p.parse() catch |err| {
-        std.debug.print("Parse error: {s}\n", .{@errorName(err)});
-        // Add parser errors
-        for (context.errors.items) |error_item| {
-            std.debug.print("  {s}:{d}:{d}: {s}\n", .{
-                options.input_file,
-                error_item.line,
-                error_item.column,
-                error_item.msg,
-            });
+    var p = try parser.Parser.initWithMode(allocator, &context, source, syntax_mode);
+    defer p.deinit();
+
+    // 解析源码
+    const root_index = p.parse() catch |err| {
+        std.debug.print("Error: Parsing failed: {s}\n", .{@errorName(err)});
+        if (context.errors.items.len > 0) {
+            for (context.errors.items) |error_item| {
+                std.debug.print("Parse error: {s}\n", .{error_item.msg});
+            }
         }
         return;
     };
 
-    if (options.dump_ast) {
-        std.debug.print("\n=== AST Dump ===\n", .{});
-        std.debug.print("Root node index: {d}\n", .{program});
-        std.debug.print("Total nodes: {d}\n", .{context.nodes.items.len});
-        std.debug.print("String pool size: {d}\n", .{context.string_pool.count()});
-        // Print first few nodes for debugging
-        const max_nodes = @min(context.nodes.items.len, 10);
-        for (context.nodes.items[0..max_nodes], 0..) |node, i| {
-            std.debug.print("  Node {d}: tag={s}\n", .{ i, @tagName(node.tag) });
-        }
-        if (context.nodes.items.len > 10) {
-            std.debug.print("  ... and {d} more nodes\n", .{context.nodes.items.len - 10});
-        }
-        std.debug.print("=== End AST ===\n\n", .{});
+    if (options.verbose) {
+        std.debug.print("  Parsing completed: root node index = {d}\n", .{root_index});
+        std.debug.print("  Total nodes: {d}\n", .{context.nodes.items.len});
     }
 
-    // Convert parser AST to IR generator format
+    // 转换 AST 节点
     const ir_nodes = try convertASTToIRNodes(allocator, context.nodes.items);
     defer allocator.free(ir_nodes);
 
-    // Build string table from string pool
+    // 构建字符串表
     const string_table = try buildStringTable(allocator, &context.string_pool);
     defer {
         for (string_table) |s| {
@@ -456,80 +443,64 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         allocator.free(string_table);
     }
 
-    // Use the AOTCompiler for the full compilation pipeline
+    if (options.verbose) {
+        std.debug.print("  String table: {d} entries\n", .{string_table.len});
+    }
+
+    // 创建 AOT 编译器实例
     var aot_compiler = try aot.AOTCompiler.init(allocator, options);
     defer aot_compiler.deinit();
 
-    // Set the pre-parsed AST
-    try aot_compiler.setAST(ir_nodes, string_table);
+    // 设置预解析的 AST
+    try aot_compiler.setAST(ir_nodes, string_table, root_index);
 
-    // Set source for diagnostics
-    try aot_compiler.getDiagnostics().setSource(source);
-
-    if (options.dump_ir) {
-        std.debug.print("\n=== IR Dump ===\n", .{});
-
-        // Initialize symbol table and type inferencer for IR generation
-        var symbol_table = try aot.SymbolTable.init(allocator);
-        defer symbol_table.deinit();
-
-        var type_inferencer = aot.TypeInferenceMod.TypeInferencer.init(allocator, &symbol_table, aot_compiler.getDiagnostics());
-
-        // Initialize IR generator
-        var ir_generator = aot.IRGenerator.init(allocator, &symbol_table, &type_inferencer, aot_compiler.getDiagnostics());
-        defer ir_generator.deinit();
-
-        // Generate IR - pass the root node index
-        const module = ir_generator.generateFromRoot(ir_nodes, string_table, program, options.input_file, options.input_file) catch |err| {
-            std.debug.print("IR generation error: {s}\n", .{@errorName(err)});
-            std.debug.print("=== End IR ===\n\n", .{});
-            return;
-        };
-        defer {
-            module.deinit();
-            allocator.destroy(module);
+    // 执行完整的编译流程（IR生成、优化、代码生成、链接）
+    const result = aot_compiler.compile() catch |err| {
+        std.debug.print("Error: Compilation failed: {s}\n", .{@errorName(err)});
+        if (aot_compiler.hasErrors()) {
+            aot_compiler.printDiagnostics();
         }
-
-        // Serialize and print IR
-        const ir_text = aot.serializeModule(allocator, module) catch |err| {
-            std.debug.print("IR serialization error: {s}\n", .{@errorName(err)});
-            std.debug.print("=== End IR ===\n\n", .{});
-            return;
-        };
-        defer allocator.free(ir_text);
-
-        std.debug.print("{s}", .{ir_text});
-        std.debug.print("=== End IR ===\n\n", .{});
-    }
-
-    // Report compilation status
-    if (aot_compiler.hasErrors()) {
-        aot_compiler.printDiagnostics();
         return;
-    }
+    };
 
-    if (options.verbose) {
-        std.debug.print("Parsing completed successfully.\n", .{});
-        if (!options.dump_ir) {
-            std.debug.print("Note: Use --dump-ir to see the generated IR.\n", .{});
+    // 检查编译结果
+    if (result.success) {
+        if (result.output_path) |output| {
+            std.debug.print("Success: Compiled to {s}\n", .{output});
+            if (options.verbose) {
+                std.debug.print("  Errors: {d}\n", .{result.error_count});
+                std.debug.print("  Warnings: {d}\n", .{result.warning_count});
+            }
+        } else {
+            std.debug.print("Success: Compilation completed (no output file)\n", .{});
         }
-        std.debug.print("Note: Full AOT compilation pipeline (code generation, linking) not yet implemented.\n", .{});
-    } else if (!options.dump_ir and !options.dump_ast) {
-        std.debug.print("AOT compilation: parsing succeeded.\n", .{});
-        std.debug.print("Use --dump-ir to see the generated IR, or --dump-ast to see the AST.\n", .{});
+    } else {
+        std.debug.print("Error: Compilation failed with {d} errors, {d} warnings\n", .{
+            result.error_count,
+            result.warning_count,
+        });
+        aot_compiler.printDiagnostics();
     }
 }
 
 /// Convert parser AST nodes to IR generator node format
 fn convertASTToIRNodes(allocator: std.mem.Allocator, parser_nodes: []const ast.Node) ![]const aot.IRGeneratorMod.Node {
+    std.debug.print("[main.zig] Converting {d} parser nodes to IR nodes\n", .{parser_nodes.len});
+    
     const ir_nodes = try allocator.alloc(aot.IRGeneratorMod.Node, parser_nodes.len);
 
     for (parser_nodes, 0..) |pnode, i| {
+        if (i == 0) {
+            std.debug.print("[main.zig] Node 0: tag = {s}\n", .{@tagName(pnode.tag)});
+        }
         ir_nodes[i] = .{
             .tag = convertNodeTag(pnode.tag),
             .main_token = convertToken(pnode.main_token),
             .data = convertNodeData(pnode.data, pnode.tag),
         };
+        if (i == 0) {
+            std.debug.print("[main.zig] Converted node 0: tag = {s}\n", .{@tagName(ir_nodes[i].tag)});
+        }
     }
 
     return ir_nodes;
@@ -590,7 +561,7 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .block => .block,
         .expression_stmt => .expression_stmt,
         .assignment => .assignment,
-        .compound_assignment => .assignment, // Map to assignment for IR generation
+        .compound_assignment => .compound_assignment,
         .echo_stmt => .echo_stmt,
         .return_stmt => .return_stmt,
         .break_stmt => .break_stmt,
@@ -672,6 +643,12 @@ fn convertTokenTag(tag: compiler.Token.Tag) aot.IRGeneratorMod.TokenTag {
         .double_question => .question_question,
         .plus_plus => .plus_plus,
         .minus_minus => .minus_minus,
+        .plus_equal => .plus_equal,
+        .minus_equal => .minus_equal,
+        .asterisk_equal => .asterisk_equal,
+        .slash_equal => .slash_equal,
+        .percent_equal => .percent_equal,
+        .dot_equal => .dot_equal,
         .eof => .eof,
         else => .eof, // Default for unhandled tags
     };
@@ -712,6 +689,11 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
             .target = data.assignment.target,
             .value = data.assignment.value,
         } },
+        .compound_assignment => .{ .compound_assignment = .{
+            .target = data.compound_assignment.target,
+            .op = convertTokenTag(data.compound_assignment.op),
+            .value = data.compound_assignment.value,
+        } },
         .echo_stmt => .{ .echo_stmt = .{ .exprs = data.echo_stmt.exprs } },
         .return_stmt => .{ .return_stmt = .{ .expr = data.return_stmt.expr } },
         .if_stmt => .{ .if_stmt = .{
@@ -735,11 +717,33 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
             .value = data.foreach_stmt.value,
             .body = data.foreach_stmt.body,
         } },
+        .switch_stmt => .{ .switch_stmt = .{
+            .expression = data.switch_stmt.expression,
+            .cases = data.switch_stmt.cases,
+            .default = data.switch_stmt.default,
+        } },
+        .case => .{ .case = .{
+            .condition = data.case.condition,
+            .body = data.case.body,
+        } },
+        .default => .{ .default = .{
+            .body = data.default.body,
+        } },
+        .break_stmt => .{ .break_stmt = .{
+            .level = data.break_stmt.level,
+        } },
+        .continue_stmt => .{ .continue_stmt = .{
+            .level = data.continue_stmt.level,
+        } },
         .function_call => .{ .function_call = .{
             .name = data.function_call.name,
             .args = data.function_call.args,
         } },
         .array_init => .{ .array_init = .{ .elements = data.array_init.elements } },
+        .array_access => .{ .array_access = .{
+            .target = data.array_access.target,
+            .index = data.array_access.index,
+        } },
         .parameter => .{ .parameter = .{
             .attributes = data.parameter.attributes,
             .name = data.parameter.name,
@@ -760,6 +764,15 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
         } },
         .lock_stmt => .{ .lock_stmt = .{ .body = data.lock_stmt.body } },
         .go_stmt => .{ .go_stmt = .{ .call = data.go_stmt.call } },
+        .ternary_expr => .{ .ternary_expr = .{
+            .cond = data.ternary_expr.cond,
+            .then_expr = data.ternary_expr.then_expr,
+            .else_expr = data.ternary_expr.else_expr,
+        } },
+        .postfix_expr => .{ .postfix_expr = .{
+            .op = convertTokenTag(data.postfix_expr.op),
+            .expr = data.postfix_expr.expr,
+        } },
         else => .{ .none = {} },
     };
 }

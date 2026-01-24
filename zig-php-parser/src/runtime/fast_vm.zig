@@ -13,7 +13,7 @@ const fast_value = @import("fast_value.zig");
 const fast_pool = @import("fast_pool.zig");
 const fast_string = @import("fast_string.zig");
 const func_mod = @import("func.zig");
-const jit = @import("jit").root.zig;
+const jit = @import("jit");
 const opcode_mod = @import("opcode.zig");
 
 const FastValue = fast_value.FastValue;

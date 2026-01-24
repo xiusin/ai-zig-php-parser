@@ -5,11 +5,11 @@ const SyntaxConfig = @import("syntax_mode.zig").SyntaxConfig;
 const Token = @import("token.zig").Token;
 const ast = @import("ast.zig");
 pub const PHPContext = @import("root.zig").PHPContext;
-const extension_api = @import("extension").api.zig;
+const extension = @import("extension");
 
 /// Syntax hooks interface for extension system
 /// Allows extensions to hook into the parsing process for custom syntax
-pub const SyntaxHooks = extension_api.SyntaxHooks;
+pub const SyntaxHooks = extension.SyntaxHooks;
 
 pub const Parser = struct {
     lexer: Lexer,
@@ -1852,7 +1852,11 @@ pub const Parser = struct {
             },
             .t_encapsed_and_whitespace => {
                 const t = try self.eat(.t_encapsed_and_whitespace);
-                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                // 需要对插值字符串中的文本部分进行转义处理
+                const raw_content = self.lexer.buffer[t.loc.start..t.loc.end];
+                const unescaped = try self.unescapeDoubleQuoted(raw_content);
+                defer self.allocator.free(unescaped);
+                return self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(unescaped) } } });
             },
             .t_backtick_string => {
                 const t = try self.eat(.t_backtick_string);
@@ -1889,7 +1893,11 @@ pub const Parser = struct {
                             .t_encapsed_and_whitespace => blk: {
                                 const t = self.curr;
                                 self.nextToken();
-                                break :blk try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                                // 需要对heredoc中的文本部分进行转义处理
+                                const raw_content = self.lexer.buffer[t.loc.start..t.loc.end];
+                                const unescaped = try self.unescapeDoubleQuoted(raw_content);
+                                defer self.allocator.free(unescaped);
+                                break :blk try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(unescaped) } } });
                             },
                             .t_variable => blk: {
                                 const t = self.curr;
@@ -1975,7 +1983,11 @@ pub const Parser = struct {
             switch (self.curr.tag) {
                 .t_encapsed_and_whitespace => {
                     const t = try self.eat(.t_encapsed_and_whitespace);
-                    part = try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                    // 需要对插值字符串中的文本部分进行转义处理
+                    const raw_content = self.lexer.buffer[t.loc.start..t.loc.end];
+                    const unescaped = try self.unescapeDoubleQuoted(raw_content);
+                    defer self.allocator.free(unescaped);
+                    part = try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(unescaped) } } });
                 },
                 .t_variable => {
                     const t = try self.eat(.t_variable);
