@@ -576,7 +576,10 @@ pub const IRGenerator = struct {
         }
 
         // Allocate stack space for the variable
-        const ptr_type = Type{ .ptr = &type_ };
+        // 必须在堆上分配Type，因为指针需要在函数返回后仍然有效
+        const type_ptr = try self.allocator.create(Type);
+        type_ptr.* = type_;
+        const ptr_type = Type{ .ptr = type_ptr };
         const alloca_reg = try self.emitWithResult(.{ .alloca = .{ .type_ = type_, .count = 1 } }, ptr_type);
 
         try self.var_registers.put(self.allocator, name, alloca_reg);
@@ -1969,16 +1972,28 @@ pub const IRGenerator = struct {
         const lhs_reg = try self.generateExpression(bin_data.lhs);
         const rhs_reg = try self.generateExpression(bin_data.rhs);
 
+        // 推断算术运算的结果类型
+        // 如果任一操作数是php_value，结果就是php_value
+        // 否则使用左操作数的类型
+        const arith_result_type = blk: {
+            const lhs_tag = @as(std.meta.Tag(Type), lhs_reg.type_);
+            const rhs_tag = @as(std.meta.Tag(Type), rhs_reg.type_);
+            if (lhs_tag == .php_value or rhs_tag == .php_value) {
+                break :blk Type{ .php_value = {} };
+            }
+            break :blk lhs_reg.type_;
+        };
+
         // Map operator to IR operation
         const op = bin_data.op;
         return switch (op) {
             // Arithmetic
-            .plus => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, lhs_reg.type_),
-            .minus => self.emitWithResult(.{ .sub = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, lhs_reg.type_),
-            .star => self.emitWithResult(.{ .mul = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, lhs_reg.type_),
-            .slash => self.emitWithResult(.{ .div = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, lhs_reg.type_),
+            .plus => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
+            .minus => self.emitWithResult(.{ .sub = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
+            .star => self.emitWithResult(.{ .mul = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
+            .slash => self.emitWithResult(.{ .div = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
             .percent => self.emitWithResult(.{ .mod = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
-            .star_star => self.emitWithResult(.{ .pow = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, lhs_reg.type_),
+            .star_star => self.emitWithResult(.{ .pow = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
 
             // Comparison
             .equal_equal => self.emitWithResult(.{ .eq = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),

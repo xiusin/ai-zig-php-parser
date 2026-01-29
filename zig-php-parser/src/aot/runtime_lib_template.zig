@@ -492,6 +492,8 @@ pub const Value = struct {
             self.asString().retain();
         } else if (self.isArray()) {
             self.asArray().retain();
+        } else if (Value_isObject(self)) {
+            Value_asObject(self).retain();
         }
         return self;
     }
@@ -501,6 +503,8 @@ pub const Value = struct {
             self.asString().release(allocator);
         } else if (self.isArray()) {
             self.asArray().release(allocator);
+        } else if (Value_isObject(self)) {
+            Value_asObject(self).release();
         }
     }
 
@@ -1004,6 +1008,241 @@ pub fn php_in_array(needle: Value, haystack: Value) !Value {
     return Value.initBool(false);
 }
 
+/// array_slice - 从数组中提取一段切片
+/// 
+/// 提取数组中的一段元素，返回新数组。
+/// 
+/// @param arr 源数组
+/// @param offset 起始偏移量（可以为负数，表示从末尾开始）
+/// @param length 切片长度（可选，null表示到数组末尾）
+/// @param allocator 内存分配器
+/// @return 新的数组切片
+/// 
+/// 示例：
+/// ```php
+/// $arr = [1, 2, 3, 4, 5];
+/// array_slice($arr, 1, 2);  // [2, 3]
+/// array_slice($arr, -2);     // [4, 5]
+/// array_slice($arr, 1, -1);  // [2, 3, 4]
+/// ```
+pub fn php_array_slice(arr: Value, offset: Value, length: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+    
+    const php_arr = arr.asArray();
+    const arr_count = php_arr.count();
+    
+    if (arr_count == 0) {
+        // 空数组，返回空数组
+        return Value.initArray(try PHPArray.init(allocator));
+    }
+    
+    // 计算起始位置
+    const offset_int = offset.toInt();
+    const start_idx: usize = blk: {
+        if (offset_int < 0) {
+            const abs_offset = @as(usize, @intCast(-offset_int));
+            break :blk if (abs_offset > arr_count) 0 else arr_count - abs_offset;
+        } else {
+            break :blk @intCast(@min(offset_int, @as(i64, @intCast(arr_count))));
+        }
+    };
+    
+    // 计算结束位置
+    const end_idx: usize = blk: {
+        if (length.isNull()) {
+            // 没有指定长度，取到数组末尾
+            break :blk arr_count;
+        }
+        
+        const length_int = length.toInt();
+        if (length_int >= 0) {
+            // 正数长度
+            break :blk @min(start_idx + @as(usize, @intCast(length_int)), arr_count);
+        } else {
+            // 负数长度：从末尾减去
+            const abs_len = @as(usize, @intCast(-length_int));
+            if (abs_len >= arr_count) {
+                break :blk start_idx; // 返回空数组
+            }
+            break :blk if (arr_count - abs_len > start_idx) arr_count - abs_len else start_idx;
+        }
+    };
+    
+    // 创建新数组
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+    
+    if (start_idx >= end_idx) {
+        // 空切片
+        return Value.initArray(result);
+    }
+    
+    // 复制元素
+    // 注意：PHP的array_slice会重新索引数组（从0开始）
+    var iter = php_arr.elements.iterator();
+    var current_idx: usize = 0;
+    var new_idx: i64 = 0;
+    
+    while (iter.next()) |entry| {
+        // 只处理整数键（保持顺序）
+        if (entry.key_ptr.* == .integer) {
+            if (current_idx >= start_idx and current_idx < end_idx) {
+                const new_key = ArrayKey{ .integer = new_idx };
+                const value_copy = entry.value_ptr.*.retain();
+                try result.elements.put(new_key, value_copy);
+                new_idx += 1;
+            }
+            current_idx += 1;
+        }
+    }
+    
+    result.next_index = new_idx;
+    return Value.initArray(result);
+}
+
+/// array_merge - 合并一个或多个数组
+/// 
+/// 将多个数组合并成一个新数组。
+/// - 整数键会被重新索引（从0开始）
+/// - 字符串键会被保留，后面的值会覆盖前面的值
+/// 
+/// @param arrays 要合并的数组列表
+/// @param allocator 内存分配器
+/// @return 合并后的新数组
+/// 
+/// 示例：
+/// ```php
+/// $arr1 = [1, 2];
+/// $arr2 = [3, 4];
+/// array_merge($arr1, $arr2);  // [1, 2, 3, 4]
+/// 
+/// $arr3 = ['a' => 1, 'b' => 2];
+/// $arr4 = ['b' => 3, 'c' => 4];
+/// array_merge($arr3, $arr4);  // ['a' => 1, 'b' => 3, 'c' => 4]
+/// ```
+pub fn php_array_merge(arrays: []const Value, allocator: Allocator) !Value {
+    // 创建结果数组
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+    
+    var next_int_key: i64 = 0;
+    
+    // 遍历所有输入数组
+    for (arrays) |arr_val| {
+        if (!arr_val.isArray()) continue; // 跳过非数组值
+        
+        const arr = arr_val.asArray();
+        var iter = arr.elements.iterator();
+        
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*.retain();
+            
+            switch (key) {
+                .integer => {
+                    // 整数键：重新索引
+                    const new_key = ArrayKey{ .integer = next_int_key };
+                    try result.elements.put(new_key, value);
+                    next_int_key += 1;
+                },
+                .string => |str| {
+                    // 字符串键：保留键名，可能覆盖
+                    const new_key = ArrayKey{ .string = str };
+                    str.retain(); // 保留键的引用
+                    
+                    // 如果键已存在，释放旧值
+                    if (result.elements.get(new_key)) |old_value| {
+                        old_value.release(allocator);
+                    }
+                    
+                    try result.elements.put(new_key, value);
+                },
+            }
+        }
+    }
+    
+    result.next_index = next_int_key;
+    return Value.initArray(result);
+}
+
+/// array_keys - 返回数组中所有的键
+/// 
+/// 返回一个包含数组所有键的新数组（整数索引）。
+/// 
+/// @param arr 源数组
+/// @param allocator 内存分配器
+/// @return 包含所有键的新数组
+/// 
+/// 示例：
+/// ```php
+/// $arr = ['a' => 1, 'b' => 2, 0 => 3];
+/// array_keys($arr);  // ['a', 'b', 0]
+/// ```
+pub fn php_array_keys(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+    
+    const php_arr = arr.asArray();
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+    
+    var iter = php_arr.elements.iterator();
+    var idx: i64 = 0;
+    
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const key_value = switch (key) {
+            .integer => |i| Value.initInt(i),
+            .string => |s| blk: {
+                // 创建字符串值的副本
+                const str_copy = try PHPString.init(allocator, s.data);
+                break :blk Value.initString(str_copy);
+            },
+        };
+        
+        const new_key = ArrayKey{ .integer = idx };
+        try result.elements.put(new_key, key_value);
+        idx += 1;
+    }
+    
+    result.next_index = idx;
+    return Value.initArray(result);
+}
+
+/// array_values - 返回数组中所有的值
+/// 
+/// 返回一个包含数组所有值的新数组，使用整数索引（从0开始）。
+/// 这个函数会丢弃原数组的键，重新索引。
+/// 
+/// @param arr 源数组
+/// @param allocator 内存分配器
+/// @return 包含所有值的新数组（整数索引）
+/// 
+/// 示例：
+/// ```php
+/// $arr = ['a' => 1, 'b' => 2, 5 => 3];
+/// array_values($arr);  // [1, 2, 3]
+/// ```
+pub fn php_array_values(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+    
+    const php_arr = arr.asArray();
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+    
+    var iter = php_arr.elements.iterator();
+    var idx: i64 = 0;
+    
+    while (iter.next()) |entry| {
+        const value = entry.value_ptr.*.retain();
+        const new_key = ArrayKey{ .integer = idx };
+        try result.elements.put(new_key, value);
+        idx += 1;
+    }
+    
+    result.next_index = idx;
+    return Value.initArray(result);
+}
+
 // ============================================================================
 // 数学函数
 // ============================================================================
@@ -1127,4 +1366,313 @@ pub fn php_strval(val: Value, allocator: Allocator) !Value {
 /// boolval - 转换为布尔值
 pub fn php_boolval(val: Value) !Value {
     return Value.initBool(val.toBool());
+}
+
+// ============================================================================
+// 字符串插值函数
+// ============================================================================
+
+/// php_interpolate - 字符串插值（将多个值连接成字符串）
+/// 
+/// 这个函数接收一个Value数组，将每个值转换为字符串并连接起来。
+/// 这是PHP字符串插值的核心实现，例如：
+/// ```php
+/// $name = "Alice";
+/// $age = 30;
+/// echo "Hello, $name! You are $age years old.";
+/// ```
+/// 
+/// @param parts 要插值的值数组
+/// @param allocator 内存分配器
+/// @return 插值后的字符串Value
+pub fn php_interpolate(parts: []const Value, allocator: Allocator) !Value {
+    if (parts.len == 0) {
+        // 空数组，返回空字符串
+        return Value.initString(try PHPString.init(allocator, ""));
+    }
+    
+    if (parts.len == 1) {
+        // 单个值，直接转换为字符串
+        const str = try parts[0].toString(allocator);
+        return Value.initString(str);
+    }
+    
+    // 多个值，需要连接
+    // 首先计算总长度
+    var total_length: usize = 0;
+    var temp_strings = try allocator.alloc(*PHPString, parts.len);
+    defer {
+        // 释放临时字符串
+        for (temp_strings) |str| {
+            str.release(allocator);
+        }
+        allocator.free(temp_strings);
+    }
+    
+    // 将每个值转换为字符串
+    for (parts, 0..) |part, i| {
+        const str = try part.toString(allocator);
+        temp_strings[i] = str;
+        total_length += str.length;
+    }
+    
+    // 分配结果缓冲区
+    const result_data = try allocator.alloc(u8, total_length);
+    errdefer allocator.free(result_data);
+    
+    // 连接所有字符串
+    var offset: usize = 0;
+    for (temp_strings) |str| {
+        if (str.length > 0) {
+            @memcpy(result_data[offset..offset + str.length], str.data[0..str.length]);
+            offset += str.length;
+        }
+    }
+    
+    // 创建结果字符串
+    const result = try allocator.create(PHPString);
+    errdefer allocator.destroy(result);
+    
+    result.data = result_data;
+    result.length = total_length;
+    result.ref_count = 1;
+    result.is_static = false;
+    
+    return Value.initString(result);
+}
+
+// ============================================================================
+// PHP对象类型
+// ============================================================================
+
+/// PHP对象类型
+/// 使用引用计数管理内存，属性存储在HashMap中
+pub const PHPObject = struct {
+    class_name: []const u8,
+    properties: std.StringHashMap(Value),
+    ref_count: usize,
+    allocator: Allocator,
+
+    /// 创建新对象
+    pub fn init(allocator: Allocator, class_name: []const u8) !*PHPObject {
+        const obj = try allocator.create(PHPObject);
+        errdefer allocator.destroy(obj);
+        
+        obj.class_name = try allocator.dupe(u8, class_name);
+        errdefer allocator.free(obj.class_name);
+        
+        obj.properties = std.StringHashMap(Value).init(allocator);
+        obj.ref_count = 1;
+        obj.allocator = allocator;
+        return obj;
+    }
+
+    /// 增加引用计数
+    pub fn retain(self: *PHPObject) void {
+        self.ref_count += 1;
+    }
+
+    /// 减少引用计数，必要时释放
+    pub fn release(self: *PHPObject) void {
+        if (self.ref_count == 0) return;
+        
+        self.ref_count -= 1;
+        if (self.ref_count == 0) {
+            self.deinit();
+        }
+    }
+
+    /// 释放对象
+    fn deinit(self: *PHPObject) void {
+        // 释放所有属性值
+        var iter = self.properties.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.release(self.allocator);
+        }
+        self.properties.deinit();
+        
+        // 释放类名
+        self.allocator.free(self.class_name);
+        
+        // 释放对象本身
+        self.allocator.destroy(self);
+    }
+
+    /// 获取属性
+    pub fn getProperty(self: *PHPObject, name: []const u8) ?Value {
+        return self.properties.get(name);
+    }
+
+    /// 设置属性
+    pub fn setProperty(self: *PHPObject, name: []const u8, value: Value) !void {
+        // 释放旧值
+        if (self.properties.get(name)) |old_value| {
+            old_value.release(self.allocator);
+        }
+        
+        // 保留新值
+        _ = value.retain();
+        
+        // 存储属性
+        try self.properties.put(name, value);
+    }
+};
+
+// ============================================================================
+// Value类型扩展 - 对象支持
+// ============================================================================
+
+// 在Value结构中添加对象类型常量
+pub const TYPE_OBJECT: u64 = 0x0001800000000000;
+
+// 扩展Value的方法（这些方法应该添加到Value结构中）
+// 由于我们不能直接修改Value结构，我们在这里提供独立的函数
+
+/// 创建对象值
+pub fn Value_initObject(obj: *PHPObject) Value {
+    const addr = @intFromPtr(obj);
+    return .{ .val = Value.TAG_PTR | TYPE_OBJECT | (addr & 0x00007FFFFFFFFFFF) };
+}
+
+/// 检查是否是对象
+pub fn Value_isObject(self: Value) bool {
+    if ((self.val & (Value.SIGN_BIT | Value.QNAN)) != Value.QNAN) return false;
+    return (self.val & Value.TYPE_MASK) == TYPE_OBJECT;
+}
+
+/// 获取对象指针
+pub fn Value_asObject(self: Value) *PHPObject {
+    return @ptrFromInt(self.val & 0x00007FFFFFFFFFFF);
+}
+
+// 更新Value的release方法以支持对象
+// 注意：这需要在Value结构的release方法中添加对象处理
+
+// ============================================================================
+// 对象操作函数
+// ============================================================================
+
+/// 创建新对象
+/// 
+/// @param class_name 类名
+/// @param allocator 内存分配器
+/// @return 对象Value
+pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
+    const obj = try PHPObject.init(allocator, class_name);
+    return Value_initObject(obj);
+}
+
+/// 获取对象属性
+/// 
+/// @param obj_val 对象Value
+/// @param property_name 属性名
+/// @return 属性值，如果不存在返回null
+pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
+    if (!Value_isObject(obj_val)) {
+        // 不是对象，返回null
+        return Value.initNull();
+    }
+    
+    const obj = Value_asObject(obj_val);
+    return obj.getProperty(property_name) orelse Value.initNull();
+}
+
+/// 设置对象属性
+/// 
+/// @param obj_val 对象Value
+/// @param property_name 属性名
+/// @param value 属性值
+pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !void {
+    if (!Value_isObject(obj_val)) {
+        return error.NotAnObject;
+    }
+    
+    const obj = Value_asObject(obj_val);
+    try obj.setProperty(property_name, value);
+}
+
+/// 调用对象方法（简化版）
+/// 
+/// 注意：这是一个简化实现，仅返回null。
+/// 完整的方法调用需要：
+/// 1. 类定义和方法查找机制
+/// 2. 方法绑定和调用
+/// 3. $this上下文传递
+/// 4. 继承和多态支持
+/// 
+/// @param obj_val 对象Value
+/// @param method_name 方法名
+/// @param args 参数数组
+/// @return 方法返回值
+pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Value) !Value {
+    _ = obj_val;
+    _ = method_name;
+    _ = args;
+    
+    // 简化实现：暂时返回null
+    // TODO: 实现完整的方法调用机制
+    return Value.initNull();
+}
+
+/// 检查是否是对象
+pub fn php_is_object(val: Value) !Value {
+    return Value.initBool(Value_isObject(val));
+}
+
+/// 获取对象的类名
+pub fn php_get_class(obj_val: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) {
+        return Value.initBool(false);
+    }
+    
+    const obj = Value_asObject(obj_val);
+    const class_name_str = try PHPString.init(allocator, obj.class_name);
+    return Value.initString(class_name_str);
+}
+
+// ============================================================================
+// 异常处理
+// ============================================================================
+
+/// 当前异常（全局状态）
+/// 注意：这是一个简化的异常处理机制
+/// 在真实的PHP实现中，异常应该是线程局部的
+var current_exception: ?Value = null;
+
+/// 设置当前异常
+/// 
+/// @param exception 异常Value
+pub fn setException(exception: Value) void {
+    current_exception = exception;
+}
+
+/// 获取当前异常
+/// 
+/// @return 当前异常，如果没有异常返回null
+pub fn getCurrentException() ?Value {
+    return current_exception;
+}
+
+/// 清除当前异常
+pub fn clearException() void {
+    current_exception = null;
+}
+
+/// 抛出异常
+/// 
+/// @param message 异常消息
+/// @param allocator 内存分配器
+/// @return 异常Value
+pub fn throwException(message: []const u8, allocator: Allocator) !Value {
+    const msg_str = try PHPString.init(allocator, message);
+    const exception = Value.initString(msg_str);
+    setException(exception);
+    return exception;
+}
+
+/// 检查是否有异常
+/// 
+/// @return 如果有异常返回true
+pub fn hasException() bool {
+    return current_exception != null;
 }

@@ -288,6 +288,7 @@ pub const NativeLinker = struct {
             "str_replace", "str_repeat", "explode", "implode", "join",
             "count", "array_push", "array_pop", "array_shift", "array_unshift",
             "in_array", "array_key_exists", "array_keys", "array_values",
+            "array_slice", "array_merge",
             "abs", "sqrt", "round", "floor", "ceil", "min", "max", "pow",
             "is_null", "is_bool", "is_int", "is_float", "is_string", "is_array",
             "intval", "floatval", "strval", "boolval",
@@ -339,6 +340,10 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "is_float")) return "php_is_float";
         if (std.mem.eql(u8, func_name, "is_string")) return "php_is_string";
         if (std.mem.eql(u8, func_name, "is_array")) return "php_is_array";
+        if (std.mem.eql(u8, func_name, "array_keys")) return "php_array_keys";
+        if (std.mem.eql(u8, func_name, "array_values")) return "php_array_values";
+        if (std.mem.eql(u8, func_name, "array_slice")) return "php_array_slice";
+        if (std.mem.eql(u8, func_name, "array_merge")) return "php_array_merge";
         if (std.mem.eql(u8, func_name, "intval")) return "php_intval";
         if (std.mem.eql(u8, func_name, "floatval")) return "php_floatval";
         if (std.mem.eql(u8, func_name, "strval")) return "php_strval";
@@ -452,7 +457,10 @@ pub const NativeLinker = struct {
                     try code.appendSlice(self.allocator, ": *runtime.Value = &reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, "_storage;\n");
-                    // 注意：不标记const指针为未使用，因为它们通常会被使用
+                    // 标记为可能未使用（避免Zig编译器警告）
+                    try code.appendSlice(self.allocator, "    _ = &reg_");
+                    try code.writer(self.allocator).print("{d}", .{reg_id});
+                    try code.appendSlice(self.allocator, ";\n");
                 } else {
                     // 普通寄存器：声明为值
                     const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
@@ -599,12 +607,39 @@ pub const NativeLinker = struct {
         } else if (try self.tryGenerateSimpleIfElsePattern(code, func)) {
             // 简单if/else模式：生成原生if语句
             // 已在tryGenerateSimpleIfElsePattern中生成
+            // 添加cleanup代码
+            if (cleanup_registers.items.len > 0) {
+                try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
+                for (cleanup_registers.items) |reg_id| {
+                    try code.appendSlice(self.allocator, "    reg_");
+                    try code.writer(self.allocator).print("{d}", .{reg_id});
+                    try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+                }
+            }
         } else if (try self.tryGenerateWhileLoopSimple(code, func)) {
             // while循环模式：生成原生while循环
             // 已在tryGenerateWhileLoopSimple中生成
+            // 添加cleanup代码
+            if (cleanup_registers.items.len > 0) {
+                try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
+                for (cleanup_registers.items) |reg_id| {
+                    try code.appendSlice(self.allocator, "    reg_");
+                    try code.writer(self.allocator).print("{d}", .{reg_id});
+                    try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+                }
+            }
         } else if (try self.tryGenerateForLoopSimple(code, func)) {
             // for循环模式：生成原生for循环
             // 已在tryGenerateForLoopSimple中生成
+            // 添加cleanup代码
+            if (cleanup_registers.items.len > 0) {
+                try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
+                for (cleanup_registers.items) |reg_id| {
+                    try code.appendSlice(self.allocator, "    reg_");
+                    try code.writer(self.allocator).print("{d}", .{reg_id});
+                    try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+                }
+            }
         } else {
             // 复杂控制流：使用状态机
             try self.generateControlFlowStateMachine(code, func, cleanup_registers.items);
@@ -866,6 +901,9 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "    while (true) {\n");
         try code.appendSlice(self.allocator, "        switch (current_block) {\n");
         
+        // 检查函数是否有返回值
+        const func_has_return_value = self.func_return_types.get(func.name) orelse false;
+        
         for (func.blocks.items, 0..) |block, block_idx| {
             const case_start = try std.fmt.allocPrint(self.allocator,
                 "            {d} => {{ // {s}\n",
@@ -881,7 +919,7 @@ pub const NativeLinker = struct {
             
             // 生成终止指令
             if (block.terminator) |term| {
-                try self.generateTerminatorSimple(code, term, cleanup_regs, func, block_idx);
+                try self.generateTerminatorSimple(code, term, cleanup_regs, func, block_idx, func_has_return_value);
             } else {
                 if (block_idx + 1 < func.blocks.items.len) {
                     const jump = try std.fmt.allocPrint(self.allocator,
@@ -900,7 +938,11 @@ pub const NativeLinker = struct {
                             try code.appendSlice(self.allocator, cleanup);
                         }
                     }
-                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
+                    if (func_has_return_value) {
+                        try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
+                    } else {
+                        try code.appendSlice(self.allocator, "                return;\n");
+                    }
                 }
             }
             
@@ -913,7 +955,7 @@ pub const NativeLinker = struct {
     }
     
     /// 生成终止指令（简化版，用于状态机）
-    fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, func: *const IR.Function, _: usize) !void {
+    fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, func: *const IR.Function, _: usize, func_has_return_value: bool) !void {
         switch (term) {
             .ret => |ret_val| {
                 if (cleanup_regs.len > 0) {
@@ -937,7 +979,11 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(ret_stmt);
                     try code.appendSlice(self.allocator, ret_stmt);
                 } else {
-                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
+                    if (func_has_return_value) {
+                        try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
+                    } else {
+                        try code.appendSlice(self.allocator, "                return;\n");
+                    }
                 }
             },
             .br => |target| {
@@ -970,7 +1016,11 @@ pub const NativeLinker = struct {
                 try code.appendSlice(self.allocator, cond);
             },
             else => {
-                try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
+                if (func_has_return_value) {
+                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
+                } else {
+                    try code.appendSlice(self.allocator, "                return;\n");
+                }
             },
         }
     }
@@ -1081,9 +1131,37 @@ pub const NativeLinker = struct {
         // 生成body块的指令
         try code.appendSlice(self.allocator, "        // Loop body\n");
         
+        // 收集body块中需要释放的临时寄存器
+        var body_temps = std.ArrayList(usize){};
+        defer body_temps.deinit(self.allocator);
+        
+        for (body_block.instructions.items) |inst| {
+            if (inst.result) |reg| {
+                // 检查是否是创建临时对象的指令
+                switch (inst.op) {
+                    .const_string, .concat, .array_new, .cast => {
+                        // 这些指令可能创建新的Value，需要在循环体结束时释放
+                        // 但要排除存储到变量的情况
+                        try body_temps.append(self.allocator, reg.id);
+                    },
+                    else => {},
+                }
+            }
+        }
+        
         for (body_block.instructions.items) |inst| {
             try code.appendSlice(self.allocator, "    ");
             try self.generateInstructionSimple(code, inst);
+        }
+        
+        // 在循环体结束时释放临时对象
+        if (body_temps.items.len > 0) {
+            try code.appendSlice(self.allocator, "        // Release loop body temporaries\n");
+            for (body_temps.items) |reg_id| {
+                try code.appendSlice(self.allocator, "        reg_");
+                try code.writer(self.allocator).print("{d}", .{reg_id});
+                try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+            }
         }
         
         try code.appendSlice(self.allocator, "    }\n");
@@ -1190,6 +1268,12 @@ pub const NativeLinker = struct {
             return false;
         }
         
+        // 检查exit块是否是最后一个块
+        // 如果不是，说明有更复杂的控制流，应该使用状态机
+        if (exit_idx != func.blocks.items.len - 1) {
+            return false;
+        }
+        
         // 所有条件满足，生成for循环
         try code.appendSlice(self.allocator, "    // Simple for loop (optimized, no state machine)\n");
         
@@ -1224,6 +1308,24 @@ pub const NativeLinker = struct {
         
         // 生成body块的指令
         try code.appendSlice(self.allocator, "        // Loop body\n");
+        
+        // 收集body块中需要释放的临时寄存器
+        var body_temps = std.ArrayList(usize){};
+        defer body_temps.deinit(self.allocator);
+        
+        for (body_block.instructions.items) |inst| {
+            if (inst.result) |reg| {
+                // 检查是否是创建临时对象的指令
+                switch (inst.op) {
+                    .const_string, .concat, .array_new, .cast => {
+                        // 这些指令可能创建新的Value，需要在循环体结束时释放
+                        try body_temps.append(self.allocator, reg.id);
+                    },
+                    else => {},
+                }
+            }
+        }
+        
         for (body_block.instructions.items) |inst| {
             try code.appendSlice(self.allocator, "    ");
             try self.generateInstructionSimple(code, inst);
@@ -1234,6 +1336,16 @@ pub const NativeLinker = struct {
         for (loop_block.instructions.items) |inst| {
             try code.appendSlice(self.allocator, "    ");
             try self.generateInstructionSimple(code, inst);
+        }
+        
+        // 在循环体结束时释放临时对象
+        if (body_temps.items.len > 0) {
+            try code.appendSlice(self.allocator, "        // Release loop body temporaries\n");
+            for (body_temps.items) |reg_id| {
+                try code.appendSlice(self.allocator, "        reg_");
+                try code.writer(self.allocator).print("{d}", .{reg_id});
+                try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+            }
         }
         
         try code.appendSlice(self.allocator, "    }\n");
@@ -1271,6 +1383,10 @@ pub const NativeLinker = struct {
                 const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
                 if (value_type_tag == .i64) {
                     try writer.print("    reg_{d}.* = runtime.Value.initInt(reg_{d});\n", .{op.ptr.id, op.value.id});
+                } else if (value_type_tag == .f64) {
+                    try writer.print("    reg_{d}.* = runtime.Value.initFloat(reg_{d});\n", .{op.ptr.id, op.value.id});
+                } else if (value_type_tag == .bool) {
+                    try writer.print("    reg_{d}.* = runtime.Value.initBool(reg_{d});\n", .{op.ptr.id, op.value.id});
                 } else {
                     // 已经是Value类型，直接赋值
                     try writer.print("    reg_{d}.* = reg_{d};\n", .{op.ptr.id, op.value.id});
@@ -1281,6 +1397,10 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     if (type_tag == .i64) {
                         try writer.print("    reg_{d} = reg_{d}.*.asInt();\n", .{reg.id, op.ptr.id});
+                    } else if (type_tag == .f64) {
+                        try writer.print("    reg_{d} = reg_{d}.*.asFloat();\n", .{reg.id, op.ptr.id});
+                    } else if (type_tag == .bool) {
+                        try writer.print("    reg_{d} = reg_{d}.*.asBool();\n", .{reg.id, op.ptr.id});
                     } else {
                         try writer.print("    reg_{d} = reg_{d}.*;\n", .{reg.id, op.ptr.id});
                     }
@@ -1288,7 +1408,37 @@ pub const NativeLinker = struct {
             },
             .concat => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = try runtime.php_concat(reg_{d}, reg_{d}, runtime.runtime_allocator);\n", .{reg.id, op.lhs.id, op.rhs.id});
+                    // 检查操作数类型，必要时进行转换
+                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    
+                    // 生成左操作数表达式
+                    const lhs_expr = if (lhs_type_tag == .php_value or lhs_type_tag == .php_string)
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.lhs.id})
+                    else if (lhs_type_tag == .i64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.lhs.id})
+                    else if (lhs_type_tag == .f64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{op.lhs.id})
+                    else if (lhs_type_tag == .bool)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.lhs.id})
+                    else
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.lhs.id});
+                    defer self.allocator.free(lhs_expr);
+                    
+                    // 生成右操作数表达式
+                    const rhs_expr = if (rhs_type_tag == .php_value or rhs_type_tag == .php_string)
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.rhs.id})
+                    else if (rhs_type_tag == .i64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.rhs.id})
+                    else if (rhs_type_tag == .f64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{op.rhs.id})
+                    else if (rhs_type_tag == .bool)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.rhs.id})
+                    else
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.rhs.id});
+                    defer self.allocator.free(rhs_expr);
+                    
+                    try writer.print("    reg_{d} = try runtime.php_concat({s}, {s}, runtime.runtime_allocator);\n", .{reg.id, lhs_expr, rhs_expr});
                 }
             },
             .add => |op| {
@@ -1733,8 +1883,218 @@ pub const NativeLinker = struct {
                     }
                 }
             },
+            .interpolate => |op| {
+                // 字符串插值：将多个部分连接成一个字符串
+                if (inst.result) |reg| {
+                    if (op.parts.len == 0) {
+                        // 空插值，返回空字符串
+                        try writer.print("    reg_{d} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"\"));\n", .{reg.id});
+                    } else if (op.parts.len == 1) {
+                        // 单个部分，直接转换为字符串
+                        const part = op.parts[0];
+                        const part_type_tag = @as(std.meta.Tag(IR.Type), part.type_);
+                        
+                        if (part_type_tag == .php_value or part_type_tag == .php_string) {
+                            // 已经是Value类型，调用toString
+                            try writer.print("    reg_{d} = runtime.Value.initString(try reg_{d}.toString(runtime.runtime_allocator));\n", .{reg.id, part.id});
+                        } else if (part_type_tag == .i64) {
+                            // i64类型，转换为字符串
+                            try writer.print("    reg_{d} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, try std.fmt.allocPrint(runtime.runtime_allocator, \"{{d}}\", .{{reg_{d}}})));\n", .{reg.id, part.id});
+                        } else if (part_type_tag == .f64) {
+                            // f64类型，转换为字符串
+                            try writer.print("    reg_{d} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, try std.fmt.allocPrint(runtime.runtime_allocator, \"{{d}}\", .{{reg_{d}}})));\n", .{reg.id, part.id});
+                        } else if (part_type_tag == .bool) {
+                            // bool类型，转换为字符串
+                            try writer.print("    reg_{d} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, if (reg_{d}) \"1\" else \"\"));\n", .{reg.id, part.id});
+                        } else {
+                            // 其他类型，默认调用toString
+                            try writer.print("    reg_{d} = runtime.Value.initString(try reg_{d}.toString(runtime.runtime_allocator));\n", .{reg.id, part.id});
+                        }
+                    } else {
+                        // 多个部分，需要连接
+                        // 生成一个临时数组来存储所有部分
+                        try writer.print("    {{\n", .{});
+                        try writer.print("        var parts = try runtime.runtime_allocator.alloc(runtime.Value, {d});\n", .{op.parts.len});
+                        try writer.print("        defer runtime.runtime_allocator.free(parts);\n", .{});
+                        
+                        // 将每个部分转换为Value并存储到数组中
+                        for (op.parts, 0..) |part, i| {
+                            const part_type_tag = @as(std.meta.Tag(IR.Type), part.type_);
+                            
+                            if (part_type_tag == .php_value or part_type_tag == .php_string) {
+                                // 已经是Value类型，直接使用
+                                try writer.print("        parts[{d}] = reg_{d};\n", .{i, part.id});
+                            } else if (part_type_tag == .i64) {
+                                // i64类型，转换为Value
+                                try writer.print("        parts[{d}] = runtime.Value.initInt(reg_{d});\n", .{i, part.id});
+                            } else if (part_type_tag == .f64) {
+                                // f64类型，转换为Value
+                                try writer.print("        parts[{d}] = runtime.Value.initFloat(reg_{d});\n", .{i, part.id});
+                            } else if (part_type_tag == .bool) {
+                                // bool类型，转换为Value
+                                try writer.print("        parts[{d}] = runtime.Value.initBool(reg_{d});\n", .{i, part.id});
+                            } else {
+                                // 其他类型，默认直接使用
+                                try writer.print("        parts[{d}] = reg_{d};\n", .{i, part.id});
+                            }
+                        }
+                        
+                        // 调用运行时函数进行插值
+                        try writer.print("        reg_{d} = try runtime.php_interpolate(parts, runtime.runtime_allocator);\n", .{reg.id});
+                        try writer.print("    }}\n", .{});
+                    }
+                }
+            },
+            // ============ PHP Object Operations ============
+            .new_object => |op| {
+                if (inst.result) |reg| {
+                    // 生成参数列表
+                    var args_buf = std.ArrayList(u8){};
+                    defer args_buf.deinit(self.allocator);
+                    const args_writer = args_buf.writer(self.allocator);
+                    
+                    for (op.args, 0..) |arg, i| {
+                        if (i > 0) try args_writer.writeAll(", ");
+                        const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                        if (arg_type_tag == .i64) {
+                            try args_writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                        } else if (arg_type_tag == .f64) {
+                            try args_writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                        } else if (arg_type_tag == .bool) {
+                            try args_writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                        } else {
+                            try args_writer.print("reg_{d}", .{arg.id});
+                        }
+                    }
+                    
+                    // 创建对象
+                    try writer.print("    reg_{d} = try runtime.php_object_new(\"{s}\", runtime.runtime_allocator);\n", 
+                        .{reg.id, op.class_name});
+                }
+            },
+            .property_get => |op| {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", 
+                        .{reg.id, op.object.id, op.property_name});
+                }
+            },
+            .property_set => |op| {
+                const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
+                
+                const value_expr = if (value_type_tag == .php_value)
+                    try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.value.id})
+                else if (value_type_tag == .i64)
+                    try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.value.id})
+                else if (value_type_tag == .f64)
+                    try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{op.value.id})
+                else if (value_type_tag == .bool)
+                    try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.value.id})
+                else
+                    try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.value.id});
+                defer self.allocator.free(value_expr);
+                
+                try writer.print("    try runtime.php_object_set(reg_{d}, \"{s}\", {s});\n", 
+                    .{op.object.id, op.property_name, value_expr});
+            },
+            .method_call => |op| {
+                // 生成参数列表
+                var args_buf = std.ArrayList(u8){};
+                defer args_buf.deinit(self.allocator);
+                const args_writer = args_buf.writer(self.allocator);
+                
+                for (op.args, 0..) |arg, i| {
+                    if (i > 0) try args_writer.writeAll(", ");
+                    const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                    if (arg_type_tag == .i64) {
+                        try args_writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                    } else if (arg_type_tag == .f64) {
+                        try args_writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                    } else if (arg_type_tag == .bool) {
+                        try args_writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                    } else {
+                        try args_writer.print("reg_{d}", .{arg.id});
+                    }
+                }
+                
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{{s}}});\n", 
+                        .{reg.id, op.object.id, op.method_name, args_buf.items});
+                } else {
+                    try writer.print("    _ = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{{s}}});\n", 
+                        .{op.object.id, op.method_name, args_buf.items});
+                }
+            },
+            // ============ 异常处理指令 ============
+            .try_begin => {
+                // try_begin: 开始try块
+                // 在Zig中，我们使用errdefer来处理异常
+                // 这里我们生成一个注释标记try块的开始
+                try writer.writeAll("    // Try block begin\n");
+                try writer.writeAll("    {\n");
+            },
+            .try_end => {
+                // try_end: 结束try块
+                // 生成try块的结束标记
+                try writer.writeAll("    } // Try block end\n");
+            },
+            .catch_ => |op| {
+                // catch: 捕获异常
+                // 在Zig中，我们使用catch来处理错误
+                // 生成catch块
+                if (op.exception_type) |exc_type| {
+                    try writer.print("    // Catch block for exception type: {s}\n", .{exc_type});
+                } else {
+                    try writer.writeAll("    // Catch block for all exceptions\n");
+                }
+                
+                // 获取当前异常并存储到结果寄存器
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = runtime.getCurrentException() orelse runtime.Value.initNull();\n", .{reg.id});
+                }
+            },
+            .get_exception => {
+                // get_exception: 获取当前异常
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = runtime.getCurrentException() orelse runtime.Value.initNull();\n", .{reg.id});
+                }
+            },
+            .clear_exception => {
+                // clear_exception: 清除当前异常
+                try writer.writeAll("    runtime.clearException();\n");
+            },
+            .cast => |op| {
+                // cast: 类型转换
+                if (inst.result) |reg| {
+                    // 根据目标类型生成不同的转换代码
+                    if (op.to_type == .php_value) {
+                        // 从基本类型转换到php_value
+                        if (op.from_type == .i64) {
+                            try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ reg.id, op.value.id });
+                        } else if (op.from_type == .f64) {
+                            try writer.print("    reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ reg.id, op.value.id });
+                        } else if (op.from_type == .bool) {
+                            try writer.print("    reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ reg.id, op.value.id });
+                        } else {
+                            try writer.print("    reg_{d} = reg_{d}; // cast from {any} to {any}\n", .{ reg.id, op.value.id, op.from_type, op.to_type });
+                        }
+                    } else if (op.to_type == .i64) {
+                        // 转换到i64
+                        try writer.print("    reg_{d} = reg_{d}.asInt();\n", .{ reg.id, op.value.id });
+                    } else if (op.to_type == .f64) {
+                        // 转换到f64
+                        try writer.print("    reg_{d} = reg_{d}.asFloat();\n", .{ reg.id, op.value.id });
+                    } else if (op.to_type == .bool) {
+                        // 转换到bool
+                        try writer.print("    reg_{d} = reg_{d}.asBool();\n", .{ reg.id, op.value.id });
+                    } else {
+                        // 默认：直接赋值
+                        try writer.print("    reg_{d} = reg_{d}; // cast\n", .{ reg.id, op.value.id });
+                    }
+                }
+            },
             else => {
                 // 其他指令暂时跳过
+                // 注意：finally块通过控制流（基本块）实现，不需要单独的指令
             },
         }
     }
