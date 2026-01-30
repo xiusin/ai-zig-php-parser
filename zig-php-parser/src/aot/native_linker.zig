@@ -274,6 +274,39 @@ pub const NativeLinker = struct {
         };
     }
     
+    /// 检查函数是否需要 allocator 参数
+    fn functionNeedsAllocator(self: *const Self, func_name: []const u8) bool {
+        _ = self;
+        
+        const needs_allocator = [_][]const u8{
+            // 字符串函数
+            "strtoupper", "strtolower", "trim", "ltrim", "rtrim",
+            "str_replace", "str_repeat", "str_pad", "strrev",
+            "ucfirst", "lcfirst", "ucwords",
+            "explode", "implode", "str_split",
+            "strcasecmp", "substr", "strval",
+            
+            // 数组函数
+            "array_push", "array_pop", "array_slice", "array_merge",
+            "array_keys", "array_values",
+            
+            // 时间函数
+            "microtime", "date",
+            
+            // 随机数函数
+            "random_bytes",
+            
+            // 其他
+            "php_concat",
+        };
+        
+        for (needs_allocator) |name| {
+            if (std.mem.eql(u8, func_name, name)) return true;
+        }
+        
+        return false;
+    }
+    
     /// 检查是否是内置函数
     fn isBuiltinFunction(self: *const Self, func_name: []const u8) bool {
         _ = self;
@@ -283,17 +316,43 @@ pub const NativeLinker = struct {
         
         // 常见的PHP内置函数
         const builtins = [_][]const u8{
+            // 输出函数
             "echo", "print", "var_dump", "print_r", "var_export",
-            "strlen", "substr", "strpos", "strtoupper", "strtolower", "trim", "ltrim", "rtrim",
-            "str_replace", "str_repeat", "explode", "implode", "join",
+            
+            // 字符串函数
+            "strlen", "substr", "strpos", "strtoupper", "strtolower", 
+            "trim", "ltrim", "rtrim",
+            "str_replace", "str_repeat", "str_pad", "strrev",
+            "str_contains", "str_starts_with", "str_ends_with",
+            "ucfirst", "lcfirst", "ucwords",
+            "explode", "implode", "join", "str_split",
+            "strcmp", "strcasecmp",
+            
+            // 数组函数
             "count", "array_push", "array_pop", "array_shift", "array_unshift",
             "in_array", "array_key_exists", "array_keys", "array_values",
             "array_slice", "array_merge",
+            
+            // 数学函数
             "abs", "sqrt", "round", "floor", "ceil", "min", "max", "pow",
+            "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+            "log", "log10", "exp", "fmod", "hypot",
+            "deg2rad", "rad2deg", "pi", "rand", "mt_rand",
+            
+            // 时间函数
+            "time", "microtime", "date",
+            
+            // 随机数函数
+            "srand", "mt_srand", "random_int", "random_bytes",
+            
+            // 类型检查函数
             "is_null", "is_bool", "is_int", "is_float", "is_string", "is_array",
+            
+            // 类型转换函数
             "intval", "floatval", "strval", "boolval",
-            "isset", "empty", "unset",
-            "die", "exit",
+            
+            // 其他
+            "isset", "empty", "unset", "die", "exit",
         };
         
         for (builtins) |builtin| {
@@ -316,16 +375,43 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "echo")) return "php_echo";
         if (std.mem.eql(u8, func_name, "print")) return "php_print";
         if (std.mem.eql(u8, func_name, "var_dump")) return "php_var_dump";
+        
+        // 字符串函数
         if (std.mem.eql(u8, func_name, "strlen")) return "php_strlen";
         if (std.mem.eql(u8, func_name, "substr")) return "php_substr";
         if (std.mem.eql(u8, func_name, "strpos")) return "php_strpos";
         if (std.mem.eql(u8, func_name, "strtoupper")) return "php_strtoupper";
         if (std.mem.eql(u8, func_name, "strtolower")) return "php_strtolower";
         if (std.mem.eql(u8, func_name, "trim")) return "php_trim";
+        if (std.mem.eql(u8, func_name, "ltrim")) return "php_ltrim";
+        if (std.mem.eql(u8, func_name, "rtrim")) return "php_rtrim";
+        if (std.mem.eql(u8, func_name, "str_replace")) return "php_str_replace";
+        if (std.mem.eql(u8, func_name, "str_repeat")) return "php_str_repeat";
+        if (std.mem.eql(u8, func_name, "str_pad")) return "php_str_pad";
+        if (std.mem.eql(u8, func_name, "strrev")) return "php_strrev";
+        if (std.mem.eql(u8, func_name, "str_contains")) return "php_str_contains";
+        if (std.mem.eql(u8, func_name, "str_starts_with")) return "php_str_starts_with";
+        if (std.mem.eql(u8, func_name, "str_ends_with")) return "php_str_ends_with";
+        if (std.mem.eql(u8, func_name, "ucfirst")) return "php_ucfirst";
+        if (std.mem.eql(u8, func_name, "lcfirst")) return "php_lcfirst";
+        if (std.mem.eql(u8, func_name, "ucwords")) return "php_ucwords";
+        if (std.mem.eql(u8, func_name, "explode")) return "php_explode";
+        if (std.mem.eql(u8, func_name, "implode")) return "php_implode";
+        if (std.mem.eql(u8, func_name, "str_split")) return "php_str_split";
+        if (std.mem.eql(u8, func_name, "strcmp")) return "php_strcmp";
+        if (std.mem.eql(u8, func_name, "strcasecmp")) return "php_strcasecmp";
+        
+        // 数组函数
         if (std.mem.eql(u8, func_name, "count")) return "php_count";
         if (std.mem.eql(u8, func_name, "array_push")) return "php_array_push";
         if (std.mem.eql(u8, func_name, "array_pop")) return "php_array_pop";
         if (std.mem.eql(u8, func_name, "in_array")) return "php_in_array";
+        if (std.mem.eql(u8, func_name, "array_keys")) return "php_array_keys";
+        if (std.mem.eql(u8, func_name, "array_values")) return "php_array_values";
+        if (std.mem.eql(u8, func_name, "array_slice")) return "php_array_slice";
+        if (std.mem.eql(u8, func_name, "array_merge")) return "php_array_merge";
+        
+        // 数学函数
         if (std.mem.eql(u8, func_name, "abs")) return "php_abs";
         if (std.mem.eql(u8, func_name, "sqrt")) return "php_sqrt";
         if (std.mem.eql(u8, func_name, "round")) return "php_round";
@@ -333,17 +419,45 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "ceil")) return "php_ceil";
         if (std.mem.eql(u8, func_name, "min")) return "php_min";
         if (std.mem.eql(u8, func_name, "max")) return "php_max";
-        if (std.mem.eql(u8, func_name, "pow")) return "php_pow";
+        if (std.mem.eql(u8, func_name, "pow")) return "php_pow_func";
+        if (std.mem.eql(u8, func_name, "sin")) return "php_sin";
+        if (std.mem.eql(u8, func_name, "cos")) return "php_cos";
+        if (std.mem.eql(u8, func_name, "tan")) return "php_tan";
+        if (std.mem.eql(u8, func_name, "asin")) return "php_asin";
+        if (std.mem.eql(u8, func_name, "acos")) return "php_acos";
+        if (std.mem.eql(u8, func_name, "atan")) return "php_atan";
+        if (std.mem.eql(u8, func_name, "atan2")) return "php_atan2";
+        if (std.mem.eql(u8, func_name, "log")) return "php_log";
+        if (std.mem.eql(u8, func_name, "log10")) return "php_log10";
+        if (std.mem.eql(u8, func_name, "exp")) return "php_exp";
+        if (std.mem.eql(u8, func_name, "fmod")) return "php_fmod";
+        if (std.mem.eql(u8, func_name, "hypot")) return "php_hypot";
+        if (std.mem.eql(u8, func_name, "deg2rad")) return "php_deg2rad";
+        if (std.mem.eql(u8, func_name, "rad2deg")) return "php_rad2deg";
+        if (std.mem.eql(u8, func_name, "pi")) return "php_pi";
+        if (std.mem.eql(u8, func_name, "rand")) return "php_rand";
+        if (std.mem.eql(u8, func_name, "mt_rand")) return "php_mt_rand";
+        
+        // 时间函数
+        if (std.mem.eql(u8, func_name, "time")) return "php_time";
+        if (std.mem.eql(u8, func_name, "microtime")) return "php_microtime";
+        if (std.mem.eql(u8, func_name, "date")) return "php_date";
+        
+        // 随机数函数
+        if (std.mem.eql(u8, func_name, "srand")) return "php_srand";
+        if (std.mem.eql(u8, func_name, "mt_srand")) return "php_mt_srand";
+        if (std.mem.eql(u8, func_name, "random_int")) return "php_random_int";
+        if (std.mem.eql(u8, func_name, "random_bytes")) return "php_random_bytes";
+        
+        // 类型检查函数
         if (std.mem.eql(u8, func_name, "is_null")) return "php_is_null";
         if (std.mem.eql(u8, func_name, "is_bool")) return "php_is_bool";
         if (std.mem.eql(u8, func_name, "is_int")) return "php_is_int";
         if (std.mem.eql(u8, func_name, "is_float")) return "php_is_float";
         if (std.mem.eql(u8, func_name, "is_string")) return "php_is_string";
         if (std.mem.eql(u8, func_name, "is_array")) return "php_is_array";
-        if (std.mem.eql(u8, func_name, "array_keys")) return "php_array_keys";
-        if (std.mem.eql(u8, func_name, "array_values")) return "php_array_values";
-        if (std.mem.eql(u8, func_name, "array_slice")) return "php_array_slice";
-        if (std.mem.eql(u8, func_name, "array_merge")) return "php_array_merge";
+        
+        // 类型转换函数
         if (std.mem.eql(u8, func_name, "intval")) return "php_intval";
         if (std.mem.eql(u8, func_name, "floatval")) return "php_floatval";
         if (std.mem.eql(u8, func_name, "strval")) return "php_strval";
@@ -1781,7 +1895,17 @@ pub const NativeLinker = struct {
                     // 有返回值寄存器
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
-                        try writer.print("    reg_{d} = try runtime.{s}({s});\n", .{reg.id, runtime_name, args_buf.items});
+                        
+                        // 检查是否需要 allocator 参数
+                        if (self.functionNeedsAllocator(op.func_name)) {
+                            if (args_buf.items.len > 0) {
+                                try writer.print("    reg_{d} = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{reg.id, runtime_name, args_buf.items});
+                            } else {
+                                try writer.print("    reg_{d} = try runtime.{s}(runtime.runtime_allocator);\n", .{reg.id, runtime_name});
+                            }
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.{s}({s});\n", .{reg.id, runtime_name, args_buf.items});
+                        }
                     } else {
                         // 用户定义函数 - 检查是否返回值
                         const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
@@ -1798,7 +1922,17 @@ pub const NativeLinker = struct {
                     // 无返回值寄存器
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
-                        try writer.print("    _ = try runtime.{s}({s});\n", .{runtime_name, args_buf.items});
+                        
+                        // 检查是否需要 allocator 参数
+                        if (self.functionNeedsAllocator(op.func_name)) {
+                            if (args_buf.items.len > 0) {
+                                try writer.print("    _ = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{runtime_name, args_buf.items});
+                            } else {
+                                try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
+                            }
+                        } else {
+                            try writer.print("    _ = try runtime.{s}({s});\n", .{runtime_name, args_buf.items});
+                        }
                     } else {
                         // 用户定义函数
                         try writer.print("    try @\"{s}\"({s});\n", .{op.func_name, args_buf.items});

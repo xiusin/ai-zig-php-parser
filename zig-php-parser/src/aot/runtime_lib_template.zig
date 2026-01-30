@@ -952,6 +952,419 @@ pub fn php_trim(str: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
+/// ltrim - 去除左侧空白
+pub fn php_ltrim(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    const trimmed = std.mem.trimLeft(u8, php_str.data, " \t\n\r");
+    
+    const result = try PHPString.init(allocator, trimmed);
+    return Value.initString(result);
+}
+
+/// rtrim - 去除右侧空白
+pub fn php_rtrim(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    const trimmed = std.mem.trimRight(u8, php_str.data, " \t\n\r");
+    
+    const result = try PHPString.init(allocator, trimmed);
+    return Value.initString(result);
+}
+
+/// str_replace - 字符串替换
+pub fn php_str_replace(search: Value, replace: Value, subject: Value, allocator: Allocator) !Value {
+    if (!subject.isString()) return subject;
+    if (!search.isString() or !replace.isString()) return subject;
+    
+    const subject_str = subject.asString();
+    const search_str = search.asString();
+    const replace_str = replace.asString();
+    
+    // 如果搜索字符串为空，直接返回原字符串
+    if (search_str.length == 0) return subject;
+    
+    // 计算需要的缓冲区大小
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (pos < subject_str.length) {
+        if (pos + search_str.length <= subject_str.length) {
+            if (std.mem.eql(u8, subject_str.data[pos..pos + search_str.length], search_str.data)) {
+                count += 1;
+                pos += search_str.length;
+                continue;
+            }
+        }
+        pos += 1;
+    }
+    
+    // 如果没有找到，返回原字符串
+    if (count == 0) return subject;
+    
+    // 计算新字符串长度
+    const new_len = subject_str.length - (count * search_str.length) + (count * replace_str.length);
+    const buffer = try allocator.alloc(u8, new_len);
+    errdefer allocator.free(buffer);
+    
+    // 执行替换
+    var write_pos: usize = 0;
+    pos = 0;
+    while (pos < subject_str.length) {
+        if (pos + search_str.length <= subject_str.length) {
+            if (std.mem.eql(u8, subject_str.data[pos..pos + search_str.length], search_str.data)) {
+                @memcpy(buffer[write_pos..write_pos + replace_str.length], replace_str.data);
+                write_pos += replace_str.length;
+                pos += search_str.length;
+                continue;
+            }
+        }
+        buffer[write_pos] = subject_str.data[pos];
+        write_pos += 1;
+        pos += 1;
+    }
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// str_repeat - 重复字符串
+pub fn php_str_repeat(str: Value, times: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    const repeat_times = times.toInt();
+    
+    if (repeat_times <= 0) return Value.initString(try PHPString.init(allocator, ""));
+    if (repeat_times == 1) return str;
+    
+    const new_len = php_str.length * @as(usize, @intCast(repeat_times));
+    const buffer = try allocator.alloc(u8, new_len);
+    errdefer allocator.free(buffer);
+    
+    var pos: usize = 0;
+    var i: i64 = 0;
+    while (i < repeat_times) : (i += 1) {
+        @memcpy(buffer[pos..pos + php_str.length], php_str.data);
+        pos += php_str.length;
+    }
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// str_pad - 填充字符串到指定长度
+pub fn php_str_pad(str: Value, length: Value, pad_str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    const target_len = length.toInt();
+    
+    if (target_len <= @as(i64, @intCast(php_str.length))) return str;
+    
+    const pad_string = if (pad_str.isString()) pad_str.asString() else blk: {
+        break :blk try PHPString.init(allocator, " ");
+    };
+    
+    const buffer = try allocator.alloc(u8, @intCast(target_len));
+    errdefer allocator.free(buffer);
+    
+    // 复制原字符串
+    @memcpy(buffer[0..php_str.length], php_str.data);
+    
+    // 填充
+    var pos = php_str.length;
+    while (pos < buffer.len) {
+        const copy_len = @min(pad_string.length, buffer.len - pos);
+        @memcpy(buffer[pos..pos + copy_len], pad_string.data[0..copy_len]);
+        pos += copy_len;
+    }
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// strrev - 反转字符串
+pub fn php_strrev(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    const buffer = try allocator.alloc(u8, php_str.length);
+    errdefer allocator.free(buffer);
+    
+    var i: usize = 0;
+    while (i < php_str.length) : (i += 1) {
+        buffer[i] = php_str.data[php_str.length - 1 - i];
+    }
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// str_contains - 检查字符串是否包含子串 (PHP 8.0+)
+pub fn php_str_contains(haystack: Value, needle: Value) !Value {
+    if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
+    
+    const hay = haystack.asString();
+    const need = needle.asString();
+    
+    if (need.length == 0) return Value.initBool(true);
+    if (need.length > hay.length) return Value.initBool(false);
+    
+    var i: usize = 0;
+    while (i <= hay.length - need.length) : (i += 1) {
+        if (std.mem.eql(u8, hay.data[i..i + need.length], need.data)) {
+            return Value.initBool(true);
+        }
+    }
+    
+    return Value.initBool(false);
+}
+
+/// str_starts_with - 检查字符串是否以指定前缀开始 (PHP 8.0+)
+pub fn php_str_starts_with(haystack: Value, needle: Value) !Value {
+    if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
+    
+    const hay = haystack.asString();
+    const need = needle.asString();
+    
+    if (need.length == 0) return Value.initBool(true);
+    if (need.length > hay.length) return Value.initBool(false);
+    
+    return Value.initBool(std.mem.eql(u8, hay.data[0..need.length], need.data));
+}
+
+/// str_ends_with - 检查字符串是否以指定后缀结束 (PHP 8.0+)
+pub fn php_str_ends_with(haystack: Value, needle: Value) !Value {
+    if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
+    
+    const hay = haystack.asString();
+    const need = needle.asString();
+    
+    if (need.length == 0) return Value.initBool(true);
+    if (need.length > hay.length) return Value.initBool(false);
+    
+    const start_pos = hay.length - need.length;
+    return Value.initBool(std.mem.eql(u8, hay.data[start_pos..], need.data));
+}
+
+/// ucfirst - 首字母大写
+pub fn php_ucfirst(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    if (php_str.length == 0) return str;
+    
+    const buffer = try allocator.alloc(u8, php_str.length);
+    errdefer allocator.free(buffer);
+    
+    @memcpy(buffer, php_str.data);
+    buffer[0] = std.ascii.toUpper(buffer[0]);
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// lcfirst - 首字母小写
+pub fn php_lcfirst(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    if (php_str.length == 0) return str;
+    
+    const buffer = try allocator.alloc(u8, php_str.length);
+    errdefer allocator.free(buffer);
+    
+    @memcpy(buffer, php_str.data);
+    buffer[0] = std.ascii.toLower(buffer[0]);
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// ucwords - 每个单词首字母大写
+pub fn php_ucwords(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    
+    const php_str = str.asString();
+    if (php_str.length == 0) return str;
+    
+    const buffer = try allocator.alloc(u8, php_str.length);
+    errdefer allocator.free(buffer);
+    
+    @memcpy(buffer, php_str.data);
+    
+    var is_word_start = true;
+    for (buffer, 0..) |c, i| {
+        if (std.ascii.isWhitespace(c)) {
+            is_word_start = true;
+        } else if (is_word_start) {
+            buffer[i] = std.ascii.toUpper(c);
+            is_word_start = false;
+        }
+    }
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// explode - 分割字符串为数组
+pub fn php_explode(delimiter: Value, str: Value, allocator: Allocator) !Value {
+    if (!delimiter.isString() or !str.isString()) {
+        return Value.initArray(try PHPArray.init(allocator));
+    }
+    
+    const delim = delimiter.asString();
+    const php_str = str.asString();
+    
+    const arr = try PHPArray.init(allocator);
+    
+    if (delim.length == 0) {
+        // 空分隔符，返回包含整个字符串的数组
+        try arr.push(allocator, str);
+        return Value.initArray(arr);
+    }
+    
+    var start: usize = 0;
+    var pos: usize = 0;
+    
+    while (pos <= php_str.length - delim.length) {
+        if (std.mem.eql(u8, php_str.data[pos..pos + delim.length], delim.data)) {
+            // 找到分隔符
+            const part = try PHPString.init(allocator, php_str.data[start..pos]);
+            try arr.push(allocator, Value.initString(part));
+            pos += delim.length;
+            start = pos;
+        } else {
+            pos += 1;
+        }
+    }
+    
+    // 添加最后一部分
+    const last_part = try PHPString.init(allocator, php_str.data[start..]);
+    try arr.push(allocator, Value.initString(last_part));
+    
+    return Value.initArray(arr);
+}
+
+/// implode - 连接数组元素为字符串
+pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
+    if (!pieces.isArray()) return Value.initString(try PHPString.init(allocator, ""));
+    
+    const glue_str = if (glue.isString()) glue.asString() else try PHPString.init(allocator, "");
+    const arr = pieces.asArray();
+    
+    if (arr.count() == 0) return Value.initString(try PHPString.init(allocator, ""));
+    
+    // 计算总长度
+    var total_len: usize = 0;
+    var it = arr.elements.iterator();
+    var first = true;
+    while (it.next()) |entry| {
+        if (!first) total_len += glue_str.length;
+        const val = entry.value_ptr.*;
+        const str = try val.toString(allocator);
+        defer allocator.free(str);
+        total_len += str.len;
+        first = false;
+    }
+    
+    // 构建结果字符串
+    const buffer = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(buffer);
+    
+    var write_pos: usize = 0;
+    it = arr.elements.iterator();
+    first = true;
+    while (it.next()) |entry| {
+        if (!first) {
+            @memcpy(buffer[write_pos..write_pos + glue_str.length], glue_str.data);
+            write_pos += glue_str.length;
+        }
+        const val = entry.value_ptr.*;
+        const str = try val.toString(allocator);
+        defer allocator.free(str);
+        @memcpy(buffer[write_pos..write_pos + str.len], str);
+        write_pos += str.len;
+        first = false;
+    }
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// str_split - 将字符串分割为数组
+pub fn php_str_split(str: Value, length: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return Value.initArray(try PHPArray.init(allocator));
+    
+    const php_str = str.asString();
+    const chunk_len = if (length.isNull()) 1 else @max(1, length.toInt());
+    
+    const arr = try PHPArray.init(allocator);
+    
+    var pos: usize = 0;
+    while (pos < php_str.length) {
+        const end = @min(pos + @as(usize, @intCast(chunk_len)), php_str.length);
+        const chunk = try PHPString.init(allocator, php_str.data[pos..end]);
+        try arr.push(allocator, Value.initString(chunk));
+        pos = end;
+    }
+    
+    return Value.initArray(arr);
+}
+
+/// strcmp - 字符串比较
+pub fn php_strcmp(str1: Value, str2: Value) !Value {
+    if (!str1.isString() or !str2.isString()) return Value.initInt(0);
+    
+    const s1 = str1.asString();
+    const s2 = str2.asString();
+    
+    const result = std.mem.order(u8, s1.data, s2.data);
+    return Value.initInt(switch (result) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    });
+}
+
+/// strcasecmp - 不区分大小写的字符串比较
+pub fn php_strcasecmp(str1: Value, str2: Value, allocator: Allocator) !Value {
+    if (!str1.isString() or !str2.isString()) return Value.initInt(0);
+    
+    const s1 = str1.asString();
+    const s2 = str2.asString();
+    
+    // 转换为小写后比较
+    const lower1 = try allocator.alloc(u8, s1.length);
+    defer allocator.free(lower1);
+    const lower2 = try allocator.alloc(u8, s2.length);
+    defer allocator.free(lower2);
+    
+    for (s1.data, 0..) |c, i| {
+        lower1[i] = std.ascii.toLower(c);
+    }
+    for (s2.data, 0..) |c, i| {
+        lower2[i] = std.ascii.toLower(c);
+    }
+    
+    const result = std.mem.order(u8, lower1, lower2);
+    return Value.initInt(switch (result) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    });
+}
+
 // ============================================================================
 // 数组函数
 // ============================================================================
@@ -1293,6 +1706,116 @@ pub fn php_max(a: Value, b: Value) !Value {
     return Value.initFloat(@max(a.toFloat(), b.toFloat()));
 }
 
+/// sin - 正弦
+pub fn php_sin(val: Value) !Value {
+    return Value.initFloat(@sin(val.toFloat()));
+}
+
+/// cos - 余弦
+pub fn php_cos(val: Value) !Value {
+    return Value.initFloat(@cos(val.toFloat()));
+}
+
+/// tan - 正切
+pub fn php_tan(val: Value) !Value {
+    return Value.initFloat(@tan(val.toFloat()));
+}
+
+/// asin - 反正弦
+pub fn php_asin(val: Value) !Value {
+    return Value.initFloat(std.math.asin(val.toFloat()));
+}
+
+/// acos - 反余弦
+pub fn php_acos(val: Value) !Value {
+    return Value.initFloat(std.math.acos(val.toFloat()));
+}
+
+/// atan - 反正切
+pub fn php_atan(val: Value) !Value {
+    return Value.initFloat(std.math.atan(val.toFloat()));
+}
+
+/// atan2 - 两个参数的反正切
+pub fn php_atan2(y: Value, x: Value) !Value {
+    return Value.initFloat(std.math.atan2(y.toFloat(), x.toFloat()));
+}
+
+/// log - 自然对数
+pub fn php_log(val: Value) !Value {
+    return Value.initFloat(@log(val.toFloat()));
+}
+
+/// log10 - 以10为底的对数
+pub fn php_log10(val: Value) !Value {
+    return Value.initFloat(@log10(val.toFloat()));
+}
+
+/// exp - e的x次方
+pub fn php_exp(val: Value) !Value {
+    return Value.initFloat(@exp(val.toFloat()));
+}
+
+/// pow - 幂运算
+pub fn php_pow_func(base: Value, exponent: Value) !Value {
+    if (base.isInt() and exponent.isInt()) {
+        const b = base.asInt();
+        const e = exponent.asInt();
+        if (e >= 0 and e < 64) {
+            // 整数幂运算
+            var result: i64 = 1;
+            var i: i64 = 0;
+            while (i < e) : (i += 1) {
+                result *= b;
+            }
+            return Value.initInt(result);
+        }
+    }
+    return Value.initFloat(std.math.pow(f64, base.toFloat(), exponent.toFloat()));
+}
+
+/// fmod - 浮点数取模
+pub fn php_fmod(x: Value, y: Value) !Value {
+    return Value.initFloat(@mod(x.toFloat(), y.toFloat()));
+}
+
+/// hypot - 计算直角三角形斜边长度
+pub fn php_hypot(x: Value, y: Value) !Value {
+    return Value.initFloat(std.math.hypot(x.toFloat(), y.toFloat()));
+}
+
+/// deg2rad - 角度转弧度
+pub fn php_deg2rad(degrees: Value) !Value {
+    const rad = degrees.toFloat() * std.math.pi / 180.0;
+    return Value.initFloat(rad);
+}
+
+/// rad2deg - 弧度转角度
+pub fn php_rad2deg(radians: Value) !Value {
+    const deg = radians.toFloat() * 180.0 / std.math.pi;
+    return Value.initFloat(deg);
+}
+
+/// pi - 返回圆周率
+pub fn php_pi() !Value {
+    return Value.initFloat(std.math.pi);
+}
+
+/// intval - 转换为整数
+pub fn php_intval(val: Value) !Value {
+    return Value.initInt(val.toInt());
+}
+
+/// floatval - 转换为浮点数
+pub fn php_floatval(val: Value) !Value {
+    return Value.initFloat(val.toFloat());
+}
+
+/// boolval - 转换为布尔值
+pub fn php_boolval(val: Value) !Value {
+    return Value.initBool(val.toBool());
+}
+
 // ============================================================================
 // 类型检查函数
 // ============================================================================
@@ -1342,32 +1865,6 @@ pub fn php_is_numeric(val: Value) !Value {
     }
     return Value.initBool(false);
 }
-
-// ============================================================================
-// 类型转换函数
-// ============================================================================
-
-/// intval - 转换为整数
-pub fn php_intval(val: Value) !Value {
-    return Value.initInt(val.toInt());
-}
-
-/// floatval - 转换为浮点数
-pub fn php_floatval(val: Value) !Value {
-    return Value.initFloat(val.toFloat());
-}
-
-/// strval - 转换为字符串
-pub fn php_strval(val: Value, allocator: Allocator) !Value {
-    const str = try val.toString(allocator);
-    return Value.initString(str);
-}
-
-/// boolval - 转换为布尔值
-pub fn php_boolval(val: Value) !Value {
-    return Value.initBool(val.toBool());
-}
-
 // ============================================================================
 // 字符串插值函数
 // ============================================================================
@@ -1675,4 +2172,219 @@ pub fn throwException(message: []const u8, allocator: Allocator) !Value {
 /// @return 如果有异常返回true
 pub fn hasException() bool {
     return current_exception != null;
+}
+
+// ============================================================================
+// 时间函数（从VM实现复用）
+// ============================================================================
+
+/// time - 返回当前Unix时间戳
+pub fn php_time() !Value {
+    const timestamp = std.time.timestamp();
+    return Value.initInt(timestamp);
+}
+
+/// microtime - 返回当前时间（带微秒）
+/// 
+/// @param get_as_float 是否返回浮点数格式
+/// @param allocator 内存分配器
+/// @return 字符串格式 "0.microseconds seconds" 或浮点数时间戳
+pub fn php_microtime(get_as_float: Value, allocator: Allocator) !Value {
+    const now_ns = std.time.nanoTimestamp();
+    const sec = @divTrunc(now_ns, std.time.ns_per_s);
+    const usec = @divTrunc(@mod(now_ns, std.time.ns_per_s), std.time.ns_per_us);
+    
+    // 检查是否返回浮点数
+    const as_float = if (get_as_float.isBool())
+        get_as_float.asBool()
+    else if (get_as_float.isInt())
+        get_as_float.asInt() != 0
+    else
+        false;
+    
+    if (as_float) {
+        // 返回浮点数时间戳
+        const float_time = @as(f64, @floatFromInt(sec)) + @as(f64, @floatFromInt(usec)) / 1000000.0;
+        return Value.initFloat(float_time);
+    } else {
+        // 返回字符串格式 "0.microseconds seconds"
+        const formatted = try std.fmt.allocPrint(allocator, "0.{d:0>6} {d}", .{ usec, sec });
+        defer allocator.free(formatted);
+        const result = try PHPString.init(allocator, formatted);
+        return Value.initString(result);
+    }
+}
+
+/// date - 格式化日期时间
+/// 
+/// 注意：这是一个简化实现，仅支持基本格式
+/// 完整的PHP date()函数支持更多格式选项
+/// 
+/// @param format 格式字符串
+/// @param timestamp 时间戳（可选，默认当前时间）
+/// @param allocator 内存分配器
+/// @return 格式化后的日期字符串
+pub fn php_date(format: Value, timestamp: Value, allocator: Allocator) !Value {
+    if (!format.isString()) {
+        return Value.initString(try PHPString.init(allocator, ""));
+    }
+    
+    // 获取时间戳
+    const ts = if (timestamp.isNull())
+        std.time.timestamp()
+    else if (timestamp.isInt())
+        timestamp.asInt()
+    else if (timestamp.isFloat())
+        @as(i64, @intFromFloat(timestamp.asFloat()))
+    else
+        std.time.timestamp();
+    
+    // 简化实现：仅支持 Y-m-d H:i:s 格式
+    // 完整实现需要完整的日期格式化库
+    const epoch_seconds = @as(u64, @intCast(ts));
+    const days_since_epoch = epoch_seconds / 86400;
+    const seconds_today = epoch_seconds % 86400;
+    
+    // 计算年月日（简化算法）
+    const year = 1970 + @as(i64, @intCast(days_since_epoch / 365));
+    const month: i64 = 1;
+    const day: i64 = 1;
+    
+    // 计算时分秒
+    const hour = seconds_today / 3600;
+    const minute = (seconds_today % 3600) / 60;
+    const second = seconds_today % 60;
+    
+    // 格式化输出（简化版）
+    const formatted = try std.fmt.allocPrint(
+        allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}",
+        .{ year, month, day, hour, minute, second }
+    );
+    defer allocator.free(formatted);
+    
+    const result = try PHPString.init(allocator, formatted);
+    return Value.initString(result);
+}
+
+// ============================================================================
+// 随机数函数（从VM实现复用）
+// ============================================================================
+
+/// 线程局部随机数生成器状态
+threadlocal var rng_state: u64 = 0;
+threadlocal var rng_initialized: bool = false;
+
+/// 初始化随机数生成器
+fn ensureRngInitialized() void {
+    if (!rng_initialized) {
+        rng_state = @as(u64, @intCast(std.time.timestamp()));
+        rng_initialized = true;
+    }
+}
+
+/// 简单的线性同余生成器
+fn nextRandom() u64 {
+    ensureRngInitialized();
+    rng_state = rng_state *% 1103515245 +% 12345;
+    return rng_state;
+}
+
+/// rand - 生成随机整数
+/// 
+/// @param min 最小值（可选）
+/// @param max 最大值（可选）
+/// @return 随机整数
+pub fn php_rand(min: Value, max: Value) !Value {
+    if (min.isNull() and max.isNull()) {
+        // 无参数：返回 0 到 RAND_MAX
+        const random = nextRandom();
+        return Value.initInt(@as(i64, @intCast(random & 0x7FFFFFFF)));
+    }
+    
+    const min_val = min.toInt();
+    const max_val = max.toInt();
+    
+    if (min_val > max_val) {
+        return Value.initInt(min_val);
+    }
+    
+    const range = @as(u64, @intCast(max_val - min_val + 1));
+    const random = nextRandom() % range;
+    
+    return Value.initInt(min_val + @as(i64, @intCast(random)));
+}
+
+/// mt_rand - 生成随机整数（Mersenne Twister）
+/// 
+/// 注意：这是简化实现，使用与rand()相同的生成器
+/// 完整实现应该使用真正的MT19937算法
+/// 
+/// @param min 最小值（可选）
+/// @param max 最大值（可选）
+/// @return 随机整数
+pub fn php_mt_rand(min: Value, max: Value) !Value {
+    return php_rand(min, max);
+}
+
+/// srand - 设置随机数种子
+/// 
+/// @param seed 种子值（可选）
+pub fn php_srand(seed: Value) !Value {
+    if (seed.isNull()) {
+        rng_state = @as(u64, @intCast(std.time.timestamp()));
+    } else {
+        rng_state = @as(u64, @intCast(@abs(seed.toInt())));
+    }
+    rng_initialized = true;
+    return Value.initNull();
+}
+
+/// mt_srand - 设置MT随机数种子
+/// 
+/// @param seed 种子值（可选）
+pub fn php_mt_srand(seed: Value) !Value {
+    return php_srand(seed);
+}
+
+/// random_int - 生成密码学安全的随机整数
+/// 
+/// @param min 最小值
+/// @param max 最大值
+/// @return 随机整数
+pub fn php_random_int(min: Value, max: Value) !Value {
+    const min_val = min.toInt();
+    const max_val = max.toInt();
+    
+    if (min_val > max_val) {
+        return error.InvalidRange;
+    }
+    
+    // 使用密码学安全的随机数生成器
+    const random_val = std.crypto.random.intRangeAtMost(i64, min_val, max_val);
+    return Value.initInt(random_val);
+}
+
+/// random_bytes - 生成密码学安全的随机字节
+/// 
+/// @param length 字节数
+/// @param allocator 内存分配器
+/// @return 随机字节字符串
+pub fn php_random_bytes(length: Value, allocator: Allocator) !Value {
+    const len = length.toInt();
+    
+    if (len < 0) {
+        return error.InvalidLength;
+    }
+    
+    const byte_len = @as(usize, @intCast(len));
+    const buffer = try allocator.alloc(u8, byte_len);
+    errdefer allocator.free(buffer);
+    
+    // 填充密码学安全的随机字节
+    std.crypto.random.bytes(buffer);
+    
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
 }
