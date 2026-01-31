@@ -343,7 +343,6 @@ pub const BasicBlock = struct {
     }
 };
 
-
 /// An SSA register (value)
 pub const Register = struct {
     /// Unique register ID within a function
@@ -518,6 +517,9 @@ pub const Instruction = struct {
             .new_object => |op| allocator.free(op.args),
             .phi => |op| allocator.free(op.incoming),
             .interpolate => |op| allocator.free(op.parts),
+            .static_method_call => |op| allocator.free(op.args),
+            .closure_new => |op| allocator.free(op.captures),
+            .parent_call => |op| allocator.free(op.args),
             else => {},
         }
     }
@@ -653,6 +655,20 @@ pub const Instruction = struct {
         clone: UnaryOp,
         /// Check instanceof
         instanceof: InstanceofOp,
+        /// Static method call
+        static_method_call: StaticMethodCallOp,
+        /// Static property get
+        static_property_get: StaticPropertyGetOp,
+        /// Static property set
+        static_property_set: StaticPropertySetOp,
+        /// Create closure
+        closure_new: ClosureNewOp,
+        /// Bind closure to object ($this)
+        closure_bind: ClosureBindOp,
+        /// Check interface implementation
+        implements_interface: ImplementsInterfaceOp,
+        /// Get parent class
+        parent_call: ParentCallOp,
 
         // ============ PHP Value Operations ============
         /// Create PHP value from primitive
@@ -689,6 +705,20 @@ pub const Instruction = struct {
         mutex_unlock: void,
         /// Create new mutex
         mutex_new: void,
+        /// Spawn goroutine/coroutine
+        go_spawn: GoSpawnOp,
+        /// Create channel
+        channel_new: ChannelNewOp,
+        /// Send to channel
+        channel_send: ChannelSendOp,
+        /// Receive from channel
+        channel_recv: ChannelRecvOp,
+        /// Close channel
+        channel_close: UnaryOp,
+        /// Select on multiple channels
+        select_: SelectChannelOp,
+        /// Await async result
+        await_: UnaryOp,
 
         // ============ Debugging ============
         /// Debug print
@@ -831,6 +861,52 @@ pub const Instruction = struct {
         class_name: []const u8,
     };
 
+    /// Static method call
+    pub const StaticMethodCallOp = struct {
+        class_name: []const u8,
+        method_name: []const u8,
+        args: []const Register,
+    };
+
+    /// Static property get
+    pub const StaticPropertyGetOp = struct {
+        class_name: []const u8,
+        property_name: []const u8,
+    };
+
+    /// Static property set
+    pub const StaticPropertySetOp = struct {
+        class_name: []const u8,
+        property_name: []const u8,
+        value: Register,
+    };
+
+    /// Create closure
+    pub const ClosureNewOp = struct {
+        func_ptr: Register,
+        captures: []const Register,
+        param_count: u8,
+    };
+
+    /// Bind closure to object
+    pub const ClosureBindOp = struct {
+        closure: Register,
+        object: Register,
+    };
+
+    /// Check interface implementation
+    pub const ImplementsInterfaceOp = struct {
+        object: Register,
+        interface_name: []const u8,
+    };
+
+    /// Parent method call
+    pub const ParentCallOp = struct {
+        object: Register,
+        method_name: []const u8,
+        args: []const Register,
+    };
+
     /// Box primitive to PHP value
     pub const BoxOp = struct {
         value: Register,
@@ -865,8 +941,43 @@ pub const Instruction = struct {
     pub const CatchOp = struct {
         exception_type: ?[]const u8,
     };
-};
 
+    /// Spawn goroutine/coroutine
+    pub const GoSpawnOp = struct {
+        func_name: []const u8,
+        args: []const Register,
+    };
+
+    /// Create channel
+    pub const ChannelNewOp = struct {
+        buffer_size: u32,
+        elem_type: Type,
+    };
+
+    /// Send to channel
+    pub const ChannelSendOp = struct {
+        channel: Register,
+        value: Register,
+    };
+
+    /// Receive from channel
+    pub const ChannelRecvOp = struct {
+        channel: Register,
+    };
+
+    /// Select on multiple channels
+    pub const SelectChannelOp = struct {
+        cases: []const SelectCase,
+        has_default: bool,
+    };
+
+    pub const SelectCase = struct {
+        channel: Register,
+        is_send: bool,
+        value: ?Register,
+        block: *BasicBlock,
+    };
+};
 
 // ============================================================================
 // IR Serialization / Pretty Printing (for --dump-ir)
@@ -1154,6 +1265,34 @@ pub const IRPrinter = struct {
             },
             .clone => |op| try self.print("clone {any}", .{op.operand}),
             .instanceof => |op| try self.print("instanceof {any} is {s}", .{ op.object, op.class_name }),
+            .implements_interface => |op| try self.print("implements {any} is {s}", .{ op.object, op.interface_name }),
+            .static_method_call => |op| {
+                try self.print("static.call {s}::{s}(", .{ op.class_name, op.method_name });
+                for (op.args, 0..) |arg, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.print("{any}", .{arg});
+                }
+                try self.write(")");
+            },
+            .static_property_get => |op| try self.print("static.get {s}::{s}", .{ op.class_name, op.property_name }),
+            .static_property_set => |op| try self.print("static.set {s}::{s} = {any}", .{ op.class_name, op.property_name, op.value }),
+            .closure_new => |op| {
+                try self.print("closure.new {any} params={d} captures=(", .{ op.func_ptr, op.param_count });
+                for (op.captures, 0..) |cap, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.print("{any}", .{cap});
+                }
+                try self.write(")");
+            },
+            .closure_bind => |op| try self.print("closure.bind {any} to {any}", .{ op.closure, op.object }),
+            .parent_call => |op| {
+                try self.print("parent.call {any}.{s}(", .{ op.object, op.method_name });
+                for (op.args, 0..) |arg, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.print("{any}", .{arg});
+                }
+                try self.write(")");
+            },
 
             // PHP value operations
             .box => |op| try self.print("box {any} from {any}", .{ op.value, op.from_type }),
@@ -1187,6 +1326,20 @@ pub const IRPrinter = struct {
             .mutex_lock => try self.write("mutex.lock"),
             .mutex_unlock => try self.write("mutex.unlock"),
             .mutex_new => try self.write("mutex.new"),
+            .go_spawn => |op| {
+                try self.print("go @{s}(", .{op.func_name});
+                for (op.args, 0..) |arg, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.print("{any}", .{arg});
+                }
+                try self.write(")");
+            },
+            .channel_new => |op| try self.print("chan.new size={d}", .{op.buffer_size}),
+            .channel_send => |op| try self.print("chan.send {any} <- {any}", .{ op.channel, op.value }),
+            .channel_recv => |op| try self.print("chan.recv <- {any}", .{op.channel}),
+            .channel_close => |op| try self.print("chan.close {any}", .{op.operand}),
+            .select_ => try self.write("select ..."),
+            .await_ => |op| try self.print("await {any}", .{op.operand}),
 
             // Debug
             .debug_print => |op| try self.print("debug.print {any}", .{op.operand}),

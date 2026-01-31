@@ -2,7 +2,6 @@ const std = @import("std");
 
 /// Go风格的时间库
 /// 提供类似Go语言time包的时间处理功能
-
 /// 时间单位常量（纳秒）
 pub const Nanosecond: i64 = 1;
 pub const Microsecond: i64 = 1000 * Nanosecond;
@@ -383,7 +382,7 @@ pub const Time = struct {
         // 使用简单的迭代算法
         var y: i32 = 1970;
         var remaining = days;
-        
+
         if (remaining >= 0) {
             while (remaining >= (if (isLeapYear(y)) @as(i64, 366) else @as(i64, 365))) {
                 remaining -= if (isLeapYear(y)) @as(i64, 366) else @as(i64, 365);
@@ -401,7 +400,7 @@ pub const Time = struct {
     fn yearFromDays(days: i64) i32 {
         var y: i32 = 1970;
         var remaining = days;
-        
+
         if (remaining >= 0) {
             while (remaining >= (if (Time.isLeapYear(y)) @as(i64, 366) else @as(i64, 365))) {
                 remaining -= if (Time.isLeapYear(y)) @as(i64, 366) else @as(i64, 365);
@@ -426,7 +425,7 @@ pub const Time = struct {
     fn monthFromDays(days: i64) u4 {
         const y = yearFromDays(days);
         var remaining = days;
-        
+
         // 减去年份的天数
         var yr: i32 = 1970;
         if (remaining >= 0) {
@@ -440,7 +439,7 @@ pub const Time = struct {
                 remaining += if (Time.isLeapYear(yr)) @as(i64, 366) else @as(i64, 365);
             }
         }
-        
+
         // 计算月份
         const month_days = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
         var m: u4 = 1;
@@ -466,7 +465,7 @@ pub const Time = struct {
     fn dayFromDays(days: i64) u8 {
         const y = yearFromDays(days);
         var remaining = days;
-        
+
         // 减去年份的天数
         var yr: i32 = 1970;
         if (remaining >= 0) {
@@ -480,7 +479,7 @@ pub const Time = struct {
                 remaining += if (Time.isLeapYear(yr)) @as(i64, 366) else @as(i64, 365);
             }
         }
-        
+
         // 减去月份的天数
         const month_days = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
         var m: u4 = 1;
@@ -607,7 +606,7 @@ pub const Time = struct {
         if (m == 2 and isLeapYear(y)) {
             max_day = 29;
         }
-        
+
         var d: i32 = @min(@as(i32, self.day()), max_day);
         d += days_to_add;
 
@@ -892,18 +891,19 @@ pub fn parseDuration(s: []const u8) !Duration {
 }
 
 // ============================================================================
-// PHP兼容函数
+// PHP兼容函数（调用 core_time 模块，DRY 原则）
 // ============================================================================
+
+const core_time = @import("core/time_functions.zig");
 
 /// PHP time() - 返回当前Unix时间戳
 pub fn phpTime() i64 {
-    return Time.now().getUnix();
+    return core_time.time();
 }
 
 /// PHP microtime(true) - 返回当前时间（微秒精度）
 pub fn phpMicrotime() f64 {
-    const t = Time.now();
-    return @as(f64, @floatFromInt(t.sec)) + @as(f64, @floatFromInt(t.nsec)) / 1_000_000_000.0;
+    return core_time.microtime_float();
 }
 
 /// PHP date() - 格式化时间

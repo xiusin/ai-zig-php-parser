@@ -24,7 +24,7 @@ pub const Severity = enum {
 
     pub fn toColor(self: Severity) []const u8 {
         return switch (self) {
-            .note => "\x1b[36m",    // Cyan
+            .note => "\x1b[36m", // Cyan
             .warning => "\x1b[33m", // Yellow
             .@"error" => "\x1b[31m", // Red
         };
@@ -41,42 +41,42 @@ pub const CWE = enum(u32) {
     double_free = 415,
     memory_leak = 401,
     uninitialized_memory = 457,
-    
+
     // Type Safety
     type_confusion = 843,
     improper_type_validation = 1287,
-    
+
     // Resource Management
     resource_exhaustion = 400,
     improper_resource_shutdown = 404,
-    
+
     // Code Quality
     dead_code = 561,
     // unreachable_code shares same CWE as dead_code
-    
+
     // Concurrency
     data_race = 362,
     deadlock = 833,
-    
+
     // Input Validation
     improper_input_validation = 20,
     integer_overflow = 190,
     division_by_zero = 369,
-    
+
     // Logic Errors
     incorrect_calculation = 682,
     off_by_one = 193,
-    
+
     // Security
     injection = 94,
     path_traversal = 22,
-    
+
     // Undefined Behavior
     undefined_behavior = 758,
-    
+
     // Other
     unknown = 0,
-    
+
     pub fn toString(self: CWE) []const u8 {
         return switch (self) {
             .buffer_overflow => "CWE-119: Buffer Overflow",
@@ -103,7 +103,7 @@ pub const CWE = enum(u32) {
             .unknown => "CWE-0: Unknown",
         };
     }
-    
+
     pub fn getUrl(self: CWE) []const u8 {
         var buf: [100]u8 = undefined;
         const url = std.fmt.bufPrint(&buf, "https://cwe.mitre.org/data/definitions/{d}.html", .{@intFromEnum(self)}) catch return "";
@@ -140,19 +140,32 @@ pub const SourceLocation = struct {
     ) !void {
         _ = fmt;
         _ = options;
+
+        // 获取相对路径（从当前目录开始）
+        const rel_path = if (std.mem.startsWith(u8, self.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
+            self.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
+        else
+            self.file;
+
         if (self.line > 0) {
-            try writer.print("{s}:{d}:{d}", .{ self.file, self.line, self.column });
+            try writer.print("{s}:{d}:{d}", .{ rel_path, self.line, self.column });
         } else {
-            try writer.print("{s}", .{self.file});
+            try writer.print("{s}", .{rel_path});
         }
     }
-    
+
     /// Convert to string for display
     pub fn toString(self: SourceLocation, allocator: std.mem.Allocator) ![]const u8 {
+        // 获取相对路径（从当前目录开始）
+        const rel_path = if (std.mem.startsWith(u8, self.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
+            self.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
+        else
+            self.file;
+
         if (self.line > 0) {
-            return std.fmt.allocPrint(allocator, "{s}:{d}:{d}", .{ self.file, self.line, self.column });
+            return std.fmt.allocPrint(allocator, "{s}:{d}:{d}", .{ rel_path, self.line, self.column });
         } else {
-            return std.fmt.allocPrint(allocator, "{s}", .{self.file});
+            return std.fmt.allocPrint(allocator, "{s}", .{rel_path});
         }
     }
 };
@@ -208,7 +221,7 @@ pub const DiagnosticEngine = struct {
             self.allocator.free(diag.message);
         }
         self.diagnostics.deinit(self.allocator);
-        
+
         // Free source lines if allocated
         if (self.source_lines) |lines| {
             self.allocator.free(lines);
@@ -409,10 +422,17 @@ pub const DiagnosticEngine = struct {
 
         // Print location and severity
         try writer.print("{s}", .{bold});
+
+        // 获取相对路径（从当前目录开始）
+        const rel_path = if (std.mem.startsWith(u8, diag.location.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
+            diag.location.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
+        else
+            diag.location.file;
+
         if (diag.location.line > 0) {
-            try writer.print("{s}:{d}:{d}", .{ diag.location.file, diag.location.line, diag.location.column });
+            try writer.print("{s}:{d}:{d}", .{ rel_path, diag.location.line, diag.location.column });
         } else {
-            try writer.print("{s}", .{diag.location.file});
+            try writer.print("{s}", .{rel_path});
         }
         try writer.print("{s}: {s}{s}{s}: {s}", .{
             reset,
@@ -421,12 +441,12 @@ pub const DiagnosticEngine = struct {
             reset,
             diag.message,
         });
-        
+
         // Print CWE if available
         if (diag.cwe) |cwe| {
             try writer.print(" [{s}]", .{cwe.toString()});
         }
-        
+
         try writer.writeAll("\n");
 
         // Print source context if available
@@ -458,7 +478,7 @@ pub const DiagnosticEngine = struct {
             const hint_color = if (self.use_colors) "\x1b[32m" else "";
             try writer.print("    {s}hint{s}: {s}\n", .{ hint_color, reset, hint });
         }
-        
+
         // Print fix suggestions
         if (diag.fix_suggestions.len > 0) {
             const fix_color = if (self.use_colors) "\x1b[32m" else "";
@@ -470,16 +490,12 @@ pub const DiagnosticEngine = struct {
                 }
             }
         }
-        
+
         // Print CWE URL if available
         if (diag.cwe) |cwe| {
             if (@intFromEnum(cwe) > 0) {
                 const url_color = if (self.use_colors) "\x1b[34m" else "";
-                try writer.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ 
-                    url_color, 
-                    reset, 
-                    @intFromEnum(cwe) 
-                });
+                try writer.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ url_color, reset, @intFromEnum(cwe) });
             }
         }
 
@@ -531,10 +547,16 @@ pub const DiagnosticEngine = struct {
         const color = if (self.use_colors) diag.severity.toColor() else "";
 
         // Print location and severity
+        // 获取相对路径（从当前目录开始）
+        const rel_path = if (std.mem.startsWith(u8, diag.location.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
+            diag.location.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
+        else
+            diag.location.file;
+
         if (diag.location.line > 0) {
             std.debug.print("{s}{s}:{d}:{d}{s}: {s}{s}{s}: {s}", .{
                 bold,
-                diag.location.file,
+                rel_path,
                 diag.location.line,
                 diag.location.column,
                 reset,
@@ -546,7 +568,7 @@ pub const DiagnosticEngine = struct {
         } else {
             std.debug.print("{s}{s}{s}: {s}{s}{s}: {s}", .{
                 bold,
-                diag.location.file,
+                rel_path,
                 reset,
                 color,
                 diag.severity.toString(),
@@ -554,12 +576,12 @@ pub const DiagnosticEngine = struct {
                 diag.message,
             });
         }
-        
+
         // Print CWE if available
         if (diag.cwe) |cwe| {
             std.debug.print(" [{s}]", .{cwe.toString()});
         }
-        
+
         std.debug.print("\n", .{});
 
         // Print source context if available
@@ -591,7 +613,7 @@ pub const DiagnosticEngine = struct {
             const hint_color = if (self.use_colors) "\x1b[32m" else "";
             std.debug.print("    {s}hint{s}: {s}\n", .{ hint_color, reset, hint });
         }
-        
+
         // Print fix suggestions
         if (diag.fix_suggestions.len > 0) {
             const fix_color = if (self.use_colors) "\x1b[32m" else "";
@@ -603,16 +625,12 @@ pub const DiagnosticEngine = struct {
                 }
             }
         }
-        
+
         // Print CWE URL if available
         if (diag.cwe) |cwe| {
             if (@intFromEnum(cwe) > 0) {
                 const url_color = if (self.use_colors) "\x1b[34m" else "";
-                std.debug.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ 
-                    url_color, 
-                    reset, 
-                    @intFromEnum(cwe) 
-                });
+                std.debug.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ url_color, reset, @intFromEnum(cwe) });
             }
         }
 
@@ -811,7 +829,7 @@ test "DiagnosticEngine clear" {
 
 test "SourceLocation format" {
     const loc = SourceLocation{ .file = "test.php", .line = 42, .column = 10 };
-    
+
     // Test the format function directly by using a buffer writer
     var buf: [100]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -843,7 +861,7 @@ test "DiagnosticEngine with CWE" {
 
     try std.testing.expectEqual(@as(u32, 1), engine.error_count);
     try std.testing.expect(engine.hasErrors());
-    
+
     const diag = engine.diagnostics.items[0];
     try std.testing.expectEqual(CWE.buffer_overflow, diag.cwe.?);
 }
@@ -854,7 +872,7 @@ test "DiagnosticEngine with fix suggestions" {
     defer engine.deinit();
 
     const loc = SourceLocation{ .file = "test.php", .line = 10, .column = 5 };
-    
+
     // 使用静态数组避免内存问题
     const fix1 = FixSuggestion{
         .description = "Add bounds checking before array access",
@@ -870,7 +888,7 @@ test "DiagnosticEngine with fix suggestions" {
     engine.reportErrorWithFix(loc, .buffer_overflow, message, &fixes);
 
     try std.testing.expectEqual(@as(u32, 1), engine.error_count);
-    
+
     const diag = engine.diagnostics.items[0];
     try std.testing.expectEqual(@as(usize, 2), diag.fix_suggestions.len);
     try std.testing.expectEqualStrings("Add bounds checking before array access", diag.fix_suggestions[0].description);
@@ -879,25 +897,25 @@ test "DiagnosticEngine with fix suggestions" {
 test "Convenience diagnostic functions" {
     const allocator = std.testing.allocator;
     const loc = SourceLocation{ .file = "test.php", .line = 10, .column = 5 };
-    
+
     const fixes = [_]FixSuggestion{
         .{ .description = "Check for null before dereferencing" },
     };
-    
+
     const diag1 = bufferOverflowError(loc, "buffer overflow", &fixes);
     try std.testing.expectEqual(CWE.buffer_overflow, diag1.cwe.?);
     try std.testing.expectEqual(Severity.@"error", diag1.severity);
-    
+
     const diag2 = nullPointerError(loc, "null pointer", &fixes);
     try std.testing.expectEqual(CWE.null_pointer_dereference, diag2.cwe.?);
-    
+
     const diag3 = dataRaceError(loc, "data race", &fixes);
     try std.testing.expectEqual(CWE.data_race, diag3.cwe.?);
-    
+
     const diag4 = deadCodeWarning(loc, "unreachable code", &fixes);
     try std.testing.expectEqual(CWE.dead_code, diag4.cwe.?);
     try std.testing.expectEqual(Severity.warning, diag4.severity);
-    
+
     _ = allocator;
 }
 
@@ -919,9 +937,9 @@ test "DiagnosticEngine render with CWE and fixes" {
     // Test rendering to a buffer
     var buf: [4096]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
-    
+
     try engine.render(fbs.writer());
-    
+
     const output = fbs.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "CWE-476") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Add null check") != null);

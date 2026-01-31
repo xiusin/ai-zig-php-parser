@@ -313,6 +313,11 @@ pub const IRGenerator = struct {
     current_location: SourceLocation,
     /// Variable to register mapping for current function
     var_registers: std.StringHashMapUnmanaged(Register),
+    /// Track variable usage for unused variable detection
+    var_usage: std.StringHashMapUnmanaged(struct {
+        is_used: bool,
+        location: SourceLocation,
+    }),
     /// Block counter for unique labels
     block_counter: u32,
     /// Loop context stack for break/continue
@@ -357,6 +362,7 @@ pub const IRGenerator = struct {
             .string_table = null,
             .current_location = .{},
             .var_registers = .{},
+            .var_usage = .{},
             .block_counter = 0,
             .loop_stack = .{},
             .try_stack = .{},
@@ -366,6 +372,7 @@ pub const IRGenerator = struct {
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
         self.var_registers.deinit(self.allocator);
+        self.var_usage.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
     }
@@ -401,7 +408,7 @@ pub const IRGenerator = struct {
         // Debug: Print root node info
         std.debug.print("[IR Generator] Processing root node at index {d}\n", .{root_index});
         std.debug.print("[IR Generator] Total nodes: {d}\n", .{nodes.len});
-        
+
         // Process root node at the specified index
         if (root_index < nodes.len and nodes[root_index].tag == .root) {
             const root_data = nodes[root_index].data.root;
@@ -413,8 +420,8 @@ pub const IRGenerator = struct {
 
             for (root_data.stmts) |stmt_idx| {
                 const stmt_node = self.getNode(stmt_idx) orelse continue;
-                std.debug.print("[IR Generator] Statement {d}: tag = {s}\n", .{stmt_idx, @tagName(stmt_node.tag)});
-                
+                std.debug.print("[IR Generator] Statement {d}: tag = {s}\n", .{ stmt_idx, @tagName(stmt_node.tag) });
+
                 if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
                     stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl)
                 {
@@ -564,6 +571,7 @@ pub const IRGenerator = struct {
     /// Update source location from a token
     fn updateLocation(self: *Self, token: Token) void {
         self.current_location = .{
+            .file = if (self.module) |m| m.source_file else "<unknown>",
             .line = token.line,
             .column = token.column,
         };
@@ -583,6 +591,11 @@ pub const IRGenerator = struct {
         const alloca_reg = try self.emitWithResult(.{ .alloca = .{ .type_ = type_, .count = 1 } }, ptr_type);
 
         try self.var_registers.put(self.allocator, name, alloca_reg);
+        // Mark variable as defined but not used yet, store definition location
+        try self.var_usage.put(self.allocator, name, .{
+            .is_used = false,
+            .location = self.current_location,
+        });
         return alloca_reg;
     }
 
@@ -591,46 +604,64 @@ pub const IRGenerator = struct {
         return self.var_registers.get(name);
     }
 
-    /// Create a constant initializer instruction from a register
-    /// @pre value_reg must be a valid register containing a constant value
-    /// @post returns an Instruction that can be used as a global initializer
-    /// @ownership TRANSFER (caller owns the returned instruction)
-    fn createConstantInitializer(self: *Self, value_reg: Register) !*Instruction {
-        // Find the instruction that produced this register
-        // For constants, we need to extract the constant value from the register
-        
-        // Search through current block's instructions to find the one that produced value_reg
-        if (self.current_block) |block| {
-            for (block.instructions.items) |inst| {
-                if (inst.result) |result| {
-                    if (result.id == value_reg.id) {
-                        // Found the instruction - create a copy for the initializer
-                        const init_inst = try self.allocator.create(Instruction);
-                        init_inst.* = .{
-                            .result = value_reg,
-                            .op = inst.op,
-                            .location = inst.location,
-                        };
-                        return init_inst;
-                    }
-                }
-            }
+    /// Generate IR for variable access
+    fn generateVariable(self: *Self, node: *const Node) !Register {
+        const var_name = self.getString(node.data.variable.name);
+
+        // Mark variable as used
+        if (self.var_usage.get(var_name)) |usage_info| {
+            try self.var_usage.put(self.allocator, var_name, .{
+                .is_used = true,
+                .location = usage_info.location,
+            });
         }
-        
-        // If not found in current block, create a default null initializer
-        const init_inst = try self.allocator.create(Instruction);
-        init_inst.* = .{
-            .result = value_reg,
-            .op = .const_null,
-            .location = self.current_location,
-        };
-        return init_inst;
+
+        // Look up variable register
+        if (self.lookupVarRegister(var_name)) |ptr_reg| {
+            // 从指针类型中提取指向的类型
+            // Extract the pointed-to type from the pointer type
+            const ptr_type = ptr_reg.type_;
+            const pointed_type = if (ptr_type == .ptr) ptr_type.ptr.* else .php_value;
+
+            // Load the value from the variable
+            return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = pointed_type } }, pointed_type);
+        }
+
+        // Variable not found - create a null value
+        return self.emitWithResult(.const_null, .php_value);
     }
 
-    /// Convert InferredType to IR Type
-    fn inferredToIRType(self: *const Self, inferred: InferredType) Type {
-        _ = self;
-        return inferred.toIRType();
+    /// Check for unused variables and report errors
+    fn checkUnusedVariables(self: *Self) !void {
+        var iter = self.var_usage.iterator();
+        while (iter.next()) |entry| {
+            const var_name = entry.key_ptr.*;
+            const usage_info = entry.value_ptr.*;
+
+            if (!usage_info.is_used) {
+                // 根据当前模式确定变量前缀
+                const var_prefix = if (self.isGoMode()) "" else "$";
+
+                // 报告未使用变量错误，使用变量定义时的位置信息
+                self.diagnostics.report(
+                    .@"error",
+                    usage_info.location,
+                    "未使用的变量: {s}{s}",
+                    .{ var_prefix, var_name },
+                );
+            }
+        }
+    }
+
+    /// 检查当前是否为Go模式
+    fn isGoMode(self: *const Self) bool {
+        // 通过检查当前函数名或模块名判断是否为Go模式
+        if (self.current_function) |func| {
+            // Go模式通常包含go关键字或特定命名模式
+            return std.mem.indexOf(u8, func.name, "go") != null or
+                std.mem.indexOf(u8, func.name, "Go") != null;
+        }
+        return false;
     }
 
     // ========================================================================
@@ -660,6 +691,7 @@ pub const IRGenerator = struct {
             .continue_stmt => try self.generateContinueStmt(node),
             .echo_stmt => try self.generateEchoStmt(node),
             .lock_stmt => try self.generateLockStmt(node),
+            .go_stmt => try self.generateGoStmt(node),
             .expression_stmt => {
                 // Expression statement - just evaluate the expression
                 _ = try self.generateExpression(index);
@@ -667,13 +699,13 @@ pub const IRGenerator = struct {
             .assignment => try self.generateAssignment(node),
             .compound_assignment => try self.generateCompoundAssignment(node),
             .list_assignment => try self.generateListAssignment(node),
-            .list_empty => {}, // Empty slot - no code generation needed
+            .list_empty => {},
             .block => try self.generateBlock(node),
             .const_decl => try self.generateConstDecl(node),
-            .global_stmt => try self.generateGlobalStmt(node),
-            .static_stmt => try self.generateStaticStmt(node),
+            // global_stmt和static_stmt暂时跳过，因为AST可能未正确初始化data
+            .global_stmt => {},
+            .static_stmt => {},
             else => {
-                // For other statement types, try to generate as expression
                 _ = try self.generateExpression(index);
             },
         }
@@ -713,6 +745,7 @@ pub const IRGenerator = struct {
         // Set up new context
         self.current_function = func;
         self.var_registers = .{};
+        self.var_usage = .{}; // 初始化变量使用跟踪
         self.block_counter = 0;
 
         // Create entry block
@@ -732,9 +765,14 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .ret = null });
         }
 
+        // Check for unused variables
+        try self.checkUnusedVariables();
+
         // Restore previous context
         self.var_registers.deinit(self.allocator);
+        self.var_usage.deinit(self.allocator);
         self.var_registers = prev_var_registers;
+        self.var_usage = .{};
         self.current_function = prev_function;
         self.current_block = prev_block;
     }
@@ -789,6 +827,10 @@ pub const IRGenerator = struct {
 
     /// Generate IR for class declaration
     fn generateClassDecl(self: *Self, node: *const Node) !void {
+        // 安全检查：class_decl应该使用container_decl数据
+        if (node.tag != .class_decl) return;
+
+        // 使用@field安全获取，如果失败则返回
         const class_data = node.data.container_decl;
         const class_name = self.getString(class_data.name);
 
@@ -919,6 +961,9 @@ pub const IRGenerator = struct {
                     .is_variadic = false,
                     .is_reference = false,
                 });
+                // 同时注册$this变量，以便在方法体中通过$this访问
+                const this_reg = try self.getOrCreateVarRegister("this", .php_value);
+                try self.var_registers.put(self.allocator, "$this", this_reg);
             }
 
             // Process parameters
@@ -1182,10 +1227,7 @@ pub const IRGenerator = struct {
         const i64_type_ptr = try self.allocator.create(Type);
         i64_type_ptr.* = Type{ .i64 = {} };
         const index_type = Type{ .ptr = i64_type_ptr };
-        const index_ptr = try self.emitWithResult(
-            .{ .alloca = .{ .type_ = .i64, .count = 1 } },
-            index_type
-        );
+        const index_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .i64, .count = 1 } }, index_type);
         const zero_reg = try self.emitWithResult(.{ .const_int = 0 }, .i64);
         _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = zero_reg } }, null);
 
@@ -1198,15 +1240,12 @@ pub const IRGenerator = struct {
         // Push loop context for break/continue
         try self.loop_stack.append(self.allocator, .{
             .break_block = exit_block,
-            .continue_block = increment_block,  // ✅ 修复：continue跳到increment块
+            .continue_block = increment_block, // ✅ 修复：continue跳到increment块
         });
 
         // Condition check: index < length
         self.setCurrentBlock(cond_block);
-        const index_reg = try self.emitWithResult(
-            .{ .load = .{ .ptr = index_ptr, .type_ = .i64 } },
-            .i64
-        );
+        const index_reg = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
         const cond_reg = try self.emitWithResult(.{ .lt = .{ .lhs = index_reg, .rhs = length_reg } }, .bool);
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
@@ -1218,10 +1257,7 @@ pub const IRGenerator = struct {
         self.setCurrentBlock(body_block);
 
         // Load current index
-        const current_index = try self.emitWithResult(
-            .{ .load = .{ .ptr = index_ptr, .type_ = .i64 } },
-            .i64
-        );
+        const current_index = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
 
         // Get key if needed
         if (foreach_data.key) |key_idx| {
@@ -1256,14 +1292,11 @@ pub const IRGenerator = struct {
 
         // Increment block: increment index and jump back to condition
         self.setCurrentBlock(increment_block);
-        const current_idx = try self.emitWithResult(
-            .{ .load = .{ .ptr = index_ptr, .type_ = .i64 } },
-            .i64
-        );
+        const current_idx = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
         const one_reg = try self.emitWithResult(.{ .const_int = 1 }, .i64);
         const next_idx = try self.emitWithResult(.{ .add = .{ .lhs = current_idx, .rhs = one_reg } }, .i64);
         _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = next_idx } }, null);
-        
+
         // Jump back to condition
         self.setTerminator(.{ .br = cond_block });
 
@@ -1274,42 +1307,42 @@ pub const IRGenerator = struct {
     /// Generate IR for switch statement
     fn generateSwitchStmt(self: *Self, node: *const Node) !void {
         const switch_data = node.data.switch_stmt;
-        
+
         // 生成switch表达式
         const value_reg = try self.generateExpression(switch_data.expression);
-        
+
         // 创建merge块（switch之后继续执行的地方）
         const merge_block = try self.createBlock("switch.merge");
-        
+
         // 创建default块（如果有default case）
         const default_block = if (switch_data.default) |_|
             try self.createBlock("switch.default")
         else
             merge_block;
-        
+
         // 为每个case创建基本块
         var case_blocks = std.ArrayListUnmanaged(*BasicBlock){};
         defer case_blocks.deinit(self.allocator);
-        
+
         for (switch_data.cases, 0..) |_, i| {
             const label = try std.fmt.allocPrint(self.allocator, "switch.case.{d}", .{i});
             defer self.allocator.free(label);
             const block = try self.createBlock(label);
             try case_blocks.append(self.allocator, block);
         }
-        
+
         // 构建switch cases数组
         var ir_cases = std.ArrayListUnmanaged(Terminator.SwitchCase){};
         defer ir_cases.deinit(self.allocator);
-        
+
         for (switch_data.cases, 0..) |case_idx, i| {
             const case_node = self.getNode(case_idx).?;
             const case_data = case_node.data.case;
-            
+
             // 计算case值（必须是常量）
             const case_value_node = self.getNode(case_data.condition).?;
             const case_const = self.getConstantValue(case_value_node);
-            
+
             const case_value: i64 = if (case_const) |c| blk: {
                 if (c.int_val) |val| {
                     break :blk val;
@@ -1321,13 +1354,13 @@ pub const IRGenerator = struct {
                     break :blk 0;
                 }
             } else 0;
-            
+
             try ir_cases.append(self.allocator, .{
                 .value = case_value,
                 .block = case_blocks.items[i],
             });
         }
-        
+
         // 生成switch终止指令
         const cases_slice = try self.allocator.dupe(Terminator.SwitchCase, ir_cases.items);
         self.setTerminator(.{ .switch_ = .{
@@ -1335,24 +1368,24 @@ pub const IRGenerator = struct {
             .cases = cases_slice,
             .default = default_block,
         } });
-        
+
         // Push loop context for break (switch可以使用break)
         try self.loop_stack.append(self.allocator, .{
             .break_block = merge_block,
             .continue_block = merge_block, // switch中的continue无意义，指向merge
         });
-        
+
         // 生成每个case的代码
         for (switch_data.cases, 0..) |case_idx, i| {
             self.current_block = case_blocks.items[i];
             const case_node = self.getNode(case_idx).?;
             const case_data = case_node.data.case;
-            
+
             for (case_data.body) |stmt_idx| {
                 try self.generateStatement(stmt_idx);
                 if (self.isBlockTerminated()) break;
             }
-            
+
             // 如果没有break，fall through到下一个case或merge
             if (!self.isBlockTerminated()) {
                 if (i + 1 < case_blocks.items.len) {
@@ -1367,26 +1400,26 @@ pub const IRGenerator = struct {
                 }
             }
         }
-        
+
         // 生成default块
         if (switch_data.default) |default_idx| {
             self.current_block = default_block;
             const default_node = self.getNode(default_idx).?;
             const default_data = default_node.data.default;
-            
+
             for (default_data.body) |stmt_idx| {
                 try self.generateStatement(stmt_idx);
                 if (self.isBlockTerminated()) break;
             }
-            
+
             if (!self.isBlockTerminated()) {
                 self.setTerminator(.{ .br = merge_block });
             }
         }
-        
+
         // Pop loop context
         _ = self.loop_stack.pop();
-        
+
         // 继续在merge块
         self.current_block = merge_block;
     }
@@ -1531,6 +1564,31 @@ pub const IRGenerator = struct {
         self.setCurrentBlock(exit_block);
     }
 
+    /// Generate IR for go statement (goroutine/coroutine spawn)
+    fn generateGoStmt(self: *Self, node: *const Node) !void {
+        const go_data = node.data.go_stmt;
+
+        // go语句的调用表达式
+        const call_node = self.getNode(go_data.call) orelse return;
+
+        if (call_node.tag == .function_call) {
+            const call_data = call_node.data.function_call;
+            const func_name = self.getString(call_data.name);
+
+            // 生成参数
+            const args = try self.allocator.alloc(Register, call_data.args.len);
+            for (call_data.args, 0..) |arg_idx, i| {
+                args[i] = try self.generateExpression(arg_idx);
+            }
+
+            // 发出go_spawn指令
+            _ = try self.emit(.{ .go_spawn = .{
+                .func_name = func_name,
+                .args = args,
+            } }, null);
+        }
+    }
+
     /// Generate IR for throw statement
     fn generateThrowStmt(self: *Self, node: *const Node) !void {
         const throw_data = node.data.throw_stmt;
@@ -1611,12 +1669,6 @@ pub const IRGenerator = struct {
                     _ = try self.emit(.{ .array_set = .{
                         .array = array_reg,
                         .key = key_reg,
-                        .value = value_reg,
-                    } }, null);
-                } else {
-                    // Array push: $arr[] = value
-                    _ = try self.emit(.{ .array_push = .{
-                        .array = array_reg,
                         .value = value_reg,
                     } }, null);
                 }
@@ -1729,17 +1781,13 @@ pub const IRGenerator = struct {
         // Evaluate constant value (with constant folding)
         const value_reg = try self.generateExpression(const_data.value);
 
-        // Create constant initializer instruction
-        // We need to create a standalone instruction that represents the constant value
-        const init_inst = try self.createConstantInitializer(value_reg);
-
         // Create global constant
         if (self.module) |module| {
             const global = try self.allocator.create(Global);
             global.* = .{
                 .name = const_name,
                 .type_ = value_reg.type_,
-                .initializer = init_inst,
+                .initializer = null, // TODO: Implement proper constant initializer
                 .is_constant = true,
                 .location = self.current_location,
             };
@@ -1751,7 +1799,11 @@ pub const IRGenerator = struct {
 
     /// Generate IR for global statement
     fn generateGlobalStmt(self: *Self, node: *const Node) !void {
+        // 安全检查：确保data字段有效
+        if (node.tag != .global_stmt) return;
+
         const global_data = node.data.global_stmt;
+        if (global_data.vars.len == 0) return;
 
         for (global_data.vars) |var_idx| {
             const var_node = self.getNode(var_idx) orelse continue;
@@ -1828,6 +1880,14 @@ pub const IRGenerator = struct {
             .match_expr => self.generateMatchExpr(node),
             .clone_with_expr => self.generateCloneWithExpr(node),
 
+            // $this 表达式 - 返回this参数寄存器
+            .self_expr => blk: {
+                if (self.lookupVarRegister("this")) |ptr_reg| {
+                    break :blk self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+                }
+                break :blk self.emitWithResult(.const_null, .php_value);
+            },
+
             // Assignment as expression
             .assignment => blk: {
                 try self.generateAssignment(node);
@@ -1839,7 +1899,7 @@ pub const IRGenerator = struct {
             // Compound assignment as expression
             .compound_assignment => blk: {
                 const compound_data = node.data.compound_assignment;
-                
+
                 // Get target node
                 const target_node = self.getNode(compound_data.target) orelse {
                     break :blk try self.emitWithResult(.const_null, .php_value);
@@ -1934,29 +1994,6 @@ pub const IRGenerator = struct {
         // Boolean value is determined by the token
         const is_true = node.main_token.tag == .keyword_true;
         return self.emitWithResult(.{ .const_bool = is_true }, .bool);
-    }
-
-    /// Generate IR for variable access
-    fn generateVariable(self: *Self, node: *const Node) !Register {
-        const var_name = self.getString(node.data.variable.name);
-
-        // Look up variable register
-        if (self.lookupVarRegister(var_name)) |ptr_reg| {
-            // 从指针类型中提取指向的类型
-            // Extract the pointed-to type from the pointer type
-            const load_type = switch (ptr_reg.type_) {
-                .ptr => |inner_type| inner_type.*,
-                else => .php_value, // 默认为php_value / Default to php_value
-            };
-            
-            // 使用正确的类型生成load指令
-            // Generate load instruction with the correct type
-            return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = load_type } }, load_type);
-        }
-
-        // Variable not found - create it with null value
-        const ptr_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-        return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
     }
 
     /// Generate IR for binary expression
@@ -2092,7 +2129,7 @@ pub const IRGenerator = struct {
     /// Generate IR for postfix expression (++, --)
     fn generatePostfixExpr(self: *Self, node: *const Node) !Register {
         const postfix_data = node.data.postfix_expr;
-        
+
         // 生成表达式（获取变量的值）
         const operand_reg = try self.generateExpression(postfix_data.expr);
 

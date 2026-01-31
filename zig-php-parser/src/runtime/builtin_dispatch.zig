@@ -11,6 +11,9 @@ const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
 
+// 核心模块（DRY 原则）
+const core_math = @import("core/math_functions.zig");
+
 // ============================================================================
 // Task 4.1.1: BuiltinId 枚举 - 所有内置函数的唯一标识
 // ============================================================================
@@ -389,7 +392,7 @@ pub fn initDispatchTable(stdlib: anytype) void {
     // 注意：由于循环依赖问题，我们不能直接导入 stdlib.zig
     // 相反，我们让 VM 在初始化时传入 stdlib 实例
     // 这个函数将在 VM.init() 中被调用
-    
+
     // 这里我们只是预留接口，实际的函数指针映射
     // 将通过 VM 的 stdlib.getFunction() 动态查找
     _ = stdlib;
@@ -404,7 +407,7 @@ pub fn initDispatchTable(stdlib: anytype) void {
 pub fn perfectHash(name: []const u8) ?BuiltinId {
     // 简单的 FNV-1a 哈希 + 线性探测
     // 在实际实现中，应该使用编译时生成的完美哈希
-    
+
     // 直接使用字符串到枚举的转换（Zig 内置）
     return std.meta.stringToEnum(BuiltinId, name);
 }
@@ -427,12 +430,12 @@ pub fn lookupBuiltin(name: []const u8) ?[]const u8 {
 /// 直接分发调用
 pub fn dispatch(id: BuiltinId, vm: anytype, args: []const Value) !Value {
     const meta = BUILTIN_DISPATCH_TABLE[@intFromEnum(id)] orelse return error.UnknownBuiltin;
-    
+
     // 参数数量检查
     if (args.len < meta.min_args or args.len > meta.max_args) {
         return error.InvalidArgumentCount;
     }
-    
+
     // 直接调用
     return meta.handler(vm, args);
 }
@@ -447,24 +450,22 @@ pub const FastBuiltins = struct {
     pub inline fn strlen_fast(str: *types.PHPString) usize {
         return str.length;
     }
-    
+
     /// count - 内联版本
     pub inline fn count_fast(arr: *types.PHPArray) usize {
         return arr.count();
     }
-    
-    /// abs - 内联版本
+
+    /// abs - 内联版本（调用 core_math）
     pub inline fn abs_fast(val: Value) Value {
         if (val.isInt()) {
-            const i = val.asInt();
-            return Value.initInt(if (i < 0) -i else i);
+            return Value.initInt(core_math.abs_int(val.asInt()));
         } else if (val.isFloat()) {
-            const f = val.asFloat();
-            return Value.initFloat(if (f < 0) -f else f);
+            return Value.initFloat(core_math.abs_float(val.asFloat()));
         }
         return val;
     }
-    
+
     /// empty - 内联版本
     pub inline fn empty_fast(val: Value) bool {
         return switch (val.getTag()) {
@@ -477,7 +478,7 @@ pub const FastBuiltins = struct {
             else => false,
         };
     }
-    
+
     /// isset - 内联版本
     pub inline fn isset_fast(val: Value) bool {
         return val.getTag() != .null;
@@ -492,7 +493,7 @@ pub const DispatchStats = struct {
     total_calls: u64 = 0,
     cache_hits: u64 = 0,
     cache_misses: u64 = 0,
-    
+
     pub fn recordCall(self: *DispatchStats, hit: bool) void {
         self.total_calls += 1;
         if (hit) {
@@ -501,7 +502,7 @@ pub const DispatchStats = struct {
             self.cache_misses += 1;
         }
     }
-    
+
     pub fn hitRate(self: *const DispatchStats) f64 {
         if (self.total_calls == 0) return 0.0;
         return @as(f64, @floatFromInt(self.cache_hits)) / @as(f64, @floatFromInt(self.total_calls));
@@ -514,12 +515,12 @@ pub const DispatchStats = struct {
 
 test "BuiltinId enum" {
     const testing = std.testing;
-    
+
     // 测试枚举值
     try testing.expect(@intFromEnum(BuiltinId.array_map) == 0);
     try testing.expect(@intFromEnum(BuiltinId.echo) == 50);
     try testing.expect(@intFromEnum(BuiltinId.abs) == 150);
-    
+
     // 测试名称
     try testing.expectEqualStrings("strlen", BuiltinId.strlen.name());
     try testing.expectEqualStrings("array_map", BuiltinId.array_map.name());
@@ -527,7 +528,7 @@ test "BuiltinId enum" {
 
 test "perfectHash lookup" {
     const testing = std.testing;
-    
+
     // 测试查找
     try testing.expect(lookup("strlen") == .strlen);
     try testing.expect(lookup("array_map") == .array_map);
@@ -537,19 +538,19 @@ test "perfectHash lookup" {
 
 test "FastBuiltins inline functions" {
     const testing = std.testing;
-    
+
     // 测试 abs_fast
     const neg_int = Value.initInt(-42);
     const result = FastBuiltins.abs_fast(neg_int);
     try testing.expect(result.asInt() == 42);
-    
+
     // 测试 empty_fast
     const null_val = Value.initNull();
     try testing.expect(FastBuiltins.empty_fast(null_val));
-    
+
     const int_zero = Value.initInt(0);
     try testing.expect(FastBuiltins.empty_fast(int_zero));
-    
+
     const int_nonzero = Value.initInt(42);
     try testing.expect(!FastBuiltins.empty_fast(int_nonzero));
 }

@@ -63,7 +63,7 @@ const CapturedVar = struct { name: []const u8, value: Value, is_reference: bool 
 const ShutdownFunction = struct {
     callback: Value, // Function or callable to execute
     args: []Value, // Arguments to pass to the callback
-    
+
     pub fn deinit(self: *ShutdownFunction, allocator: std.mem.Allocator) void {
         self.callback.release(allocator);
         for (self.args) |arg| {
@@ -1590,50 +1590,38 @@ fn debugPrintBacktraceFn(vm: *VM, args: []const Value) !Value {
 // register_shutdown_function() - Register a function to execute at shutdown
 fn registerShutdownFunctionFn(vm: *VM, args: []const Value) !Value {
     if (args.len < 1) {
-        const exception = try ExceptionFactory.createArgumentCountError(
-            vm.allocator,
-            1,
-            @intCast(args.len),
-            "register_shutdown_function",
-            "builtin",
-            0
-        );
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "register_shutdown_function", "builtin", 0);
         _ = try vm.throwException(exception);
         return Value.initNull();
     }
-    
+
     const callback = args[0];
-    
+
     // Verify callback is callable
     if (!callback.isCallable()) {
-        const exception = try ExceptionFactory.createTypeError(
-            vm.allocator,
-            "register_shutdown_function() expects parameter 1 to be a valid callback",
-            "builtin",
-            0
-        );
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "register_shutdown_function() expects parameter 1 to be a valid callback", "builtin", 0);
         _ = try vm.throwException(exception);
         return Value.initNull();
     }
-    
+
     // Copy callback arguments (skip first argument which is the callback itself)
-    const callback_args = if (args.len > 1) 
+    const callback_args = if (args.len > 1)
         try vm.allocator.dupe(Value, args[1..])
     else
         try vm.allocator.alloc(Value, 0);
-    
+
     // Retain all values
     _ = callback.retain();
     for (callback_args) |arg| {
         _ = arg.retain();
     }
-    
+
     // Register the shutdown function
     try vm.shutdown_functions.append(vm.allocator, .{
         .callback = callback,
         .args = callback_args,
     });
-    
+
     return Value.initBool(true);
 }
 
@@ -2002,7 +1990,7 @@ pub const VM = struct {
 
     // Builtin function registry with category-based organization
     builtin_registry: BuiltinRegistry,
-    
+
     // Shutdown function registry for register_shutdown_function()
     shutdown_functions: std.ArrayList(ShutdownFunction),
 
@@ -2156,7 +2144,7 @@ pub const VM = struct {
         if (self.optimization_flags.enable_opcode_caching) {
             self.logPerformanceStats();
         }
-        
+
         // 0. Execute shutdown functions (before any cleanup)
         self.executeShutdownFunctions();
 
@@ -2205,7 +2193,7 @@ pub const VM = struct {
 
         // 5.5. Clean up builtin function registry
         self.builtin_registry.deinit();
-        
+
         // 5.6. Clean up shutdown functions
         for (self.shutdown_functions.items) |*func| {
             func.deinit(self.allocator);
@@ -2375,7 +2363,8 @@ pub const VM = struct {
                 const param_data = param_node.data.parameter;
                 const param_name = self.context.string_pool.keys()[param_data.name];
                 const php_param_name = try types.PHPString.init(self.allocator, param_name);
-                defer php_param_name.release(self.allocator);
+                // Parameter.init会retain，但我们不释放原始引用以确保数据存活
+                // 这可能导致轻微内存泄漏，但保证参数名正确传递
 
                 parameters[i] = types.Method.Parameter.init(php_param_name);
 
@@ -2596,6 +2585,20 @@ pub const VM = struct {
         try self.global.set("LOCK_EX", Value.initInt(2));
         try self.global.set("LOCK_UN", Value.initInt(3));
         try self.global.set("LOCK_NB", Value.initInt(4));
+
+        // Math constants
+        try self.global.set("M_PI", Value.initFloat(std.math.pi));
+        try self.global.set("M_E", Value.initFloat(std.math.e));
+        try self.global.set("M_LOG2E", Value.initFloat(std.math.log2e));
+        try self.global.set("M_LOG10E", Value.initFloat(std.math.log10e));
+        try self.global.set("M_LN2", Value.initFloat(std.math.ln2));
+        try self.global.set("M_LN10", Value.initFloat(std.math.ln10));
+        try self.global.set("M_PI_2", Value.initFloat(std.math.pi / 2.0));
+        try self.global.set("M_PI_4", Value.initFloat(std.math.pi / 4.0));
+        try self.global.set("M_1_PI", Value.initFloat(1.0 / std.math.pi));
+        try self.global.set("M_2_PI", Value.initFloat(2.0 / std.math.pi));
+        try self.global.set("M_SQRT2", Value.initFloat(std.math.sqrt2));
+        try self.global.set("M_SQRT1_2", Value.initFloat(1.0 / std.math.sqrt2));
     }
 
     /// Initialize the builtin function registry with core functions
@@ -2630,7 +2633,7 @@ pub const VM = struct {
         while (i > 0) {
             i -= 1;
             const func = &self.shutdown_functions.items[i];
-            
+
             // Call the callback with its arguments
             // We catch and log errors but don't crash - shutdown functions should be resilient
             const result = switch (func.callback.getTag()) {
@@ -2671,7 +2674,7 @@ pub const VM = struct {
                     continue;
                 },
             };
-            
+
             // Release the result value
             result.release(self.allocator);
         }
@@ -5199,6 +5202,38 @@ pub const VM = struct {
                     return Value.bitOrFast(left, right);
                 }
                 return Value.initInt(left.toInt() | right.toInt());
+            },
+            Token.Tag.k_instanceof => {
+                // instanceof需要特殊处理：右操作数是类名，不是普通表达式
+                // 从AST节点直接获取类名
+                const rhs_node = &self.context.nodes.items[rhs_idx];
+                var class_name: []const u8 = undefined;
+                if (rhs_node.tag == .variable) {
+                    // 类名存储为变量节点（不带$前缀）
+                    const name_id = rhs_node.data.variable.name;
+                    class_name = self.context.string_pool.keys()[name_id];
+                } else if (rhs_node.tag == .literal_string) {
+                    const str_id = rhs_node.data.literal_string.value;
+                    class_name = self.context.string_pool.keys()[str_id];
+                } else {
+                    return Value.initBool(false);
+                }
+
+                // 检查左操作数是否为对象
+                if (left.getTag() != .object) {
+                    return Value.initBool(false);
+                }
+
+                const object = left.getAsObject().data;
+
+                // 先检查接口
+                if (self.getInterface(class_name)) |target_interface| {
+                    return Value.initBool(object.implementsInterface(target_interface));
+                }
+
+                // 再检查类
+                const target_class = self.getClass(class_name) orelse return Value.initBool(false);
+                return Value.initBool(object.isInstanceOf(target_class));
             },
             else => return Value.initNull(),
         }

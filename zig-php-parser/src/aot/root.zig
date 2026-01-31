@@ -121,6 +121,18 @@ pub const CompiledFile = MultiFileCompilerMod.CompiledFile;
 pub const IncrementalCompilerMod = @import("incremental_compiler.zig");
 pub const IncrementalCompiler = IncrementalCompilerMod.IncrementalCompiler;
 
+// OOP Runtime module
+pub const OOPRuntime = @import("oop_runtime.zig");
+pub const OOPObject = OOPRuntime.PHPObject;
+pub const OOPClassMeta = OOPRuntime.ClassMeta;
+pub const OOPInterfaceMeta = OOPRuntime.InterfaceMeta;
+pub const OOPTraitMeta = OOPRuntime.TraitMeta;
+pub const OOPClosure = OOPRuntime.Closure;
+pub const OOPUnionType = OOPRuntime.UnionType;
+pub const OOPTypeInfo = OOPRuntime.TypeInfo;
+pub const OOPCallable = OOPRuntime.Callable;
+pub const OOPValue = OOPRuntime.Value;
+
 // Optimizer module
 pub const OptimizerMod = @import("optimizer.zig");
 pub const IROptimizer = OptimizerMod.IROptimizer;
@@ -158,6 +170,8 @@ test {
     _ = @import("multi_file_compiler.zig");
     // _ = @import("test_multi_file_compiler.zig");
     _ = @import("optimizer.zig");
+    _ = @import("oop_runtime.zig");
+    _ = @import("test_oop_runtime.zig");
     // End-to-end integration tests
     // _ = @import("test_e2e_roundtrip.zig");
     // _ = @import("test_e2e_error_reporting.zig");

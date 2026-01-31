@@ -11,6 +11,12 @@ const builtin_random = @import("builtin_random.zig");
 const builtin_vars = @import("builtin_vars.zig");
 const pcre2 = @import("pcre2.zig");
 
+// 核心函数模块（DRY 原则：统一实现）
+const core_string = @import("core/string_functions.zig");
+const core_math = @import("core/math_functions.zig");
+const core_time = @import("core/time_functions.zig");
+const core_type = @import("core/type_functions.zig");
+
 // SIMD optimized string operations for performance
 const simd_ops = @import("simd_ops.zig");
 const SimdString = simd_ops.SimdString;
@@ -273,8 +279,17 @@ pub const StandardLibrary = struct {
             &.{ .name = "cos", .min_args = 1, .max_args = 1, .handler = cosFn },
             &.{ .name = "tan", .min_args = 1, .max_args = 1, .handler = tanFn },
             &.{ .name = "log", .min_args = 1, .max_args = 2, .handler = logFn },
+            &.{ .name = "log10", .min_args = 1, .max_args = 1, .handler = log10Fn },
             &.{ .name = "exp", .min_args = 1, .max_args = 1, .handler = expFn },
             &.{ .name = "pi", .min_args = 0, .max_args = 0, .handler = piFn },
+            &.{ .name = "deg2rad", .min_args = 1, .max_args = 1, .handler = deg2radFn },
+            &.{ .name = "rad2deg", .min_args = 1, .max_args = 1, .handler = rad2degFn },
+            &.{ .name = "asin", .min_args = 1, .max_args = 1, .handler = asinFn },
+            &.{ .name = "acos", .min_args = 1, .max_args = 1, .handler = acosFn },
+            &.{ .name = "atan", .min_args = 1, .max_args = 1, .handler = atanFn },
+            &.{ .name = "atan2", .min_args = 2, .max_args = 2, .handler = atan2Fn },
+            &.{ .name = "hypot", .min_args = 2, .max_args = 2, .handler = hypotFn },
+            &.{ .name = "fmod", .min_args = 2, .max_args = 2, .handler = fmodFn },
         };
 
         for (math_functions) |func| {
@@ -933,7 +948,7 @@ fn arrayUnshiftFn(vm: *VM, args: []const Value) !Value {
     // Replace the original array's contents by copying from new_array
     // First clear the old array
     php_array.getElements().clearRetainingCapacity();
-    
+
     // Copy elements from new_array
     var new_iter = new_array.getElements().iterator();
     while (new_iter.next()) |entry| {
@@ -2129,25 +2144,20 @@ fn dirnameFn(vm: *VM, args: []const Value) !Value {
     return Value.fromBox(box, Value.TYPE_STRING);
 }
 
-// Date/Time Function Implementations
+// Date/Time Function Implementations（调用 core_time 模块）
 fn timeFn(vm: *VM, args: []const Value) !Value {
     _ = vm;
     _ = args;
-    const timestamp = std.time.timestamp();
-    return Value.initInt(timestamp);
+    return Value.initInt(core_time.time());
 }
 
 fn microtimeFn(vm: *VM, args: []const Value) !Value {
     const as_float = if (args.len > 0) args[0].toBool() else false;
-    const nanos = std.time.nanoTimestamp();
-    const secs: f64 = @as(f64, @floatFromInt(nanos)) / 1_000_000_000.0;
-
     if (as_float) {
-        return Value.initFloat(secs);
+        return Value.initFloat(core_time.microtime_float());
     } else {
-        const usec = @mod(@as(i64, @intCast(@divFloor(nanos, 1000))), 1_000_000);
-        const sec = @divFloor(nanos, 1_000_000_000);
-        const result = try std.fmt.allocPrint(vm.allocator, "0.{d:0>6} {d}", .{ usec, sec });
+        var ctx = core_string.common.CoreContext{ .allocator = vm.allocator };
+        const result = try core_time.microtime_string(&ctx);
         defer vm.allocator.free(result);
         const str = try PHPString.init(vm.allocator, result);
         const box = try vm.allocator.create(types.gc.Box(*PHPString));
@@ -2703,9 +2713,13 @@ fn md5Fn(vm: *VM, args: []const Value) !Value {
         return Value.fromBox(box, Value.TYPE_STRING);
     } else {
         var hex_buffer: [32]u8 = undefined;
-        const hex_str = try std.fmt.bufPrint(&hex_buffer, "{x:0>32}", .{hash});
+        const hex_chars = "0123456789abcdef";
+        for (hash, 0..) |byte, i| {
+            hex_buffer[i * 2] = hex_chars[byte >> 4];
+            hex_buffer[i * 2 + 1] = hex_chars[byte & 0x0f];
+        }
 
-        const result_str = try PHPString.init(vm.allocator, hex_str);
+        const result_str = try PHPString.init(vm.allocator, &hex_buffer);
 
         const box = try vm.allocator.create(types.gc.Box(*PHPString));
         box.* = .{
@@ -2747,9 +2761,13 @@ fn sha1Fn(vm: *VM, args: []const Value) !Value {
         return Value.fromBox(box, Value.TYPE_STRING);
     } else {
         var hex_buffer: [40]u8 = undefined;
-        const hex_str = try std.fmt.bufPrint(&hex_buffer, "{x:0>40}", .{hash});
+        const hex_chars = "0123456789abcdef";
+        for (hash, 0..) |byte, i| {
+            hex_buffer[i * 2] = hex_chars[byte >> 4];
+            hex_buffer[i * 2 + 1] = hex_chars[byte & 0x0f];
+        }
 
-        const result_str = try PHPString.init(vm.allocator, hex_str);
+        const result_str = try PHPString.init(vm.allocator, &hex_buffer);
 
         const box = try vm.allocator.create(types.gc.Box(*PHPString));
         box.* = .{
@@ -2828,9 +2846,13 @@ fn sha256Fn(vm: *VM, args: []const Value) !Value {
         return Value.fromBox(box, Value.TYPE_STRING);
     } else {
         var hex_buffer: [64]u8 = undefined;
-        const hex_str = try std.fmt.bufPrint(&hex_buffer, "{x:0>64}", .{hash});
+        const hex_chars = "0123456789abcdef";
+        for (hash, 0..) |byte, i| {
+            hex_buffer[i * 2] = hex_chars[byte >> 4];
+            hex_buffer[i * 2 + 1] = hex_chars[byte & 0x0f];
+        }
 
-        const result_str = try PHPString.init(vm.allocator, hex_str);
+        const result_str = try PHPString.init(vm.allocator, &hex_buffer);
 
         const box = try vm.allocator.create(types.gc.Box(*PHPString));
         box.* = .{
@@ -2872,9 +2894,13 @@ fn sha512Fn(vm: *VM, args: []const Value) !Value {
         return Value.fromBox(box, Value.TYPE_STRING);
     } else {
         var hex_buffer: [128]u8 = undefined;
-        const hex_str = try std.fmt.bufPrint(&hex_buffer, "{x:0>128}", .{hash});
+        const hex_chars = "0123456789abcdef";
+        for (hash, 0..) |byte, i| {
+            hex_buffer[i * 2] = hex_chars[byte >> 4];
+            hex_buffer[i * 2 + 1] = hex_chars[byte & 0x0f];
+        }
 
-        const result_str = try PHPString.init(vm.allocator, hex_str);
+        const result_str = try PHPString.init(vm.allocator, &hex_buffer);
 
         const box = try vm.allocator.create(types.gc.Box(*PHPString));
         box.* = .{
@@ -3572,9 +3598,8 @@ fn strPadFn(vm: *VM, args: []const Value) !Value {
 fn strrevFn(vm: *VM, args: []const Value) !Value {
     const str = if (args[0].getTag() == .string) args[0].getAsString().data.data else "";
     if (str.len == 0) return Value.initString(vm.allocator, "");
-    var result = try vm.allocator.alloc(u8, str.len);
+    const result = try core_string.strrev_raw(vm.allocator, str);
     defer vm.allocator.free(result);
-    for (str, 0..) |c, i| result[str.len - 1 - i] = c;
     return Value.initString(vm.allocator, result);
 }
 
@@ -4208,6 +4233,54 @@ fn piFn(vm: *VM, args: []const Value) !Value {
     _ = vm;
     _ = args;
     return Value.initFloat(std.math.pi);
+}
+
+fn log10Fn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@log10(num));
+}
+
+fn deg2radFn(vm: *VM, args: []const Value) !Value {
+    const degrees = try toFloat(vm, args[0]);
+    return Value.initFloat(degrees * std.math.pi / 180.0);
+}
+
+fn rad2degFn(vm: *VM, args: []const Value) !Value {
+    const radians = try toFloat(vm, args[0]);
+    return Value.initFloat(radians * 180.0 / std.math.pi);
+}
+
+fn asinFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(std.math.asin(num));
+}
+
+fn acosFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(std.math.acos(num));
+}
+
+fn atanFn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(std.math.atan(num));
+}
+
+fn atan2Fn(vm: *VM, args: []const Value) !Value {
+    const y = try toFloat(vm, args[0]);
+    const x = try toFloat(vm, args[1]);
+    return Value.initFloat(std.math.atan2(y, x));
+}
+
+fn hypotFn(vm: *VM, args: []const Value) !Value {
+    const x = try toFloat(vm, args[0]);
+    const y = try toFloat(vm, args[1]);
+    return Value.initFloat(std.math.hypot(x, y));
+}
+
+fn fmodFn(vm: *VM, args: []const Value) !Value {
+    const x = try toFloat(vm, args[0]);
+    const y = try toFloat(vm, args[1]);
+    return Value.initFloat(@mod(x, y));
 }
 
 // 辅助函数：将 Value 转换为整数

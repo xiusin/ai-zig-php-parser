@@ -986,15 +986,15 @@ pub const BytecodeGenerator = struct {
             // 栈分配：使用特殊指令在栈上分配对象
             // new_struct 指令用于栈分配，operand1 = 类名常量索引，operand2 = 栈槽位
             try self.emit(.new_struct, class_const, stack_slot.?);
-            // 如果有构造参数，需要调用构造函数
-            if (arg_count > 0) {
-                // 调用构造函数初始化栈上的对象
-                const init_const = try self.addConstant(.{ .string_val = "__construct" });
-                try self.emit(.call_method, init_const, arg_count);
-            }
+            // 调用构造函数初始化栈上的对象
+            const init_const = try self.addConstant(.{ .string_val = "__construct" });
+            try self.emit(.call_method, init_const, arg_count);
         } else {
             // 堆分配：使用标准的 new_object 指令
             try self.emit(.new_object, class_const, arg_count);
+            // 调用构造函数
+            const init_const = try self.addConstant(.{ .string_val = "__construct" });
+            try self.emit(.call_method, init_const, arg_count);
         }
 
         // 参数弹出，对象压入

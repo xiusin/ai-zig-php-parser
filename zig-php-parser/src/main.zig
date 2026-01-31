@@ -486,7 +486,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 /// Convert parser AST nodes to IR generator node format
 fn convertASTToIRNodes(allocator: std.mem.Allocator, parser_nodes: []const ast.Node) ![]const aot.IRGeneratorMod.Node {
     std.debug.print("[main.zig] Converting {d} parser nodes to IR nodes\n", .{parser_nodes.len});
-    
+
     const ir_nodes = try allocator.alloc(aot.IRGeneratorMod.Node, parser_nodes.len);
 
     for (parser_nodes, 0..) |pnode, i| {
@@ -604,7 +604,7 @@ fn convertToken(token: compiler.Token) aot.IRGeneratorMod.Token {
         .tag = convertTokenTag(token.tag),
         .start = @intCast(token.loc.start),
         .end = @intCast(token.loc.end),
-        .line = 0, // Line info not directly available in parser token
+        .line = 0, // TODO: 需要从parser获取行号信息
         .column = 0,
     };
 }
@@ -772,6 +772,122 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
         .postfix_expr => .{ .postfix_expr = .{
             .op = convertTokenTag(data.postfix_expr.op),
             .expr = data.postfix_expr.expr,
+        } },
+        // OOP相关节点转换
+        .class_decl, .interface_decl, .trait_decl, .enum_decl => .{ .container_decl = .{
+            .attributes = data.container_decl.attributes,
+            .name = data.container_decl.name,
+            .modifiers = .{
+                .is_public = data.container_decl.modifiers.is_public,
+                .is_protected = data.container_decl.modifiers.is_protected,
+                .is_private = data.container_decl.modifiers.is_private,
+                .is_static = data.container_decl.modifiers.is_static,
+                .is_final = data.container_decl.modifiers.is_final,
+                .is_abstract = data.container_decl.modifiers.is_abstract,
+                .is_readonly = data.container_decl.modifiers.is_readonly,
+            },
+            .extends = data.container_decl.extends,
+            .implements = data.container_decl.implements,
+            .members = data.container_decl.members,
+        } },
+        .method_decl => .{ .method_decl = .{
+            .attributes = data.method_decl.attributes,
+            .name = data.method_decl.name,
+            .modifiers = .{
+                .is_public = data.method_decl.modifiers.is_public,
+                .is_protected = data.method_decl.modifiers.is_protected,
+                .is_private = data.method_decl.modifiers.is_private,
+                .is_static = data.method_decl.modifiers.is_static,
+                .is_final = data.method_decl.modifiers.is_final,
+                .is_abstract = data.method_decl.modifiers.is_abstract,
+                .is_readonly = data.method_decl.modifiers.is_readonly,
+            },
+            .params = data.method_decl.params,
+            .return_type = data.method_decl.return_type,
+            .body = data.method_decl.body,
+        } },
+        .property_decl => .{ .property_decl = .{
+            .attributes = data.property_decl.attributes,
+            .name = data.property_decl.name,
+            .modifiers = .{
+                .is_public = data.property_decl.modifiers.is_public,
+                .is_protected = data.property_decl.modifiers.is_protected,
+                .is_private = data.property_decl.modifiers.is_private,
+                .is_static = data.property_decl.modifiers.is_static,
+                .is_final = data.property_decl.modifiers.is_final,
+                .is_abstract = data.property_decl.modifiers.is_abstract,
+                .is_readonly = data.property_decl.modifiers.is_readonly,
+            },
+            .type = data.property_decl.type,
+            .default_value = data.property_decl.default_value,
+            .hooks = data.property_decl.hooks,
+        } },
+        .object_instantiation => .{ .object_instantiation = .{
+            .class_name = data.object_instantiation.class_name,
+            .args = data.object_instantiation.args,
+        } },
+        .method_call => .{ .method_call = .{
+            .target = data.method_call.target,
+            .method_name = data.method_call.method_name,
+            .args = data.method_call.args,
+        } },
+        .property_access => .{ .property_access = .{
+            .target = data.property_access.target,
+            .property_name = data.property_access.property_name,
+        } },
+        .static_method_call => .{ .static_method_call = .{
+            .class_name = data.static_method_call.class_name,
+            .method_name = data.static_method_call.method_name,
+            .args = data.static_method_call.args,
+        } },
+        .static_property_access => .{ .static_property_access = .{
+            .class_name = data.static_property_access.class_name,
+            .property_name = data.static_property_access.property_name,
+        } },
+        .const_decl => .{ .const_decl = .{
+            .name = data.const_decl.name,
+            .value = data.const_decl.value,
+        } },
+        .try_stmt => .{ .try_stmt = .{
+            .body = data.try_stmt.body,
+            .catch_clauses = data.try_stmt.catch_clauses,
+            .finally_clause = data.try_stmt.finally_clause,
+        } },
+        .catch_clause => .{ .catch_clause = .{
+            .exception_type = data.catch_clause.exception_type,
+            .variable = data.catch_clause.variable,
+            .body = data.catch_clause.body,
+        } },
+        .finally_clause => .{ .finally_clause = .{
+            .body = data.finally_clause.body,
+        } },
+        .throw_stmt => .{ .throw_stmt = .{
+            .expression = data.throw_stmt.expression,
+        } },
+        .closure => .{ .closure = .{
+            .attributes = data.closure.attributes,
+            .params = data.closure.params,
+            .captures = data.closure.captures,
+            .return_type = data.closure.return_type,
+            .body = data.closure.body,
+            .is_static = data.closure.is_static,
+        } },
+        .arrow_function => .{ .arrow_function = .{
+            .attributes = data.arrow_function.attributes,
+            .params = data.arrow_function.params,
+            .return_type = data.arrow_function.return_type,
+            .body = data.arrow_function.body,
+            .is_static = data.arrow_function.is_static,
+        } },
+        .named_type => .{ .named_type = .{
+            .name = data.named_type.name,
+        } },
+        .yield_expr => .{ .yield_expr = .{
+            .key = data.yield_expr.key,
+            .value = data.yield_expr.value,
+        } },
+        .trait_use => .{ .trait_use = .{
+            .traits = data.trait_use.traits,
         } },
         else => .{ .none = {} },
     };

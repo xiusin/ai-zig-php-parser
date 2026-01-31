@@ -1929,6 +1929,12 @@ pub const Parser = struct {
                 const expression = try self.parseExpression(0);
                 return self.createNode(.{ .tag = .throw_stmt, .main_token = token, .data = .{ .throw_stmt = .{ .expression = expression } } });
             },
+            // 允许 range 作为函数调用（PHP内置函数）
+            .k_range => {
+                const t = try self.eat(.k_range);
+                const name_id = try self.context.intern("range");
+                return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
             .l_paren => {
                 self.nextToken();
                 // Check for type cast: (int), (float), (string), (array), (object), (bool)

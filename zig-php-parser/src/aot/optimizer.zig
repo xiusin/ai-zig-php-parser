@@ -56,7 +56,6 @@ pub const OptimizeLevel = enum {
     }
 };
 
-
 /// Configuration for optimization passes
 pub const PassConfig = struct {
     /// Enable dead code elimination
@@ -139,7 +138,6 @@ pub const PassConfig = struct {
     }
 };
 
-
 // ============================================================================
 // Optimization Statistics
 // ============================================================================
@@ -178,7 +176,6 @@ pub const OptimizationStats = struct {
         try writer.print("  Passes run: {d}\n", .{self.passes_run});
     }
 };
-
 
 // ============================================================================
 // IR Optimizer
@@ -260,7 +257,6 @@ pub const IROptimizer = struct {
     pub fn resetStats(self: *Self) void {
         self.stats.reset();
     }
-
 
     // ========================================================================
     // Main Optimization Entry Point
@@ -347,7 +343,6 @@ pub const IROptimizer = struct {
             }
         }
     }
-
 
     // ========================================================================
     // Dead Code Elimination
@@ -512,6 +507,34 @@ pub const IROptimizer = struct {
             .instanceof => |op| {
                 try self.used_registers.put(op.object.id, {});
             },
+            .implements_interface => |op| {
+                try self.used_registers.put(op.object.id, {});
+            },
+            .static_method_call => |op| {
+                for (op.args) |arg| {
+                    try self.used_registers.put(arg.id, {});
+                }
+            },
+            .static_property_get => {},
+            .static_property_set => |op| {
+                try self.used_registers.put(op.value.id, {});
+            },
+            .closure_new => |op| {
+                try self.used_registers.put(op.func_ptr.id, {});
+                for (op.captures) |cap| {
+                    try self.used_registers.put(cap.id, {});
+                }
+            },
+            .closure_bind => |op| {
+                try self.used_registers.put(op.closure.id, {});
+                try self.used_registers.put(op.object.id, {});
+            },
+            .parent_call => |op| {
+                try self.used_registers.put(op.object.id, {});
+                for (op.args) |arg| {
+                    try self.used_registers.put(arg.id, {});
+                }
+            },
             .box => |op| {
                 try self.used_registers.put(op.value.id, {});
             },
@@ -538,9 +561,33 @@ pub const IROptimizer = struct {
             .try_begin, .try_end, .get_exception, .clear_exception => {},
             .mutex_lock, .mutex_unlock, .mutex_new => {},
             .catch_ => {},
+            // Concurrency operations
+            .go_spawn => |op| {
+                for (op.args) |arg| {
+                    try self.used_registers.put(arg.id, {});
+                }
+            },
+            .channel_new => {},
+            .channel_send => |op| {
+                try self.used_registers.put(op.channel.id, {});
+                try self.used_registers.put(op.value.id, {});
+            },
+            .channel_recv => |op| {
+                try self.used_registers.put(op.channel.id, {});
+            },
+            .channel_close, .await_ => |op| {
+                try self.used_registers.put(op.operand.id, {});
+            },
+            .select_ => |op| {
+                for (op.cases) |case| {
+                    try self.used_registers.put(case.channel.id, {});
+                    if (case.value) |v| {
+                        try self.used_registers.put(v.id, {});
+                    }
+                }
+            },
         }
     }
-
 
     /// Mark registers used in a terminator
     fn markRegistersInTerminator(self: *Self, term: Terminator) !void {
@@ -581,6 +628,7 @@ pub const IROptimizer = struct {
             .load => false,
             .strlen, .array_count => false,
             .instanceof => false,
+            .implements_interface => false,
 
             // Operations with side effects
             .store => true,
@@ -588,9 +636,12 @@ pub const IROptimizer = struct {
             .array_new, .array_get, .array_set, .array_push, .array_key_exists, .array_unset => true,
             .concat, .interpolate => true,
             .new_object, .property_get, .property_set, .method_call, .clone => true,
+            .static_method_call, .static_property_get, .static_property_set => true,
+            .closure_new, .closure_bind, .parent_call => true,
             .retain, .release => true,
             .try_begin, .try_end, .catch_, .get_exception, .clear_exception => true,
             .mutex_lock, .mutex_unlock, .mutex_new => true,
+            .go_spawn, .channel_new, .channel_send, .channel_recv, .channel_close, .select_, .await_ => true,
             .debug_print => true,
         };
     }
@@ -652,7 +703,6 @@ pub const IROptimizer = struct {
             }
         }
     }
-
 
     // ========================================================================
     // Constant Propagation
@@ -886,7 +936,6 @@ pub const IROptimizer = struct {
         }
         return false;
     }
-
 
     // ========================================================================
     // Function Inlining
@@ -1207,7 +1256,6 @@ pub const IROptimizer = struct {
         const new_id = reg_map.get(reg.id) orelse reg.id;
         return Register{ .id = new_id, .type_ = reg.type_ };
     }
-
 
     // ========================================================================
     // Type Specialization
@@ -1685,7 +1733,6 @@ pub const IROptimizer = struct {
         return hasher.final();
     }
 
-
     // ========================================================================
     // Strength Reduction
     // ========================================================================
@@ -1782,7 +1829,6 @@ pub const IROptimizer = struct {
         return @intCast(@ctz(uval));
     }
 };
-
 
 // ============================================================================
 // LLVM Optimization Configuration
@@ -1966,7 +2012,6 @@ pub const LLVMPassConfig = struct {
     }
 };
 
-
 /// LLVM Pass Manager wrapper
 pub const LLVMPassManager = struct {
     allocator: Allocator,
@@ -2063,7 +2108,6 @@ pub const LLVMPassManager = struct {
         return passes.toOwnedSlice(allocator);
     }
 };
-
 
 // ============================================================================
 // Unit Tests
@@ -2233,7 +2277,6 @@ test "IROptimizer.hasSideEffects" {
     };
     try std.testing.expect(optimizer.hasSideEffects(&store_inst));
 }
-
 
 test "LLVMPassConfig presets" {
     const debug = LLVMPassConfig.debug();
@@ -2616,7 +2659,6 @@ test "IROptimizer.remapInstructionOp - constants unchanged" {
         else => try std.testing.expect(false),
     }
 }
-
 
 test "IROptimizer.hashExpression - comprehensive coverage" {
     const allocator = std.testing.allocator;

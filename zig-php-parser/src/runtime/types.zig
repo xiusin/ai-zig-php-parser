@@ -1955,7 +1955,7 @@ pub const PHPObject = struct {
     }
 
     /// 快速属性读取（使用内联缓存）
-    /// 
+    ///
     /// 如果缓存命中（shape_id 匹配），直接使用偏移量访问，~1ns
     /// 否则进行完整查找并更新缓存
     pub inline fn getPropertyFast(self: *PHPObject, name: []const u8, cache: *InlineCacheEntry) !Value {
@@ -2259,8 +2259,8 @@ pub const PHPObject = struct {
                 return generator_value;
             }
 
-            // Normal function execution
-            return @as(anyerror!Value, vm_instance.run(body_node)) catch |err| switch (err) {
+            // Normal function execution - 使用eval而非run，保持与用户函数一致
+            return @as(anyerror!Value, vm_instance.eval(body_node)) catch |err| switch (err) {
                 error.Return => {
                     if (vm_instance.return_value) |val| {
                         const ret = val;
@@ -2653,7 +2653,7 @@ pub const Value = struct {
         }
         return 0;
     }
-    
+
     /// 提取为32位整数 (截断，用于兼容旧代码)
     pub inline fn asInt32(self: Value) i32 {
         return @truncate(self.asInt());
@@ -3006,7 +3006,7 @@ pub const Value = struct {
 
 /// 隐藏类(Shape) - 对象属性布局描述
 /// 用于替换传统的HashMap，提高属性访问性能
-/// 
+///
 /// 增强版本：支持内联缓存
 /// - 内联缓存兼容：通过 id 快速比较
 pub const Shape = struct {
@@ -3452,14 +3452,14 @@ pub const Generator = struct {
     captured_refs: std.StringHashMap(void),
     parent_frame_vars: std.StringHashMap(Value),
     is_static: bool,
-    
+
     // Generator state
     current_value: Value,
     current_key: Value,
     is_started: bool,
     is_valid: bool,
     yielded: bool,
-    
+
     pub fn init(allocator: std.mem.Allocator, function: UserFunction) Generator {
         var copied_name = function.name;
         const should_release_original = function.name.data.len > 0;
