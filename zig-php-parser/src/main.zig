@@ -430,8 +430,11 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         std.debug.print("  Total nodes: {d}\n", .{context.nodes.items.len});
     }
 
+    const line_starts = try computeLineStarts(allocator, source);
+    defer allocator.free(line_starts);
+
     // 转换 AST 节点
-    const ir_nodes = try convertASTToIRNodes(allocator, context.nodes.items);
+    const ir_nodes = try convertASTToIRNodes(allocator, context.nodes.items, line_starts);
     defer allocator.free(ir_nodes);
 
     // 构建字符串表
@@ -484,7 +487,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 }
 
 /// Convert parser AST nodes to IR generator node format
-fn convertASTToIRNodes(allocator: std.mem.Allocator, parser_nodes: []const ast.Node) ![]const aot.IRGeneratorMod.Node {
+fn convertASTToIRNodes(allocator: std.mem.Allocator, parser_nodes: []const ast.Node, line_starts: []const usize) ![]const aot.IRGeneratorMod.Node {
     std.debug.print("[main.zig] Converting {d} parser nodes to IR nodes\n", .{parser_nodes.len});
 
     const ir_nodes = try allocator.alloc(aot.IRGeneratorMod.Node, parser_nodes.len);
@@ -495,7 +498,7 @@ fn convertASTToIRNodes(allocator: std.mem.Allocator, parser_nodes: []const ast.N
         }
         ir_nodes[i] = .{
             .tag = convertNodeTag(pnode.tag),
-            .main_token = convertToken(pnode.main_token),
+            .main_token = convertToken(pnode.main_token, line_starts),
             .data = convertNodeData(pnode.data, pnode.tag),
         };
         if (i == 0) {
@@ -599,14 +602,42 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
 }
 
 /// Convert parser token to IR generator token
-fn convertToken(token: compiler.Token) aot.IRGeneratorMod.Token {
+fn convertToken(token: compiler.Token, line_starts: []const usize) aot.IRGeneratorMod.Token {
+    const pos: usize = token.loc.start;
+    var line_index: usize = 0;
+    var lo: usize = 0;
+    var hi: usize = line_starts.len;
+    while (lo + 1 < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (line_starts[mid] <= pos) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    line_index = lo;
+
+    const line_num: u32 = @intCast(line_index + 1);
+    const col_num: u32 = @intCast((pos - line_starts[line_index]) + 1);
     return .{
         .tag = convertTokenTag(token.tag),
         .start = @intCast(token.loc.start),
         .end = @intCast(token.loc.end),
-        .line = 0, // TODO: 需要从parser获取行号信息
-        .column = 0,
+        .line = line_num,
+        .column = col_num,
     };
+}
+
+fn computeLineStarts(allocator: std.mem.Allocator, source: []const u8) ![]usize {
+    var starts = std.ArrayListUnmanaged(usize){};
+    errdefer starts.deinit(allocator);
+    try starts.append(allocator, 0);
+    for (source, 0..) |c, i| {
+        if (c == '\n' and i + 1 < source.len) {
+            try starts.append(allocator, i + 1);
+        }
+    }
+    return starts.toOwnedSlice(allocator);
 }
 
 /// Convert parser token tag to IR generator token tag

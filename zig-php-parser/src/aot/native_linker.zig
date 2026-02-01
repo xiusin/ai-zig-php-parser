@@ -1935,6 +1935,72 @@ pub const NativeLinker = struct {
                     }
                 }
             },
+            .identical => |op| {
+                if (inst.result) |reg| {
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+
+                    const lhs_str = if (lhs_type_tag == .i64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.lhs.id})
+                    else if (lhs_type_tag == .f64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{op.lhs.id})
+                    else if (lhs_type_tag == .bool)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.lhs.id})
+                    else
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.lhs.id});
+                    defer self.allocator.free(lhs_str);
+
+                    const rhs_str = if (rhs_type_tag == .i64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.rhs.id})
+                    else if (rhs_type_tag == .f64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{op.rhs.id})
+                    else if (rhs_type_tag == .bool)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.rhs.id})
+                    else
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.rhs.id});
+                    defer self.allocator.free(rhs_str);
+
+                    if (type_tag == .bool) {
+                        try writer.print("    reg_{d} = (try runtime.php_identical({s}, {s})).toBool();\n", .{ reg.id, lhs_str, rhs_str });
+                    } else {
+                        try writer.print("    reg_{d} = try runtime.php_identical({s}, {s});\n", .{ reg.id, lhs_str, rhs_str });
+                    }
+                }
+            },
+            .not_identical => |op| {
+                if (inst.result) |reg| {
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+
+                    const lhs_str = if (lhs_type_tag == .i64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.lhs.id})
+                    else if (lhs_type_tag == .f64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{op.lhs.id})
+                    else if (lhs_type_tag == .bool)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.lhs.id})
+                    else
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.lhs.id});
+                    defer self.allocator.free(lhs_str);
+
+                    const rhs_str = if (rhs_type_tag == .i64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.rhs.id})
+                    else if (rhs_type_tag == .f64)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{op.rhs.id})
+                    else if (rhs_type_tag == .bool)
+                        try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.rhs.id})
+                    else
+                        try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.rhs.id});
+                    defer self.allocator.free(rhs_str);
+
+                    if (type_tag == .bool) {
+                        try writer.print("    reg_{d} = (try runtime.php_not_identical({s}, {s})).toBool();\n", .{ reg.id, lhs_str, rhs_str });
+                    } else {
+                        try writer.print("    reg_{d} = try runtime.php_not_identical({s}, {s});\n", .{ reg.id, lhs_str, rhs_str });
+                    }
+                }
+            },
             .lt => |op| {
                 if (inst.result) |reg| {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
