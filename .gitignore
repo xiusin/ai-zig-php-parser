@@ -4,3 +4,6 @@ ai_*.md
 *.dSYM
 .DS_Store
 *.a
+zig-php-parser/.venv-*
+zig-php-parser/ci/*
+zig-php-parser/.perf_reports/*

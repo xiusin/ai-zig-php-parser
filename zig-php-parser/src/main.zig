@@ -547,8 +547,8 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .yield_expr => .yield_expr,
         .method_call => .method_call,
         .property_access => .property_access,
-        .safe_property_access => .property_access, // 安全导航操作符映射到 property_access
-        .variable_property_access => .property_access, // 可变属性访问映射到 property_access
+        .safe_property_access => .safe_property_access,
+        .variable_property_access => .variable_property_access,
         .array_access => .array_access,
         .function_call => .function_call,
         .function_decl => .function_decl,
@@ -572,10 +572,10 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .literal_string => .literal_string,
         .literal_bool => .literal_bool,
         .literal_null => .literal_null,
-        .magic_constant => .literal_string, // Map magic constants to string literals for IR
+        .magic_constant => .magic_constant,
         .array_init => .array_init,
         .array_pair => .array_pair,
-        .named_arg => .array_pair, // Map named_arg to array_pair for IR (key-value pair)
+        .named_arg => .named_arg,
         .binary_expr => .binary_expr,
         .unary_expr => .unary_expr,
         .postfix_expr => .postfix_expr,
@@ -594,7 +594,7 @@ fn convertNodeTag(tag: ast.Node.Tag) aot.IRGeneratorMod.Node.Tag {
         .self_expr => .self_expr,
         .parent_expr => .parent_expr,
         .static_expr => .static_expr,
-        .cast_expr => .unary_expr, // Map cast expressions to unary expressions for IR
+        .cast_expr => .cast_expr,
     };
 }
 
@@ -675,6 +675,17 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
                 .backtick => .backtick,
             },
         } },
+        .literal_bool => .{ .literal_bool = .{ .value = data.literal_int.value != 0 } },
+        .literal_null => .{ .literal_null = {} },
+        .magic_constant => .{ .magic_constant = .{ .kind = switch (data.magic_constant.kind) {
+            .dir => .dir,
+            .file => .file,
+            .line => .line,
+            .function => .function,
+            .class => .class,
+            .method => .method,
+            .namespace => .namespace,
+        } } },
         .variable => .{ .variable = .{ .name = data.variable.name } },
         .binary_expr => .{ .binary_expr = .{
             .lhs = data.binary_expr.lhs,
@@ -696,6 +707,7 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
         } },
         .echo_stmt => .{ .echo_stmt = .{ .exprs = data.echo_stmt.exprs } },
         .return_stmt => .{ .return_stmt = .{ .expr = data.return_stmt.expr } },
+        .expression_stmt => .{ .none = {} },
         .if_stmt => .{ .if_stmt = .{
             .condition = data.if_stmt.condition,
             .then_branch = data.if_stmt.then_branch,
@@ -738,6 +750,10 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
         .function_call => .{ .function_call = .{
             .name = data.function_call.name,
             .args = data.function_call.args,
+        } },
+        .named_arg => .{ .named_arg = .{
+            .name = data.named_arg.name,
+            .value = data.named_arg.value,
         } },
         .array_init => .{ .array_init = .{ .elements = data.array_init.elements } },
         .array_access => .{ .array_access = .{
@@ -835,6 +851,14 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
             .target = data.property_access.target,
             .property_name = data.property_access.property_name,
         } },
+        .safe_property_access => .{ .safe_property_access = .{
+            .target = data.safe_property_access.target,
+            .property_name = data.safe_property_access.property_name,
+        } },
+        .variable_property_access => .{ .variable_property_access = .{
+            .target = data.variable_property_access.target,
+            .prop_variable = data.variable_property_access.prop_variable,
+        } },
         .static_method_call => .{ .static_method_call = .{
             .class_name = data.static_method_call.class_name,
             .method_name = data.static_method_call.method_name,
@@ -881,6 +905,26 @@ fn convertNodeData(data: ast.Node.Data, tag: ast.Node.Tag) aot.IRGeneratorMod.No
         } },
         .named_type => .{ .named_type = .{
             .name = data.named_type.name,
+        } },
+        .nullable_type => .{ .nullable_type = .{ .inner = data.nullable_type.inner } },
+        .include_stmt, .require_stmt => .{ .include_stmt = .{
+            .path = data.include_stmt.path,
+            .is_once = data.include_stmt.is_once,
+            .is_require = data.include_stmt.is_require,
+        } },
+        .use_stmt => .{ .use_stmt = .{
+            .namespace = data.use_stmt.namespace,
+            .alias = data.use_stmt.alias,
+            .use_type = data.use_stmt.use_type,
+        } },
+        .namespace_stmt => .{ .namespace_stmt = .{ .name = data.namespace_stmt.name } },
+        .cast_expr => .{ .cast_expr = .{
+            .cast_type = switch (data.cast_expr.cast_type) {
+                .k_array => .array,
+                .k_object => .object,
+                else => .unknown,
+            },
+            .expr = data.cast_expr.expr,
         } },
         .yield_expr => .{ .yield_expr = .{
             .key = data.yield_expr.key,

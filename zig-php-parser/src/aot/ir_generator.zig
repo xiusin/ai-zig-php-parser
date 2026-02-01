@@ -52,6 +52,22 @@ pub const QuoteType = enum {
     backtick,
 };
 
+pub const MagicConstantKind = enum {
+    dir,
+    file,
+    line,
+    function,
+    class,
+    method,
+    namespace,
+};
+
+pub const CastType = enum {
+    array,
+    object,
+    unknown,
+};
+
 /// Token tag enum (subset needed for IR generation)
 pub const TokenTag = enum(u8) {
     // Literals
@@ -162,6 +178,8 @@ pub const Node = struct {
         yield_expr,
         method_call,
         property_access,
+        safe_property_access,
+        variable_property_access,
         array_access,
         function_call,
         function_decl,
@@ -185,8 +203,10 @@ pub const Node = struct {
         literal_string,
         literal_bool,
         literal_null,
+        magic_constant,
         array_init,
         array_pair,
+        named_arg,
         binary_expr,
         unary_expr,
         postfix_expr,
@@ -201,6 +221,7 @@ pub const Node = struct {
         nullable_type,
         union_type,
         intersection_type,
+        cast_expr,
         class_constant_access,
         self_expr,
         parent_expr,
@@ -260,7 +281,11 @@ pub const Node = struct {
         function_call: struct { name: Index, args: []const Index },
         array_init: struct { elements: []const Index },
         array_pair: struct { key: Index, value: Index },
+        named_arg: struct { name: StringId, value: Index },
         literal_string: struct { value: StringId, quote_type: QuoteType },
+        literal_bool: struct { value: bool },
+        literal_null: void,
+        magic_constant: struct { kind: MagicConstantKind },
         root: struct { stmts: []const Index },
         echo_stmt: struct { exprs: []const Index },
         return_stmt: struct { expr: ?Index },
@@ -279,13 +304,18 @@ pub const Node = struct {
         object_instantiation: struct { class_name: Index, args: []const Index },
         function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index },
         block: struct { stmts: []const Index },
+        expression_stmt: struct { expr: Index },
         variable: struct { name: StringId },
         literal_int: struct { value: i64 },
         literal_float: struct { value: f64 },
         trait_use: struct { traits: []const Index },
         named_type: struct { name: StringId },
+        nullable_type: struct { inner: Index },
         union_type: struct { types: []const Index },
         intersection_type: struct { types: []const Index },
+        cast_expr: struct { cast_type: CastType, expr: Index },
+        safe_property_access: struct { target: Index, property_name: StringId },
+        variable_property_access: struct { target: Index, prop_variable: Index },
         none: void,
     };
 };
@@ -825,6 +855,37 @@ pub const IRGenerator = struct {
         }
     }
 
+    fn tryMakeConstInstruction(self: *Self, expr_idx: Node.Index) !?*Instruction {
+        const expr_node = self.getNode(expr_idx) orelse return null;
+        const module = self.module orelse return null;
+
+        const inst = try self.allocator.create(Instruction);
+        errdefer self.allocator.destroy(inst);
+        inst.* = .{
+            .op = .const_null,
+            .result = null,
+            .location = self.current_location,
+        };
+
+        switch (expr_node.tag) {
+            .literal_int => inst.op = .{ .const_int = expr_node.data.literal_int.value },
+            .literal_float => inst.op = .{ .const_float = expr_node.data.literal_float.value },
+            .literal_null => inst.op = .const_null,
+            .literal_bool => inst.op = .{ .const_bool = expr_node.main_token.tag == .keyword_true },
+            .literal_string => {
+                const s = self.getString(expr_node.data.literal_string.value);
+                const id = try module.internString(s);
+                inst.op = .{ .const_string = id };
+            },
+            else => {
+                self.allocator.destroy(inst);
+                return null;
+            },
+        }
+
+        return inst;
+    }
+
     /// Generate IR for class declaration
     fn generateClassDecl(self: *Self, node: *const Node) !void {
         // 安全检查：class_decl应该使用container_decl数据
@@ -833,6 +894,8 @@ pub const IRGenerator = struct {
         // 使用@field安全获取，如果失败则返回
         const class_data = node.data.container_decl;
         const class_name = self.getString(class_data.name);
+
+        var properties = std.ArrayListUnmanaged(TypeDef.Property){};
 
         // Create type definition
         const type_def = try self.allocator.create(TypeDef);
@@ -867,11 +930,35 @@ pub const IRGenerator = struct {
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
                 .method_decl => try self.generateMethodDecl(member, class_name),
-                .property_decl => try self.generatePropertyDecl(member, class_name),
+                .property_decl => {
+                    const prop_data = member.data.property_decl;
+                    const prop_name = self.getString(prop_data.name);
+                    const prop_type = if (prop_data.type) |t| try self.resolveTypeNode(t) else .php_value;
+                    const default_inst = if (prop_data.default_value) |dv| try self.tryMakeConstInstruction(dv) else null;
+
+                    const visibility: TypeDef.Visibility = if (prop_data.modifiers.is_private)
+                        .private
+                    else if (prop_data.modifiers.is_protected)
+                        .protected
+                    else
+                        .public;
+
+                    try properties.append(self.allocator, .{
+                        .name = prop_name,
+                        .type_ = prop_type,
+                        .default_value = default_inst,
+                        .is_static = prop_data.modifiers.is_static,
+                        .visibility = visibility,
+                    });
+
+                    try self.generatePropertyDecl(member, class_name);
+                },
                 .const_decl => try self.generateClassConstDecl(member, class_name),
                 else => {},
             }
         }
+
+        type_def.properties = try properties.toOwnedSlice(self.allocator);
 
         // Leave class scope
         self.symbol_table.leaveScope();
@@ -1682,6 +1769,19 @@ pub const IRGenerator = struct {
                     .value = value_reg,
                 } }, null);
             },
+            .variable_property_access => {
+                const obj_reg = try self.generateExpression(target_node.data.variable_property_access.target);
+                const prop_reg = try self.generateExpression(target_node.data.variable_property_access.prop_variable);
+                const args = try self.allocator.alloc(Register, 3);
+                args[0] = obj_reg;
+                args[1] = prop_reg;
+                args[2] = value_reg;
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_object_set_dynamic",
+                    .args = args,
+                    .return_type = .php_value,
+                } }, null);
+            },
             else => {},
         }
     }
@@ -1740,6 +1840,19 @@ pub const IRGenerator = struct {
                     .object = obj_reg,
                     .property_name = prop_name,
                     .value = result_reg,
+                } }, null);
+            },
+            .variable_property_access => {
+                const obj_reg = try self.generateExpression(target_node.data.variable_property_access.target);
+                const prop_reg = try self.generateExpression(target_node.data.variable_property_access.prop_variable);
+                const args = try self.allocator.alloc(Register, 3);
+                args[0] = obj_reg;
+                args[1] = prop_reg;
+                args[2] = result_reg;
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_object_set_dynamic",
+                    .args = args,
+                    .return_type = .php_value,
                 } }, null);
             },
             else => {},
@@ -1847,6 +1960,7 @@ pub const IRGenerator = struct {
             .literal_string => self.generateLiteralString(node),
             .literal_bool => self.generateLiteralBool(node),
             .literal_null => self.emitWithResult(.const_null, .php_value),
+            .magic_constant => self.generateMagicConstant(node),
 
             // Variables
             .variable => self.generateVariable(node),
@@ -1869,6 +1983,8 @@ pub const IRGenerator = struct {
             // Object operations
             .object_instantiation => self.generateObjectInstantiation(node),
             .property_access => self.generatePropertyAccess(node),
+            .safe_property_access => self.generateSafePropertyAccess(node),
+            .variable_property_access => self.generateVariablePropertyAccess(node),
             .static_property_access => self.generateStaticPropertyAccess(node),
             .class_constant_access => self.generateClassConstantAccess(node),
 
@@ -1879,6 +1995,8 @@ pub const IRGenerator = struct {
             // Special expressions
             .match_expr => self.generateMatchExpr(node),
             .clone_with_expr => self.generateCloneWithExpr(node),
+            .named_arg => self.generateNamedArg(node),
+            .cast_expr => self.generateCastExpr(node),
 
             // $this 表达式 - 返回this参数寄存器
             .self_expr => blk: {
@@ -1950,6 +2068,19 @@ pub const IRGenerator = struct {
                             .value = result_reg,
                         } }, null);
                     },
+                    .variable_property_access => {
+                        const obj_reg = try self.generateExpression(target_node.data.variable_property_access.target);
+                        const prop_reg = try self.generateExpression(target_node.data.variable_property_access.prop_variable);
+                        const args = try self.allocator.alloc(Register, 3);
+                        args[0] = obj_reg;
+                        args[1] = prop_reg;
+                        args[2] = result_reg;
+                        _ = try self.emit(.{ .call = .{
+                            .func_name = "php_object_set_dynamic",
+                            .args = args,
+                            .return_type = .php_value,
+                        } }, null);
+                    },
                     else => {},
                 }
 
@@ -1994,6 +2125,59 @@ pub const IRGenerator = struct {
         // Boolean value is determined by the token
         const is_true = node.main_token.tag == .keyword_true;
         return self.emitWithResult(.{ .const_bool = is_true }, .bool);
+    }
+
+    fn generateMagicConstant(self: *Self, node: *const Node) !Register {
+        const kind = node.data.magic_constant.kind;
+        const module = self.module orelse return self.emitWithResult(.const_null, .php_value);
+
+        return switch (kind) {
+            .line => self.emitWithResult(.{ .const_int = @as(i64, @intCast(self.current_location.line)) }, .php_value),
+            .file => blk: {
+                const s = module.source_file;
+                const id = try module.internString(s);
+                break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
+            },
+            .dir => blk: {
+                const dir = std.fs.path.dirname(module.source_file) orelse "";
+                const id = try module.internString(dir);
+                break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
+            },
+            .function => blk: {
+                const name = if (self.current_function) |f| f.name else "";
+                const id = try module.internString(name);
+                break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
+            },
+            .class => blk: {
+                const name = self.lookupCurrentClassName() orelse "";
+                const id = try module.internString(name);
+                break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
+            },
+            .method => blk: {
+                const class_name = self.lookupCurrentClassName() orelse "";
+                const func_name = if (self.current_function) |f| f.name else "";
+                var buf: [256]u8 = undefined;
+                const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, func_name }) catch func_name;
+                const id = try module.internString(full);
+                break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
+            },
+            .namespace => blk: {
+                const id = try module.internString("");
+                break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
+            },
+        };
+    }
+
+    fn lookupCurrentClassName(self: *Self) ?[]const u8 {
+        var i: usize = self.symbol_table.scope_stack.items.len;
+        while (i > 0) {
+            i -= 1;
+            const scope = self.symbol_table.scope_stack.items[i];
+            if (scope.kind == .class) {
+                return scope.name;
+            }
+        }
+        return null;
     }
 
     /// Generate IR for binary expression
@@ -2366,6 +2550,70 @@ pub const IRGenerator = struct {
         } }, .php_value);
     }
 
+    fn emitPropertyNameValue(self: *Self, property_name: []const u8) !Register {
+        const module = self.module orelse return self.emitWithResult(.const_null, .php_value);
+        const id = try module.internString(property_name);
+        return self.emitWithResult(.{ .const_string = id }, .php_string);
+    }
+
+    fn generateSafePropertyAccess(self: *Self, node: *const Node) !Register {
+        const access_data = node.data.safe_property_access;
+        const obj_reg = try self.generateExpression(access_data.target);
+        const prop_val_reg = try self.emitPropertyNameValue(self.getString(access_data.property_name));
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = obj_reg;
+        args[1] = prop_val_reg;
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_object_get_safe_value",
+            .args = args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
+    fn generateVariablePropertyAccess(self: *Self, node: *const Node) !Register {
+        const access_data = node.data.variable_property_access;
+        const obj_reg = try self.generateExpression(access_data.target);
+        const prop_reg = try self.generateExpression(access_data.prop_variable);
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = obj_reg;
+        args[1] = prop_reg;
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_object_get_dynamic",
+            .args = args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
+    fn generateNamedArg(self: *Self, node: *const Node) !Register {
+        return self.generateExpression(node.data.named_arg.value);
+    }
+
+    fn generateCastExpr(self: *Self, node: *const Node) !Register {
+        const cast_data = node.data.cast_expr;
+        const value_reg = try self.generateExpression(cast_data.expr);
+        return switch (cast_data.cast_type) {
+            .array => blk: {
+                const args = try self.allocator.alloc(Register, 1);
+                args[0] = value_reg;
+                break :blk self.emitWithResult(.{ .call = .{
+                    .func_name = "php_cast_array",
+                    .args = args,
+                    .return_type = .php_value,
+                } }, .php_value);
+            },
+            .object => blk: {
+                const args = try self.allocator.alloc(Register, 1);
+                args[0] = value_reg;
+                break :blk self.emitWithResult(.{ .call = .{
+                    .func_name = "php_cast_object",
+                    .args = args,
+                    .return_type = .php_value,
+                } }, .php_value);
+            },
+            .unknown => value_reg,
+        };
+    }
+
     /// Generate IR for static property access
     fn generateStaticPropertyAccess(self: *Self, node: *const Node) !Register {
         const access_data = node.data.static_property_access;
@@ -2379,7 +2627,7 @@ pub const IRGenerator = struct {
 
         return self.emitWithResult(.{ .call = .{
             .func_name = name_copy,
-            .args = &.{},
+            .args = try self.allocator.alloc(Register, 0),
             .return_type = .php_value,
         } }, .php_value);
     }
@@ -2397,7 +2645,7 @@ pub const IRGenerator = struct {
 
         return self.emitWithResult(.{ .call = .{
             .func_name = name_copy,
-            .args = &.{},
+            .args = try self.allocator.alloc(Register, 0),
             .return_type = .php_value,
         } }, .php_value);
     }
@@ -2451,7 +2699,7 @@ pub const IRGenerator = struct {
         // Return callable reference
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
-            .args = &.{},
+            .args = try self.allocator.alloc(Register, 0),
             .return_type = .php_callable,
         } }, .php_callable);
     }
@@ -2499,7 +2747,7 @@ pub const IRGenerator = struct {
 
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
-            .args = &.{},
+            .args = try self.allocator.alloc(Register, 0),
             .return_type = .php_callable,
         } }, .php_callable);
     }

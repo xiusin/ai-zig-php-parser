@@ -27,6 +27,7 @@ pub var runtime_allocator: Allocator = undefined;
 /// 初始化运行时
 pub fn initRuntime(allocator: Allocator) void {
     runtime_allocator = allocator;
+    initClassRegistry(allocator);
 }
 
 /// 清理运行时
@@ -2499,7 +2500,10 @@ pub fn Value_asObject(self: Value) *PHPObject {
 /// @param allocator 内存分配器
 /// @return 对象Value
 pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
-    const obj = try PHPObject.init(allocator, class_name);
+    const obj = if (findClass(class_name)) |meta|
+        try PHPObject.initWithMeta(allocator, meta)
+    else
+        try PHPObject.init(allocator, class_name);
 
     // 注册对象以便程序退出时清理
     if (global_object_registry) |*registry| {
@@ -2516,12 +2520,76 @@ pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
 /// @return 属性值，如果不存在返回null
 pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
-        // 不是对象，返回null
-        return Value.initNull();
+        return error.NotAnObject;
     }
 
     const obj = Value_asObject(obj_val);
     return obj.getProperty(property_name) orelse Value.initNull();
+}
+
+pub fn php_object_get_safe_value(obj_val: Value, prop_name_val: Value) !Value {
+    if (!Value_isObject(obj_val)) {
+        return Value.initNull();
+    }
+    if (!prop_name_val.isString()) {
+        return Value.initNull();
+    }
+    const obj = Value_asObject(obj_val);
+    return obj.getProperty(prop_name_val.asString().data) orelse Value.initNull();
+}
+
+pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
+    if (!Value_isObject(obj_val)) {
+        return error.NotAnObject;
+    }
+    if (!prop_name_val.isString()) {
+        return error.InvalidPropertyName;
+    }
+    const obj = Value_asObject(obj_val);
+    return obj.getProperty(prop_name_val.asString().data) orelse Value.initNull();
+}
+
+pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value) !Value {
+    if (!Value_isObject(obj_val)) {
+        return error.NotAnObject;
+    }
+    if (!prop_name_val.isString()) {
+        return error.InvalidPropertyName;
+    }
+    const obj = Value_asObject(obj_val);
+    try obj.setProperty(prop_name_val.asString().data, value);
+    return Value.initNull();
+}
+
+pub fn php_cast_array(val: Value) !Value {
+    if (val.isArray()) {
+        return val;
+    }
+    const arr = try PHPArray.init(runtime_allocator);
+    try arr.push(runtime_allocator, val);
+    return Value.initArray(arr);
+}
+
+pub fn php_cast_object(val: Value) !Value {
+    if (val.isArray()) {
+        const obj_val = try php_object_new("stdClass", runtime_allocator);
+        const obj = Value_asObject(obj_val);
+        var it = val.asArray().elements.iterator();
+        while (it.next()) |entry| {
+            switch (entry.key_ptr.*) {
+                .string => |key| {
+                    try obj.setProperty(key.data, entry.value_ptr.*);
+                },
+                .integer => |idx| {
+                    const key_str = try std.fmt.allocPrint(runtime_allocator, "{d}", .{idx});
+                    defer runtime_allocator.free(key_str);
+                    try obj.setProperty(key_str, entry.value_ptr.*);
+                },
+            }
+        }
+        return obj_val;
+    }
+    return val;
 }
 
 /// 设置对象属性
