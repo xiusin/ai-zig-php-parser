@@ -45,8 +45,8 @@ const TypeInferencer = TypeInferenceMod.TypeInferencer;
 const compiler = @import("compiler");
 const ast = compiler.ast;
 pub const Node = ast.Node;
-const Token = compiler.token.Token;
-const TokenTag = compiler.token.Token.Tag;
+pub const Token = compiler.token.Token;
+pub const TokenTag = compiler.token.Token.Tag;
 const QuoteType = ast.QuoteType;
 const MagicConstantKind = ast.MagicConstantKind;
 // CastType in ast.zig is Token.Tag, so we alias it here for compatibility,

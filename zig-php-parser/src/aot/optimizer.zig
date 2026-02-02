@@ -77,6 +77,10 @@ pub const PassConfig = struct {
     strength_reduction: bool = false,
     /// Enable Mem2Reg (promote memory to registers)
     mem2reg: bool = false,
+    /// Enable loop unrolling
+    loop_unroll: bool = false,
+    /// Loop unroll factor (number of copies)
+    unroll_factor: u32 = 4,
     /// Maximum optimization iterations
     max_iterations: u32 = 3,
 
@@ -92,6 +96,7 @@ pub const PassConfig = struct {
             .licm = false,
             .strength_reduction = false,
             .mem2reg = false,
+            .loop_unroll = false,
             .max_iterations = 1,
         };
     }
@@ -108,6 +113,7 @@ pub const PassConfig = struct {
             .licm = false,
             .strength_reduction = false,
             .mem2reg = true,
+            .loop_unroll = false,
             .max_iterations = 2,
         };
     }
@@ -124,6 +130,7 @@ pub const PassConfig = struct {
             .licm = true,
             .strength_reduction = true,
             .mem2reg = true,
+            .loop_unroll = true,
             .max_iterations = 5,
         };
     }
@@ -140,6 +147,7 @@ pub const PassConfig = struct {
             .licm = false,
             .strength_reduction = true,
             .mem2reg = true,
+            .loop_unroll = false, // Unrolling increases size
             .max_iterations = 2,
         };
     }
@@ -165,6 +173,8 @@ pub const OptimizationStats = struct {
     cse_eliminations: u32 = 0,
     /// Number of allocas promoted to registers
     allocas_promoted: u32 = 0,
+    /// Number of loops unrolled
+    loops_unrolled: u32 = 0,
     /// Number of optimization passes run
     passes_run: u32 = 0,
 
@@ -182,6 +192,7 @@ pub const OptimizationStats = struct {
         try writer.print("  Functions inlined: {d}\n", .{self.functions_inlined});
         try writer.print("  Type specializations: {d}\n", .{self.type_specializations});
         try writer.print("  CSE eliminations: {d}\n", .{self.cse_eliminations});
+        try writer.print("  Loops unrolled: {d}\n", .{self.loops_unrolled});
         try writer.print("  Passes run: {d}\n", .{self.passes_run});
     }
 };
@@ -431,6 +442,18 @@ pub const IROptimizer = struct {
             }
         }
 
+        // Loop Unrolling
+        // We only unroll innermost loops (no sub-loops) for now to keep it simple.
+        if (self.config.loop_unroll and loop.sub_loops.items.len == 0) {
+            if (try self.unrollLoop(func, loop, dt)) {
+                self.stats.loops_unrolled += 1;
+                changed = true;
+                // If unrolled, the loop structure changes significantly.
+                // We might need to stop further optimizations on this loop struct.
+                return true;
+            }
+        }
+
         // Find loop invariants
         // An instruction is invariant if:
         // 1. It is side-effect free
@@ -651,6 +674,110 @@ pub const IROptimizer = struct {
                 else => {},
             }
         }
+    }
+
+    // ========================================================================
+    // Loop Unrolling
+    // ========================================================================
+
+    /// Try to unroll a loop
+    fn unrollLoop(self: *Self, func: *Function, loop: *Analysis.Loop, dt: *const Analysis.DominatorTree) !bool {
+        _ = dt;
+        _ = func;
+        // 1. Analyze loop to check if it's a candidate
+        // We look for:
+        // - Single back-edge
+        // - Single exit block (latch)
+        // - Simple induction variable (i = i + const)
+        // - Constant trip count (optional, but easier) or just unroll by factor
+        
+        // For this simple implementation, we just check if it's a "do-while" style loop 
+        // with a latch that conditionally branches to header.
+        
+        // Check 1: Latch must terminate with conditional branch to header
+        // Find latch: a block in loop that has edge to header
+        var latch: ?*BasicBlock = null;
+        for (loop.blocks.items) |block| {
+            for (block.successors.items) |succ| {
+                if (succ == loop.header) {
+                    if (latch != null) return false; // Multiple latches not supported yet
+                    latch = block;
+                }
+            }
+        }
+        
+        if (latch == null) return false;
+        const latch_block = latch.?;
+        
+        // Check 2: Latch must be conditional branch
+        if (latch_block.terminator == null) return false;
+        
+        switch (latch_block.terminator.?) {
+            .cond_br => |cb| {
+                // One target is header, other is exit
+                if (cb.then_block != loop.header and cb.else_block != loop.header) return false;
+            },
+            else => return false, // Must be conditional branch
+        }
+        
+        // Check 3: Loop size (don't unroll huge loops)
+        var instruction_count: usize = 0;
+        for (loop.blocks.items) |block| {
+            instruction_count += block.instructions.items.len;
+        }
+        if (instruction_count > 50) return false; // Heuristic
+        
+        // Perform unrolling
+        // We will duplicate the loop body (blocks excluding latch/header if they are complex, 
+        // but typically we unroll the whole body).
+        
+        // Simplified Unrolling Strategy:
+        // Just duplicate the body blocks N-1 times and chain them.
+        // This is complex for general CFGs.
+        // Let's implement a very specific case: Single Basic Block Loop (plus header/latch logic)
+        // Header -> Body -> Latch -> Header
+        // Or Header (check) -> Body -> Latch (inc) -> Header
+        
+        // If loop has too many blocks, skip for now to avoid complexity
+        if (loop.blocks.items.len > 3) return false;
+        
+        // Check 4: Check if we can identify induction variable and its update
+        // We look for a Phi in header that is used in Latch for update
+        
+        // This is a placeholder for full unrolling implementation.
+        // Implementing full unrolling correctly requires:
+        // 1. Cloning blocks and instructions (map old regs to new regs)
+        // 2. Stitching CFG together
+        // 3. Updating Phi nodes
+        
+        // Given the complexity and potential for breakage, we'll implement a very simple case:
+        // A loop with structure: Header -> Body -> Latch -> Header
+        // where Body has no other control flow.
+        
+        // Find Body block (the one that is not Header or Latch)
+        var body_block: ?*BasicBlock = null;
+        for (loop.blocks.items) |block| {
+            if (block != loop.header and block != latch_block) {
+                if (body_block != null) return false; // More than one body block
+                body_block = block;
+            }
+        }
+        
+        // If no separate body block, maybe Header->Latch or just Header (self-loop)
+        // Let's support Header -> Latch (do-while) or Header -> Body -> Latch
+        
+        const factor = self.config.unroll_factor;
+        if (factor <= 1) return false;
+        
+        // CLONING LOGIC
+        // We need to clone the body block (factor - 1) times.
+        // And insert them between Header and Body (or Body and Latch).
+        
+        // Since we don't have a robust cloning utility yet, we will mark this as
+        // "Not Implemented" but leave the structure for future.
+        // Real implementation requires a `cloneBlock` utility in `Function` or `Optimizer`.
+        
+        return false;
     }
 
     // ========================================================================
@@ -2219,13 +2346,30 @@ pub const IROptimizer = struct {
 
     /// Eliminate common subexpressions in a function
     fn eliminateCSEInFunction(self: *Self, func: *Function) !bool {
+        // We need dominator tree for safe GVN/CSE
+        try Analysis.rebuildCFG(func);
+        var dt = try Analysis.computeDominators(self.allocator, func);
+        defer dt.deinit();
+
         var changed = false;
 
-        // Map from expression hash to register
-        var expr_map = std.AutoHashMap(u64, Register).init(self.allocator);
+        // Map from expression hash to (Register, defining_block)
+        const CSEEntry = struct {
+            reg: Register,
+            block: *BasicBlock,
+        };
+        var expr_map = std.AutoHashMap(u64, CSEEntry).init(self.allocator);
         defer expr_map.deinit();
-
+        
+        // We must visit blocks in dominance order (e.g. RPO or pre-order on DomTree)
+        // For simplicity, we just iterate blocks. But to be correct, we only reuse if:
+        // 1. Definition dominates Use
+        // Since we process all instructions, if we find a match in expr_map, we check dominance.
+        
         for (func.blocks.items) |block| {
+            // Optimization: If we process blocks in RPO, we see definitions before uses more often.
+            // But checking dominance is always required for correctness unless we scope the map.
+            
             for (block.instructions.items) |inst| {
                 // Only consider pure expressions
                 if (self.hasSideEffects(inst)) continue;
@@ -2234,26 +2378,148 @@ pub const IROptimizer = struct {
                 const hash = self.hashExpression(inst);
                 if (hash == 0) continue;
 
-                if (expr_map.get(hash)) |existing_reg| {
-                    // Found common subexpression - replace with load from existing register
-                    if (inst.result) |result| {
-                        // Mark this instruction for replacement
-                        // In a full implementation, we would replace uses of result with existing_reg
-                        _ = result;
-                        _ = existing_reg;
-                        self.stats.cse_eliminations += 1;
-                        changed = true;
+                if (expr_map.get(hash)) |entry| {
+                    // Check if the defining block dominates the current block
+                    if (dt.dominates(entry.block, block)) {
+                        // Found common subexpression - replace usage
+                        if (inst.result) |result| {
+                            // We can replace 'result' with 'entry.reg'
+                            // But we need to update all USERS of 'result' to use 'entry.reg'
+                            // Since we don't have use-def chains, this is expensive (scan all insts).
+                            // For now, let's just mark it.
+                            // To implement replacement: 
+                            // 1. Replace usages
+                            // 2. Turn this inst into a COPY (or NOP if we replace usages directly)
+                            
+                            // Let's implement usage replacement
+                            self.replaceRegisterUsage(func, result, entry.reg);
+                            
+                            // Turn current instruction into NOP
+                            // We can't easily remove it from list while iterating (unless we handle index)
+                            // So we make it a NOP or a COPY.
+                            // But we don't have COPY instruction? 
+                            // If we replaced usages, this instruction is dead (if side-effect free).
+                            // DCE will remove it later.
+                            
+                            // We should clear the result so it looks like it produces nothing?
+                            // Or just change op to Nop.
+                            // However, 'inst' is a pointer to the instruction in the list.
+                            
+                            // IMPORTANT: We need to modify the instruction in place.
+                            // Deinit old ops if needed.
+                            inst.deinit(self.allocator);
+                            inst.op = .nop;
+                            inst.result = null; // Result is no longer produced here
+                            
+                            self.stats.cse_eliminations += 1;
+                            changed = true;
+                        }
                     }
                 } else {
                     // Record this expression
                     if (inst.result) |result| {
-                        try expr_map.put(hash, result);
+                        try expr_map.put(hash, .{ .reg = result, .block = block });
                     }
                 }
             }
         }
 
         return changed;
+    }
+
+    /// Replace all usages of old_reg with new_reg in the function
+    fn replaceRegisterUsage(self: *Self, func: *Function, old_reg: Register, new_reg: Register) void {
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                self.replaceRegisterInInst(inst, old_reg, new_reg);
+            }
+            // Check terminator
+            if (block.terminator) |*term| {
+                self.replaceRegisterInTerminator(term, old_reg, new_reg);
+            }
+        }
+    }
+
+    /// Helper to replace register in instruction operands
+    fn replaceRegisterInInst(self: *Self, inst: *Instruction, old_reg: Register, new_reg: Register) void {
+        _ = self;
+        switch (inst.op) {
+            .add, .sub, .mul, .div, .mod, .pow,
+            .bit_and, .bit_or, .bit_xor, .shl, .shr,
+            .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship,
+            .and_, .or_, .concat => |*op| {
+                if (op.lhs.id == old_reg.id) op.lhs = new_reg;
+                if (op.rhs.id == old_reg.id) op.rhs = new_reg;
+            },
+            .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type,
+            .channel_close, .await_ => |*op| {
+                if (op.operand.id == old_reg.id) op.operand = new_reg;
+            },
+            .channel_recv => |*op| {
+                if (op.channel.id == old_reg.id) op.channel = new_reg;
+            },
+            .cast => |*op| {
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .type_check => |*op| {
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .box => |*op| {
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .unbox => |*op| {
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .load => |*op| {
+                if (op.ptr.id == old_reg.id) op.ptr = new_reg;
+            },
+            .store => |*op| {
+                if (op.ptr.id == old_reg.id) op.ptr = new_reg;
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .call => |*op| {
+                // args is []const Register, we need to cast to mutable to update in place?
+                // Or reallocation? The args are usually in an array allocated by allocator.
+                // It is const in the struct definition.
+                // We strictly shouldn't modify const data.
+                // But this is an optimizer, rewriting code.
+                // We cast away const for optimization.
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
+            .phi => |*op| {
+                const inc_ptr = @constCast(op.incoming.ptr);
+                for (0..op.incoming.len) |i| {
+                    if (inc_ptr[i].value.id == old_reg.id) inc_ptr[i].value = new_reg;
+                }
+            },
+            // Handle other ops...
+            else => {},
+        }
+    }
+
+    /// Helper to replace register in terminator
+    fn replaceRegisterInTerminator(self: *Self, term: *Terminator, old_reg: Register, new_reg: Register) void {
+        _ = self;
+        switch (term.*) {
+            .ret => |*val| {
+                if (val.*) |*v| {
+                    if (v.id == old_reg.id) v.* = new_reg;
+                }
+            },
+            .cond_br => |*cb| {
+                if (cb.cond.id == old_reg.id) cb.cond = new_reg;
+            },
+            .switch_ => |*sw| {
+                if (sw.value.id == old_reg.id) sw.value = new_reg;
+            },
+            .throw => |*val| {
+                if (val.id == old_reg.id) val.* = new_reg;
+            },
+            else => {},
+        }
     }
 
     /// Compute a hash for an expression (for CSE)

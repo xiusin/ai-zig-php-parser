@@ -1118,6 +1118,7 @@ pub const CodeGenerator = struct {
 
             // Debug
             .debug_print => |op| try self.buildDebugPrint(op.operand),
+            .nop => null,
         };
 
         // Store result in register map if instruction has a result

@@ -808,6 +808,15 @@ pub const AOTCompiler = struct {
         }
     }
 
+    /// Set source code manually
+    pub fn setSource(self: *Self, source: []const u8) !void {
+        if (self.source) |s| {
+            self.allocator.free(s);
+        }
+        self.source = try self.allocator.dupe(u8, source);
+        try self.diagnostics.setSource(self.source.?);
+    }
+
     /// Set pre-parsed AST nodes and string table
     /// This is used when the parser is invoked externally (e.g., from main.zig)
     pub fn setAST(self: *Self, nodes: []const IRGeneratorMod.Node, string_table: []const []const u8, root_index: u32) !void {
