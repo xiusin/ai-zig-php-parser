@@ -268,6 +268,12 @@ fn intersect(b1: *BasicBlock, b2: *BasicBlock, idoms: []?*BasicBlock, rpo_indice
 
 /// Rebuild CFG edges based on terminators
 pub fn rebuildCFG(func: *Function) !void {
+    // Reassign indices to ensure they are compact and match array order
+    // This is crucial if blocks were removed (e.g. by DCE)
+    for (func.blocks.items, 0..) |block, i| {
+        block.index = @intCast(i);
+    }
+
     // Clear existing edges
     for (func.blocks.items) |block| {
         block.predecessors.clearRetainingCapacity();

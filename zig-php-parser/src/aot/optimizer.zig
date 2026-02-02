@@ -113,7 +113,7 @@ pub const PassConfig = struct {
             .licm = false,
             .strength_reduction = false,
             .mem2reg = true,
-            .loop_unroll = false,
+            .loop_unroll = true,
             .max_iterations = 2,
         };
     }
@@ -335,6 +335,18 @@ pub const IROptimizer = struct {
 
             if (self.config.strength_reduction) {
                 if (try self.runStrengthReduction(module)) {
+                    changed = true;
+                }
+            }
+
+            if (self.config.licm) {
+                if (try self.runLICM(module)) {
+                    changed = true;
+                }
+            }
+
+            if (self.config.loop_unroll) {
+                if (try self.runLoopUnroll(module)) {
                     changed = true;
                 }
             }
@@ -680,104 +692,275 @@ pub const IROptimizer = struct {
     // Loop Unrolling
     // ========================================================================
 
+    /// Run Loop Unrolling on the entire module
+    fn runLoopUnroll(self: *Self, module: *Module) !bool {
+        var changed = false;
+        for (module.functions.items) |func| {
+            if (try self.runLoopUnrollInFunction(func)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// Run Loop Unrolling on a function
+    fn runLoopUnrollInFunction(self: *Self, func: *Function) !bool {
+        var changed = false;
+        
+        // We need dominator tree for loop detection
+        // Note: Rebuild CFG first to be safe
+        try Analysis.rebuildCFG(func);
+        var dt = try Analysis.computeDominators(self.allocator, func);
+        defer dt.deinit();
+        
+        var loop_info = try Analysis.computeLoops(self.allocator, func, &dt);
+        defer loop_info.deinit();
+        
+        // Iterate loops
+        // Since unrolling modifies CFG, we should be careful.
+        // Safe approach: unroll one loop per pass, or handle carefully.
+        // For now, let's just try to unroll loops, and if we unroll one, we stop for this pass.
+        for (loop_info.loops.items) |loop| {
+             if (try self.unrollLoop(func, loop, &dt)) {
+                 changed = true;
+                 // Rebuild CFG to ensure successors/predecessors are correct for next passes
+                 try Analysis.rebuildCFG(func);
+                 break; // CFG changed, stop processing loops
+             }
+        }
+        
+        return changed;
+    }
+
     /// Try to unroll a loop
     fn unrollLoop(self: *Self, func: *Function, loop: *Analysis.Loop, dt: *const Analysis.DominatorTree) !bool {
         _ = dt;
-        _ = func;
+        
         // 1. Analyze loop to check if it's a candidate
-        // We look for:
-        // - Single back-edge
-        // - Single exit block (latch)
-        // - Simple induction variable (i = i + const)
-        // - Constant trip count (optional, but easier) or just unroll by factor
+        // We verify it has a single latch that conditionally branches to header (do-while style)
+        // OR we can handle standard while loops if we are careful.
+        // For now, let's stick to the structure:
+        // Latch -> Header (Back Edge)
         
-        // For this simple implementation, we just check if it's a "do-while" style loop 
-        // with a latch that conditionally branches to header.
-        
-        // Check 1: Latch must terminate with conditional branch to header
-        // Find latch: a block in loop that has edge to header
         var latch: ?*BasicBlock = null;
         for (loop.blocks.items) |block| {
             for (block.successors.items) |succ| {
                 if (succ == loop.header) {
-                    if (latch != null) return false; // Multiple latches not supported yet
+                    if (latch != null) {
+                        // std.debug.print("Multiple latches found\n", .{});
+                        return false; 
+                    }
                     latch = block;
                 }
             }
         }
         
-        if (latch == null) return false;
+        if (latch == null) {
+            // std.debug.print("No latch found. Loop blocks: {d}\n", .{loop.blocks.items.len});
+            return false;
+        }
         const latch_block = latch.?;
         
-        // Check 2: Latch must be conditional branch
-        if (latch_block.terminator == null) return false;
-        
-        switch (latch_block.terminator.?) {
-            .cond_br => |cb| {
-                // One target is header, other is exit
-                if (cb.then_block != loop.header and cb.else_block != loop.header) return false;
-            },
-            else => return false, // Must be conditional branch
-        }
-        
-        // Check 3: Loop size (don't unroll huge loops)
+        // Check loop size
         var instruction_count: usize = 0;
         for (loop.blocks.items) |block| {
             instruction_count += block.instructions.items.len;
         }
-        if (instruction_count > 50) return false; // Heuristic
+        if (instruction_count > 50) {
+            // std.debug.print("Loop too large: {d}\n", .{instruction_count});
+            return false;
+        }
         
-        // Perform unrolling
-        // We will duplicate the loop body (blocks excluding latch/header if they are complex, 
-        // but typically we unroll the whole body).
+        const factor = self.config.unroll_factor;
+        if (factor <= 1) {
+            // std.debug.print("Unroll factor too small: {d}\n", .{factor});
+            return false;
+        }
         
-        // Simplified Unrolling Strategy:
-        // Just duplicate the body blocks N-1 times and chain them.
-        // This is complex for general CFGs.
-        // Let's implement a very specific case: Single Basic Block Loop (plus header/latch logic)
-        // Header -> Body -> Latch -> Header
-        // Or Header (check) -> Body -> Latch (inc) -> Header
-        
-        // If loop has too many blocks, skip for now to avoid complexity
-        if (loop.blocks.items.len > 3) return false;
-        
-        // Check 4: Check if we can identify induction variable and its update
-        // We look for a Phi in header that is used in Latch for update
-        
-        // This is a placeholder for full unrolling implementation.
-        // Implementing full unrolling correctly requires:
-        // 1. Cloning blocks and instructions (map old regs to new regs)
-        // 2. Stitching CFG together
-        // 3. Updating Phi nodes
-        
-        // Given the complexity and potential for breakage, we'll implement a very simple case:
-        // A loop with structure: Header -> Body -> Latch -> Header
-        // where Body has no other control flow.
-        
-        // Find Body block (the one that is not Header or Latch)
-        var body_block: ?*BasicBlock = null;
-        for (loop.blocks.items) |block| {
-            if (block != loop.header and block != latch_block) {
-                if (body_block != null) return false; // More than one body block
-                body_block = block;
+        // Map to track register renames across iterations (Original -> Latest)
+        var reg_map = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer reg_map.deinit();
+
+        // Identify Header PHIs and their back-edge inputs
+        // Map: Header_PHI_Reg_ID -> Back_Edge_Input_Reg_ID
+        var phi_back_edge_map = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer phi_back_edge_map.deinit();
+
+        for (loop.header.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                for (inst.op.phi.incoming) |inc| {
+                    if (inc.block == latch_block) {
+                        try phi_back_edge_map.put(inst.result.?.id, inc.value.id);
+                        break;
+                    }
+                }
             }
         }
         
-        // If no separate body block, maybe Header->Latch or just Header (self-loop)
-        // Let's support Header -> Latch (do-while) or Header -> Body -> Latch
+        // We will chain: Latch(Original) -> Clone1 -> Clone2 -> ... -> Clone(K-1) -> Header(Original)
+        // The Latch(Original) currently points to Header. We will redirect it to Clone1.
         
-        const factor = self.config.unroll_factor;
-        if (factor <= 1) return false;
+        var current_predecessor = latch_block;
         
-        // CLONING LOGIC
-        // We need to clone the body block (factor - 1) times.
-        // And insert them between Header and Body (or Body and Latch).
+        // We need to order blocks for cloning.
+        // Simple heuristic: Header first, then others. 
+        // If we just iterate loop.blocks, we might visit in wrong order, but since we are mapping
+        // based on "latest", and definitions usually dominate uses, 
+        // and we handle PHIs specially, topological sort of body is best.
+        // Since we assume simple loops, let's just use the order in loop.blocks but ensure Header is processed.
         
-        // Since we don't have a robust cloning utility yet, we will mark this as
-        // "Not Implemented" but leave the structure for future.
-        // Real implementation requires a `cloneBlock` utility in `Function` or `Optimizer`.
+        // Perform unrolling
+        for (1..factor) |k| {
+            // 1. Resolve Header PHIs for this iteration
+            // The "PHI" value in this iteration is the value flowing from the previous iteration's latch.
+            var phi_it = phi_back_edge_map.iterator();
+            while (phi_it.next()) |entry| {
+                const phi_id = entry.key_ptr.*;
+                const input_id = entry.value_ptr.*;
+                
+                // Get the remapped input from previous iteration (or original if first iter)
+                const resolved_input = reg_map.get(input_id) orelse input_id;
+                
+                // Map the PHI result in this iteration to that input
+                try reg_map.put(phi_id, resolved_input);
+            }
+            
+            // 2. Clone blocks
+            var first_cloned_block: ?*BasicBlock = null;
+            var last_cloned_block: ?*BasicBlock = null;
+            
+            // We need to map OriginalBlock -> NewBlock for this iteration to fix internal edges
+            var block_map = std.AutoHashMap(*BasicBlock, *BasicBlock).init(self.allocator);
+            defer block_map.deinit();
+            
+            // First pass: Create blocks
+            for (loop.blocks.items) |block| {
+                const suffix = try std.fmt.allocPrint(self.allocator, "_unroll_{d}_{s}", .{k, block.label});
+                defer self.allocator.free(suffix);
+                const new_block = try func.createBlock(suffix);
+                try block_map.put(block, new_block);
+                
+                if (block == loop.header) first_cloned_block = new_block;
+                if (block == latch_block) last_cloned_block = new_block;
+            }
+            
+            // Second pass: Clone instructions and fix edges
+            for (loop.blocks.items) |block| {
+                const new_block = block_map.get(block).?;
+                
+                // Clone instructions
+                for (block.instructions.items) |inst| {
+                    // Skip PHIs in Header (we mapped them already)
+                    if (block == loop.header and inst.op == .phi) continue;
+                    
+                    if (try self.cloneAndRemapInstruction(inst, &reg_map, &func.next_register_id)) |new_inst| {
+                        try new_block.appendInstruction(new_inst);
+                    }
+                }
+                
+                // Clone terminator
+                if (block.terminator) |term| {
+                    var new_term = term;
+                    self.remapRegistersInTerminator(&new_term, &reg_map);
+                    
+                    // Remap branch targets
+                    switch (new_term) {
+                        .br => |*target| {
+                            if (block_map.get(target.*)) |new_target| {
+                                target.* = new_target;
+                            }
+                        },
+                        .cond_br => |*cb| {
+                            if (block_map.get(cb.then_block)) |new_target| cb.then_block = new_target;
+                            if (block_map.get(cb.else_block)) |new_target| cb.else_block = new_target;
+                        },
+                        // Handle switch if needed
+                        else => {},
+                    }
+                    new_block.terminator = new_term;
+                }
+            }
+            
+            // Link previous latch to this iteration's header
+            // The previous latch (current_predecessor) terminator needs to be updated.
+            // It was pointing to 'Header' (Original). Now point to 'first_cloned_block'.
+            
+            if (current_predecessor.terminator) |*term| {
+                switch (term.*) {
+                    .br => |*target| {
+                        if (target.* == loop.header) target.* = first_cloned_block.?;
+                    },
+                    .cond_br => |*cb| {
+                        if (cb.then_block == loop.header) cb.then_block = first_cloned_block.?;
+                        if (cb.else_block == loop.header) cb.else_block = first_cloned_block.?;
+                    },
+                    else => {},
+                }
+            }
+            
+            current_predecessor = last_cloned_block.?;
+        }
         
-        return false;
+        // 3. Fix up the final latch to point to Original Header
+        // `current_predecessor` is now `Latch_{last}`.
+        // Its terminator already points to `Header` (because we copied from Original Latch and didn't remap that edge since Header wasn't in `block_map` for that iter? Wait).
+        // In the loop above: `block_map` only contained blocks for *current* iteration.
+        // `Header` (Original) was NOT in `block_map`.
+        // So `if (block_map.get(target)) ...` would fail for Header, preserving the link to Original Header.
+        // So `current_predecessor` (Latch_{last}) ALREADY points to Original Header. Correct.
+        
+        // 4. Update Original Header PHIs to take input from `current_predecessor` instead of `latch_block`.
+        for (loop.header.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                // The phi incoming values from latch need to be updated.
+                // The incoming VALUE should be what `current_predecessor` produces.
+                // This is `reg_map.get(original_incoming_id)`.
+                
+                // We need to modify the `PhiIncoming` struct.
+                // `inst.op.phi.incoming` is a slice. We can modify in place.
+                const inc_ptr = @constCast(inst.op.phi.incoming.ptr);
+                for (0..inst.op.phi.incoming.len) |i| {
+                    if (inc_ptr[i].block == latch_block) {
+                        // Update block
+                        inc_ptr[i].block = current_predecessor;
+                        // Update value
+                        const old_val_id = inc_ptr[i].value.id;
+                        if (reg_map.get(old_val_id)) |new_id| {
+                            inc_ptr[i].value.id = new_id;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Rebuild CFG info (preds/succs) since we messed with pointers
+        // Ideally we should update incrementally, but full rebuild is safer.
+        // Analysis.rebuildCFG(func); // Call this after optimization pass
+        
+        self.stats.loops_unrolled += 1;
+        return true;
+    }
+
+    /// Remap registers in a terminator
+    fn remapRegistersInTerminator(self: *Self, term: *Terminator, reg_map: *std.AutoHashMap(u32, u32)) void {
+        _ = self;
+        switch (term.*) {
+            .ret => |*val| {
+                if (val.*) |*v| {
+                    if (reg_map.get(v.id)) |new_id| v.id = new_id;
+                }
+            },
+            .cond_br => |*cb| {
+                if (reg_map.get(cb.cond.id)) |new_id| cb.cond.id = new_id;
+            },
+            .switch_ => |*sw| {
+                if (reg_map.get(sw.value.id)) |new_id| sw.value.id = new_id;
+            },
+            .throw => |*val| {
+                if (reg_map.get(val.id)) |new_id| val.id = new_id;
+            },
+            else => {},
+        }
     }
 
     // ========================================================================
