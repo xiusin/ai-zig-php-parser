@@ -362,6 +362,294 @@ pub const IROptimizer = struct {
                     changed = true;
                 }
             }
+
+            if (self.config.licm) {
+                if (try self.runLICMInFunction(func)) {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Loop Invariant Code Motion (LICM)
+    // ========================================================================
+
+    /// Run LICM on the entire module
+    fn runLICM(self: *Self, module: *Module) !bool {
+        var changed = false;
+
+        for (module.functions.items) |func| {
+            if (try self.runLICMInFunction(func)) {
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    /// Run LICM on a single function
+    pub fn runLICMInFunction(self: *Self, func: *Function) !bool {
+        // 0. Rebuild CFG
+        try Analysis.rebuildCFG(func);
+
+        // 1. Compute Dominators
+        var dt = try Analysis.computeDominators(self.allocator, func);
+        defer dt.deinit();
+
+        // 2. Compute Loops
+        var loop_info = try Analysis.computeLoops(self.allocator, func, &dt);
+        defer loop_info.deinit();
+
+        if (loop_info.loops.items.len == 0) return false;
+
+        var changed = false;
+
+        // 3. Optimize Loops
+        // We iterate top-level loops. optimizeLoop will handle sub-loops recursively if needed,
+        // or we can just iterate all loops if we flatten them. 
+        // Analysis returns hierarchy. Let's process bottom-up (inner loops first) usually better,
+        // but for basic LICM, processing any order is fine as long as we hoist to immediate pre-header.
+        
+        for (loop_info.loops.items) |loop| {
+            if (try self.optimizeLoop(func, loop, &dt)) {
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    /// Optimize a single loop (and its sub-loops)
+    fn optimizeLoop(self: *Self, func: *Function, loop: *Analysis.Loop, dt: *const Analysis.DominatorTree) !bool {
+        var changed = false;
+
+        // Process sub-loops first (bottom-up)
+        for (loop.sub_loops.items) |sub_loop| {
+            if (try self.optimizeLoop(func, sub_loop, dt)) {
+                changed = true;
+            }
+        }
+
+        // Find loop invariants
+        // An instruction is invariant if:
+        // 1. It is side-effect free
+        // 2. All operands are loop-invariant (constants or defined outside the loop)
+        
+        var invariant_instrs = std.ArrayListUnmanaged(*Instruction){};
+        defer invariant_instrs.deinit(self.allocator);
+
+        // Iterate over all blocks in the loop
+        for (loop.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (self.isLoopInvariant(inst, loop)) {
+                    try invariant_instrs.append(self.allocator, inst);
+                }
+            }
+        }
+
+        if (invariant_instrs.items.len == 0) return changed;
+
+        // Move invariants to pre-header
+        if (invariant_instrs.items.len > 0) {
+            const pre_header = try self.getOrCreatePreHeader(func, loop, dt);
+            
+            for (invariant_instrs.items) |inst| {
+                // Remove from original block
+                // We need to find which block it belongs to.
+                // Since we don't store parent pointer in Instruction, we search.
+                // Optimization: isLoopInvariant could return the block too.
+                // Or we just search again.
+                
+                var removed = false;
+                for (loop.blocks.items) |block| {
+                    if (self.removeInstructionFromBlock(block, inst)) {
+                        removed = true;
+                        break;
+                    }
+                }
+
+                if (removed) {
+                    // Insert into pre-header (before terminator)
+                    // If pre-header is empty (except terminator), just append.
+                    // Pre-header should be a new block or a unique predecessor.
+                    
+                    // We need to insert at the end of instructions list, but before terminator?
+                    // BasicBlock.instructions does not include terminator.
+                    try pre_header.instructions.append(self.allocator, inst);
+                    changed = true;
+                }
+            }
+        }
+
+        return changed;
+    }
+
+    /// Check if instruction is loop invariant
+    fn isLoopInvariant(self: *Self, inst: *Instruction, loop: *Analysis.Loop) bool {
+        // 1. Must be side-effect free
+        if (self.hasSideEffects(inst)) return false;
+
+        // 2. Operands must be invariant
+        return self.areOperandsInvariant(inst, loop);
+    }
+
+    /// Check if all operands of an instruction are invariant
+    fn areOperandsInvariant(self: *Self, inst: *Instruction, loop: *Analysis.Loop) bool {
+        switch (inst.op) {
+            .add, .sub, .mul, .div, .mod, .pow => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
+            .bit_and, .bit_or, .bit_xor, .shl, .shr => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
+            .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
+            .and_, .or_, .concat => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
+            .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type => |op| return self.isInvariant(op.operand, loop),
+            .load => |op| {
+                // Load is invariant if pointer is invariant AND memory is not modified in loop.
+                // For now, assume any store invalidates loads (conservative).
+                // Or better: check if there are any stores in the loop.
+                if (!self.isInvariant(op.ptr, loop)) return false;
+                if (self.hasStoreInLoop(loop)) return false; 
+                return true;
+            },
+            .cast => |op| return self.isInvariant(op.value, loop),
+            .type_check => |op| return self.isInvariant(op.value, loop),
+            .box => |op| return self.isInvariant(op.value, loop),
+            .unbox => |op| return self.isInvariant(op.value, loop),
+            // Constants are always invariant
+            .const_int, .const_float, .const_bool, .const_string, .const_null => return true,
+            // Allocas are invariant (address is constant)
+            .alloca => return true, 
+            else => return false, // Conservative
+        }
+    }
+
+    /// Check if a register is defined outside the loop (or is constant)
+    fn isInvariant(self: *Self, reg: Register, loop: *Analysis.Loop) bool {
+        _ = self;
+        // Find definition of register
+        // Since we don't have use-def chains, we have to search blocks.
+        // Optimization: If register ID is very small (params), it's invariant.
+        
+        // Scan loop blocks to see if they define this register
+        for (loop.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |res| {
+                    if (res.id == reg.id) return false; // Defined inside loop
+                }
+            }
+            // Check Phis? (Phis in header are defined "inside" loop logic usually)
+            // But Phis at header might take values from outside.
+            // However, a Phi in a loop header depends on back-edge, so it varies.
+            // So Phi result is NOT invariant.
+        }
+        
+        return true; // Defined outside
+    }
+
+    /// Check if loop contains any store instructions
+    fn hasStoreInLoop(self: *Self, loop: *Analysis.Loop) bool {
+        _ = self;
+        for (loop.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.op == .store) return true;
+                // Calls also modify memory
+                if (inst.op == .call or inst.op == .call_indirect) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Remove instruction from block
+    fn removeInstructionFromBlock(self: *Self, block: *BasicBlock, inst: *Instruction) bool {
+        _ = self;
+        for (block.instructions.items, 0..) |it, i| {
+            if (it == inst) {
+                _ = block.instructions.orderedRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Get or create a pre-header for the loop
+    fn getOrCreatePreHeader(self: *Self, func: *Function, loop: *Analysis.Loop, dt: *const Analysis.DominatorTree) !*BasicBlock {
+        _ = dt;
+        const header = loop.header;
+        
+        // Check if there is already a unique predecessor that dominates header and is not in loop
+        // And is not a back-edge source (which is in loop).
+        // Ideally, a pre-header is a block that has only 'header' as successor, 
+        // and 'header' has only 'pre-header' as non-loop predecessor.
+        
+        // Count non-loop predecessors
+        var non_loop_preds = std.ArrayListUnmanaged(*BasicBlock){};
+        defer non_loop_preds.deinit(self.allocator);
+        
+        for (header.predecessors.items) |pred| {
+            if (!loop.contains(pred)) {
+                try non_loop_preds.append(self.allocator, pred);
+            }
+        }
+        
+        if (non_loop_preds.items.len == 1) {
+            const pred = non_loop_preds.items[0];
+            // Check if this pred flows ONLY to header
+            if (pred.successors.items.len == 1 and pred.successors.items[0] == header) {
+                return pred; // Found valid pre-header
+            }
+        }
+        
+        // Create new pre-header
+        const pre_header = try func.createBlock("preheader");
+        
+        // Redirect non-loop predecessors to pre-header
+        for (non_loop_preds.items) |pred| {
+            try self.redirectEdge(pred, header, pre_header);
+        }
+        
+        // Connect pre-header to header
+        pre_header.terminator = .{ .br = header };
+        try Analysis.rebuildCFG(func); // Update edges
+        
+        return pre_header;
+    }
+
+    /// Redirect an edge from->old_to to from->new_to
+    fn redirectEdge(self: *Self, from: *BasicBlock, old_to: *BasicBlock, new_to: *BasicBlock) !void {
+        if (from.terminator) |*term| {
+            switch (term.*) {
+                .br => |target| {
+                    if (target == old_to) term.br = new_to;
+                },
+                .cond_br => |*cb| {
+                    if (cb.then_block == old_to) cb.then_block = new_to;
+                    if (cb.else_block == old_to) cb.else_block = new_to;
+                },
+                .switch_ => |*sw| {
+                    var modified = false;
+                    for (sw.cases) |case| {
+                        if (case.block == old_to) {
+                            modified = true;
+                            break;
+                        }
+                    }
+                    
+                    if (modified) {
+                        const new_cases = try self.allocator.alloc(Terminator.SwitchCase, sw.cases.len);
+                        for (sw.cases, 0..) |case, i| {
+                            new_cases[i] = case;
+                            if (case.block == old_to) {
+                                new_cases[i].block = new_to;
+                            }
+                        }
+                        // We should free old cases if we owned them, but they are const.
+                        // Ideally we track ownership.
+                        sw.cases = new_cases;
+                    }
+
+                    if (sw.default == old_to) sw.default = new_to;
+                },
+                else => {},
+            }
         }
     }
 

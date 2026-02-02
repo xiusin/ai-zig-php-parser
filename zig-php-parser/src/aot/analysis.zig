@@ -299,3 +299,195 @@ fn addEdge(from: *BasicBlock, to: *BasicBlock) !void {
     try from.addSuccessor(to);
     try to.addPredecessor(from);
 }
+
+// ============================================================================
+// Loop Analysis
+// ============================================================================
+
+/// Loop information
+pub const Loop = struct {
+    /// Loop header (entry point)
+    header: *BasicBlock,
+    /// Blocks contained in the loop
+    blocks: std.ArrayListUnmanaged(*BasicBlock),
+    /// Sub-loops nested within this loop
+    sub_loops: std.ArrayListUnmanaged(*Loop),
+    /// Parent loop (null for top-level loops)
+    parent: ?*Loop,
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator, header: *BasicBlock) Self {
+        _ = allocator;
+        return .{
+            .header = header,
+            .blocks = .{},
+            .sub_loops = .{},
+            .parent = null,
+        };
+    }
+
+    pub fn deinit(self: *Self, allocator: Allocator) void {
+        self.blocks.deinit(allocator);
+        for (self.sub_loops.items) |sub_loop| {
+            sub_loop.deinit(allocator);
+            allocator.destroy(sub_loop);
+        }
+        self.sub_loops.deinit(allocator);
+    }
+
+    /// Check if block is in this loop
+    pub fn contains(self: *const Self, block: *BasicBlock) bool {
+        for (self.blocks.items) |b| {
+            if (b == block) return true;
+        }
+        return false;
+    }
+};
+
+/// Result of loop analysis
+pub const LoopInfo = struct {
+    allocator: Allocator,
+    /// Top-level loops
+    loops: std.ArrayListUnmanaged(*Loop),
+    /// Map from header block to Loop
+    loop_map: std.AutoHashMap(*BasicBlock, *Loop),
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator) Self {
+        return .{
+            .allocator = allocator,
+            .loops = .{},
+            .loop_map = std.AutoHashMap(*BasicBlock, *Loop).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        for (self.loops.items) |loop| {
+            loop.deinit(self.allocator);
+            self.allocator.destroy(loop);
+        }
+        self.loops.deinit(self.allocator);
+        self.loop_map.deinit();
+    }
+};
+
+/// Compute loop information for a function
+pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const DominatorTree) !LoopInfo {
+    var info = LoopInfo.init(allocator);
+    errdefer info.deinit();
+
+    // 1. Identify back edges
+    for (func.blocks.items) |block| {
+        for (block.successors.items) |succ| {
+            // Check if successor dominates predecessor (back edge)
+            if (dt.dominates(succ, block)) {
+                // Found loop header `succ` and back edge `block -> succ`
+                
+                // Get or create loop for this header
+                var loop_ptr: *Loop = undefined;
+                if (info.loop_map.get(succ)) |existing| {
+                    loop_ptr = existing;
+                } else {
+                    const new_loop = try allocator.create(Loop);
+                    new_loop.* = Loop.init(allocator, succ);
+                    try info.loop_map.put(succ, new_loop);
+                    // We'll organize hierarchy later, initially treat all as top-level or collect them
+                    // For now, let's just track unique headers
+                    loop_ptr = new_loop;
+                }
+
+                // Add nodes to loop
+                // The natural loop of a back edge A->B consists of B plus
+                // the set of nodes that can reach A without going through B.
+                try addLoopBlocks(allocator, loop_ptr, block, succ);
+            }
+        }
+    }
+
+    // 2. Build loop hierarchy (nesting)
+    // If loop A's header is in loop B, then A is nested in B (unless they share header)
+    // If they share header, they are merged or one is part of another. 
+    // In our logic above, one header = one loop struct.
+    // So we just check if loop A's header is contained in loop B's blocks.
+    
+    // We need to iterate carefully. Let's collect all loops first.
+    var all_loops = std.ArrayListUnmanaged(*Loop){};
+    defer all_loops.deinit(allocator);
+    
+    var it = info.loop_map.iterator();
+    while (it.next()) |entry| {
+        try all_loops.append(allocator, entry.value_ptr.*);
+    }
+
+    // Sort loops by size (number of blocks) - usually inner loops are smaller?
+    // Or just strictly check containment.
+    
+    for (all_loops.items) |loop| {
+        var parent_candidate: ?*Loop = null;
+        
+        // Find the "nearest" enclosing loop
+        // A loop L1 is nested in L2 if L1.header is in L2.blocks AND L1.header != L2.header
+        
+        for (all_loops.items) |potential_parent| {
+            if (loop == potential_parent) continue;
+            
+            if (potential_parent.contains(loop.header)) {
+                // Found a container. Is it the tightest one?
+                // If we already have a parent, check if potential_parent is nested in current parent
+                if (parent_candidate) |curr_parent| {
+                    if (curr_parent.contains(potential_parent.header)) {
+                        // potential_parent is tighter (nested inside curr_parent)
+                        parent_candidate = potential_parent;
+                    }
+                } else {
+                    parent_candidate = potential_parent;
+                }
+            }
+        }
+        
+        if (parent_candidate) |parent| {
+            loop.parent = parent;
+            try parent.sub_loops.append(allocator, loop);
+        } else {
+            // Top-level loop
+            try info.loops.append(allocator, loop);
+        }
+    }
+
+    return info;
+}
+
+/// Helper to add blocks to a loop (Reverse DFS from back-edge source)
+fn addLoopBlocks(allocator: Allocator, loop: *Loop, back_edge_source: *BasicBlock, header: *BasicBlock) !void {
+    // If header is not in loop yet, add it
+    if (!loop.contains(header)) {
+        try loop.blocks.append(allocator, header);
+    }
+    
+    // If back_edge_source is header (self-loop), we are done
+    if (back_edge_source == header) return;
+
+    // Worklist for reverse traversal
+    var worklist = std.ArrayListUnmanaged(*BasicBlock){};
+    defer worklist.deinit(allocator);
+
+    try worklist.append(allocator, back_edge_source);
+    if (!loop.contains(back_edge_source)) {
+        try loop.blocks.append(allocator, back_edge_source);
+    }
+
+    while (worklist.items.len > 0) {
+        const block = worklist.pop().?;
+        for (block.predecessors.items) |pred| {
+            if (pred == header) continue; // Don't go past header
+            
+            if (!loop.contains(pred)) {
+                try loop.blocks.append(allocator, pred);
+                try worklist.append(allocator, pred);
+            }
+        }
+    }
+}
+
