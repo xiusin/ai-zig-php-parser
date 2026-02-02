@@ -73,6 +73,7 @@ pub const CompileError = CompilerMod.CompileError;
 pub const CompileOptions = CompilerMod.CompileOptions;
 pub const OptimizeLevel = CompilerMod.OptimizeLevel;
 pub const Target = CompilerMod.Target;
+pub const LoweringPolicy = CompilerMod.LoweringPolicy;
 pub const supported_targets = CompilerMod.supported_targets;
 pub const listTargets = CompilerMod.listTargets;
 pub const AOTSyntaxMode = CompilerMod.SyntaxMode;

@@ -39,6 +39,12 @@ pub const NativeLinkerConfig = struct {
     strip_symbols: bool = false,
     /// 详细输出
     verbose: bool = false,
+    lowering_policy: LoweringPolicy = LoweringPolicy.@"error",
+};
+
+pub const LoweringPolicy = enum {
+    warn,
+    @"error",
 };
 
 /// 目标平台
@@ -95,6 +101,18 @@ pub const NativeLinker = struct {
     current_reg_is_value: ?[]bool,
 
     const Self = @This();
+
+    fn handleUnsupportedOp(self: *Self, inst: *const IR.Instruction) !void {
+        const tag = std.meta.activeTag(inst.op);
+        const op_name = @tagName(tag);
+        switch (self.config.lowering_policy) {
+            .warn => self.diagnostics.reportWarning(inst.location, "AOT lowering 未实现 IR op: {s}", .{op_name}),
+            .@"error" => {
+                self.diagnostics.reportError(inst.location, "AOT lowering 未实现 IR op: {s}", .{op_name});
+                return error.UnsupportedIrOp;
+            },
+        }
+    }
 
     /// 寄存器使用信息（用于生命周期分析）
     const RegUseInfo = struct {
@@ -2549,7 +2567,7 @@ pub const NativeLinker = struct {
                 try writer.print("    runtime.channel_close(reg_{d});\n", .{op.operand.id});
             },
             .select_ => {
-                // select语句需要更复杂的代码生成
+                try self.handleUnsupportedOp(inst);
                 try writer.writeAll("    // TODO: select statement\n");
             },
             .await_ => |op| {
@@ -2558,7 +2576,7 @@ pub const NativeLinker = struct {
                 }
             },
             else => {
-                // 其他指令暂时跳过
+                try self.handleUnsupportedOp(inst);
             },
         }
     }
@@ -2867,8 +2885,9 @@ pub const NativeLinker = struct {
                 try code.appendSlice(self.allocator, instr);
             },
             else => {
-                // 其他指令暂时跳过
-                const comment = try std.fmt.allocPrint(self.allocator, "        // TODO: {s}\n", .{@tagName(@as(std.meta.Tag(IR.Instruction.Op), inst.op))});
+                try self.handleUnsupportedOp(inst);
+                const tag = std.meta.activeTag(inst.op);
+                const comment = try std.fmt.allocPrint(self.allocator, "        // TODO: {s}\n", .{@tagName(tag)});
                 defer self.allocator.free(comment);
                 try code.appendSlice(self.allocator, comment);
             },

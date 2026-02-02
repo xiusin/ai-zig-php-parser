@@ -40,6 +40,7 @@ fn printUsage() void {
         \\  --dump-ir              Dump generated IR for debugging
         \\  --dump-ast             Dump parsed AST for debugging
         \\  --verbose              Verbose output during compilation
+        \\  --lowering-policy=<p>  Lowering policy for unsupported IR ops: warn, error (default: error)
         \\  --list-targets         List all supported target platforms
         \\
         \\Execution Modes:
@@ -177,6 +178,15 @@ pub fn main() !void {
             aot_options.dump_ast = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             aot_options.verbose = true;
+        } else if (std.mem.startsWith(u8, arg, "--lowering-policy=")) {
+            const policy_str = arg["--lowering-policy=".len..];
+            if (aot.LoweringPolicy.fromString(policy_str)) |policy| {
+                aot_options.lowering_policy = policy;
+            } else {
+                std.debug.print("Error: Invalid lowering policy '{s}'\n", .{policy_str});
+                std.debug.print("Valid policies: warn, error\n", .{});
+                return;
+            }
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {
             const mode_str = arg[7..];
             if (parseExecutionMode(mode_str)) |mode| {

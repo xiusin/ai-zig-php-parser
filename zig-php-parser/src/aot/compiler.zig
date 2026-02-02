@@ -115,6 +115,24 @@ const IRGeneratorMod = @import("ir_generator.zig");
 // Compile Options
 // ============================================================================
 
+pub const LoweringPolicy = enum {
+    warn,
+    @"error",
+
+    pub fn fromString(str: []const u8) ?LoweringPolicy {
+        if (std.mem.eql(u8, str, "warn")) return .warn;
+        if (std.mem.eql(u8, str, "error")) return .@"error";
+        return null;
+    }
+
+    pub fn toString(self: LoweringPolicy) []const u8 {
+        return switch (self) {
+            .warn => "warn",
+            .@"error" => "error",
+        };
+    }
+};
+
 /// AOT Compiler configuration options
 pub const CompileOptions = struct {
     /// Input PHP source file path
@@ -137,17 +155,24 @@ pub const CompileOptions = struct {
     verbose: bool = false,
     /// Syntax mode for parsing (PHP or Go style)
     syntax_mode: SyntaxMode = .php,
+    /// Behavior when encountering IR ops not supported by lowering
+    lowering_policy: LoweringPolicy = .@"error",
 
     /// Get the output file path, deriving from input if not specified
-    /// 默认输出文件名统一为 "hello"，用户可通过 --output 参数自定义
     pub fn getOutputPath(self: *const CompileOptions, allocator: Allocator) ![]const u8 {
         if (self.output_file) |out| {
             return try allocator.dupe(u8, out);
         }
 
-        // 统一默认输出文件名为 "hello"
-        // 这样用户不需要每次授予执行权限
-        return try allocator.dupe(u8, "hello");
+        const base = std.fs.path.basename(self.input_file);
+        const stem = if (std.mem.endsWith(u8, base, ".php") and base.len > 4) base[0 .. base.len - 4] else base;
+        if (stem.len == 0) {
+            return try allocator.dupe(u8, "a.out");
+        }
+        if (self.target.os == .windows) {
+            return try std.fmt.allocPrint(allocator, "{s}.exe", .{stem});
+        }
+        return try allocator.dupe(u8, stem);
     }
 };
 
@@ -468,6 +493,8 @@ pub const AOTCompiler = struct {
         // Initialize diagnostics engine
         const diagnostics = try allocator.create(DiagnosticEngine);
         diagnostics.* = DiagnosticEngine.init(allocator);
+        const base_dir = std.fs.path.dirname(options.input_file) orelse ".";
+        try diagnostics.setPathBase(base_dir);
 
         // Initialize syntax config from options
         const syntax_config = SyntaxConfig.init(options.syntax_mode);
@@ -653,6 +680,10 @@ pub const AOTCompiler = struct {
             .debug_info = self.options.debug_info,
             .strip_symbols = self.options.optimize_level == .release_small,
             .verbose = self.options.verbose,
+            .lowering_policy = switch (self.options.lowering_policy) {
+                .warn => .warn,
+                .@"error" => .@"error",
+            },
         };
         self.native_linker = try NativeLinker.init(self.allocator, native_config, self.diagnostics);
     }
@@ -738,6 +769,7 @@ pub const AOTCompiler = struct {
         std.debug.print("  Static link: {}\n", .{self.options.static_link});
         std.debug.print("  Debug info: {}\n", .{self.options.debug_info});
         std.debug.print("  Syntax mode: {s}\n", .{self.options.syntax_mode.toString()});
+        std.debug.print("  Lowering policy: {s}\n", .{self.options.lowering_policy.toString()});
     }
 
     /// Load source file
@@ -1132,7 +1164,7 @@ test "CompileOptions.getOutputPath" {
         try std.testing.expectEqualStrings("myapp", path);
     }
 
-    // Test deriving from input - 现在统一输出为 "hello"
+    // Test deriving from input
     {
         const opts = CompileOptions{
             .input_file = "hello.php",
@@ -1142,14 +1174,14 @@ test "CompileOptions.getOutputPath" {
         try std.testing.expectEqualStrings("hello", path);
     }
 
-    // Test input without .php extension - 现在统一输出为 "hello"
+    // Test input without .php extension
     {
         const opts = CompileOptions{
             .input_file = "script",
         };
         const path = try opts.getOutputPath(allocator);
         defer allocator.free(path);
-        try std.testing.expectEqualStrings("hello", path);
+        try std.testing.expectEqualStrings("script", path);
     }
 }
 

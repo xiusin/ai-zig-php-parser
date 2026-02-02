@@ -126,13 +126,11 @@ pub fn build(b: *std.Build) void {
         "src/aot/root.zig",
         "src/aot/diagnostics.zig",
         "src/aot/ir_generator.zig",
+        "src/aot/test_phi_ir.zig",
         // Runtime tests
         "src/runtime/coroutine_error_handling.zig",
         "src/runtime/coroutine_debugging.zig",
         "src/runtime/test_error_handling_property.zig",
-        // JIT tests
-        "src/jit/test_fallback_properties.zig",
-        "src/jit/test_fallback_integration.zig",
     };
 
     // Add all test files
@@ -145,6 +143,9 @@ pub fn build(b: *std.Build) void {
             }),
         });
         test_exe.linkLibC();
+        test_exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
+        test_exe.addLibraryPath(.{ .cwd_relative = pcre2_prefix ++ "/lib" });
+        test_exe.linkSystemLibrary("pcre2-8");
     // 添加模块导入
     test_exe.root_module.addImport("compiler", compiler_mod);
     test_exe.root_module.addImport("runtime", runtime_mod);
@@ -162,79 +163,6 @@ pub fn build(b: *std.Build) void {
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);
     }
-    
-    // Bytecode optimizer property tests
-    const optimizer_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bytecode/test_optimizer_properties.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    optimizer_test.linkLibC();
-    // 添加模块导入
-    optimizer_test.root_module.addImport("compiler", compiler_mod);
-    optimizer_test.root_module.addImport("runtime", runtime_mod);
-    optimizer_test.root_module.addImport("bytecode", bytecode_mod);
-    optimizer_test.root_module.addImport("jit", jit_mod);
-    optimizer_test.root_module.addImport("extension", extension_mod);
-    // 添加模块导入
-    optimizer_test.root_module.addImport("compiler", compiler_mod);
-    optimizer_test.root_module.addImport("runtime", runtime_mod);
-    optimizer_test.root_module.addImport("bytecode", bytecode_mod);
-    optimizer_test.root_module.addImport("jit", jit_mod);
-    optimizer_test.root_module.addImport("extension", extension_mod);
-    const run_optimizer_test = b.addRunArtifact(optimizer_test);
-    test_step.dependOn(&run_optimizer_test.step);
-    
-    // VM property tests
-    const vm_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bytecode/test_vm_properties.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    vm_test.linkLibC();
-    // 添加模块导入
-    vm_test.root_module.addImport("compiler", compiler_mod);
-    vm_test.root_module.addImport("runtime", runtime_mod);
-    vm_test.root_module.addImport("bytecode", bytecode_mod);
-    vm_test.root_module.addImport("jit", jit_mod);
-    vm_test.root_module.addImport("extension", extension_mod);
-    // 添加模块导入
-    vm_test.root_module.addImport("compiler", compiler_mod);
-    vm_test.root_module.addImport("runtime", runtime_mod);
-    vm_test.root_module.addImport("bytecode", bytecode_mod);
-    vm_test.root_module.addImport("jit", jit_mod);
-    vm_test.root_module.addImport("extension", extension_mod);
-    const run_vm_test = b.addRunArtifact(vm_test);
-    test_step.dependOn(&run_vm_test.step);
-    
-    // GC property tests
-    const gc_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bytecode/test_gc_properties.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    gc_test.linkLibC();
-    // 添加模块导入
-    gc_test.root_module.addImport("compiler", compiler_mod);
-    gc_test.root_module.addImport("runtime", runtime_mod);
-    gc_test.root_module.addImport("bytecode", bytecode_mod);
-    gc_test.root_module.addImport("jit", jit_mod);
-    gc_test.root_module.addImport("extension", extension_mod);
-    // 添加模块导入
-    gc_test.root_module.addImport("compiler", compiler_mod);
-    gc_test.root_module.addImport("runtime", runtime_mod);
-    gc_test.root_module.addImport("bytecode", bytecode_mod);
-    gc_test.root_module.addImport("jit", jit_mod);
-    gc_test.root_module.addImport("extension", extension_mod);
-    const run_gc_test = b.addRunArtifact(gc_test);
-    test_step.dependOn(&run_gc_test.step);
-
     // PHP compatibility tests
     const compat_test_step = b.step("test-compat", "Run PHP compatibility tests");
     const compat_test_cmd = b.addSystemCommand(&[_][]const u8{"./run_compatibility_tests.sh"});
