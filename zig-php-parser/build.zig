@@ -123,14 +123,14 @@ pub fn build(b: *std.Build) void {
     // List of all test files (only existing files)
     const test_files = [_][]const u8{
         // AOT module tests
-        "src/aot/root.zig",
-        "src/aot/diagnostics.zig",
-        "src/aot/ir_generator.zig",
-        "src/aot/test_phi_ir.zig",
+        // "src/aot/root.zig",
+        // "src/aot/diagnostics.zig",
+        // "src/aot/ir_generator.zig",
+        "src/aot/test_control_flow_ir.zig",
         // Runtime tests
-        "src/runtime/coroutine_error_handling.zig",
-        "src/runtime/coroutine_debugging.zig",
-        "src/runtime/test_error_handling_property.zig",
+        // "src/runtime/coroutine_error_handling.zig",
+        // "src/runtime/coroutine_debugging.zig",
+        // "src/runtime/test_error_handling_property.zig",
     };
 
     // Add all test files

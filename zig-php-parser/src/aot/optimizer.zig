@@ -29,6 +29,7 @@ const Type = IR.Type;
 const Terminator = IR.Terminator;
 const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
+const Analysis = @import("analysis.zig");
 
 // ============================================================================
 // Optimization Level Configuration
@@ -74,6 +75,8 @@ pub const PassConfig = struct {
     licm: bool = false,
     /// Enable strength reduction
     strength_reduction: bool = false,
+    /// Enable Mem2Reg (promote memory to registers)
+    mem2reg: bool = false,
     /// Maximum optimization iterations
     max_iterations: u32 = 3,
 
@@ -88,6 +91,7 @@ pub const PassConfig = struct {
             .cse = false,
             .licm = false,
             .strength_reduction = false,
+            .mem2reg = false,
             .max_iterations = 1,
         };
     }
@@ -103,6 +107,7 @@ pub const PassConfig = struct {
             .cse = true,
             .licm = false,
             .strength_reduction = false,
+            .mem2reg = true,
             .max_iterations = 2,
         };
     }
@@ -118,6 +123,7 @@ pub const PassConfig = struct {
             .cse = true,
             .licm = true,
             .strength_reduction = true,
+            .mem2reg = true,
             .max_iterations = 5,
         };
     }
@@ -133,6 +139,7 @@ pub const PassConfig = struct {
             .cse = true,
             .licm = false,
             .strength_reduction = true,
+            .mem2reg = true,
             .max_iterations = 2,
         };
     }
@@ -156,6 +163,8 @@ pub const OptimizationStats = struct {
     type_specializations: u32 = 0,
     /// Number of common subexpressions eliminated
     cse_eliminations: u32 = 0,
+    /// Number of allocas promoted to registers
+    allocas_promoted: u32 = 0,
     /// Number of optimization passes run
     passes_run: u32 = 0,
 
@@ -277,6 +286,12 @@ pub const IROptimizer = struct {
             self.stats.passes_run += 1;
 
             // Run each enabled pass
+            if (self.config.mem2reg) {
+                if (try self.runMem2Reg(module)) {
+                    changed = true;
+                }
+            }
+
             if (self.config.constant_propagation) {
                 if (try self.runConstantPropagation(module)) {
                     changed = true;
@@ -324,6 +339,12 @@ pub const IROptimizer = struct {
             changed = false;
             iteration += 1;
 
+            if (self.config.mem2reg) {
+                if (try self.promoteMemoryToRegisters(func)) {
+                    changed = true;
+                }
+            }
+
             if (self.config.constant_propagation) {
                 if (try self.propagateConstantsInFunction(func)) {
                     changed = true;
@@ -340,6 +361,421 @@ pub const IROptimizer = struct {
                 if (try self.eliminateCSEInFunction(func)) {
                     changed = true;
                 }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Mem2Reg (Promote Memory to Register)
+    // ========================================================================
+
+    /// Run Mem2Reg on the entire module
+    fn runMem2Reg(self: *Self, module: *Module) !bool {
+        var changed = false;
+
+        for (module.functions.items) |func| {
+            if (try self.promoteMemoryToRegisters(func)) {
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    /// Promote memory to registers in a single function
+    fn promoteMemoryToRegisters(self: *Self, func: *Function) !bool {
+        // 0. Rebuild CFG (ensure predecessors/successors are up to date)
+        try Analysis.rebuildCFG(func);
+
+        // 1. Compute Dominators
+        var dt = try Analysis.computeDominators(self.allocator, func);
+        defer dt.deinit();
+
+        // 2. Find promotable allocas
+        var promotable_allocas = std.ArrayListUnmanaged(*Instruction){};
+        defer promotable_allocas.deinit(self.allocator);
+
+        // Map alloca -> list of definition blocks
+        var def_blocks = std.AutoHashMap(*Instruction, std.ArrayListUnmanaged(*BasicBlock)).init(self.allocator);
+        defer {
+            var it = def_blocks.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            def_blocks.deinit();
+        }
+
+        // Map Register ID -> Alloca Instruction (for fast lookup)
+        var reg_to_alloca = std.AutoHashMap(u32, *Instruction).init(self.allocator);
+        defer reg_to_alloca.deinit();
+
+        // Scan entry block for allocas
+        if (func.getEntryBlock()) |entry| {
+            for (entry.instructions.items) |inst| {
+                if (inst.op == .alloca) {
+                    if (self.isPromotable(inst, func)) {
+                        try promotable_allocas.append(self.allocator, inst);
+                        try def_blocks.put(inst, .{});
+                        if (inst.result) |res| {
+                            try reg_to_alloca.put(res.id, inst);
+                        }
+                    } else {
+                        // Alloca rejected
+                    }
+                }
+            }
+        }
+
+        if (promotable_allocas.items.len == 0) return false;
+
+        // 3. Collect Defs
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                switch (inst.op) {
+                    .store => |op| {
+                        if (reg_to_alloca.get(op.ptr.id)) |alloca| {
+                            var list = def_blocks.getPtr(alloca).?;
+                            // Add block if not already there
+                            var found = false;
+                            for (list.items) |b| {
+                                if (b == block) { found = true; break; }
+                            }
+                            if (!found) try list.append(self.allocator, block);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // 4. Insert Phi Nodes
+        // Map: Block -> Map: Alloca -> PhiInstruction
+        // We need this to quickly find the phi node for a variable in a block during renaming
+        var new_phis = std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)).init(self.allocator);
+        defer {
+            var it = new_phis.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit();
+            }
+            new_phis.deinit();
+        }
+
+        for (promotable_allocas.items) |alloca| {
+            const defs = def_blocks.get(alloca).?;
+            // Compute IDF
+            var idf = try self.computeIDF(defs.items, &dt);
+            defer idf.deinit(self.allocator);
+
+            for (idf.items) |block| {
+                // Insert Phi node
+                const phi_reg = func.newRegister(alloca.op.alloca.type_);
+                const phi_inst = try self.allocator.create(Instruction);
+                phi_inst.* = .{
+                    .result = phi_reg,
+                    .op = .{ .phi = .{ .incoming = &.{} } }, // Empty initially
+                    .location = alloca.location,
+                };
+                
+                // Prepend to block instructions (Phis must be first)
+                try block.instructions.insert(self.allocator, 0, phi_inst);
+
+                // Record phi
+                var phis_in_block = new_phis.getPtr(block);
+                if (phis_in_block == null) {
+                    try new_phis.put(block, std.AutoHashMap(*Instruction, *Instruction).init(self.allocator));
+                    phis_in_block = new_phis.getPtr(block);
+                }
+                try phis_in_block.?.put(alloca, phi_inst);
+            }
+        }
+
+        // 5. Rename Variables
+        // Stack of current values for each alloca
+        var current_values = std.AutoHashMap(*Instruction, std.ArrayListUnmanaged(Register)).init(self.allocator);
+        defer {
+            var it = current_values.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            current_values.deinit();
+        }
+
+        // Initialize stacks with undefined/null or initial value?
+        // Allocas are uninitialized. We can use a special "undef" value or just rely on correctness.
+        // For strictness, we can create an undef register.
+        // But typically we don't need to push anything initially if the code is correct (defs dominate uses).
+        // However, if there are uses before defs (uninitialized read), we might crash.
+        // We'll assume valid code or handle it.
+
+        if (func.getEntryBlock()) |entry| {
+             try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca);
+        }
+
+        // 6. Cleanup (Remove allocas)
+        // Stores and loads were marked as NOPs in renameVariables.
+        // We just need to remove the allocas themselves.
+        for (promotable_allocas.items) |alloca| {
+             alloca.op = .nop;
+             self.stats.allocas_promoted += 1;
+        }
+
+        return true;
+    }
+
+    /// Compute Iterated Dominance Frontier
+    fn computeIDF(self: *Self, defs: []const *BasicBlock, dt: *const Analysis.DominatorTree) !std.ArrayListUnmanaged(*BasicBlock) {
+        var idf = std.ArrayListUnmanaged(*BasicBlock){};
+        
+        // Priority Queue using level (higher level = deeper)
+        // We actually need to process by level for efficiency, but simple worklist is fine.
+        var worklist = std.ArrayListUnmanaged(*BasicBlock){};
+        defer worklist.deinit(self.allocator);
+        
+        var visited = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
+        defer visited.deinit();
+
+        for (defs) |def| {
+            try worklist.append(self.allocator, def);
+            try visited.put(def, {});
+        }
+
+        var i: usize = 0;
+        while (i < worklist.items.len) {
+            const block = worklist.items[i];
+            i += 1;
+
+            const frontier = dt.frontiers[block.index];
+            for (frontier.items) |f_block| {
+                if (!visited.contains(f_block)) {
+                    try visited.put(f_block, {});
+                    try worklist.append(self.allocator, f_block);
+                    try idf.append(self.allocator, f_block);
+                }
+            }
+        }
+
+        return idf;
+    }
+
+    /// Check if alloca is promotable
+    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function) bool {
+        // Result must be used
+        const result_reg = alloca.result orelse return false;
+        const result_id = result_reg.id;
+
+        // Check all uses
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                switch (inst.op) {
+                    .load => |op| {
+                        if (op.ptr.id == result_id) {
+                            // Valid use
+                            if (!op.type_.eql(alloca.op.alloca.type_)) return false; // Type mismatch
+                        }
+                    },
+                    .store => |op| {
+                        if (op.ptr.id == result_id) {
+                            // Valid use
+                            if (op.value.id == result_id) return false; // Storing pointer to itself?
+                        } else if (op.value.id == result_id) {
+                            // Escaping pointer!
+                            return false;
+                        }
+                    },
+                    else => {
+                        // Check if register is used in other operands
+                        // We need to check all operands.
+                        // Ideally we have use-def chains.
+                        // Here we just scan.
+                        if (self.usesRegister(inst, result_id)) return false;
+                    },
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Check if instruction uses a register
+    fn usesRegister(self: *Self, inst: *Instruction, reg_id: u32) bool {
+        _ = self;
+        switch (inst.op) {
+            .load => |op| return op.ptr.id == reg_id,
+            .store => |op| return op.ptr.id == reg_id or op.value.id == reg_id,
+            .add, .sub, .mul, .div, .mod, .pow => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
+            .bit_and, .bit_or, .bit_xor, .shl, .shr => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
+            .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
+            .and_, .or_, .concat => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
+            .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type => |op| return op.operand.id == reg_id,
+            .call => |op| {
+                for (op.args) |arg| if (arg.id == reg_id) return true;
+                return false;
+            },
+            // ... (check other ops)
+            // For brevity, assuming other ops are checked similar to above or via generic scan
+            else => return false, // Simplified for now
+        }
+    }
+
+    /// Rename variables in the dominator tree
+    fn renameVariables(
+        self: *Self,
+        block: *BasicBlock,
+        dt: *const Analysis.DominatorTree,
+        current_values: *std.AutoHashMap(*Instruction, std.ArrayListUnmanaged(Register)),
+        new_phis: *std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)),
+        reg_to_alloca: *std.AutoHashMap(u32, *Instruction),
+    ) !void {
+        // Record stack heights to pop later
+        var stack_heights = std.AutoHashMap(*Instruction, usize).init(self.allocator);
+        defer stack_heights.deinit();
+
+        // 1. Process Phis
+        if (new_phis.getPtr(block)) |phis| {
+            var it = phis.iterator();
+            while (it.next()) |entry| {
+                const alloca = entry.key_ptr.*;
+                const phi_inst = entry.value_ptr.*;
+                
+                // Push phi result to stack
+                var stack = current_values.getPtr(alloca);
+                if (stack == null) {
+                     try current_values.put(alloca, .{});
+                     stack = current_values.getPtr(alloca);
+                }
+                
+                // Save current height
+                try stack_heights.put(alloca, stack.?.items.len);
+                
+                if (phi_inst.result) |res| {
+                    try stack.?.append(self.allocator, res);
+                }
+            }
+        }
+
+        // 2. Process Instructions
+        for (block.instructions.items) |inst| {
+            switch (inst.op) {
+                .load => |op| {
+                    if (reg_to_alloca.get(op.ptr.id)) |alloca| {
+                        // Replace result with current value
+                        if (current_values.getPtr(alloca)) |stack| {
+                            if (stack.items.len > 0) {
+                                const val = stack.items[stack.items.len - 1];
+                                // We can't easily replace all uses of inst.result without use-def chains.
+                                // But since we are iterating, we can't update future instructions yet.
+                                // Wait, in SSA construction, we usually update uses.
+                                // But here we don't have use lists.
+                                // So we cheat: We make this load a "copy" or "move" (identity cast) 
+                                // or simply replace the instruction in place with a specialized "alias" op?
+                                // No, standard way is to map the old register ID to the new register ID (val.id).
+                                // BUT, we don't have a global map for that here.
+                                //
+                                // Alternative: Modify the instruction to be a `cast` or similar from val to result.
+                                // Then Copy Propagation will clean it up.
+                                //
+                                // Better: Update `inst.result`'s ID to match `val.id`? No, registers must be unique-ish.
+                                //
+                                // Correct way: We need a map of "Renames": OldReg -> NewReg.
+                                // And when we see a use of OldReg, we use NewReg.
+                                // But `renameVariables` visits definitions.
+                                //
+                                // Ah, the standard algorithm assumes we can update uses.
+                                // Since we don't have use-lists, we must carry a map "OldReg -> NewReg" and apply it to operands.
+                                // But we are only visiting blocks once.
+                                //
+                                // Wait, the stack `current_values` GIVES us the new register for an alloca.
+                                // When we see a load `r1 = load alloca`, we want `r1` to be an alias for `stack.top()`.
+                                // We can change the load to `r1 = bitcast stack.top()`.
+                                // Or better: `r1` IS the register we want to replace.
+                                // But `r1` is defined here.
+                                //
+                                // We can change `inst.op` to `.bit_or { .lhs = val, .rhs = val }` (nop move) 
+                                // or `.cast` or `.select`.
+                                //
+                                // Let's use a new op `copy` or just `add val, 0` or similar.
+                                // Or reuse `cast` with same type.
+                                inst.op = .{ .cast = .{ .value = val, .from_type = val.type_, .to_type = op.type_ } };
+                                // And later Copy Propagation / DCE removes it.
+                                // This avoids needing to update all users of `inst.result` immediately.
+                            }
+                        }
+                    }
+                },
+                .store => |op| {
+                    if (reg_to_alloca.get(op.ptr.id)) |alloca| {
+                        // Push value to stack
+                        var stack = current_values.getPtr(alloca);
+                        if (stack == null) {
+                             try current_values.put(alloca, .{});
+                             stack = current_values.getPtr(alloca);
+                        }
+                        
+                        // Save current height (if not already saved for this block? No, stores push new values)
+                        // Actually we need to pop *all* pushes from this block.
+                        // So we should track pushes.
+                        // `stack_heights` tracks the height *before* entry to this block.
+                        // No, `stack_heights` stores the height *before* the push we just did?
+                        // We need to restore the stack to the state it was at the start of the block.
+                        // So we only record height ONCE per alloca per block.
+                        if (!stack_heights.contains(alloca)) {
+                            try stack_heights.put(alloca, stack.?.items.len);
+                        }
+                        
+                        try stack.?.append(self.allocator, op.value);
+                        
+                        // Remove store
+                        inst.op = .nop;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        // 3. Update Successors' Phis
+        for (block.successors.items) |succ| {
+             if (new_phis.getPtr(succ)) |succ_phis| {
+                 var it = succ_phis.iterator();
+                 while (it.next()) |entry| {
+                     const alloca = entry.key_ptr.*;
+                     const phi_inst = entry.value_ptr.*;
+                     
+                     if (current_values.getPtr(alloca)) |stack| {
+                         if (stack.items.len > 0) {
+                             const val = stack.items[stack.items.len - 1];
+                             
+                             // Add incoming value to phi
+                             // We need to reallocate the incoming slice
+                             const old_incoming = phi_inst.op.phi.incoming;
+                             const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
+                             @memcpy(new_incoming[0..old_incoming.len], old_incoming);
+                             new_incoming[old_incoming.len] = .{ .value = val, .block = block };
+                             
+                             // Free old slice if it wasn't empty/static?
+                             // Currently slices are owned by instruction if created.
+                             if (old_incoming.len > 0) self.allocator.free(old_incoming);
+                             
+                             phi_inst.op.phi.incoming = new_incoming;
+                         }
+                     }
+                 }
+             }
+        }
+
+        // 4. Recurse
+        if (dt.children[block.index].items.len > 0) {
+            for (dt.children[block.index].items) |child| {
+                try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca);
+            }
+        }
+
+        // 5. Pop Stacks
+        var it = stack_heights.iterator();
+        while (it.next()) |entry| {
+            const alloca = entry.key_ptr.*;
+            const height = entry.value_ptr.*;
+            
+            if (current_values.getPtr(alloca)) |stack| {
+                stack.shrinkRetainingCapacity(height);
             }
         }
     }
@@ -586,6 +1022,7 @@ pub const IROptimizer = struct {
                     }
                 }
             },
+            .nop => {},
         }
     }
 
@@ -643,6 +1080,7 @@ pub const IROptimizer = struct {
             .mutex_lock, .mutex_unlock, .mutex_new => true,
             .go_spawn, .channel_new, .channel_send, .channel_recv, .channel_close, .select_, .await_ => true,
             .debug_print => true,
+            .nop => false,
         };
     }
 

@@ -42,283 +42,17 @@ const InferredType = SymbolTableMod.InferredType;
 const ConcreteType = SymbolTableMod.ConcreteType;
 const TypeInferenceMod = @import("type_inference.zig");
 const TypeInferencer = TypeInferenceMod.TypeInferencer;
-// AST types are defined locally to avoid cross-module import issues
-// These mirror the types from src/compiler/ast.zig and src/compiler/token.zig
+const compiler = @import("compiler");
+const ast = compiler.ast;
+pub const Node = ast.Node;
+const Token = compiler.token.Token;
+const TokenTag = compiler.token.Token.Tag;
+const QuoteType = ast.QuoteType;
+const MagicConstantKind = ast.MagicConstantKind;
+// CastType in ast.zig is Token.Tag, so we alias it here for compatibility,
+// but we will need to update usages to use Token.Tag values.
+const CastType = TokenTag;
 
-/// Quote type for string literals
-pub const QuoteType = enum {
-    single,
-    double,
-    backtick,
-};
-
-pub const MagicConstantKind = enum {
-    dir,
-    file,
-    line,
-    function,
-    class,
-    method,
-    namespace,
-};
-
-pub const CastType = enum {
-    array,
-    object,
-    unknown,
-};
-
-/// Token tag enum (subset needed for IR generation)
-pub const TokenTag = enum(u8) {
-    // Literals
-    integer_literal,
-    float_literal,
-    string_literal,
-    // Keywords
-    keyword_true,
-    keyword_false,
-    keyword_null,
-    keyword_and,
-    keyword_or,
-    // Operators
-    plus,
-    minus,
-    star,
-    slash,
-    percent,
-    star_star,
-    dot,
-    ampersand,
-    pipe,
-    caret,
-    tilde,
-    less_less,
-    greater_greater,
-    equal_equal,
-    bang_equal,
-    equal_equal_equal,
-    bang_equal_equal,
-    less_than,
-    less_equal,
-    greater_than,
-    greater_equal,
-    spaceship,
-    ampersand_ampersand,
-    pipe_pipe,
-    bang,
-    question_question,
-    plus_plus,
-    minus_minus,
-    // Compound assignment operators
-    plus_equal,
-    minus_equal,
-    asterisk_equal,
-    slash_equal,
-    percent_equal,
-    dot_equal,
-    // Other
-    eof,
-    _,
-};
-
-/// Simplified Token structure
-pub const Token = struct {
-    tag: TokenTag,
-    start: u32,
-    end: u32,
-    line: u32,
-    column: u32,
-};
-
-/// AST Node structure (mirrors src/compiler/ast.zig)
-pub const Node = struct {
-    tag: Tag,
-    main_token: Token,
-    data: Data,
-
-    pub const Index = u32;
-    pub const StringId = u32;
-
-    pub const Tag = enum {
-        root,
-        attribute,
-        class_decl,
-        interface_decl,
-        trait_decl,
-        enum_decl,
-        struct_decl,
-        property_decl,
-        property_hook,
-        method_decl,
-        parameter,
-        const_decl,
-        global_stmt,
-        static_stmt,
-        go_stmt,
-        lock_stmt,
-        closure,
-        arrow_function,
-        anonymous_class,
-        list_assignment,
-        list_empty,
-        if_stmt,
-        while_stmt,
-        for_stmt,
-        for_range_stmt,
-        foreach_stmt,
-        switch_stmt,
-        case,
-        default,
-        match_expr,
-        match_arm,
-        try_stmt,
-        catch_clause,
-        finally_clause,
-        throw_stmt,
-        yield_expr,
-        method_call,
-        property_access,
-        safe_property_access,
-        variable_property_access,
-        array_access,
-        function_call,
-        function_decl,
-        static_method_call,
-        static_property_access,
-        use_stmt,
-        namespace_stmt,
-        include_stmt,
-        require_stmt,
-        block,
-        expression_stmt,
-        assignment,
-        compound_assignment,
-        echo_stmt,
-        return_stmt,
-        break_stmt,
-        continue_stmt,
-        variable,
-        literal_int,
-        literal_float,
-        literal_string,
-        literal_bool,
-        literal_null,
-        magic_constant,
-        array_init,
-        array_pair,
-        named_arg,
-        binary_expr,
-        unary_expr,
-        postfix_expr,
-        ternary_expr,
-        unpacking_expr,
-        pipe_expr,
-        clone_with_expr,
-        struct_instantiation,
-        object_instantiation,
-        trait_use,
-        named_type,
-        nullable_type,
-        union_type,
-        intersection_type,
-        cast_expr,
-        class_constant_access,
-        self_expr,
-        parent_expr,
-        static_expr,
-    };
-
-    pub const Modifier = packed struct {
-        is_public: bool = false,
-        is_protected: bool = false,
-        is_private: bool = false,
-        is_static: bool = false,
-        is_final: bool = false,
-        is_abstract: bool = false,
-        is_readonly: bool = false,
-    };
-
-    pub const Data = union {
-        attribute: struct { name: StringId, args: []const Index },
-        container_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, extends: ?Index, implements: []const Index, members: []const Index },
-        method_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, params: []const Index, return_type: ?Index, body: ?Index },
-        property_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, type: ?Index, default_value: ?Index, hooks: []const Index },
-        property_hook: struct { name: StringId, body: Index },
-        parameter: struct { attributes: []const Index, name: StringId, type: ?Index, default_value: ?Index, is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool },
-        const_decl: struct { name: StringId, value: Index },
-        global_stmt: struct { vars: []const Index },
-        static_stmt: struct { vars: []const Index },
-        go_stmt: struct { call: Index },
-        lock_stmt: struct { body: Index },
-        closure: struct { attributes: []const Index, params: []const Index, captures: []const Index, return_type: ?Index, body: Index, is_static: bool },
-        arrow_function: struct { attributes: []const Index, params: []const Index, return_type: ?Index, body: Index, is_static: bool },
-        anonymous_class: struct { attributes: []const Index, extends: ?Index, implements: []const Index, members: []const Index, args: []const Index },
-        list_assignment: struct { targets: []const Index, value: Index },
-        if_stmt: struct { condition: Index, then_branch: Index, else_branch: ?Index },
-        while_stmt: struct { condition: Index, body: Index },
-        for_stmt: struct { init: ?Index, condition: ?Index, loop: ?Index, body: Index },
-        for_range_stmt: struct { count: Index, variable: ?Index, body: Index },
-        foreach_stmt: struct { iterable: Index, key: ?Index, value: Index, body: Index },
-        switch_stmt: struct { expression: Index, cases: []const Index, default: ?Index },
-        case: struct { condition: Index, body: []const Index },
-        default: struct { body: []const Index },
-        try_stmt: struct { body: Index, catch_clauses: []const Index, finally_clause: ?Index },
-        catch_clause: struct { exception_type: ?Index, variable: ?Index, body: Index },
-        finally_clause: struct { body: Index },
-        throw_stmt: struct { expression: Index },
-        match_expr: struct { expression: Index, arms: []const Index, default: ?Index },
-        match_arm: struct { conditions: []const Index, body: Index },
-        yield_expr: struct { key: ?Index, value: ?Index },
-        method_call: struct { target: Index, method_name: StringId, args: []const Index },
-        property_access: struct { target: Index, property_name: StringId },
-        array_access: struct { target: Index, index: ?Index },
-        static_method_call: struct { class_name: StringId, method_name: StringId, args: []const Index },
-        static_property_access: struct { class_name: StringId, property_name: StringId },
-        class_constant_access: struct { class_name: StringId, constant_name: StringId },
-        use_stmt: struct { namespace: StringId, alias: ?StringId, use_type: u8 },
-        namespace_stmt: struct { name: StringId },
-        include_stmt: struct { path: Index, is_once: bool, is_require: bool },
-        function_call: struct { name: Index, args: []const Index },
-        array_init: struct { elements: []const Index },
-        array_pair: struct { key: Index, value: Index },
-        named_arg: struct { name: StringId, value: Index },
-        literal_string: struct { value: StringId, quote_type: QuoteType },
-        literal_bool: struct { value: bool },
-        literal_null: void,
-        magic_constant: struct { kind: MagicConstantKind },
-        root: struct { stmts: []const Index },
-        echo_stmt: struct { exprs: []const Index },
-        return_stmt: struct { expr: ?Index },
-        break_stmt: struct { level: ?Index },
-        continue_stmt: struct { level: ?Index },
-        assignment: struct { target: Index, value: Index },
-        compound_assignment: struct { target: Index, op: TokenTag, value: Index },
-        binary_expr: struct { lhs: Index, op: TokenTag, rhs: Index },
-        unary_expr: struct { op: TokenTag, expr: Index },
-        postfix_expr: struct { op: TokenTag, expr: Index },
-        ternary_expr: struct { cond: Index, then_expr: ?Index, else_expr: Index },
-        unpacking_expr: struct { expr: Index },
-        pipe_expr: struct { left: Index, right: Index },
-        clone_with_expr: struct { object: Index, properties: Index },
-        struct_instantiation: struct { struct_type: Index, args: []const Index },
-        object_instantiation: struct { class_name: Index, args: []const Index },
-        function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index },
-        block: struct { stmts: []const Index },
-        expression_stmt: struct { expr: Index },
-        variable: struct { name: StringId },
-        literal_int: struct { value: i64 },
-        literal_float: struct { value: f64 },
-        trait_use: struct { traits: []const Index },
-        named_type: struct { name: StringId },
-        nullable_type: struct { inner: Index },
-        union_type: struct { types: []const Index },
-        intersection_type: struct { types: []const Index },
-        cast_expr: struct { cast_type: CastType, expr: Index },
-        safe_property_access: struct { target: Index, property_name: StringId },
-        variable_property_access: struct { target: Index, prop_variable: Index },
-        none: void,
-    };
-};
 
 /// IR Generator - converts AST to SSA-form IR
 pub const IRGenerator = struct {
@@ -435,14 +169,9 @@ pub const IRGenerator = struct {
         module.* = Module.init(self.allocator, module_name, source_file);
         self.module = module;
 
-        // Debug: Print root node info
-        std.debug.print("[IR Generator] Processing root node at index {d}\n", .{root_index});
-        std.debug.print("[IR Generator] Total nodes: {d}\n", .{nodes.len});
-
         // Process root node at the specified index
         if (root_index < nodes.len and nodes[root_index].tag == .root) {
             const root_data = nodes[root_index].data.root;
-            std.debug.print("[IR Generator] Root has {d} statements\n", .{root_data.stmts.len});
 
             // Separate function declarations from top-level statements
             var top_level_stmts = std.ArrayListUnmanaged(Node.Index){};
@@ -450,7 +179,6 @@ pub const IRGenerator = struct {
 
             for (root_data.stmts) |stmt_idx| {
                 const stmt_node = self.getNode(stmt_idx) orelse continue;
-                std.debug.print("[IR Generator] Statement {d}: tag = {s}\n", .{ stmt_idx, @tagName(stmt_node.tag) });
 
                 if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
                     stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl)
@@ -463,14 +191,12 @@ pub const IRGenerator = struct {
                 }
             }
 
-            std.debug.print("[IR Generator] Top-level statements: {d}\n", .{top_level_stmts.items.len});
-
             // Create __main__ function for top-level statements if any
             if (top_level_stmts.items.len > 0) {
                 try self.generateMainFunction(top_level_stmts.items);
             }
         } else {
-            std.debug.print("[IR Generator] ERROR: Root node not found or invalid tag\n", .{});
+            // Root node not found or invalid tag
         }
 
         return module;
@@ -600,10 +326,11 @@ pub const IRGenerator = struct {
 
     /// Update source location from a token
     fn updateLocation(self: *Self, token: Token) void {
+        const loc = self.diagnostics.getLocation(token.loc.start);
         self.current_location = .{
             .file = if (self.module) |m| m.source_file else "<unknown>",
-            .line = token.line,
-            .column = token.column,
+            .line = loc.line,
+            .column = loc.column,
         };
     }
 
@@ -618,15 +345,30 @@ pub const IRGenerator = struct {
         const type_ptr = try self.allocator.create(Type);
         type_ptr.* = type_;
         const ptr_type = Type{ .ptr = type_ptr };
-        const alloca_reg = try self.emitWithResult(.{ .alloca = .{ .type_ = type_, .count = 1 } }, ptr_type);
+        
+        // Always create alloca in the entry block to ensure dominance
+        const func = self.current_function orelse return error.NoCurrentFunction;
+        // Function always has at least one block (entry) created during init
+        const entry_block = if (func.blocks.items.len > 0) func.blocks.items[0] else return error.NoEntryBlock;
+        
+        const result = func.newRegister(ptr_type);
+        const inst = try self.allocator.create(Instruction);
+        inst.* = .{
+            .result = result,
+            .op = .{ .alloca = .{ .type_ = type_, .count = 1 } },
+            .location = self.current_location,
+        };
+        
+        // Prepend to entry block to ensure it's before any potential use
+        try entry_block.instructions.insert(self.allocator, 0, inst);
 
-        try self.var_registers.put(self.allocator, name, alloca_reg);
+        try self.var_registers.put(self.allocator, name, result);
         // Mark variable as defined but not used yet, store definition location
         try self.var_usage.put(self.allocator, name, .{
             .is_used = false,
             .location = self.current_location,
         });
-        return alloca_reg;
+        return result;
     }
 
     /// Look up a variable's register
@@ -871,7 +613,7 @@ pub const IRGenerator = struct {
             .literal_int => inst.op = .{ .const_int = expr_node.data.literal_int.value },
             .literal_float => inst.op = .{ .const_float = expr_node.data.literal_float.value },
             .literal_null => inst.op = .const_null,
-            .literal_bool => inst.op = .{ .const_bool = expr_node.main_token.tag == .keyword_true },
+            .literal_bool => inst.op = .{ .const_bool = expr_node.main_token.tag == .k_true },
             .literal_string => {
                 const s = self.getString(expr_node.data.literal_string.value);
                 const id = try module.internString(s);
@@ -1809,6 +1551,12 @@ pub const IRGenerator = struct {
             .slash_equal => try self.emitWithResult(.{ .div = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
             .percent_equal => try self.emitWithResult(.{ .mod = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
             .dot_equal => try self.emitWithResult(.{ .concat = .{ .lhs = current_value, .rhs = rhs_value } }, .php_string),
+            .star_star_equal => try self.emitWithResult(.{ .pow = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+            .caret_equal => try self.emitWithResult(.{ .bit_xor = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .and_equal => try self.emitWithResult(.{ .bit_and = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .or_equal => try self.emitWithResult(.{ .bit_or = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .less_less_equal => try self.emitWithResult(.{ .shl = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .greater_greater_equal => try self.emitWithResult(.{ .shr = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
             else => return error.UnsupportedCompoundOperator,
         };
 
@@ -2123,7 +1871,7 @@ pub const IRGenerator = struct {
     /// Generate IR for boolean literal
     fn generateLiteralBool(self: *Self, node: *const Node) !Register {
         // Boolean value is determined by the token
-        const is_true = node.main_token.tag == .keyword_true;
+        const is_true = node.main_token.tag == .k_true;
         return self.emitWithResult(.{ .const_bool = is_true }, .bool);
     }
 
@@ -2211,7 +1959,7 @@ pub const IRGenerator = struct {
             // Arithmetic
             .plus => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
             .minus => self.emitWithResult(.{ .sub = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
-            .star => self.emitWithResult(.{ .mul = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
+            .asterisk => self.emitWithResult(.{ .mul = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
             .slash => self.emitWithResult(.{ .div = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
             .percent => self.emitWithResult(.{ .mod = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
             .star_star => self.emitWithResult(.{ .pow = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
@@ -2221,15 +1969,15 @@ pub const IRGenerator = struct {
             .bang_equal => self.emitWithResult(.{ .ne = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .equal_equal_equal => self.emitWithResult(.{ .identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .bang_equal_equal => self.emitWithResult(.{ .not_identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .less_than => self.emitWithResult(.{ .lt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .less => self.emitWithResult(.{ .lt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .less_equal => self.emitWithResult(.{ .le = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .greater_than => self.emitWithResult(.{ .gt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .greater => self.emitWithResult(.{ .gt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .greater_equal => self.emitWithResult(.{ .ge = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .spaceship => self.emitWithResult(.{ .spaceship = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
 
             // Logical
-            .keyword_and, .ampersand_ampersand => self.emitWithResult(.{ .and_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .keyword_or, .pipe_pipe => self.emitWithResult(.{ .or_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .k_and, .double_ampersand => self.emitWithResult(.{ .and_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .k_or, .double_pipe => self.emitWithResult(.{ .or_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
 
             // Bitwise
             .ampersand => self.emitWithResult(.{ .bit_and = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
@@ -2242,7 +1990,8 @@ pub const IRGenerator = struct {
             .dot => self.emitWithResult(.{ .concat = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_string),
 
             // Null coalescing
-            .question_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
+            .double_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
+            // .question_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
 
             else => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
         };
@@ -2592,7 +2341,7 @@ pub const IRGenerator = struct {
         const cast_data = node.data.cast_expr;
         const value_reg = try self.generateExpression(cast_data.expr);
         return switch (cast_data.cast_type) {
-            .array => blk: {
+            .k_array => blk: {
                 const args = try self.allocator.alloc(Register, 1);
                 args[0] = value_reg;
                 break :blk self.emitWithResult(.{ .call = .{
@@ -2601,7 +2350,7 @@ pub const IRGenerator = struct {
                     .return_type = .php_value,
                 } }, .php_value);
             },
-            .object => blk: {
+            .k_object => blk: {
                 const args = try self.allocator.alloc(Register, 1);
                 args[0] = value_reg;
                 break :blk self.emitWithResult(.{ .call = .{
@@ -2610,7 +2359,7 @@ pub const IRGenerator = struct {
                     .return_type = .php_value,
                 } }, .php_value);
             },
-            .unknown => value_reg,
+            else => value_reg,
         };
     }
 
@@ -2888,7 +2637,7 @@ pub const IRGenerator = struct {
             const result: ?i64 = switch (op) {
                 .plus => lhs_val +% rhs_val,
                 .minus => lhs_val -% rhs_val,
-                .star => lhs_val *% rhs_val,
+                .asterisk => lhs_val *% rhs_val,
                 .slash => if (rhs_val != 0) @divTrunc(lhs_val, rhs_val) else null,
                 .percent => if (rhs_val != 0) @mod(lhs_val, rhs_val) else null,
                 .ampersand => lhs_val & rhs_val,
@@ -2896,7 +2645,7 @@ pub const IRGenerator = struct {
                 .caret => lhs_val ^ rhs_val,
                 .less_less => lhs_val << @intCast(@mod(rhs_val, 64)),
                 .greater_greater => lhs_val >> @intCast(@mod(rhs_val, 64)),
-                else => null,
+            else => null,
             };
 
             if (result) |val| {
@@ -2908,9 +2657,9 @@ pub const IRGenerator = struct {
             const bool_result: ?bool = switch (op) {
                 .equal_equal, .equal_equal_equal => lhs_val == rhs_val,
                 .bang_equal, .bang_equal_equal => lhs_val != rhs_val,
-                .less_than => lhs_val < rhs_val,
+                .less => lhs_val < rhs_val,
                 .less_equal => lhs_val <= rhs_val,
-                .greater_than => lhs_val > rhs_val,
+                .greater => lhs_val > rhs_val,
                 .greater_equal => lhs_val >= rhs_val,
                 else => null,
             };
@@ -2929,7 +2678,7 @@ pub const IRGenerator = struct {
             const result: ?f64 = switch (op) {
                 .plus => lhs_val + rhs_val,
                 .minus => lhs_val - rhs_val,
-                .star => lhs_val * rhs_val,
+                .asterisk => lhs_val * rhs_val,
                 .slash => if (rhs_val != 0) lhs_val / rhs_val else null,
                 else => null,
             };
@@ -2943,9 +2692,9 @@ pub const IRGenerator = struct {
             const bool_result: ?bool = switch (op) {
                 .equal_equal => lhs_val == rhs_val,
                 .bang_equal => lhs_val != rhs_val,
-                .less_than => lhs_val < rhs_val,
+                .less => lhs_val < rhs_val,
                 .less_equal => lhs_val <= rhs_val,
-                .greater_than => lhs_val > rhs_val,
+                .greater => lhs_val > rhs_val,
                 .greater_equal => lhs_val >= rhs_val,
                 else => null,
             };
@@ -2966,7 +2715,7 @@ pub const IRGenerator = struct {
             const result: ?f64 = switch (op) {
                 .plus => lhs_val + rhs_val,
                 .minus => lhs_val - rhs_val,
-                .star => lhs_val * rhs_val,
+                .asterisk => lhs_val * rhs_val,
                 .slash => if (rhs_val != 0) lhs_val / rhs_val else null,
                 else => null,
             };
@@ -2983,8 +2732,8 @@ pub const IRGenerator = struct {
             const rhs_val = rhs_const.?.bool_val.?;
 
             const result: ?bool = switch (op) {
-                .keyword_and, .ampersand_ampersand => lhs_val and rhs_val,
-                .keyword_or, .pipe_pipe => lhs_val or rhs_val,
+                .k_and, .double_ampersand => lhs_val and rhs_val,
+                .k_or, .double_pipe => lhs_val or rhs_val,
                 .equal_equal, .equal_equal_equal => lhs_val == rhs_val,
                 .bang_equal, .bang_equal_equal => lhs_val != rhs_val,
                 else => null,
@@ -3075,7 +2824,7 @@ pub const IRGenerator = struct {
         return switch (node.tag) {
             .literal_int => .{ .int_val = node.data.literal_int.value },
             .literal_float => .{ .float_val = node.data.literal_float.value },
-            .literal_bool => .{ .bool_val = node.main_token.tag == .keyword_true },
+            .literal_bool => .{ .bool_val = node.main_token.tag == .k_true },
             .literal_null => .{ .is_null = true },
             .literal_string => .{ .string_val = self.getString(node.data.literal_string.value) },
             else => null,
@@ -3144,7 +2893,7 @@ test "IRGenerator simple module generation" {
     const nodes = [_]Node{
         .{
             .tag = .root,
-            .main_token = .{ .tag = .eof, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .eof, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .root = .{ .stmts = &.{} } },
         },
     };
@@ -3201,25 +2950,25 @@ test "IRGenerator constant folding - integer addition" {
         // 0: root
         .{
             .tag = .root,
-            .main_token = .{ .tag = .eof, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .eof, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .root = .{ .stmts = &[_]Node.Index{1} } },
         },
         // 1: binary_expr (2 + 3)
         .{
             .tag = .binary_expr,
-            .main_token = .{ .tag = .plus, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .plus, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .binary_expr = .{ .lhs = 2, .op = .plus, .rhs = 3 } },
         },
         // 2: literal_int (2)
         .{
             .tag = .literal_int,
-            .main_token = .{ .tag = .integer_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_lnumber, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_int = .{ .value = 2 } },
         },
         // 3: literal_int (3)
         .{
             .tag = .literal_int,
-            .main_token = .{ .tag = .integer_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_lnumber, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_int = .{ .value = 3 } },
         },
     };
@@ -3277,19 +3026,19 @@ test "IRGenerator constant folding - string concatenation" {
         // 0: binary_expr ("hello" . " world")
         .{
             .tag = .binary_expr,
-            .main_token = .{ .tag = .dot, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .dot, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .binary_expr = .{ .lhs = 1, .op = .dot, .rhs = 2 } },
         },
         // 1: literal_string ("hello")
         .{
             .tag = .literal_string,
-            .main_token = .{ .tag = .string_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_string, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_string = .{ .value = 0, .quote_type = .double } },
         },
         // 2: literal_string (" world")
         .{
             .tag = .literal_string,
-            .main_token = .{ .tag = .string_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_string, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_string = .{ .value = 1, .quote_type = .double } },
         },
     };
@@ -3322,7 +3071,7 @@ test "IRGenerator getConstantValue" {
     // Test integer constant
     const int_node = Node{
         .tag = .literal_int,
-        .main_token = .{ .tag = .integer_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+        .main_token = .{ .tag = .t_lnumber, .loc = .{ .start = 0, .end = 0 } },
         .data = .{ .literal_int = .{ .value = 42 } },
     };
     const int_const = generator.getConstantValue(&int_node);
@@ -3332,7 +3081,7 @@ test "IRGenerator getConstantValue" {
     // Test float constant
     const float_node = Node{
         .tag = .literal_float,
-        .main_token = .{ .tag = .float_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+        .main_token = .{ .tag = .t_dnumber, .loc = .{ .start = 0, .end = 0 } },
         .data = .{ .literal_float = .{ .value = 3.14 } },
     };
     const float_const = generator.getConstantValue(&float_node);
@@ -3342,7 +3091,7 @@ test "IRGenerator getConstantValue" {
     // Test null constant
     const null_node = Node{
         .tag = .literal_null,
-        .main_token = .{ .tag = .keyword_null, .start = 0, .end = 0, .line = 1, .column = 1 },
+        .main_token = .{ .tag = .k_null, .loc = .{ .start = 0, .end = 0 } },
         .data = .{ .none = {} },
     };
     const null_const = generator.getConstantValue(&null_node);

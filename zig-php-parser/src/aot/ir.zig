@@ -234,7 +234,7 @@ pub const Function = struct {
     pub fn createBlock(self: *Self, label: []const u8) !*BasicBlock {
         const label_copy = try self.allocator.dupe(u8, label);
         const block = try self.allocator.create(BasicBlock);
-        block.* = BasicBlock.init(self.allocator, label_copy);
+        block.* = BasicBlock.init(self.allocator, label_copy, @intCast(self.blocks.items.len));
         try self.blocks.append(self.allocator, block);
         return block;
     }
@@ -282,6 +282,8 @@ pub const BasicBlock = struct {
     allocator: Allocator,
     /// Block label (for jumps)
     label: []const u8,
+    /// Block index in function (for analysis)
+    index: u32,
     /// Instructions in this block
     instructions: std.ArrayListUnmanaged(*Instruction),
     /// Block terminator (branch, return, etc.)
@@ -294,10 +296,11 @@ pub const BasicBlock = struct {
     const Self = @This();
 
     /// Initialize a new basic block
-    pub fn init(allocator: Allocator, label: []const u8) Self {
+    pub fn init(allocator: Allocator, label: []const u8, index: u32) Self {
         return .{
             .allocator = allocator,
             .label = label,
+            .index = index,
             .instructions = .{},
             .terminator = null,
             .predecessors = .{},
@@ -430,6 +433,25 @@ pub const Type = union(enum) {
         params: []const Type,
         return_type: *const Type,
     };
+
+    /// Check if two types are equal
+    pub fn eql(self: Type, other: Type) bool {
+        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
+        switch (self) {
+            .ptr => |inner| return inner.eql(other.ptr.*),
+            .php_object => |name| return std.mem.eql(u8, name, other.php_object),
+            .nullable => |inner| return inner.eql(other.nullable.*),
+            .function => |func| {
+                if (func.params.len != other.function.params.len) return false;
+                if (!func.return_type.eql(other.function.return_type.*)) return false;
+                for (func.params, 0..) |p, i| {
+                    if (!p.eql(other.function.params[i])) return false;
+                }
+                return true;
+            },
+            else => return true,
+        }
+    }
 
     /// Check if this type is a PHP dynamic type
     pub fn isDynamic(self: Type) bool {
@@ -723,6 +745,8 @@ pub const Instruction = struct {
         // ============ Debugging ============
         /// Debug print
         debug_print: UnaryOp,
+        /// No operation (placeholder for removed instructions)
+        nop: void,
     };
 
     /// Binary operation operands
@@ -1343,6 +1367,7 @@ pub const IRPrinter = struct {
 
             // Debug
             .debug_print => |op| try self.print("debug.print {any}", .{op.operand}),
+            .nop => try self.write("nop"),
         }
     }
 

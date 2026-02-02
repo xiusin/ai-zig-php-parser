@@ -190,6 +190,8 @@ pub const DiagnosticEngine = struct {
     use_colors: bool = true,
     /// Source code lines for context display (optional)
     source_lines: ?[]const []const u8 = null,
+    /// Line start offsets for location calculation
+    line_offsets: std.ArrayListUnmanaged(usize) = .{},
     path_base: ?[]const u8 = null,
 
     const Self = @This();
@@ -218,6 +220,7 @@ pub const DiagnosticEngine = struct {
         if (self.source_lines) |lines| {
             self.allocator.free(lines);
         }
+        self.line_offsets.deinit(self.allocator);
     }
 
     /// Set source code for context display
@@ -225,9 +228,18 @@ pub const DiagnosticEngine = struct {
         var lines = std.ArrayListUnmanaged([]const u8){};
         errdefer lines.deinit(self.allocator);
 
+        // Build line offsets
+        self.line_offsets.clearRetainingCapacity();
+        try self.line_offsets.append(self.allocator, 0);
+
+        var offset: usize = 0;
         var it = std.mem.splitScalar(u8, source, '\n');
         while (it.next()) |line| {
             try lines.append(self.allocator, line);
+            offset += line.len + 1; // +1 for newline
+            if (offset < source.len) {
+                try self.line_offsets.append(self.allocator, offset);
+            }
         }
 
         self.source_lines = try lines.toOwnedSlice(self.allocator);
@@ -245,6 +257,35 @@ pub const DiagnosticEngine = struct {
         else
             try std.fmt.allocPrint(self.allocator, "{s}{c}", .{ base_dir, std.fs.path.sep });
         self.path_base = normalized;
+    }
+
+    /// Get line and column for a byte offset
+    pub fn getLocation(self: *const Self, offset: usize) struct { line: u32, column: u32 } {
+        if (self.line_offsets.items.len == 0) return .{ .line = 1, .column = 1 };
+
+        // Binary search for line
+        // Find largest line_start <= offset
+        var left: usize = 0;
+        var right: usize = self.line_offsets.items.len;
+
+        while (left < right) {
+            const mid = left + (right - left) / 2;
+            if (self.line_offsets.items[mid] > offset) {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+
+        // left is now the index of the first line start > offset
+        // so the line index is left - 1
+        const line_idx = if (left > 0) left - 1 else 0;
+        const line_start = self.line_offsets.items[line_idx];
+
+        return .{
+            .line = @intCast(line_idx + 1),
+            .column = @intCast(offset - line_start + 1),
+        };
     }
 
     fn relativizePath(self: *const Self, path: []const u8) []const u8 {
@@ -975,4 +1016,39 @@ test "DiagnosticEngine path base relativize" {
 
     const output = fbs.getWritten();
     try std.testing.expect(std.mem.startsWith(u8, output, "examples/tests/basic/test.php:3:2"));
+}
+
+test "DiagnosticEngine getLocation" {
+    const allocator = std.testing.allocator;
+    var engine = DiagnosticEngine.init(allocator);
+    defer engine.deinit();
+
+    const source = 
+        \\line 1
+        \\line 2
+        \\line 3
+    ;
+    try engine.setSource(source);
+
+    // Line 1: "line 1" (len 6)
+    // Offset 0 -> 1:1
+    const loc1 = engine.getLocation(0);
+    try std.testing.expectEqual(@as(u32, 1), loc1.line);
+    try std.testing.expectEqual(@as(u32, 1), loc1.column);
+
+    // Offset 6 -> 1:7 (newline is at offset 6)
+    const loc2 = engine.getLocation(6);
+    try std.testing.expectEqual(@as(u32, 1), loc2.line);
+    try std.testing.expectEqual(@as(u32, 7), loc2.column);
+
+    // Line 2: starts at offset 7
+    // Offset 7 -> 2:1
+    const loc3 = engine.getLocation(7);
+    try std.testing.expectEqual(@as(u32, 2), loc3.line);
+    try std.testing.expectEqual(@as(u32, 1), loc3.column);
+
+    // Offset 10 -> 2:4 ("l" is 7, "i" is 8, "n" is 9, "e" is 10)
+    const loc4 = engine.getLocation(10);
+    try std.testing.expectEqual(@as(u32, 2), loc4.line);
+    try std.testing.expectEqual(@as(u32, 4), loc4.column);
 }
