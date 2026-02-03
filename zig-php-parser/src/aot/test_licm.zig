@@ -138,8 +138,9 @@ test "IROptimizer.runLICM - hoist invariant" {
     var optimizer = IROptimizer.init(allocator, .aggressive, null);
     defer optimizer.deinit();
     
-    // Ensure LICM is enabled
+    // Ensure LICM is enabled, Loop Unroll is disabled (to avoid interfering with LICM test)
     optimizer.config.licm = true;
+    optimizer.config.loop_unroll = false;
     
     // Run optimization
     _ = try optimizer.runLICMInFunction(func);

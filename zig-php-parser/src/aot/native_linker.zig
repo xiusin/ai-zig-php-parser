@@ -1014,7 +1014,9 @@ pub const NativeLinker = struct {
                         const func_has_return_value = self.func_return_types.get(func.name) orelse false;
                         if (func_has_return_value) {
                             // 函数返回runtime.Value，需要检查寄存器类型
-                            const reg_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                            // Use cached type from all_registers to ensure consistency
+                            const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
+                            const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
                             if (reg_type_tag == .i64) {
                                 try code.appendSlice(self.allocator, "        return runtime.Value.initInt(reg_");
                                 try code.writer(self.allocator).print("{d}", .{reg.id});
@@ -1109,7 +1111,8 @@ pub const NativeLinker = struct {
                             const func_has_return_value = self.func_return_types.get(func.name) orelse false;
                             if (func_has_return_value) {
                                 // 函数返回runtime.Value，需要检查寄存器类型
-                                const reg_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                                const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
+                                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
                                 if (reg_type_tag == .i64) {
                                     try code.appendSlice(self.allocator, "        return runtime.Value.initInt(reg_");
                                     try code.writer(self.allocator).print("{d}", .{reg.id});
@@ -1269,7 +1272,8 @@ pub const NativeLinker = struct {
             }
 
             const src = incoming.value;
-            const src_tag = @as(std.meta.Tag(IR.Type), src.type_);
+            const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
+            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
             const src_expr = blk: {
                 if (dest_is_value and src_tag == .i64) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{src.id});
                 if (dest_is_value and src_tag == .f64) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{src.id});
@@ -1306,9 +1310,31 @@ pub const NativeLinker = struct {
                     }
                 }
                 if (ret_val) |reg| {
-                    const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return reg_{d};\n", .{reg.id});
-                    defer self.allocator.free(ret_stmt);
-                    try code.appendSlice(self.allocator, ret_stmt);
+                    if (func_has_return_value) {
+                        const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
+                        const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                        if (reg_type_tag == .i64) {
+                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                            defer self.allocator.free(ret_stmt);
+                            try code.appendSlice(self.allocator, ret_stmt);
+                        } else if (reg_type_tag == .f64) {
+                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                            defer self.allocator.free(ret_stmt);
+                            try code.appendSlice(self.allocator, ret_stmt);
+                        } else if (reg_type_tag == .bool) {
+                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                            defer self.allocator.free(ret_stmt);
+                            try code.appendSlice(self.allocator, ret_stmt);
+                        } else {
+                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return reg_{d};\n", .{reg.id});
+                            defer self.allocator.free(ret_stmt);
+                            try code.appendSlice(self.allocator, ret_stmt);
+                        }
+                    } else {
+                        const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return reg_{d};\n", .{reg.id});
+                        defer self.allocator.free(ret_stmt);
+                        try code.appendSlice(self.allocator, ret_stmt);
+                    }
                 } else {
                     if (func_has_return_value) {
                         try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
@@ -1879,6 +1905,43 @@ pub const NativeLinker = struct {
                     }
                 }
             },
+            .mod => |op| {
+                if (inst.result) |reg| {
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    const rhs_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+
+                    if (type_tag == .i64 and lhs_tag == .i64 and rhs_tag == .i64) {
+                        try writer.print("    reg_{d} = @rem(reg_{d}, reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    } else {
+                        if (lhs_tag == .i64 and rhs_tag == .i64) {
+                            try writer.print("    reg_{d} = try runtime.php_mod(runtime.Value.initInt(reg_{d}), runtime.Value.initInt(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                        } else if (lhs_tag == .i64) {
+                            try writer.print("    reg_{d} = try runtime.php_mod(runtime.Value.initInt(reg_{d}), reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                        } else if (rhs_tag == .i64) {
+                            try writer.print("    reg_{d} = try runtime.php_mod(reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_mod(reg_{d}, reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                        }
+                    }
+                }
+            },
+            .shl => |op| {
+                if (inst.result) |reg| {
+                     try writer.print("    reg_{d} = reg_{d} << @as(u6, @intCast(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .shr => |op| {
+                if (inst.result) |reg| {
+                     try writer.print("    reg_{d} = reg_{d} >> @as(u6, @intCast(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .bit_and => |op| {
+                if (inst.result) |reg| {
+                     try writer.print("    reg_{d} = reg_{d} & reg_{d};\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                }
+            },
+            .nop => {},
             .eq => |op| {
                 if (inst.result) |reg| {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);

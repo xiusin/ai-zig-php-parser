@@ -129,7 +129,7 @@ pub const PassConfig = struct {
             .cse = true,
             .licm = true,
             .strength_reduction = true,
-            .mem2reg = true,
+            .mem2reg = false, // TODO: Fix parameter mapping in NativeLinker when allocas are removed
             .loop_unroll = true,
             .max_iterations = 5,
         };
@@ -2913,7 +2913,7 @@ pub const IROptimizer = struct {
     // ========================================================================
 
     /// Run strength reduction on the entire module
-    fn runStrengthReduction(self: *Self, module: *Module) !bool {
+    pub fn runStrengthReduction(self: *Self, module: *Module) !bool {
         var changed = false;
 
         for (module.functions.items) |func| {
@@ -2926,13 +2926,19 @@ pub const IROptimizer = struct {
     }
 
     /// Apply strength reduction in a function
-    fn reduceStrengthInFunction(self: *Self, func: *Function) !bool {
+    pub fn reduceStrengthInFunction(self: *Self, func: *Function) !bool {
         var changed = false;
 
         for (func.blocks.items) |block| {
-            for (block.instructions.items) |inst| {
-                if (try self.reduceStrength(inst)) {
+            var i: usize = 0;
+            while (i < block.instructions.items.len) {
+                const inst = block.instructions.items[i];
+                if (try self.reduceStrength(func, block, i, inst)) |inserted| {
                     changed = true;
+                    // Skip inserted instructions + current instruction
+                    i += inserted + 1;
+                } else {
+                    i += 1;
                 }
             }
         }
@@ -2941,21 +2947,30 @@ pub const IROptimizer = struct {
     }
 
     /// Apply strength reduction to an instruction
-    fn reduceStrength(self: *Self, inst: *Instruction) !bool {
+    fn reduceStrength(self: *Self, func: *Function, block: *BasicBlock, index: usize, inst: *Instruction) !?usize {
         switch (inst.op) {
             .mul => |op| {
                 // Multiply by power of 2 -> shift left
                 if (self.constant_values.get(op.rhs.id)) |rhs| {
                     if (rhs == .int) {
                         if (self.isPowerOfTwo(rhs.int)) |shift| {
+                            // Create constant for shift amount
+                            const shift_reg = func.newRegister(.i64);
+                            const shift_inst = try self.allocator.create(Instruction);
+                            shift_inst.* = .{
+                                .result = shift_reg,
+                                .op = .{ .const_int = shift },
+                                .location = inst.location,
+                            };
+                            
+                            try block.instructions.insert(self.allocator, index, shift_inst);
+                            
                             inst.op = .{ .shl = .{
                                 .lhs = op.lhs,
-                                .rhs = Register{ .id = op.rhs.id, .type_ = .i64 },
+                                .rhs = shift_reg,
                             } };
-                            // Note: In a full implementation, we'd create a new const instruction
-                            // for the shift amount
-                            _ = shift;
-                            return true;
+                            
+                            return 1;
                         }
                     }
                 }
@@ -2965,12 +2980,22 @@ pub const IROptimizer = struct {
                 if (self.constant_values.get(op.rhs.id)) |rhs| {
                     if (rhs == .int and rhs.int > 0) {
                         if (self.isPowerOfTwo(rhs.int)) |shift| {
+                            const shift_reg = func.newRegister(.i64);
+                            const shift_inst = try self.allocator.create(Instruction);
+                            shift_inst.* = .{
+                                .result = shift_reg,
+                                .op = .{ .const_int = shift },
+                                .location = inst.location,
+                            };
+                            
+                            try block.instructions.insert(self.allocator, index, shift_inst);
+                            
                             inst.op = .{ .shr = .{
                                 .lhs = op.lhs,
-                                .rhs = Register{ .id = op.rhs.id, .type_ = .i64 },
+                                .rhs = shift_reg,
                             } };
-                            _ = shift;
-                            return true;
+                            
+                            return 1;
                         }
                     }
                 }
@@ -2980,19 +3005,29 @@ pub const IROptimizer = struct {
                 if (self.constant_values.get(op.rhs.id)) |rhs| {
                     if (rhs == .int and rhs.int > 0) {
                         if (self.isPowerOfTwo(rhs.int)) |_| {
+                            const mask_reg = func.newRegister(.i64);
+                            const mask_inst = try self.allocator.create(Instruction);
+                            mask_inst.* = .{
+                                .result = mask_reg,
+                                .op = .{ .const_int = rhs.int - 1 },
+                                .location = inst.location,
+                            };
+                            
+                            try block.instructions.insert(self.allocator, index, mask_inst);
+                            
                             inst.op = .{ .bit_and = .{
                                 .lhs = op.lhs,
-                                .rhs = Register{ .id = op.rhs.id, .type_ = .i64 },
+                                .rhs = mask_reg,
                             } };
-                            // Note: mask should be (rhs - 1)
-                            return true;
+                            
+                            return 1;
                         }
                     }
                 }
             },
             else => {},
         }
-        return false;
+        return null;
     }
 
     /// Check if a value is a power of 2 and return the exponent
