@@ -1119,7 +1119,7 @@ pub const CodeGenerator = struct {
             // Debug
             .debug_print => |op| try self.buildDebugPrint(op.operand),
             .nop => null,
-            .param => null, // TODO: Implement LLVM param handling
+            .param => |op| try self.buildParam(op.index, op.name),
         };
 
         // Store result in register map if instruction has a result
@@ -1605,6 +1605,15 @@ pub const CodeGenerator = struct {
     fn buildDebugPrint(self: *Self, operand: IR.Register) !LLVMValueRef {
         _ = self;
         _ = operand;
+        return null;
+    }
+
+    fn buildParam(self: *Self, index: u32, name: []const u8) !LLVMValueRef {
+        _ = name;
+        if (!self.llvm_available) return null;
+
+        // In real LLVM mode:
+        // return LLVMGetParam(self.current_function, index);
         return null;
     }
 

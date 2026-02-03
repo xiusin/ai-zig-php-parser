@@ -96,7 +96,7 @@ pub const PassConfig = struct {
             .licm = false,
             .strength_reduction = false,
             .mem2reg = false,
-            .loop_unroll = false,
+            .loop_unroll = true,
             .max_iterations = 1,
         };
     }
@@ -130,7 +130,7 @@ pub const PassConfig = struct {
             .licm = true,
             .strength_reduction = true,
             .mem2reg = true,
-            .loop_unroll = false,
+            .loop_unroll = true,
             .max_iterations = 5,
         };
     }
@@ -760,6 +760,7 @@ pub const IROptimizer = struct {
             return false;
         }
         const latch_block = latch.?;
+        // std.debug.print("Found latch: {s}\n", .{latch_block.label});
         
         // Check loop size
         var instruction_count: usize = 0;
@@ -791,7 +792,10 @@ pub const IROptimizer = struct {
                 for (inst.op.phi.incoming) |inc| {
                     if (inc.block == latch_block) {
                         try phi_back_edge_map.put(inst.result.?.id, inc.value.id);
+                        // std.debug.print("PHI Map: reg_{d} <- reg_{d}\n", .{inst.result.?.id, inc.value.id});
                         break;
+                    } else {
+                        // std.debug.print("PHI mismatch: inc.block {s} != latch {s}\n", .{inc.block.label, latch_block.label});
                     }
                 }
             }
@@ -801,6 +805,8 @@ pub const IROptimizer = struct {
         // The Latch(Original) currently points to Header. We will redirect it to Clone1.
         
         var current_predecessor = latch_block;
+        var expected_target = loop.header;
+        var first_unrolled_header: ?*BasicBlock = null;
         
         // We need to order blocks for cloning.
         // Simple heuristic: Header first, then others. 
@@ -882,32 +888,83 @@ pub const IROptimizer = struct {
             }
             
             // Link previous latch to this iteration's header
-            // The previous latch (current_predecessor) terminator needs to be updated.
-            // It was pointing to 'Header' (Original). Now point to 'first_cloned_block'.
-            
-            if (current_predecessor.terminator) |*term| {
-                switch (term.*) {
-                    .br => |*target| {
-                        if (target.* == loop.header) target.* = first_cloned_block.?;
-                    },
-                    .cond_br => |*cb| {
-                        if (cb.then_block == loop.header) cb.then_block = first_cloned_block.?;
-                        if (cb.else_block == loop.header) cb.else_block = first_cloned_block.?;
-                    },
-                    else => {},
+            if (k == 1) {
+                first_unrolled_header = first_cloned_block;
+            } else {
+                // Link Clone (k-1) Latch -> Clone k Header
+                var linked = false;
+                if (current_predecessor.terminator) |*term| {
+                    switch (term.*) {
+                        .br => |*target| {
+                            if (target.* == expected_target) {
+                                target.* = first_cloned_block.?;
+                                linked = true;
+                            }
+                        },
+                        .cond_br => |*cb| {
+                            if (cb.then_block == expected_target) {
+                                cb.then_block = first_cloned_block.?;
+                                linked = true;
+                            }
+                            if (cb.else_block == expected_target) {
+                                cb.else_block = first_cloned_block.?;
+                                linked = true;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                if (!linked) {
+                     // var actual_target_label: []const u8 = "unknown";
+                     // if (current_predecessor.terminator) |*term| {
+                     //     switch (term.*) {
+                     //         .br => |*target| actual_target_label = target.*.label,
+                     //         .cond_br => |*cb| actual_target_label = cb.then_block.label,
+                     //         else => {},
+                     //     }
+                     // }
+                     // std.debug.print("Failed to link latch {s} to clone header {s} (expected {s}, actual {s})\n", .{current_predecessor.label, first_cloned_block.?.label, expected_target.label, actual_target_label});
+                } else {
+                    // std.debug.print("Linked latch {s} to clone header {s}\n", .{current_predecessor.label, first_cloned_block.?.label});
                 }
             }
+            
+            // Update expected target for next iteration
+            // The cloned latch will point to the cloned header (because of cloneAndRemap)
+            expected_target = first_cloned_block.?;
             
             current_predecessor = last_cloned_block.?;
         }
         
-        // 3. Fix up the final latch to point to Original Header
-        // `current_predecessor` is now `Latch_{last}`.
-        // Its terminator already points to `Header` (because we copied from Original Latch and didn't remap that edge since Header wasn't in `block_map` for that iter? Wait).
-        // In the loop above: `block_map` only contained blocks for *current* iteration.
-        // `Header` (Original) was NOT in `block_map`.
-        // So `if (block_map.get(target)) ...` would fail for Header, preserving the link to Original Header.
-        // So `current_predecessor` (Latch_{last}) ALREADY points to Original Header. Correct.
+        // 3. Final Linking
+        
+        // Link Original Latch -> Clone 1 Header
+        if (latch_block.terminator) |*term| {
+             switch (term.*) {
+                 .br => |*target| {
+                     if (target.* == loop.header) target.* = first_unrolled_header.?;
+                 },
+                 .cond_br => |*cb| {
+                     if (cb.then_block == loop.header) cb.then_block = first_unrolled_header.?;
+                     if (cb.else_block == loop.header) cb.else_block = first_unrolled_header.?;
+                 },
+                 else => {},
+             }
+        }
+        
+        // Link Last Clone Latch -> Original Header
+        if (current_predecessor.terminator) |*term| {
+             switch (term.*) {
+                 .br => |*target| {
+                     if (target.* == expected_target) target.* = loop.header;
+                 },
+                 .cond_br => |*cb| {
+                     if (cb.then_block == expected_target) cb.then_block = loop.header;
+                     if (cb.else_block == expected_target) cb.else_block = loop.header;
+                 },
+                 else => {},
+             }
+        }
         
         // 4. Update Original Header PHIs to take input from `current_predecessor` instead of `latch_block`.
         for (loop.header.instructions.items) |inst| {
