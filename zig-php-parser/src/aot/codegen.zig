@@ -146,6 +146,59 @@ pub const LLVMCallConv = enum(c_uint) {
 };
 
 // ============================================================================
+// LLVM C API Function Declarations
+// ============================================================================
+
+extern "c" fn LLVMBuildAdd(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildNSWAdd(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildFAdd(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildSub(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildNSWSub(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildFSub(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildMul(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildNSWMul(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildFMul(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildSDiv(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildFDiv(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildSRem(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildFRem(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildAnd(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildOr(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildXor(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildShl(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildLShr(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildAShr(builder: LLVMBuilderRef, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildICmp(builder: LLVMBuilderRef, Op: LLVMIntPredicate, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildFCmp(builder: LLVMBuilderRef, Op: LLVMRealPredicate, LHS: LLVMValueRef, RHS: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildNot(builder: LLVMBuilderRef, V: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildNeg(builder: LLVMBuilderRef, V: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildFNeg(builder: LLVMBuilderRef, V: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+
+extern "c" fn LLVMConstInt(IntTy: LLVMTypeRef, N: c_ulonglong, SignExtend: c_int) LLVMValueRef;
+extern "c" fn LLVMConstReal(RealTy: LLVMTypeRef, N: f64) LLVMValueRef;
+extern "c" fn LLVMConstNull(Ty: LLVMTypeRef) LLVMValueRef;
+
+extern "c" fn LLVMBuildAlloca(builder: LLVMBuilderRef, Ty: LLVMTypeRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildArrayAlloca(builder: LLVMBuilderRef, Ty: LLVMTypeRef, Val: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildLoad2(builder: LLVMBuilderRef, Ty: LLVMTypeRef, PointerVal: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMBuildStore(builder: LLVMBuilderRef, Val: LLVMValueRef, Ptr: LLVMValueRef) LLVMValueRef;
+
+extern "c" fn LLVMBuildRetVoid(builder: LLVMBuilderRef) LLVMValueRef;
+extern "c" fn LLVMBuildRet(builder: LLVMBuilderRef, V: LLVMValueRef) LLVMValueRef;
+extern "c" fn LLVMBuildBr(builder: LLVMBuilderRef, Dest: LLVMBasicBlockRef) LLVMValueRef;
+extern "c" fn LLVMBuildCondBr(builder: LLVMBuilderRef, If: LLVMValueRef, Then: LLVMBasicBlockRef, Else: LLVMBasicBlockRef) LLVMValueRef;
+extern "c" fn LLVMBuildSwitch(builder: LLVMBuilderRef, V: LLVMValueRef, Else: LLVMBasicBlockRef, NumCases: c_uint) LLVMValueRef;
+extern "c" fn LLVMAddCase(Switch: LLVMValueRef, OnVal: LLVMValueRef, Dest: LLVMBasicBlockRef) void;
+extern "c" fn LLVMBuildUnreachable(builder: LLVMBuilderRef) LLVMValueRef;
+
+extern "c" fn LLVMBuildPhi(builder: LLVMBuilderRef, Ty: LLVMTypeRef, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMAddIncoming(PhiNode: LLVMValueRef, IncomingValues: [*]LLVMValueRef, IncomingBlocks: [*]LLVMBasicBlockRef, Count: c_uint) void;
+extern "c" fn LLVMBuildSelect(builder: LLVMBuilderRef, If: LLVMValueRef, Then: LLVMValueRef, Else: LLVMValueRef, Name: [*:0]const u8) LLVMValueRef;
+
+extern "c" fn LLVMBuildCall(builder: LLVMBuilderRef, Fn: LLVMValueRef, Args: [*]LLVMValueRef, NumArgs: c_uint, Name: [*:0]const u8) LLVMValueRef;
+extern "c" fn LLVMGetNamedFunction(Module: LLVMModuleRef, Name: [*:0]const u8) LLVMValueRef;
+
+// ============================================================================
 // Target Configuration
 // ============================================================================
 
@@ -1140,41 +1193,45 @@ pub const CodeGenerator = struct {
         switch (term) {
             .ret => |val| {
                 if (val) |reg| {
-                    const llvm_val = self.register_map.get(reg.id);
-                    _ = llvm_val;
-                    // LLVMBuildRet(self.builder, llvm_val)
+                    const llvm_val = self.register_map.get(reg.id) orelse return error.InvalidRegister;
+                    _ = LLVMBuildRet(self.builder, llvm_val);
                 } else {
-                    // LLVMBuildRetVoid(self.builder)
+                    _ = LLVMBuildRetVoid(self.builder);
                 }
             },
             .br => |block| {
-                const llvm_block = self.block_map.get(block.label);
-                _ = llvm_block;
-                // LLVMBuildBr(self.builder, llvm_block)
+                const llvm_block = self.block_map.get(block.label) orelse return error.InvalidBlock;
+                _ = LLVMBuildBr(self.builder, llvm_block);
             },
             .cond_br => |cb| {
-                const cond_val = self.register_map.get(cb.cond.id);
-                const then_block = self.block_map.get(cb.then_block.label);
-                const else_block = self.block_map.get(cb.else_block.label);
-                _ = cond_val;
-                _ = then_block;
-                _ = else_block;
-                // LLVMBuildCondBr(self.builder, cond_val, then_block, else_block)
+                const cond_val = self.register_map.get(cb.cond.id) orelse return error.InvalidRegister;
+                const then_block = self.block_map.get(cb.then_block.label) orelse return error.InvalidBlock;
+                const else_block = self.block_map.get(cb.else_block.label) orelse return error.InvalidBlock;
+                _ = LLVMBuildCondBr(self.builder, cond_val, then_block, else_block);
             },
             .switch_ => |sw| {
-                const switch_val = self.register_map.get(sw.value.id);
-                const default_block = self.block_map.get(sw.default.label);
-                _ = switch_val;
-                _ = default_block;
-                // Build switch instruction with cases
+                const switch_val = self.register_map.get(sw.value.id) orelse return error.InvalidRegister;
+                const default_block = self.block_map.get(sw.default.label) orelse return error.InvalidBlock;
+                
+                const switch_inst = LLVMBuildSwitch(self.builder, switch_val, default_block, @intCast(sw.cases.len));
+                
+                for (sw.cases) |case| {
+                    const case_val = try self.buildConstInt(case.value);
+                    const case_block = self.block_map.get(case.block.label) orelse return error.InvalidBlock;
+                    LLVMAddCase(switch_inst, case_val, case_block);
+                }
             },
             .unreachable_ => {
-                // LLVMBuildUnreachable(self.builder)
+                _ = LLVMBuildUnreachable(self.builder);
             },
             .throw => |reg| {
-                const exc_val = self.register_map.get(reg.id);
-                _ = exc_val;
-                // Call php_throw and then unreachable
+                const exc_val = self.register_map.get(reg.id) orelse return error.InvalidRegister;
+                // Call php_throw
+                if (self.runtime_functions.get("php_throw")) |func| {
+                    const args = [_]LLVMValueRef{exc_val};
+                    _ = LLVMBuildCall(self.builder, func, &args, 1, "");
+                }
+                _ = LLVMBuildUnreachable(self.builder);
             },
         }
     }
@@ -1186,21 +1243,89 @@ pub const CodeGenerator = struct {
     const ArithOp = enum { add, sub, mul, div, mod, pow, bit_and, bit_or, bit_xor, shl, shr, and_, or_ };
 
     fn buildArithmetic(self: *Self, op: ArithOp, lhs: IR.Register, rhs: IR.Register) !LLVMValueRef {
-        _ = self;
-        _ = op;
-        _ = lhs;
-        _ = rhs;
-        // In real LLVM mode, build appropriate instruction based on op
-        return null;
+        if (!self.llvm_available) return null;
+
+        const lhs_val = self.register_map.get(lhs.id) orelse return error.InvalidRegister;
+        const rhs_val = self.register_map.get(rhs.id) orelse return error.InvalidRegister;
+
+        // Check if types are compatible (basic check)
+        if (!lhs.type_.eql(rhs.type_)) {
+            // In some cases we might need implicit casting, but for now strict SSA
+            // return error.TypeMismatch;
+        }
+
+        switch (lhs.type_) {
+            .i64, .bool, .i8, .i32 => {
+                // Integer operations
+                return switch (op) {
+                    .add => LLVMBuildAdd(self.builder, lhs_val, rhs_val, "add"),
+                    .sub => LLVMBuildSub(self.builder, lhs_val, rhs_val, "sub"),
+                    .mul => LLVMBuildMul(self.builder, lhs_val, rhs_val, "mul"),
+                    .div => LLVMBuildSDiv(self.builder, lhs_val, rhs_val, "div"),
+                    .mod => LLVMBuildSRem(self.builder, lhs_val, rhs_val, "mod"),
+                    .bit_and => LLVMBuildAnd(self.builder, lhs_val, rhs_val, "and"),
+                    .bit_or => LLVMBuildOr(self.builder, lhs_val, rhs_val, "or"),
+                    .bit_xor => LLVMBuildXor(self.builder, lhs_val, rhs_val, "xor"),
+                    .shl => LLVMBuildShl(self.builder, lhs_val, rhs_val, "shl"),
+                    .shr => LLVMBuildAShr(self.builder, lhs_val, rhs_val, "shr"), // Arithmetic shift right
+                    .and_ => LLVMBuildAnd(self.builder, lhs_val, rhs_val, "logic_and"),
+                    .or_ => LLVMBuildOr(self.builder, lhs_val, rhs_val, "logic_or"),
+                    .pow => return error.UnsupportedOperation, // Requires intrinsic
+                };
+            },
+            .f64 => {
+                // Floating point operations
+                return switch (op) {
+                    .add => LLVMBuildFAdd(self.builder, lhs_val, rhs_val, "fadd"),
+                    .sub => LLVMBuildFSub(self.builder, lhs_val, rhs_val, "fsub"),
+                    .mul => LLVMBuildFMul(self.builder, lhs_val, rhs_val, "fmul"),
+                    .div => LLVMBuildFDiv(self.builder, lhs_val, rhs_val, "fdiv"),
+                    .mod => LLVMBuildFRem(self.builder, lhs_val, rhs_val, "fmod"),
+                    .pow => return error.UnsupportedOperation, // Requires intrinsic
+                    else => return error.UnsupportedOperation, // Bitwise ops invalid on float
+                };
+            },
+            else => return error.UnsupportedOperation,
+        }
     }
 
     const UnaryOp = enum { neg, bit_not, not };
 
     fn buildUnary(self: *Self, op: UnaryOp, operand: IR.Register) !LLVMValueRef {
-        _ = self;
-        _ = op;
-        _ = operand;
-        return null;
+        if (!self.llvm_available) return null;
+
+        const val = self.register_map.get(operand.id) orelse return error.InvalidRegister;
+
+        switch (op) {
+            .neg => {
+                switch (operand.type_) {
+                    .i64, .i32, .i8 => return LLVMBuildNeg(self.builder, val, "neg"),
+                    .f64 => return LLVMBuildFNeg(self.builder, val, "fneg"),
+                    else => return error.UnsupportedOperation,
+                }
+            },
+            .bit_not => {
+                // Bitwise NOT (~)
+                if (operand.type_ == .i64 or operand.type_ == .i32 or operand.type_ == .i8) {
+                    return LLVMBuildNot(self.builder, val, "bit_not");
+                }
+                return error.UnsupportedOperation;
+            },
+            .not => {
+                // Logical NOT (!)
+                // If operand is bool (i1), Not works.
+                // If operand is int, it should ideally be compared to 0 first, but if IR assumes bool input:
+                if (operand.type_ == .bool) {
+                    return LLVMBuildNot(self.builder, val, "logic_not");
+                }
+                // If we receive i64 for logical not, we probably need icmp eq 0
+                if (operand.type_ == .i64) {
+                    const zero = try self.buildConstInt(0);
+                    return LLVMBuildICmp(self.builder, LLVMIntPredicate.EQ, val, zero, "logic_not_i64");
+                }
+                return error.UnsupportedOperation;
+            },
+        }
     }
 
     // ========================================================================
@@ -1210,11 +1335,38 @@ pub const CodeGenerator = struct {
     const CmpOp = enum { eq, ne, lt, le, gt, ge, identical, not_identical, spaceship };
 
     fn buildComparison(self: *Self, op: CmpOp, lhs: IR.Register, rhs: IR.Register) !LLVMValueRef {
-        _ = self;
-        _ = op;
-        _ = lhs;
-        _ = rhs;
-        return null;
+        if (!self.llvm_available) return null;
+
+        const lhs_val = self.register_map.get(lhs.id) orelse return error.InvalidRegister;
+        const rhs_val = self.register_map.get(rhs.id) orelse return error.InvalidRegister;
+
+        switch (lhs.type_) {
+            .i64, .bool, .i8, .i32 => {
+                const pred = switch (op) {
+                    .eq, .identical => LLVMIntPredicate.EQ,
+                    .ne, .not_identical => LLVMIntPredicate.NE,
+                    .lt => LLVMIntPredicate.SLT,
+                    .le => LLVMIntPredicate.SLE,
+                    .gt => LLVMIntPredicate.SGT,
+                    .ge => LLVMIntPredicate.SGE,
+                    .spaceship => return error.UnsupportedOperation, // Requires multiple instructions
+                };
+                return LLVMBuildICmp(self.builder, pred, lhs_val, rhs_val, "icmp");
+            },
+            .f64 => {
+                const pred = switch (op) {
+                    .eq, .identical => LLVMRealPredicate.OEQ,
+                    .ne, .not_identical => LLVMRealPredicate.ONE,
+                    .lt => LLVMRealPredicate.OLT,
+                    .le => LLVMRealPredicate.OLE,
+                    .gt => LLVMRealPredicate.OGT,
+                    .ge => LLVMRealPredicate.OGE,
+                    .spaceship => return error.UnsupportedOperation,
+                };
+                return LLVMBuildFCmp(self.builder, pred, lhs_val, rhs_val, "fcmp");
+            },
+            else => return error.UnsupportedOperation,
+        }
     }
 
     // ========================================================================
@@ -1222,24 +1374,36 @@ pub const CodeGenerator = struct {
     // ========================================================================
 
     fn buildAlloca(self: *Self, type_: IR.Type, count: u32) !LLVMValueRef {
-        _ = self;
-        _ = type_;
-        _ = count;
-        return null;
+        if (!self.llvm_available) return null;
+
+        const llvm_type = self.mapType(type_);
+        if (llvm_type == null) return error.InvalidType;
+
+        if (count > 1) {
+            const count_val = try self.buildConstInt(count);
+            return LLVMBuildArrayAlloca(self.builder, llvm_type, count_val, "alloca_array");
+        } else {
+            return LLVMBuildAlloca(self.builder, llvm_type, "alloca");
+        }
     }
 
     fn buildLoad(self: *Self, ptr: IR.Register, type_: IR.Type) !LLVMValueRef {
-        _ = self;
-        _ = ptr;
-        _ = type_;
-        return null;
+        if (!self.llvm_available) return null;
+
+        const ptr_val = self.register_map.get(ptr.id) orelse return error.InvalidRegister;
+        const llvm_type = self.mapType(type_);
+        if (llvm_type == null) return error.InvalidType;
+
+        return LLVMBuildLoad2(self.builder, llvm_type, ptr_val, "load");
     }
 
     fn buildStore(self: *Self, ptr: IR.Register, value: IR.Register) !LLVMValueRef {
-        _ = self;
-        _ = ptr;
-        _ = value;
-        return null;
+        if (!self.llvm_available) return null;
+
+        const ptr_val = self.register_map.get(ptr.id) orelse return error.InvalidRegister;
+        const val_val = self.register_map.get(value.id) orelse return error.InvalidRegister;
+
+        return LLVMBuildStore(self.builder, val_val, ptr_val);
     }
 
     // ========================================================================
@@ -1247,32 +1411,31 @@ pub const CodeGenerator = struct {
     // ========================================================================
 
     fn buildConstInt(self: *Self, val: i64) !LLVMValueRef {
-        _ = self;
-        _ = val;
-        return null;
+        if (!self.llvm_available) return null;
+        return LLVMConstInt(self.type_cache.i64_type, @as(c_ulonglong, @bitCast(u64, val)), 1);
     }
 
     fn buildConstFloat(self: *Self, val: f64) !LLVMValueRef {
-        _ = self;
-        _ = val;
-        return null;
+        if (!self.llvm_available) return null;
+        return LLVMConstReal(self.type_cache.f64_type, val);
     }
 
     fn buildConstBool(self: *Self, val: bool) !LLVMValueRef {
-        _ = self;
-        _ = val;
-        return null;
+        if (!self.llvm_available) return null;
+        return LLVMConstInt(self.type_cache.bool_type, if (val) 1 else 0, 0);
     }
 
     fn buildConstString(self: *Self, id: u32) !LLVMValueRef {
         _ = self;
         _ = id;
+        // String constants need to be interned/globalized.
+        // For now stub.
         return null;
     }
 
     fn buildConstNull(self: *Self) !LLVMValueRef {
-        _ = self;
-        return null;
+        if (!self.llvm_available) return null;
+        return LLVMConstNull(self.type_cache.ptr_type);
     }
 
     // ========================================================================
@@ -1280,11 +1443,28 @@ pub const CodeGenerator = struct {
     // ========================================================================
 
     fn buildCall(self: *Self, func_name: []const u8, args: []const IR.Register, return_type: IR.Type) !LLVMValueRef {
-        _ = self;
-        _ = func_name;
-        _ = args;
-        _ = return_type;
-        return null;
+        _ = return_type; // LLVM infers return type from function signature
+        if (!self.llvm_available) return null;
+
+        var func = self.runtime_functions.get(func_name);
+        
+        if (func == null) {
+            const func_name_z = try self.allocator.dupeZ(u8, func_name);
+            defer self.allocator.free(func_name_z);
+            func = LLVMGetNamedFunction(self.module, func_name_z);
+        }
+
+        if (func == null) return error.RuntimeFunctionNotFound; // Or generic FunctionNotFound
+
+        // Prepare args
+        const llvm_args = try self.allocator.alloc(LLVMValueRef, args.len);
+        defer self.allocator.free(llvm_args);
+
+        for (args, 0..) |arg, i| {
+            llvm_args[i] = self.register_map.get(arg.id) orelse return error.InvalidRegister;
+        }
+
+        return LLVMBuildCall(self.builder, func.?, llvm_args.ptr, @intCast(args.len), "");
     }
 
     fn buildCallIndirect(self: *Self, func_ptr: IR.Register, args: []const IR.Register, return_type: IR.Type) !LLVMValueRef {
@@ -1530,17 +1710,40 @@ pub const CodeGenerator = struct {
     // ========================================================================
 
     fn buildPhi(self: *Self, incoming: []const IR.Instruction.PhiIncoming) !LLVMValueRef {
-        _ = self;
-        _ = incoming;
-        return null;
+        if (!self.llvm_available) return null;
+
+        if (incoming.len == 0) return error.InvalidPhi;
+
+        // Use first incoming value type as the PHI type
+        const first_reg = incoming[0].value;
+        const llvm_type = self.mapType(first_reg.type_);
+        if (llvm_type == null) return error.InvalidType;
+
+        const phi = LLVMBuildPhi(self.builder, llvm_type, "phi");
+
+        const count = incoming.len;
+        const values = try self.allocator.alloc(LLVMValueRef, count);
+        defer self.allocator.free(values);
+        const blocks = try self.allocator.alloc(LLVMBasicBlockRef, count);
+        defer self.allocator.free(blocks);
+
+        for (incoming, 0..) |inc, i| {
+            values[i] = self.register_map.get(inc.value.id) orelse return error.InvalidRegister;
+            blocks[i] = self.block_map.get(inc.block.label) orelse return error.InvalidBlock;
+        }
+
+        LLVMAddIncoming(phi, values.ptr, blocks.ptr, @intCast(count));
+        return phi;
     }
 
     fn buildSelect(self: *Self, cond: IR.Register, then_value: IR.Register, else_value: IR.Register) !LLVMValueRef {
-        _ = self;
-        _ = cond;
-        _ = then_value;
-        _ = else_value;
-        return null;
+        if (!self.llvm_available) return null;
+
+        const cond_val = self.register_map.get(cond.id) orelse return error.InvalidRegister;
+        const then_val = self.register_map.get(then_value.id) orelse return error.InvalidRegister;
+        const else_val = self.register_map.get(else_value.id) orelse return error.InvalidRegister;
+
+        return LLVMBuildSelect(self.builder, cond_val, then_val, else_val, "select");
     }
 
     // ========================================================================
