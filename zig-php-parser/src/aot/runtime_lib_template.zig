@@ -235,16 +235,17 @@ pub const ArrayKey = union(enum) {
 /// PHP数组类型
 /// 支持整数键和字符串键的混合数组
 pub const PHPArray = struct {
-    elements: std.HashMap(ArrayKey, Value, ArrayContext, std.hash_map.default_max_load_percentage),
+    // 使用 ArrayHashMap 保持插入顺序
+    elements: std.ArrayHashMap(ArrayKey, Value, ArrayContext, true),
     next_index: i64,
     ref_count: usize,
 
     pub const ArrayContext = struct {
-        pub fn hash(_: ArrayContext, key: ArrayKey) u64 {
-            return key.hash();
+        pub fn hash(_: ArrayContext, key: ArrayKey) u32 {
+            return @truncate(key.hash());
         }
 
-        pub fn eql(_: ArrayContext, a: ArrayKey, b: ArrayKey) bool {
+        pub fn eql(_: ArrayContext, a: ArrayKey, b: ArrayKey, _: usize) bool {
             return a.eql(b);
         }
     };
@@ -252,7 +253,7 @@ pub const PHPArray = struct {
     /// 创建新数组
     pub fn init(allocator: Allocator) !*PHPArray {
         const array = try allocator.create(PHPArray);
-        array.elements = std.HashMap(ArrayKey, Value, ArrayContext, std.hash_map.default_max_load_percentage).init(allocator);
+        array.elements = std.ArrayHashMap(ArrayKey, Value, ArrayContext, true).init(allocator);
         array.next_index = 0;
         array.ref_count = 1;
         return array;
@@ -1060,8 +1061,8 @@ pub fn php_var_dump(value: Value) !void {
 // ============================================================================
 
 pub const ArrayIterator = struct {
-    iter: std.HashMap(ArrayKey, Value, PHPArray.ArrayContext, std.hash_map.default_max_load_percentage).Iterator,
-    current: ?std.HashMap(ArrayKey, Value, PHPArray.ArrayContext, std.hash_map.default_max_load_percentage).Entry,
+    iter: std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).Iterator,
+    current: ?std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).Entry,
 };
 
 pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !i64 {
@@ -3709,6 +3710,37 @@ pub fn php_rename(oldname: Value, newname: Value) !Value {
     };
 
     return Value.initBool(true);
+}
+
+/// copy - 拷贝文件
+pub fn php_copy(source: Value, dest: Value) !Value {
+    if (!source.isString() or !dest.isString()) return Value.initBool(false);
+
+    const source_path = source.asString().data;
+    const dest_path = dest.asString().data;
+
+    std.fs.cwd().copyFile(source_path, std.fs.cwd(), dest_path, .{}) catch {
+        return Value.initBool(false);
+    };
+
+    return Value.initBool(true);
+}
+
+/// filesize - 获取文件大小
+pub fn php_filesize(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+
+    const path = filename.asString().data;
+    const file = std.fs.cwd().openFile(path, .{}) catch {
+        return Value.initBool(false);
+    };
+    defer file.close();
+
+    const stat = file.stat() catch {
+        return Value.initBool(false);
+    };
+
+    return Value.initInt(@intCast(stat.size));
 }
 
 /// basename - 返回路径中的文件名部分

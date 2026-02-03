@@ -560,7 +560,7 @@ pub const NativeLinker = struct {
 
             // 文件函数
             "file_get_contents", "file_put_contents", "file_exists", "is_file", "is_dir",
-            "filesize", "unlink", "rename", "copy",
+            "filesize", "unlink", "rename", "copy", "mkdir", "rmdir", "basename", "dirname",
 
             // 其他
             "isset",            "empty",            "unset",
@@ -685,6 +685,10 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "unlink")) return "php_unlink";
         if (std.mem.eql(u8, func_name, "rename")) return "php_rename";
         if (std.mem.eql(u8, func_name, "copy")) return "php_copy";
+        if (std.mem.eql(u8, func_name, "mkdir")) return "php_mkdir";
+        if (std.mem.eql(u8, func_name, "rmdir")) return "php_rmdir";
+        if (std.mem.eql(u8, func_name, "basename")) return "php_basename";
+        if (std.mem.eql(u8, func_name, "dirname")) return "php_dirname";
 
         // 默认：添加php_前缀
         // 注意：这里应该分配新的字符串，但为了简单起见，我们假设调用者会处理
@@ -2368,6 +2372,63 @@ pub const NativeLinker = struct {
                     }
                 }
             },
+            .neg => |op| {
+                if (inst.result) |reg| {
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    const operand_type_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
+                    
+                    if (type_tag == .i64 and operand_type_tag == .i64) {
+                         try writer.print("    reg_{d} = -reg_{d};\n", .{ reg.id, op.operand.id });
+                    } else if (operand_type_tag == .php_value) {
+                         if (type_tag == .i64) {
+                             try writer.print("    reg_{d} = (try runtime.php_neg(reg_{d})).toInt();\n", .{ reg.id, op.operand.id });
+                         } else {
+                             try writer.print("    reg_{d} = try runtime.php_neg(reg_{d});\n", .{ reg.id, op.operand.id });
+                         }
+                    } else {
+                         // Default to runtime call if not simple i64
+                         // If operand is i64 but result is Value, wrap operand
+                         if (operand_type_tag == .i64) {
+                             try writer.print("    reg_{d} = try runtime.php_neg(runtime.Value.initInt(reg_{d}));\n", .{ reg.id, op.operand.id });
+                         } else {
+                             try writer.print("    reg_{d} = try runtime.php_neg(reg_{d});\n", .{ reg.id, op.operand.id });
+                         }
+                    }
+                }
+            },
+            .not => |op| {
+                if (inst.result) |reg| {
+                    const operand_type_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    
+                    if (type_tag == .bool) {
+                        if (operand_type_tag == .bool) {
+                            try writer.print("    reg_{d} = !reg_{d};\n", .{ reg.id, op.operand.id });
+                        } else if (operand_type_tag == .php_value) {
+                            try writer.print("    reg_{d} = (try runtime.php_not(reg_{d})).toBool();\n", .{ reg.id, op.operand.id });
+                        } else if (operand_type_tag == .i64) {
+                            try writer.print("    reg_{d} = reg_{d} == 0;\n", .{ reg.id, op.operand.id });
+                        } else {
+                            try writer.print("    reg_{d} = (try runtime.php_not(reg_{d})).toBool();\n", .{ reg.id, op.operand.id });
+                        }
+                    } else {
+                        // Result is Value or something else
+                        if (operand_type_tag == .php_value) {
+                             try writer.print("    reg_{d} = try runtime.php_not(reg_{d});\n", .{ reg.id, op.operand.id });
+                        } else {
+                             const op_str = if (operand_type_tag == .i64)
+                                 try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{op.operand.id})
+                             else if (operand_type_tag == .bool)
+                                 try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{op.operand.id})
+                             else
+                                 try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.operand.id});
+                             defer self.allocator.free(op_str);
+                             
+                             try writer.print("    reg_{d} = try runtime.php_not({s});\n", .{ reg.id, op_str });
+                        }
+                    }
+                }
+            },
             .call => |op| {
                 // 生成函数调用
                 // 检查是否是内置函数
@@ -3389,13 +3450,19 @@ pub const NativeLinker = struct {
             try self.generateInstruction(writer, inst);
         }
 
-        // 在循环体结束时释放临时字符串常量
-        try writer.writeAll("        // Release temporary string constants\n");
+        // 在循环体结束时释放临时对象
+        try writer.writeAll("        // Release temporary values\n");
         for (body_block.instructions.items) |inst| {
             if (inst.result) |result_reg| {
                 switch (inst.op) {
-                    .const_string => {
+                    .const_string, .concat, .array_new, .new_object, .interpolate => {
                         try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{result_reg.id});
+                    },
+                    .call => {
+                        // 函数调用返回的值需要释放（如果是Value类型）
+                        if (result_reg.type_ == .php_value) {
+                            try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{result_reg.id});
+                        }
                     },
                     else => {},
                 }
@@ -3552,6 +3619,41 @@ pub const NativeLinker = struct {
         for (loop_block.instructions.items) |inst| {
             try writer.writeAll("    ");
             try self.generateInstruction(writer, inst);
+        }
+
+        // 在循环体结束时释放临时对象（包括body和loop块）
+        try writer.writeAll("        // Release temporary values (body)\n");
+        for (body_block.instructions.items) |inst| {
+            if (inst.result) |result_reg| {
+                switch (inst.op) {
+                    .const_string, .concat, .array_new, .new_object, .interpolate => {
+                        try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{result_reg.id});
+                    },
+                    .call => {
+                        if (result_reg.type_ == .php_value) {
+                            try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{result_reg.id});
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        try writer.writeAll("        // Release temporary values (increment)\n");
+        for (loop_block.instructions.items) |inst| {
+            if (inst.result) |result_reg| {
+                switch (inst.op) {
+                    .const_string, .concat, .array_new, .new_object, .interpolate => {
+                        try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{result_reg.id});
+                    },
+                    .call => {
+                        if (result_reg.type_ == .php_value) {
+                            try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{result_reg.id});
+                        }
+                    },
+                    else => {},
+                }
+            }
         }
 
         try writer.writeAll("    }\n");
