@@ -176,6 +176,8 @@ pub fn main() !void {
             aot_options.dump_ir = true;
         } else if (std.mem.eql(u8, arg, "--dump-ast")) {
             aot_options.dump_ast = true;
+        } else if (std.mem.eql(u8, arg, "--dump-zig")) {
+            aot_options.dump_zig = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             aot_options.verbose = true;
         } else if (std.mem.startsWith(u8, arg, "--lowering-policy=")) {

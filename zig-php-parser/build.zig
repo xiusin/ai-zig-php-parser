@@ -197,6 +197,19 @@ pub fn build(b: *std.Build) void {
     docs_cmd.addArg("--help");
     docs_step.dependOn(&docs_cmd.step);
 
+    // AOT coverage report
+    const aot_report_step = b.step("aot-report", "Generate AOT coverage report markdown");
+    const aot_report_exe = b.addExecutable(.{
+        .name = "aot-coverage-report",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/aot_coverage_report.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_aot_report = b.addRunArtifact(aot_report_exe);
+    aot_report_step.dependOn(&run_aot_report.step);
+
     // Benchmark step
     const bench_step = b.step("bench", "Run performance benchmarks");
     const bench_exe = b.addExecutable(.{

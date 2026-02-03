@@ -1060,16 +1060,24 @@ pub const IRGenerator = struct {
         const increment_block = try self.createBlock("foreach_increment");
         const exit_block = try self.createBlock("foreach_exit");
 
-        // Create index variable (starts at 0)
+        // Initialize iterator
+        const iter_args = try self.allocator.alloc(Register, 1);
+        iter_args[0] = iterable_reg;
+        
+        // iter_addr = php_array_iter_init(iterable)
+        const iter_addr = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_array_iter_init",
+            .args = iter_args,
+            .return_type = .i64, // Using i64 for pointer address
+        } }, .i64);
+
+        // Alloc iterator storage (to update it in increment)
         const i64_type_ptr = try self.allocator.create(Type);
         i64_type_ptr.* = Type{ .i64 = {} };
-        const index_type = Type{ .ptr = i64_type_ptr };
-        const index_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .i64, .count = 1 } }, index_type);
-        const zero_reg = try self.emitWithResult(.{ .const_int = 0 }, .i64);
-        _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = zero_reg } }, null);
-
-        // Get array length once
-        const length_reg = try self.emitWithResult(.{ .array_count = .{ .operand = iterable_reg } }, .i64);
+        const iter_ptr_type = Type{ .ptr = i64_type_ptr };
+        const iter_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .i64, .count = 1 } }, iter_ptr_type);
+        
+        _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = iter_addr } }, null);
 
         // Jump to condition check
         self.setTerminator(.{ .br = cond_block });
@@ -1077,13 +1085,22 @@ pub const IRGenerator = struct {
         // Push loop context for break/continue
         try self.loop_stack.append(self.allocator, .{
             .break_block = exit_block,
-            .continue_block = increment_block, // ✅ 修复：continue跳到increment块
+            .continue_block = increment_block,
         });
 
-        // Condition check: index < length
+        // Condition check: php_array_iter_valid(iter)
         self.setCurrentBlock(cond_block);
-        const index_reg = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
-        const cond_reg = try self.emitWithResult(.{ .lt = .{ .lhs = index_reg, .rhs = length_reg } }, .bool);
+        const curr_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        
+        const valid_args = try self.allocator.alloc(Register, 1);
+        valid_args[0] = curr_iter;
+        
+        const cond_reg = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_array_iter_valid",
+            .args = valid_args,
+            .return_type = .bool,
+        } }, .bool);
+        
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
             .then_block = body_block,
@@ -1092,9 +1109,8 @@ pub const IRGenerator = struct {
 
         // Body
         self.setCurrentBlock(body_block);
-
-        // Load current index
-        const current_index = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
+        // Load iter again (SSA)
+        const body_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
 
         // Get key if needed
         if (foreach_data.key) |key_idx| {
@@ -1102,9 +1118,17 @@ pub const IRGenerator = struct {
             if (key_node != null and key_node.?.tag == .variable) {
                 const key_name = self.getString(key_node.?.data.variable.name);
                 const key_var = try self.getOrCreateVarRegister(key_name, .php_value);
-                // For now, use index as key (works for numeric arrays)
-                const key_value = try self.emitWithResult(.{ .cast = .{ .value = current_index, .from_type = .i64, .to_type = .php_value } }, .php_value);
-                _ = try self.emit(.{ .store = .{ .ptr = key_var, .value = key_value } }, null);
+                
+                const key_args = try self.allocator.alloc(Register, 1);
+                key_args[0] = body_iter;
+                
+                const key_val = try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_array_iter_key",
+                    .args = key_args,
+                    .return_type = .php_value,
+                } }, .php_value);
+                
+                _ = try self.emit(.{ .store = .{ .ptr = key_var, .value = key_val } }, null);
             }
         }
 
@@ -1113,10 +1137,17 @@ pub const IRGenerator = struct {
         if (value_node != null and value_node.?.tag == .variable) {
             const value_name = self.getString(value_node.?.data.variable.name);
             const value_var = try self.getOrCreateVarRegister(value_name, .php_value);
-            // Get array element at current index
-            const index_value = try self.emitWithResult(.{ .cast = .{ .value = current_index, .from_type = .i64, .to_type = .php_value } }, .php_value);
-            const element = try self.emitWithResult(.{ .array_get = .{ .array = iterable_reg, .key = index_value } }, .php_value);
-            _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = element } }, null);
+            
+            const val_args = try self.allocator.alloc(Register, 1);
+            val_args[0] = body_iter;
+            
+            const val_val = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_array_iter_value",
+                .args = val_args,
+                .return_type = .php_value,
+            } }, .php_value);
+            
+            _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = val_val } }, null);
         }
 
         // Generate loop body
@@ -1127,18 +1158,37 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .br = increment_block });
         }
 
-        // Increment block: increment index and jump back to condition
+        // Increment block: increment iterator
         self.setCurrentBlock(increment_block);
-        const current_idx = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
-        const one_reg = try self.emitWithResult(.{ .const_int = 1 }, .i64);
-        const next_idx = try self.emitWithResult(.{ .add = .{ .lhs = current_idx, .rhs = one_reg } }, .i64);
-        _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = next_idx } }, null);
-
-        // Jump back to condition
+        const inc_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        
+        const next_args = try self.allocator.alloc(Register, 1);
+        next_args[0] = inc_iter;
+        
+        const next_iter = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_array_iter_next",
+            .args = next_args,
+            .return_type = .i64,
+        } }, .i64);
+        _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = next_iter } }, null);
+        
         self.setTerminator(.{ .br = cond_block });
 
+        // Exit block
         _ = self.loop_stack.pop();
         self.setCurrentBlock(exit_block);
+        
+        // Cleanup iterator
+        const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        
+        const free_args = try self.allocator.alloc(Register, 1);
+        free_args[0] = exit_iter;
+        
+        _ = try self.emit(.{ .call = .{
+            .func_name = "php_array_iter_free",
+            .args = free_args,
+            .return_type = .void,
+        } }, null);
     }
 
     /// Generate IR for switch statement

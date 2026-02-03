@@ -211,10 +211,10 @@ pub const ArrayKey = union(enum) {
     integer: i64,
     string: *PHPString,
 
-    pub fn hash(self: ArrayKey) u32 {
+    pub fn hash(self: ArrayKey) u64 {
         return switch (self) {
-            .integer => |i| @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&i))),
-            .string => |s| @truncate(std.hash.Wyhash.hash(0, s.data)),
+            .integer => |i| std.hash.Wyhash.hash(0, std.mem.asBytes(&i)),
+            .string => |s| std.hash.Wyhash.hash(0, s.data),
         };
     }
 
@@ -235,16 +235,16 @@ pub const ArrayKey = union(enum) {
 /// PHP数组类型
 /// 支持整数键和字符串键的混合数组
 pub const PHPArray = struct {
-    elements: std.AutoHashMap(ArrayKey, Value),
+    elements: std.HashMap(ArrayKey, Value, ArrayContext, std.hash_map.default_max_load_percentage),
     next_index: i64,
     ref_count: usize,
 
     pub const ArrayContext = struct {
-        pub fn hash(_: ArrayContext, key: ArrayKey) u32 {
+        pub fn hash(_: ArrayContext, key: ArrayKey) u64 {
             return key.hash();
         }
 
-        pub fn eql(_: ArrayContext, a: ArrayKey, b: ArrayKey, _: usize) bool {
+        pub fn eql(_: ArrayContext, a: ArrayKey, b: ArrayKey) bool {
             return a.eql(b);
         }
     };
@@ -252,7 +252,7 @@ pub const PHPArray = struct {
     /// 创建新数组
     pub fn init(allocator: Allocator) !*PHPArray {
         const array = try allocator.create(PHPArray);
-        array.elements = std.AutoHashMap(ArrayKey, Value).init(allocator);
+        array.elements = std.HashMap(ArrayKey, Value, ArrayContext, std.hash_map.default_max_load_percentage).init(allocator);
         array.next_index = 0;
         array.ref_count = 1;
         return array;
@@ -289,6 +289,24 @@ pub const PHPArray = struct {
     /// 获取元素
     pub fn get(self: *PHPArray, key: ArrayKey) ?Value {
         return self.elements.get(key);
+    }
+
+    /// 获取元素（通过Value键）
+    pub fn getByValue(self: *PHPArray, key: Value) ?Value {
+        if (key.isString()) {
+            return self.get(ArrayKey{ .string = key.asString() });
+        } else {
+            return self.get(ArrayKey{ .integer = key.asInt() });
+        }
+    }
+
+    /// 设置元素（通过Value键）
+    pub fn setByValue(self: *PHPArray, allocator: Allocator, key: Value, value: Value) !void {
+        if (key.isString()) {
+            try self.set(allocator, ArrayKey{ .string = key.asString() }, value);
+        } else {
+            try self.set(allocator, ArrayKey{ .integer = key.toInt() }, value);
+        }
     }
 
     /// 设置元素
@@ -506,7 +524,7 @@ pub const Value = struct {
     // 引用计数
     // ========================================================================
 
-    pub fn retain(self: Value) Value {
+    pub fn retain(self: Value) void {
         if (self.isString()) {
             self.asString().retain();
         } else if (self.isArray()) {
@@ -516,7 +534,6 @@ pub const Value = struct {
         } else if (self.isFunction()) {
             self.asFunction().retain();
         }
-        return self;
     }
 
     pub fn release(self: Value, allocator: Allocator) void {
@@ -660,6 +677,7 @@ fn lookupBuiltinFunction(name: []const u8) ?*const fn (args: []const Value, allo
             .{ .name = "strtolower", .func = wrapBuiltin_strtolower },
             .{ .name = "trim", .func = wrapBuiltin_trim },
             .{ .name = "count", .func = wrapBuiltin_count },
+            .{ .name = "strval", .func = wrapBuiltin_strval },
             .{ .name = "array_map", .func = wrapBuiltin_array_map },
             .{ .name = "array_filter", .func = wrapBuiltin_array_filter },
             .{ .name = "array_reduce", .func = wrapBuiltin_array_reduce },
@@ -699,6 +717,11 @@ fn wrapBuiltin_count(args: []const Value, allocator: Allocator) !Value {
     _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_count(args[0]);
+}
+
+fn wrapBuiltin_strval(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_strval(args[0], allocator);
 }
 
 fn wrapBuiltin_array_map(args: []const Value, allocator: Allocator) !Value {
@@ -1016,8 +1039,88 @@ pub fn php_var_dump(value: Value) !void {
         std.debug.print("string({}) \"{s}\"\n", .{ str.length, str.data });
     } else if (value.isArray()) {
         const arr = value.asArray();
-        std.debug.print("array({})\n", .{arr.count()});
+        std.debug.print("array({d}) {{\n", .{arr.count()});
+        // 遍历数组
+        var iter = arr.elements.iterator();
+        while (iter.next()) |entry| {
+            std.debug.print("  ", .{});
+            switch (entry.key_ptr.*) {
+                .integer => |i| std.debug.print("[{d}]", .{i}),
+                .string => |s| std.debug.print("[\"{s}\"]", .{s.data}),
+            }
+            std.debug.print(" =>\n  ", .{});
+            php_var_dump(entry.value_ptr.*);
+        }
+        std.debug.print("}}\n", .{});
     }
+}
+
+// ============================================================================
+// 数组迭代器函数
+// ============================================================================
+
+pub const ArrayIterator = struct {
+    iter: std.HashMap(ArrayKey, Value, PHPArray.ArrayContext, std.hash_map.default_max_load_percentage).Iterator,
+    current: ?std.HashMap(ArrayKey, Value, PHPArray.ArrayContext, std.hash_map.default_max_load_percentage).Entry,
+};
+
+pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !i64 {
+    if (!array_val.isArray()) return 0;
+    const array = array_val.asArray();
+    const iter = try allocator.create(ArrayIterator);
+    iter.iter = array.elements.iterator();
+    iter.current = iter.iter.next();
+    return @as(i64, @intCast(@intFromPtr(iter)));
+}
+
+pub fn php_array_iter_valid(iter_val: Value) !bool {
+    const iter_addr = iter_val.asInt();
+    if (iter_addr == 0) return false;
+    const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    return iter.current != null;
+}
+
+pub fn php_array_iter_key(iter_val: Value, allocator: Allocator) !Value {
+    const iter_addr = iter_val.asInt();
+    if (iter_addr == 0) return Value.initNull();
+    const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    if (iter.current) |entry| {
+        switch (entry.key_ptr.*) {
+            .integer => |i| return Value.initInt(i),
+            .string => |s| {
+                s.retain();
+                return Value.initString(s);
+            },
+        }
+    }
+    _ = allocator;
+    return Value.initNull();
+}
+
+pub fn php_array_iter_value(iter_val: Value) !Value {
+    const iter_addr = iter_val.asInt();
+    if (iter_addr == 0) return Value.initNull();
+    const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    if (iter.current) |entry| {
+        entry.value_ptr.retain();
+        return entry.value_ptr.*;
+    }
+    return Value.initNull();
+}
+
+pub fn php_array_iter_next(iter_val: Value) !i64 {
+    const iter_addr = iter_val.asInt();
+    if (iter_addr == 0) return 0;
+    const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    iter.current = iter.iter.next();
+    return iter_addr;
+}
+
+pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !void {
+    const iter_addr = iter_val.asInt();
+    if (iter_addr == 0) return;
+    const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    allocator.destroy(iter);
 }
 
 // ============================================================================
@@ -3634,8 +3737,8 @@ pub fn php_dirname(path: Value, allocator: Allocator) !Value {
 
 /// json_encode - 将PHP值编码为JSON字符串
 pub fn php_json_encode(value: Value, allocator: Allocator) !Value {
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayListUnmanaged(u8){};
+    defer buffer.deinit(allocator);
 
     try jsonEncodeValue(value, &buffer, allocator);
 
@@ -3643,33 +3746,33 @@ pub fn php_json_encode(value: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
-fn jsonEncodeValue(value: Value, buffer: *std.ArrayList(u8), allocator: Allocator) !void {
+fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator: Allocator) !void {
     if (value.isNull()) {
-        try buffer.appendSlice("null");
+        try buffer.appendSlice(allocator, "null");
     } else if (value.isBool()) {
-        try buffer.appendSlice(if (value.asBool()) "true" else "false");
+        try buffer.appendSlice(allocator, if (value.asBool()) "true" else "false");
     } else if (value.isInt()) {
         const formatted = try std.fmt.allocPrint(allocator, "{d}", .{value.asInt()});
         defer allocator.free(formatted);
-        try buffer.appendSlice(formatted);
+        try buffer.appendSlice(allocator, formatted);
     } else if (value.isFloat()) {
         const formatted = try std.fmt.allocPrint(allocator, "{d}", .{value.asFloat()});
         defer allocator.free(formatted);
-        try buffer.appendSlice(formatted);
+        try buffer.appendSlice(allocator, formatted);
     } else if (value.isString()) {
         const str = value.asString();
-        try buffer.append('"');
+        try buffer.append(allocator, '"');
         for (str.data) |c| {
             switch (c) {
-                '"' => try buffer.appendSlice("\\\""),
-                '\\' => try buffer.appendSlice("\\\\"),
-                '\n' => try buffer.appendSlice("\\n"),
-                '\r' => try buffer.appendSlice("\\r"),
-                '\t' => try buffer.appendSlice("\\t"),
-                else => try buffer.append(c),
+                '"' => try buffer.appendSlice(allocator, "\\\""),
+                '\\' => try buffer.appendSlice(allocator, "\\\\"),
+                '\n' => try buffer.appendSlice(allocator, "\\n"),
+                '\r' => try buffer.appendSlice(allocator, "\\r"),
+                '\t' => try buffer.appendSlice(allocator, "\\t"),
+                else => try buffer.append(allocator, c),
             }
         }
-        try buffer.append('"');
+        try buffer.append(allocator, '"');
     } else if (value.isArray()) {
         const arr = value.asArray();
         var is_list = true;
@@ -3679,7 +3782,7 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayList(u8), allocator: Allocato
         var it = arr.elements.iterator();
         while (it.next()) |entry| {
             switch (entry.key_ptr.*) {
-                .int => |k| {
+                .integer => |k| {
                     if (k != expected_index) is_list = false;
                     expected_index += 1;
                 },
@@ -3689,56 +3792,78 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayList(u8), allocator: Allocato
         }
 
         if (is_list) {
-            try buffer.append('[');
+            try buffer.append(allocator, '[');
             var first = true;
             it = arr.elements.iterator();
             while (it.next()) |entry| {
-                if (!first) try buffer.append(',');
+                if (!first) try buffer.append(allocator, ',');
                 try jsonEncodeValue(entry.value_ptr.*, buffer, allocator);
                 first = false;
             }
-            try buffer.append(']');
+            try buffer.append(allocator, ']');
         } else {
-            try buffer.append('{');
+            try buffer.append(allocator, '{');
             var first = true;
             it = arr.elements.iterator();
             while (it.next()) |entry| {
-                if (!first) try buffer.append(',');
+                if (!first) try buffer.append(allocator, ',');
 
                 // 写入键
-                try buffer.append('"');
                 switch (entry.key_ptr.*) {
-                    .int => |k| {
+                    .integer => |k| {
+                        try buffer.append(allocator, '"');
                         const key_str = try std.fmt.allocPrint(allocator, "{d}", .{k});
                         defer allocator.free(key_str);
-                        try buffer.appendSlice(key_str);
+                        try buffer.appendSlice(allocator, key_str);
+                        try buffer.append(allocator, '"');
                     },
-                    .string => |k| try buffer.appendSlice(k.data),
+                    .string => |k| {
+                        try buffer.append(allocator, '"');
+                        for (k.data) |c| {
+                            switch (c) {
+                                '"' => try buffer.appendSlice(allocator, "\\\""),
+                                '\\' => try buffer.appendSlice(allocator, "\\\\"),
+                                '\n' => try buffer.appendSlice(allocator, "\\n"),
+                                '\r' => try buffer.appendSlice(allocator, "\\r"),
+                                '\t' => try buffer.appendSlice(allocator, "\\t"),
+                                else => try buffer.append(allocator, c),
+                            }
+                        }
+                        try buffer.append(allocator, '"');
+                    },
                 }
-                try buffer.appendSlice("\":");
+                try buffer.appendSlice(allocator, ":");
 
                 // 写入值
                 try jsonEncodeValue(entry.value_ptr.*, buffer, allocator);
                 first = false;
             }
-            try buffer.append('}');
+            try buffer.append(allocator, '}');
         }
     } else {
-        try buffer.appendSlice("null");
+        try buffer.appendSlice(allocator, "null");
     }
 }
 
 /// json_decode - 解析JSON字符串为PHP值
-pub fn php_json_decode(json: Value, allocator: Allocator) !Value {
+pub fn php_json_decode(json: Value, assoc: Value, allocator: Allocator) !Value {
     if (!json.isString()) return Value.initNull();
 
+    const is_assoc = if (assoc.isBool()) assoc.asBool() else assoc.toBool();
     const json_str = json.asString().data;
     var pos: usize = 0;
 
-    return jsonDecodeValue(json_str, &pos, allocator) catch Value.initNull();
+    return jsonDecodeValue(json_str, &pos, is_assoc, allocator) catch Value.initNull();
 }
 
-fn jsonDecodeValue(json: []const u8, pos: *usize, allocator: Allocator) !Value {
+const JsonError = error{
+    InvalidJson,
+    UnexpectedEnd,
+    OutOfMemory,
+    StringTooLarge,
+};
+
+fn jsonDecodeValue(json: []const u8, pos: *usize, assoc: bool, allocator: Allocator) JsonError!Value {
     skipWhitespace(json, pos);
 
     if (pos.* >= json.len) return error.UnexpectedEnd;
@@ -3765,11 +3890,11 @@ fn jsonDecodeValue(json: []const u8, pos: *usize, allocator: Allocator) !Value {
     }
 
     if (c == '[') {
-        return jsonDecodeArray(json, pos, allocator);
+        return jsonDecodeArray(json, pos, assoc, allocator);
     }
 
     if (c == '{') {
-        return jsonDecodeObject(json, pos, allocator);
+        return jsonDecodeObject(json, pos, assoc, allocator);
     }
 
     if (c == '-' or (c >= '0' and c <= '9')) {
@@ -3782,22 +3907,22 @@ fn jsonDecodeValue(json: []const u8, pos: *usize, allocator: Allocator) !Value {
 fn jsonDecodeString(json: []const u8, pos: *usize, allocator: Allocator) !Value {
     pos.* += 1; // 跳过开头的引号
 
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayListUnmanaged(u8){};
+    defer buffer.deinit(allocator);
 
     while (pos.* < json.len and json[pos.*] != '"') {
         if (json[pos.*] == '\\' and pos.* + 1 < json.len) {
             pos.* += 1;
             switch (json[pos.*]) {
-                'n' => try buffer.append('\n'),
-                'r' => try buffer.append('\r'),
-                't' => try buffer.append('\t'),
-                '"' => try buffer.append('"'),
-                '\\' => try buffer.append('\\'),
-                else => try buffer.append(json[pos.*]),
+                'n' => try buffer.append(allocator, '\n'),
+                'r' => try buffer.append(allocator, '\r'),
+                't' => try buffer.append(allocator, '\t'),
+                '"' => try buffer.append(allocator, '"'),
+                '\\' => try buffer.append(allocator, '\\'),
+                else => try buffer.append(allocator, json[pos.*]),
             }
         } else {
-            try buffer.append(json[pos.*]);
+            try buffer.append(allocator, json[pos.*]);
         }
         pos.* += 1;
     }
@@ -3808,7 +3933,7 @@ fn jsonDecodeString(json: []const u8, pos: *usize, allocator: Allocator) !Value 
     return Value.initString(result);
 }
 
-fn jsonDecodeNumber(json: []const u8, pos: *usize) !Value {
+fn jsonDecodeNumber(json: []const u8, pos: *usize) JsonError!Value {
     const start = pos.*;
     var is_float = false;
 
@@ -3839,7 +3964,7 @@ fn jsonDecodeNumber(json: []const u8, pos: *usize) !Value {
     }
 }
 
-fn jsonDecodeArray(json: []const u8, pos: *usize, allocator: Allocator) !Value {
+fn jsonDecodeArray(json: []const u8, pos: *usize, assoc: bool, allocator: Allocator) JsonError!Value {
     pos.* += 1; // 跳过 '['
 
     const arr = try PHPArray.init(allocator);
@@ -3852,8 +3977,9 @@ fn jsonDecodeArray(json: []const u8, pos: *usize, allocator: Allocator) !Value {
     }
 
     while (pos.* < json.len) {
-        const value = try jsonDecodeValue(json, pos, allocator);
+        const value = try jsonDecodeValue(json, pos, assoc, allocator);
         try arr.push(allocator, value);
+        value.release(allocator);
 
         skipWhitespace(json, pos);
 
@@ -3870,7 +3996,7 @@ fn jsonDecodeArray(json: []const u8, pos: *usize, allocator: Allocator) !Value {
     return Value.initArray(arr);
 }
 
-fn jsonDecodeObject(json: []const u8, pos: *usize, allocator: Allocator) !Value {
+fn jsonDecodeObject(json: []const u8, pos: *usize, assoc: bool, allocator: Allocator) !Value {
     pos.* += 1; // 跳过 '{'
 
     const arr = try PHPArray.init(allocator);
@@ -3895,12 +4021,16 @@ fn jsonDecodeObject(json: []const u8, pos: *usize, allocator: Allocator) !Value 
         pos.* += 1;
 
         // 解析值
-        const value = try jsonDecodeValue(json, pos, allocator);
+        const value = try jsonDecodeValue(json, pos, assoc, allocator);
 
         // 添加到数组
         if (key.isString()) {
-            try arr.setByString(allocator, key.asString().data, value);
+            const key_str = key.asString();
+            const array_key = ArrayKey{ .string = key_str };
+            try arr.set(allocator, array_key, value);
         }
+        key.release(allocator);
+        value.release(allocator);
 
         skipWhitespace(json, pos);
 
@@ -3913,6 +4043,9 @@ fn jsonDecodeObject(json: []const u8, pos: *usize, allocator: Allocator) !Value 
 
     if (pos.* < json.len and json[pos.*] == '}') pos.* += 1;
 
+    // 如果 assoc 为 false，应该返回对象，但目前我们统一返回数组（简化实现）
+    // TODO: 实现 stdClass 对象
+    
     return Value.initArray(arr);
 }
 

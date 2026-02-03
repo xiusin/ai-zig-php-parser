@@ -93,11 +93,6 @@ const SymbolTableMod = @import("symbol_table.zig");
 const SymbolTable = SymbolTableMod.SymbolTable;
 const TypeInferenceMod = @import("type_inference.zig");
 const TypeInferencer = TypeInferenceMod.TypeInferencer;
-const CodeGen = @import("codegen.zig");
-const CodeGenerator = CodeGen.CodeGenerator;
-const LinkerMod = @import("linker.zig");
-const StaticLinker = LinkerMod.StaticLinker;
-const LinkerConfig = LinkerMod.LinkerConfig;
 const OptimizerMod = @import("optimizer.zig");
 const IROptimizer = OptimizerMod.IROptimizer;
 const IROptimizeLevel = OptimizerMod.OptimizeLevel;
@@ -151,6 +146,8 @@ pub const CompileOptions = struct {
     dump_ir: bool = false,
     /// Dump parsed AST for debugging
     dump_ast: bool = false,
+    dump_zig: bool = false,
+    dump_zig_path: ?[]const u8 = null,
     /// Verbose output during compilation
     verbose: bool = false,
     /// Syntax mode for parsing (PHP or Go style)
@@ -206,16 +203,6 @@ pub const OptimizeLevel = enum {
         if (std.mem.eql(u8, str, "release-fast")) return .release_fast;
         if (std.mem.eql(u8, str, "release-small")) return .release_small;
         return null;
-    }
-
-    /// Convert to CodeGen optimization level
-    pub fn toCodeGenLevel(self: OptimizeLevel) CodeGen.OptimizeLevel {
-        return switch (self) {
-            .debug => .debug,
-            .release_safe => .release_safe,
-            .release_fast => .release_fast,
-            .release_small => .release_small,
-        };
     }
 
     /// Convert to IR optimizer level
@@ -358,25 +345,8 @@ pub const Target = struct {
     }
 
     /// Convert to CodeGen target
-    pub fn toCodeGenTarget(self: Target) CodeGen.Target {
-        return .{
-            .arch = switch (self.arch) {
-                .x86_64 => .x86_64,
-                .aarch64 => .aarch64,
-                .arm => .arm,
-            },
-            .os = switch (self.os) {
-                .linux => .linux,
-                .macos => .macos,
-                .windows => .windows,
-            },
-            .abi = switch (self.abi) {
-                .gnu => .gnu,
-                .musl => .musl,
-                .msvc => .msvc,
-                .none => .none,
-            },
-        };
+    pub fn toCodeGenTarget(self: Target) void {
+        _ = self;
     }
 };
 
@@ -465,8 +435,6 @@ pub const AOTCompiler = struct {
     symbol_table: ?*SymbolTable,
     type_inferencer: ?*TypeInferencer,
     ir_generator: ?*IRGenerator,
-    codegen: ?*CodeGenerator,
-    linker: ?*StaticLinker,
     optimizer: ?*IROptimizer,
     native_linker: ?*NativeLinker,
     /// Syntax configuration derived from options
@@ -506,8 +474,6 @@ pub const AOTCompiler = struct {
             .symbol_table = null,
             .type_inferencer = null,
             .ir_generator = null,
-            .codegen = null,
-            .linker = null,
             .optimizer = null,
             .native_linker = null,
             .syntax_config = syntax_config,
@@ -545,16 +511,6 @@ pub const AOTCompiler = struct {
         if (self.symbol_table) |st| {
             st.deinit();
             self.allocator.destroy(st);
-        }
-
-        // Free code generator
-        if (self.codegen) |cg| {
-            cg.deinit();
-        }
-
-        // Free linker
-        if (self.linker) |lnk| {
-            lnk.deinit();
         }
 
         // Free native linker
@@ -618,38 +574,6 @@ pub const AOTCompiler = struct {
         );
         self.optimizer = optimizer;
 
-        // Initialize code generator
-        self.codegen = try CodeGenerator.init(
-            self.allocator,
-            self.options.target.toCodeGenTarget(),
-            self.options.optimize_level.toCodeGenLevel(),
-            self.options.debug_info,
-            self.diagnostics,
-        );
-
-        // Initialize linker (for symbol resolution) - 使用简化配置
-        const linker_target: LinkerMod.Target = switch (self.options.target.os) {
-            .linux => switch (self.options.target.arch) {
-                .x86_64 => .linux_x86_64,
-                .aarch64 => .linux_aarch64,
-                else => .linux_x86_64,
-            },
-            .macos => switch (self.options.target.arch) {
-                .x86_64 => .macos_x86_64,
-                .aarch64 => .macos_aarch64,
-                else => .macos_aarch64,
-            },
-            .windows => .windows_x86_64,
-        };
-        
-        const linker_config = LinkerConfig{
-            .target = linker_target,
-            .output_format = linker_target.getObjectFormat(),
-            .strip_debug = self.options.optimize_level == .release_small,
-            .optimize = self.options.optimize_level != .debug,
-        };
-        self.linker = try StaticLinker.init(self.allocator, linker_config, self.diagnostics);
-
         // Initialize native linker (for actual executable generation)
         const native_config = NativeLinkerConfig{
             .target = .{
@@ -684,6 +608,8 @@ pub const AOTCompiler = struct {
                 .warn => .warn,
                 .@"error" => .@"error",
             },
+            .dump_zig = self.options.dump_zig,
+            .dump_zig_path = self.options.dump_zig_path,
         };
         self.native_linker = try NativeLinker.init(self.allocator, native_config, self.diagnostics);
     }
@@ -977,30 +903,7 @@ pub const AOTCompiler = struct {
         }
 
         if (self.options.verbose) {
-            std.debug.print("  Generating native code...\n", .{});
-        }
-
-        const codegen = self.codegen orelse {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "code generator not initialized",
-                .{},
-            );
-            return;
-        };
-
-        // Generate LLVM IR and native code
-        codegen.generateModule(self.ir_module.?) catch |err| {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "code generation failed: {s}",
-                .{@errorName(err)},
-            );
-            return;
-        };
-
-        if (self.options.verbose) {
-            std.debug.print("  Code generation completed.\n", .{});
+            std.debug.print("  Code generation phase skipped (handled by linker).\n", .{});
         }
     }
 
