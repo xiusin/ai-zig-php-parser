@@ -564,7 +564,9 @@ pub const IRGenerator = struct {
         }
 
         // Add parameter to function
+        var param_idx: u32 = 0;
         if (self.current_function) |func| {
+            param_idx = @intCast(func.params.items.len);
             try func.addParam(.{
                 .name = param_name,
                 .type_ = param_type,
@@ -574,8 +576,14 @@ pub const IRGenerator = struct {
             });
         }
 
-        // Create register for parameter
-        _ = try self.getOrCreateVarRegister(param_name, param_type);
+        // Emit param instruction
+        const param_reg = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
+
+        // Create register for parameter (alloca)
+        const alloca_reg = try self.getOrCreateVarRegister(param_name, param_type);
+
+        // Store param value to alloca
+        _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_reg } }, null);
     }
 
     /// Resolve a type node to IR Type

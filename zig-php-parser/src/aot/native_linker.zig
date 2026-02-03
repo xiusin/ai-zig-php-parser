@@ -793,52 +793,8 @@ pub const NativeLinker = struct {
             try code.appendSlice(self.allocator, "\n");
         }
 
-        // 生成参数初始化代码（将函数参数存储到对应的alloca寄存器中）
-        if (func.params.items.len > 0) {
-            try code.appendSlice(self.allocator, "    // Initialize parameters\n");
 
-            // 查找参数对应的alloca寄存器
-            // 参数名格式：$a, $b, ...
-            // alloca寄存器：reg_0, reg_1, ...（按照IR生成顺序）
-
-            // 遍历所有alloca指令，找到参数对应的寄存器
-            var param_alloca_map = std.AutoHashMap(usize, []const u8).init(self.allocator);
-            defer param_alloca_map.deinit();
-
-            for (func.blocks.items) |block| {
-                for (block.instructions.items) |inst| {
-                    if (inst.op == .alloca) {
-                        if (inst.result) |reg| {
-                            // 检查这个alloca是否对应某个参数
-                            // 通过检查后续的store指令来判断
-                            // 但是现在没有store指令，所以我们需要另一种方法
-
-                            // 简单方法：假设前N个alloca对应前N个参数
-                            // 这不是最优解，但可以工作
-                            const param_idx = param_alloca_map.count();
-                            if (param_idx < func.params.items.len) {
-                                try param_alloca_map.put(reg.id, func.params.items[param_idx].name);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 生成参数初始化代码
-            var param_iter = param_alloca_map.iterator();
-            while (param_iter.next()) |entry| {
-                const reg_id = entry.key_ptr.*;
-                const param_name = entry.value_ptr.*;
-
-                try code.appendSlice(self.allocator, "    reg_");
-                try code.writer(self.allocator).print("{d}", .{reg_id});
-                try code.appendSlice(self.allocator, "_storage = @\"");
-                try code.appendSlice(self.allocator, param_name);
-                try code.appendSlice(self.allocator, "\";\n");
-            }
-
-            try code.appendSlice(self.allocator, "\n");
-        }
+        // 参数初始化现在由IR中的param和store指令处理
 
         self.current_reg_types = &all_registers;
         defer self.current_reg_types = null;
@@ -1263,31 +1219,37 @@ pub const NativeLinker = struct {
 
         try writer.writeAll("    switch (prev_block) {\n");
         for (phi.incoming) |incoming| {
-            var pred_idx: u32 = 0;
+            var pred_idx: ?u32 = null;
             for (func.blocks.items, 0..) |block, idx| {
                 if (block == incoming.block) {
                     pred_idx = @intCast(idx);
                     break;
                 }
             }
+            
+            if (pred_idx) |idx| {
+                const src = incoming.value;
+                const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
+                const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+                const src_expr = blk: {
+                    if (dest_is_value and src_tag == .i64) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{src.id});
+                    if (dest_is_value and src_tag == .f64) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{src.id});
+                    if (dest_is_value and src_tag == .bool) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{src.id});
+                    if (!dest_is_value and src_tag == .php_value) {
+                        if (dest_tag == .i64) break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}.asInt()", .{src.id});
+                        if (dest_tag == .f64) break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}.asFloat()", .{src.id});
+                        if (dest_tag == .bool) break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}.toBool()", .{src.id});
+                    }
+                    break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}", .{src.id});
+                };
+                defer self.allocator.free(src_expr);
 
-            const src = incoming.value;
-            const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
-            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
-            const src_expr = blk: {
-                if (dest_is_value and src_tag == .i64) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt(reg_{d})", .{src.id});
-                if (dest_is_value and src_tag == .f64) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat(reg_{d})", .{src.id});
-                if (dest_is_value and src_tag == .bool) break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool(reg_{d})", .{src.id});
-                if (!dest_is_value and src_tag == .php_value) {
-                    if (dest_tag == .i64) break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}.asInt()", .{src.id});
-                    if (dest_tag == .f64) break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}.asFloat()", .{src.id});
-                    if (dest_tag == .bool) break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}.toBool()", .{src.id});
-                }
-                break :blk try std.fmt.allocPrint(self.allocator, "reg_{d}", .{src.id});
-            };
-            defer self.allocator.free(src_expr);
-
-            try writer.print("        {d} => reg_{d} = {s},\n", .{ pred_idx, result_reg.id, src_expr });
+                try writer.print("        {d} => reg_{d} = {s},\n", .{ idx, result_reg.id, src_expr });
+            } else {
+                // Predecessor block not found (likely removed by optimization)
+                // We just skip this case, assuming it will never be taken at runtime
+                // because the block is unreachable.
+            }
         }
         try writer.writeAll("        else => unreachable,\n");
         try writer.writeAll("    }\n");
@@ -1942,6 +1904,11 @@ pub const NativeLinker = struct {
                 }
             },
             .nop => {},
+            .param => |op| {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = @\"{s}\";\n", .{ reg.id, op.name });
+                }
+            },
             .eq => |op| {
                 if (inst.result) |reg| {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
@@ -2556,27 +2523,43 @@ pub const NativeLinker = struct {
             .cast => |op| {
                 // cast: 类型转换
                 if (inst.result) |reg| {
+                    // Get the actual type of the source register
+                    const src_real_type = self.current_reg_types.?.get(op.value.id) orelse op.value.type_;
+                    const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+
                     // 根据目标类型生成不同的转换代码
                     if (op.to_type == .php_value) {
                         // 从基本类型转换到php_value
-                        if (op.from_type == .i64) {
+                        if (src_tag == .i64) {
                             try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ reg.id, op.value.id });
-                        } else if (op.from_type == .f64) {
+                        } else if (src_tag == .f64) {
                             try writer.print("    reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ reg.id, op.value.id });
-                        } else if (op.from_type == .bool) {
+                        } else if (src_tag == .bool) {
                             try writer.print("    reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ reg.id, op.value.id });
                         } else {
-                            try writer.print("    reg_{d} = reg_{d}; // cast from {any} to {any}\n", .{ reg.id, op.value.id, op.from_type, op.to_type });
+                            try writer.print("    reg_{d} = reg_{d}; // cast from {any} to {any}\n", .{ reg.id, op.value.id, src_tag, op.to_type });
                         }
                     } else if (op.to_type == .i64) {
                         // 转换到i64
-                        try writer.print("    reg_{d} = reg_{d}.asInt();\n", .{ reg.id, op.value.id });
+                        if (src_tag == .i64) {
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.value.id });
+                        } else {
+                            try writer.print("    reg_{d} = reg_{d}.asInt();\n", .{ reg.id, op.value.id });
+                        }
                     } else if (op.to_type == .f64) {
                         // 转换到f64
-                        try writer.print("    reg_{d} = reg_{d}.asFloat();\n", .{ reg.id, op.value.id });
+                        if (src_tag == .f64) {
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.value.id });
+                        } else {
+                            try writer.print("    reg_{d} = reg_{d}.asFloat();\n", .{ reg.id, op.value.id });
+                        }
                     } else if (op.to_type == .bool) {
                         // 转换到bool
-                        try writer.print("    reg_{d} = reg_{d}.asBool();\n", .{ reg.id, op.value.id });
+                        if (src_tag == .bool) {
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.value.id });
+                        } else {
+                            try writer.print("    reg_{d} = reg_{d}.asBool();\n", .{ reg.id, op.value.id });
+                        }
                     } else {
                         // 默认：直接赋值
                         try writer.print("    reg_{d} = reg_{d}; // cast\n", .{ reg.id, op.value.id });

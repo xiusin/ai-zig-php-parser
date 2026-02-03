@@ -129,8 +129,8 @@ pub const PassConfig = struct {
             .cse = true,
             .licm = true,
             .strength_reduction = true,
-            .mem2reg = false, // TODO: Fix parameter mapping in NativeLinker when allocas are removed
-            .loop_unroll = true,
+            .mem2reg = true,
+            .loop_unroll = false,
             .max_iterations = 5,
         };
     }
@@ -1591,7 +1591,7 @@ pub const IROptimizer = struct {
                 }
             },
             // Instructions with no register operands
-            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null => {},
+            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .param => {},
             .try_begin, .try_end, .get_exception, .clear_exception => {},
             .mutex_lock, .mutex_unlock, .mutex_new => {},
             .catch_ => {},
@@ -1656,6 +1656,7 @@ pub const IROptimizer = struct {
             .and_, .or_, .not => false,
             .neg => false,
             .const_int, .const_float, .const_bool, .const_string, .const_null => false,
+            .param => false,
             .cast, .type_check, .get_type => false,
             .box, .unbox => false,
             .phi, .select => false,
@@ -2219,7 +2220,6 @@ pub const IROptimizer = struct {
         op: Instruction.Op,
         reg_map: *std.AutoHashMap(u32, u32),
     ) !Instruction.Op {
-        _ = self;
         return switch (op) {
             .add => |bin| .{ .add = .{
                 .lhs = remapRegister(bin.lhs, reg_map),
@@ -2279,10 +2279,40 @@ pub const IROptimizer = struct {
                 .ptr = remapRegister(st.ptr, reg_map),
                 .value = remapRegister(st.value, reg_map),
             } },
-            // Constants don't need remapping
             .const_int, .const_float, .const_bool, .const_string, .const_null => op,
             .alloca => op,
-            // For other operations, return as-is (simplified)
+            .param => op,
+            
+            // Deep copy needed for slice fields
+            .call => |call| blk: {
+                const new_args = try self.allocator.alloc(Register, call.args.len);
+                for (call.args, 0..) |arg, i| {
+                    new_args[i] = remapRegister(arg, reg_map);
+                }
+                break :blk .{ .call = .{
+                     .func_name = call.func_name, // String literal/slice, usually static or owned by module? Assumed safe to share if const
+                     .args = new_args,
+                     .return_type = call.return_type,
+                 } };
+             },
+            .phi => |phi| blk: {
+                 const IncomingType = @TypeOf(phi.incoming[0]);
+                 const new_incoming = try self.allocator.alloc(IncomingType, phi.incoming.len);
+                 for (phi.incoming, 0..) |inc, i| {
+                    // Block pointers need to be remapped if we are cloning blocks... 
+                    // But here we only remap registers.
+                    // If blocks are also cloned, we might need a block map.
+                    // For Loop Unrolling, we fix up Phi nodes separately after cloning.
+                    // So we can just copy the block pointer for now?
+                    // Or maybe we should clone the structure.
+                    new_incoming[i] = .{
+                        .block = inc.block, 
+                        .value = remapRegister(inc.value, reg_map),
+                    };
+                }
+                break :blk .{ .phi = .{ .incoming = new_incoming } };
+            },
+            // For other operations, return as-is (simplified) - TODO: Handle other deep copies like call_indirect, etc.
             else => op,
         };
     }

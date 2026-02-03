@@ -1119,6 +1119,7 @@ pub const CodeGenerator = struct {
             // Debug
             .debug_print => |op| try self.buildDebugPrint(op.operand),
             .nop => null,
+            .param => null, // TODO: Implement LLVM param handling
         };
 
         // Store result in register map if instruction has a result

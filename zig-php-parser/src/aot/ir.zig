@@ -747,6 +747,14 @@ pub const Instruction = struct {
         debug_print: UnaryOp,
         /// No operation (placeholder for removed instructions)
         nop: void,
+        /// Get function parameter
+        param: ParamOp,
+    };
+
+    /// Parameter operation
+    pub const ParamOp = struct {
+        index: u32,
+        name: []const u8,
     };
 
     /// Binary operation operands
@@ -1368,6 +1376,7 @@ pub const IRPrinter = struct {
             // Debug
             .debug_print => |op| try self.print("debug.print {any}", .{op.operand}),
             .nop => try self.write("nop"),
+            .param => |op| try self.print("param {d} ({s})", .{ op.index, op.name }),
         }
     }
 
