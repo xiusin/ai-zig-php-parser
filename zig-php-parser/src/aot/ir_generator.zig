@@ -169,6 +169,12 @@ pub const IRGenerator = struct {
         module.* = Module.init(self.allocator, module_name, source_file);
         self.module = module;
 
+        // Copy string table from Parser to Module
+        // This ensures that StringId from AST nodes matches StringId in IR Module
+        for (string_table) |str| {
+            try module.string_table.append(self.allocator, str);
+        }
+
         // Process root node at the specified index
         if (root_index < nodes.len and nodes[root_index].tag == .root) {
             const root_data = nodes[root_index].data.root;
@@ -399,8 +405,31 @@ pub const IRGenerator = struct {
             return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = pointed_type } }, pointed_type);
         }
 
-        // Variable not found - create a null value
-        return self.emitWithResult(.const_null, .php_value);
+        // Variable not found
+        
+        // Check if it's a variable (starts with $)
+        if (var_name.len > 0 and var_name[0] == '$') {
+            // Undefined variable - create a null value
+            // TODO: Emit warning
+            return self.emitWithResult(.const_null, .php_value);
+        } else {
+            // It's a constant (identifier)
+            // Generate call to php_constant_get(name)
+            
+            // Create string literal for name
+            const name_id = node.data.variable.name;
+            const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_value);
+            
+            // Emit call
+            const args = try self.allocator.alloc(Register, 1);
+            args[0] = name_reg;
+            
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_constant_get",
+                .args = args,
+                .return_type = .php_value,
+            } }, .php_value);
+        }
     }
 
     /// Check for unused variables and report errors
@@ -1755,18 +1784,19 @@ pub const IRGenerator = struct {
         // Evaluate constant value (with constant folding)
         const value_reg = try self.generateExpression(const_data.value);
 
-        // Create global constant
-        if (self.module) |module| {
-            const global = try self.allocator.create(Global);
-            global.* = .{
-                .name = const_name,
-                .type_ = value_reg.type_,
-                .initializer = null, // TODO: Implement proper constant initializer
-                .is_constant = true,
-                .location = self.current_location,
-            };
-            try module.addGlobal(global);
-        }
+        // Emit call to php_define(name, value)
+        const name_id = const_data.name;
+        const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_value);
+        
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = name_reg;
+        args[1] = value_reg;
+        
+        _ = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_define",
+            .args = args,
+            .return_type = .php_value,
+        } }, .php_value);
 
         try self.symbol_table.defineConstant(const_name, .dynamic, self.current_location);
     }

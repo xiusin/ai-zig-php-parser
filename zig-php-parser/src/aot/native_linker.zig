@@ -547,6 +547,9 @@ pub const NativeLinker = struct {
             "php_array_iter_key",
             "php_array_iter_free",
             "php_create_closure",
+            "php_define",
+            "define",
+            "php_constant_get",
         };
 
         for (needs_allocator) |name| {
@@ -567,6 +570,9 @@ pub const NativeLinker = struct {
         const builtins = [_][]const u8{
             // 输出函数
             "echo",             "print",        "var_dump",     "print_r",         "var_export",
+
+            // 常量函数
+            "define",           "defined",
 
             // 字符串函数
             "strlen",           "substr",       "strpos",       "strtoupper",      "strtolower",
@@ -632,6 +638,10 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "echo")) return "php_echo";
         if (std.mem.eql(u8, func_name, "print")) return "php_print";
         if (std.mem.eql(u8, func_name, "var_dump")) return "php_var_dump";
+
+        // 常量函数
+        if (std.mem.eql(u8, func_name, "define")) return "php_define";
+        if (std.mem.eql(u8, func_name, "defined")) return "php_defined";
 
         // 字符串函数
         if (std.mem.eql(u8, func_name, "strlen")) return "php_strlen";

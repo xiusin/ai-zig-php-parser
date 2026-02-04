@@ -27,11 +27,15 @@ pub var runtime_allocator: Allocator = undefined;
 /// 用户定义函数注册表
 pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) = null;
 
+/// 全局常量表
+pub var constants: std.StringHashMap(Value) = undefined;
+
 /// 初始化运行时
 pub fn initRuntime(allocator: Allocator) void {
     runtime_allocator = allocator;
     initClassRegistry(allocator);
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(allocator);
+    constants = std.StringHashMap(Value).init(allocator);
 }
 
 /// 清理运行时
@@ -40,6 +44,14 @@ pub fn deinitRuntime() void {
         registry.deinit();
         user_function_registry = null;
     }
+    var iter = constants.iterator();
+    while (iter.next()) |entry| {
+        // 释放键（我们复制了键）
+        runtime_allocator.free(entry.key_ptr.*);
+        // 释放值
+        entry.value_ptr.release(runtime_allocator);
+    }
+    constants.deinit();
 }
 
 /// 注册用户定义函数
@@ -1157,6 +1169,52 @@ pub fn php_var_dump(value: Value) !void {
         }
         std.debug.print("}}\n", .{});
     }
+}
+
+// ============================================================================
+// 常量函数
+// ============================================================================
+
+pub fn php_define(name_val: Value, value_val: Value, allocator: Allocator) !Value {
+    if (!name_val.isString()) return Value.initBool(false);
+    const name = name_val.asString().data;
+    
+    // 检查是否存在
+    if (constants.contains(name)) {
+        // Warning: Constant already defined
+        // std.debug.print("Warning: Constant {s} already defined\n", .{name});
+        return Value.initBool(false);
+    }
+    
+    // 复制键
+    const name_copy = try allocator.dupe(u8, name);
+    // 保留值
+    value_val.retain();
+    
+    try constants.put(name_copy, value_val);
+    return Value.initBool(true);
+}
+
+pub fn php_defined(name_val: Value) !Value {
+    if (!name_val.isString()) return Value.initBool(false);
+    const name = name_val.asString().data;
+    return Value.initBool(constants.contains(name));
+}
+
+pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!name_val.isString()) return Value.initNull();
+    const name = name_val.asString().data;
+    
+    if (constants.get(name)) |val| {
+        val.retain();
+        return val;
+    }
+    
+    // 未定义常量
+    std.debug.print("Fatal error: Uncaught Error: Undefined constant \"{s}\"\n", .{name});
+    std.posix.exit(255);
+    return Value.initNull();
 }
 
 // ============================================================================
