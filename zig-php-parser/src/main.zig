@@ -491,6 +491,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
             result.warning_count,
         });
         aot_compiler.printDiagnostics();
+        return error.CompilationFailed;
     }
 }
 

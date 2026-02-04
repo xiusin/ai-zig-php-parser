@@ -2329,8 +2329,35 @@ pub const IRGenerator = struct {
 
         // Generate arguments
         const args = try self.allocator.alloc(Register, call_data.args.len);
+        
+        // Lookup function symbol to check for reference parameters
+        const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
+
         for (call_data.args, 0..) |arg_idx, i| {
-            args[i] = try self.generateExpression(arg_idx);
+            // Check if argument is passed by reference
+            var is_ref = false;
+            if (func_symbol) |sym| {
+                if (sym.metadata == .function) {
+                    const params = sym.metadata.function.params;
+                    if (i < params.len) {
+                        is_ref = params[i].is_reference;
+                    }
+                }
+            }
+
+            if (is_ref) {
+                // Pass by reference
+                const arg_node = self.getNode(arg_idx);
+                if (arg_node != null and arg_node.?.tag == .variable) {
+                    const var_name = self.getString(arg_node.?.data.variable.name);
+                    const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                    args[i] = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                } else {
+                    args[i] = try self.generateExpression(arg_idx);
+                }
+            } else {
+                args[i] = try self.generateExpression(arg_idx);
+            }
         }
 
         return self.emitWithResult(.{ .call = .{

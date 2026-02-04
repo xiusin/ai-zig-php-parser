@@ -432,6 +432,7 @@ pub const Value = struct {
     pub const TYPE_STRING: u64 = 0x0000800000000000;
     pub const TYPE_ARRAY: u64 = 0x0001000000000000;
     pub const TYPE_FUNCTION: u64 = 0x0002000000000000;
+    pub const TYPE_REF: u64 = 0x0003000000000000;
 
     // 48位整数常量
     pub const INT48_MASK: u64 = 0x0000FFFFFFFFFFFF;
@@ -487,6 +488,12 @@ pub const Value = struct {
         return .{ .val = TAG_PTR | TYPE_FUNCTION | (addr & 0x00007FFFFFFFFFFF) };
     }
 
+    /// 创建引用值
+    pub fn initRef(ptr: *Value) Value {
+        const addr = @intFromPtr(ptr);
+        return .{ .val = TAG_PTR | TYPE_REF | (addr & 0x00007FFFFFFFFFFF) };
+    }
+
     // ========================================================================
     // 类型检查
     // ========================================================================
@@ -526,6 +533,13 @@ pub const Value = struct {
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         // 然后检查类型标签
         return (self.val & TYPE_MASK) == TYPE_FUNCTION;
+    }
+
+    pub fn isRef(self: Value) bool {
+        // 首先检查是否是指针类型（QNAN位设置，但SIGN_BIT未设置）
+        if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
+        // 然后检查类型标签
+        return (self.val & TYPE_MASK) == TYPE_REF;
     }
 
     // ========================================================================
@@ -570,6 +584,10 @@ pub const Value = struct {
     }
 
     pub fn asFunction(self: Value) *PHPClosure {
+        return @ptrFromInt(self.val & 0x00007FFFFFFFFFFF);
+    }
+
+    pub fn asRef(self: Value) *Value {
         return @ptrFromInt(self.val & 0x00007FFFFFFFFFFF);
     }
 
@@ -5047,4 +5065,31 @@ pub fn channel_close(channel: Value) void {
 pub fn await_result(future: Value) !Value {
     // 简单实现：直接返回future值
     return future;
+}
+
+// ============================================================================
+// Reference Support
+// ============================================================================
+
+pub fn val_assign(target: *Value, val: Value) void {
+    if (target.isRef()) {
+        target.asRef().* = val;
+    } else {
+        target.* = val;
+    }
+}
+
+pub fn val_deref(ptr: *Value) *Value {
+    if (ptr.isRef()) {
+        return ptr.asRef();
+    }
+    return ptr;
+}
+
+pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (ptr.isRef()) {
+        return ptr.*;
+    }
+    return Value.initRef(ptr);
 }

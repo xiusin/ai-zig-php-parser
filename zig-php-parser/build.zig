@@ -469,6 +469,23 @@ pub fn build(b: *std.Build) void {
     ci_test_step.dependOn(&run_ci_test.step);
     test_step.dependOn(&run_ci_test.step);
 
+    // AOT Differential Tests
+    const aot_diff_step = b.step("test-aot-diff", "Run AOT differential tests (Interpreter vs AOT)");
+    
+    const aot_diff_exe = b.addExecutable(.{
+        .name = "aot-diff-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/aot/tools/aot_diff_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    
+    const run_aot_diff = b.addRunArtifact(aot_diff_exe);
+    // Ensure the interpreter is built and installed first
+    run_aot_diff.step.dependOn(b.getInstallStep());
+    aot_diff_step.dependOn(&run_aot_diff.step);
+
     // Clean step
     const clean_step = b.step("clean", "Clean build artifacts");
     const clean_cmd = b.addSystemCommand(&[_][]const u8{ "rm", "-rf", "zig-out", ".zig-cache" });

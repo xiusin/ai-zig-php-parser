@@ -1975,15 +1975,20 @@ pub const NativeLinker = struct {
 
                 // 2. 增加新值引用计数并赋值
                 if (value_type_tag == .i64) {
-                    try writer.print("    reg_{d}.* = runtime.Value.initInt(reg_{d});\n", .{ op.ptr.id, op.value.id });
+                    try writer.print("    runtime.val_assign(reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ op.ptr.id, op.value.id });
                 } else if (value_type_tag == .f64) {
-                    try writer.print("    reg_{d}.* = runtime.Value.initFloat(reg_{d});\n", .{ op.ptr.id, op.value.id });
+                    try writer.print("    runtime.val_assign(reg_{d}, runtime.Value.initFloat(reg_{d}));\n", .{ op.ptr.id, op.value.id });
                 } else if (value_type_tag == .bool) {
-                    try writer.print("    reg_{d}.* = runtime.Value.initBool(reg_{d});\n", .{ op.ptr.id, op.value.id });
+                    try writer.print("    runtime.val_assign(reg_{d}, runtime.Value.initBool(reg_{d}));\n", .{ op.ptr.id, op.value.id });
                 } else {
                     // 已经是Value类型，需要retain
                     try writer.print("    reg_{d}.retain();\n", .{ op.value.id });
-                    try writer.print("    reg_{d}.* = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                    try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ op.ptr.id, op.value.id });
+                }
+            },
+            .make_ref => |op| {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = try runtime.make_ref(reg_{d}, runtime.runtime_allocator);\n", .{ reg.id, op.ptr.id });
                 }
             },
             .load => |op| {
@@ -1995,13 +2000,13 @@ pub const NativeLinker = struct {
                     }
 
                     if (type_tag == .i64) {
-                        try writer.print("    reg_{d} = reg_{d}.*.asInt();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*.asInt();\n", .{ reg.id, op.ptr.id });
                     } else if (type_tag == .f64) {
-                        try writer.print("    reg_{d} = reg_{d}.*.asFloat();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*.asFloat();\n", .{ reg.id, op.ptr.id });
                     } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = reg_{d}.*.asBool();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*.asBool();\n", .{ reg.id, op.ptr.id });
                     } else {
-                        try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*;\n", .{ reg.id, op.ptr.id });
                     }
                 }
             },
@@ -2478,6 +2483,74 @@ pub const NativeLinker = struct {
                         } else {
                             try writer.print("    reg_{d} = try runtime.php_ge({s}, {s});\n", .{ reg.id, lhs_str, rhs_str });
                         }
+                    }
+                }
+            },
+            .and_ => |op| {
+                if (inst.result) |reg| {
+                    const lhs_str = try self.formatRegister(op.lhs);
+                    defer self.allocator.free(lhs_str);
+                    const rhs_str = try self.formatRegister(op.rhs);
+                    defer self.allocator.free(rhs_str);
+                    
+                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    
+                    // Generate LHS boolean check
+                    var lhs_check = std.ArrayList(u8){};
+                    defer lhs_check.deinit(self.allocator);
+                    if (lhs_type_tag == .i64) try lhs_check.writer(self.allocator).print("({s} != 0)", .{lhs_str})
+                    else if (lhs_type_tag == .f64) try lhs_check.writer(self.allocator).print("({s} != 0.0)", .{lhs_str})
+                    else if (lhs_type_tag == .bool) try lhs_check.writer(self.allocator).print("{s}", .{lhs_str})
+                    else try lhs_check.writer(self.allocator).print("{s}.toBool()", .{lhs_str});
+
+                    // Generate RHS boolean check
+                    var rhs_check = std.ArrayList(u8){};
+                    defer rhs_check.deinit(self.allocator);
+                    if (rhs_type_tag == .i64) try rhs_check.writer(self.allocator).print("({s} != 0)", .{rhs_str})
+                    else if (rhs_type_tag == .f64) try rhs_check.writer(self.allocator).print("({s} != 0.0)", .{rhs_str})
+                    else if (rhs_type_tag == .bool) try rhs_check.writer(self.allocator).print("{s}", .{rhs_str})
+                    else try rhs_check.writer(self.allocator).print("{s}.toBool()", .{rhs_str});
+
+                    const res_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    if (res_type_tag == .bool) {
+                        try writer.print("    reg_{d} = {s} and {s};\n", .{ reg.id, lhs_check.items, rhs_check.items });
+                    } else {
+                        try writer.print("    reg_{d} = runtime.Value.initBool({s} and {s});\n", .{ reg.id, lhs_check.items, rhs_check.items });
+                    }
+                }
+            },
+            .or_ => |op| {
+                if (inst.result) |reg| {
+                    const lhs_str = try self.formatRegister(op.lhs);
+                    defer self.allocator.free(lhs_str);
+                    const rhs_str = try self.formatRegister(op.rhs);
+                    defer self.allocator.free(rhs_str);
+                    
+                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    
+                    // Generate LHS boolean check
+                    var lhs_check = std.ArrayList(u8){};
+                    defer lhs_check.deinit(self.allocator);
+                    if (lhs_type_tag == .i64) try lhs_check.writer(self.allocator).print("({s} != 0)", .{lhs_str})
+                    else if (lhs_type_tag == .f64) try lhs_check.writer(self.allocator).print("({s} != 0.0)", .{lhs_str})
+                    else if (lhs_type_tag == .bool) try lhs_check.writer(self.allocator).print("{s}", .{lhs_str})
+                    else try lhs_check.writer(self.allocator).print("{s}.toBool()", .{lhs_str});
+
+                    // Generate RHS boolean check
+                    var rhs_check = std.ArrayList(u8){};
+                    defer rhs_check.deinit(self.allocator);
+                    if (rhs_type_tag == .i64) try rhs_check.writer(self.allocator).print("({s} != 0)", .{rhs_str})
+                    else if (rhs_type_tag == .f64) try rhs_check.writer(self.allocator).print("({s} != 0.0)", .{rhs_str})
+                    else if (rhs_type_tag == .bool) try rhs_check.writer(self.allocator).print("{s}", .{rhs_str})
+                    else try rhs_check.writer(self.allocator).print("{s}.toBool()", .{rhs_str});
+
+                    const res_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    if (res_type_tag == .bool) {
+                        try writer.print("    reg_{d} = {s} or {s};\n", .{ reg.id, lhs_check.items, rhs_check.items });
+                    } else {
+                        try writer.print("    reg_{d} = runtime.Value.initBool({s} or {s});\n", .{ reg.id, lhs_check.items, rhs_check.items });
                     }
                 }
             },

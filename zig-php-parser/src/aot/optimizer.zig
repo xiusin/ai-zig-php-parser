@@ -1580,6 +1580,9 @@ pub const IROptimizer = struct {
             .property_get => |op| {
                 try self.used_registers.put(op.object.id, {});
             },
+            .make_ref => |op| {
+                try self.used_registers.put(op.ptr.id, {});
+            },
             .property_set => |op| {
                 try self.used_registers.put(op.object.id, {});
                 try self.used_registers.put(op.value.id, {});
@@ -1719,6 +1722,7 @@ pub const IROptimizer = struct {
             .phi, .select => false,
             .alloca => false,
             .load => false,
+            .make_ref => false,
             .strlen, .array_count => false,
             .instanceof => false,
             .implements_interface => false,

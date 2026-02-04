@@ -616,6 +616,8 @@ pub const Instruction = struct {
         load: LoadOp,
         /// Store to memory
         store: StoreOp,
+        /// Create a reference to memory
+        make_ref: MakeRefOp,
 
         // ============ Constants ============
         /// Integer constant
@@ -797,6 +799,11 @@ pub const Instruction = struct {
     pub const StoreOp = struct {
         ptr: Register,
         value: Register,
+    };
+
+    /// Create reference to memory
+    pub const MakeRefOp = struct {
+        ptr: Register,
     };
 
     /// Function call
@@ -1238,6 +1245,7 @@ pub const IRPrinter = struct {
             .alloca => |op| try self.print("alloca {any} x {d}", .{ op.type_, op.count }),
             .load => |op| try self.print("load {any} from {any}", .{ op.type_, op.ptr }),
             .store => |op| try self.print("store {any} to {any}", .{ op.value, op.ptr }),
+            .make_ref => |op| try self.print("make_ref {any}", .{op.ptr}),
 
             // Constants
             .const_int => |val| try self.print("const.i64 {d}", .{val}),

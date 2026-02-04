@@ -105,3 +105,5 @@ flowchart LR
 6) 增加对齐测试：解释器 vs AOT 输出一致（或定义允许集合）  
 7) 更新覆盖检查与文档矩阵（作为长期维护项）  
 
+
+引用传递 (Pass-by-Reference) ：由于当前 AOT 函数签名使用 []const Value （值拷贝），暂不支持 function foo(&$a) ，需要解决此问题
