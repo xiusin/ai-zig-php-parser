@@ -749,10 +749,20 @@ pub const Instruction = struct {
         nop: void,
         /// Get function parameter
         param: ParamOp,
+        /// Get captured variable
+        capture_get: CaptureGetOp,
+        /// Get argument count
+        arg_count: void,
     };
 
     /// Parameter operation
     pub const ParamOp = struct {
+        index: u32,
+        name: []const u8,
+    };
+
+    /// Capture get operation
+    pub const CaptureGetOp = struct {
         index: u32,
         name: []const u8,
     };
@@ -1377,6 +1387,8 @@ pub const IRPrinter = struct {
             .debug_print => |op| try self.print("debug.print {any}", .{op.operand}),
             .nop => try self.write("nop"),
             .param => |op| try self.print("param {d} ({s})", .{ op.index, op.name }),
+            .capture_get => |op| try self.print("capture_get {d} ({s})", .{ op.index, op.name }),
+            .arg_count => try self.write("arg_count"),
         }
     }
 

@@ -24,15 +24,29 @@ const Allocator = std.mem.Allocator;
 /// 注意：这是一个全局变量，在AOT编译的代码中可以直接访问
 pub var runtime_allocator: Allocator = undefined;
 
+/// 用户定义函数注册表
+pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) = null;
+
 /// 初始化运行时
 pub fn initRuntime(allocator: Allocator) void {
     runtime_allocator = allocator;
     initClassRegistry(allocator);
+    user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(allocator);
 }
 
 /// 清理运行时
 pub fn deinitRuntime() void {
-    // 清理全局资源（如果有）
+    if (user_function_registry) |*registry| {
+        registry.deinit();
+        user_function_registry = null;
+    }
+}
+
+/// 注册用户定义函数
+pub fn registerUserFunction(name: []const u8, func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) !void {
+    if (user_function_registry) |*registry| {
+        try registry.put(name, func);
+    }
 }
 
 // ============================================================================
@@ -430,7 +444,7 @@ pub const Value = struct {
     }
 
     /// 创建函数值
-    pub fn initFunction(func: *PHPFunction) Value {
+    pub fn initFunction(func: *PHPClosure) Value {
         const addr = @intFromPtr(func);
         return .{ .val = TAG_PTR | TYPE_FUNCTION | (addr & 0x00007FFFFFFFFFFF) };
     }
@@ -517,7 +531,7 @@ pub const Value = struct {
         return @ptrFromInt(self.val & 0x00007FFFFFFFFFFF);
     }
 
-    pub fn asFunction(self: Value) *PHPFunction {
+    pub fn asFunction(self: Value) *PHPClosure {
         return @ptrFromInt(self.val & 0x00007FFFFFFFFFFF);
     }
 
@@ -545,7 +559,7 @@ pub const Value = struct {
         } else if (Value_isObject(self)) {
             Value_asObject(self).release();
         } else if (self.isFunction()) {
-            self.asFunction().release();
+            self.asFunction().release(allocator);
         }
     }
 
@@ -636,40 +650,57 @@ pub const Value = struct {
 // Value类型扩展 - 函数/回调支持
 // ============================================================================
 
-pub const PHPFunction = struct {
-    func: *const fn (args: []const Value, allocator: Allocator) anyerror!Value,
+pub const PHPClosure = struct {
+    // 统一函数签名：ctx 可以是 this (Object) 或者 closure (Function) 或者 null
+    func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value,
+    captures: []Value,
     ref_count: usize,
     allocator: Allocator,
 
     pub fn init(
         allocator: Allocator,
-        func: *const fn (args: []const Value, allocator: Allocator) anyerror!Value,
-    ) !*PHPFunction {
-        const f = try allocator.create(PHPFunction);
+        func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value,
+        captures: []const Value,
+    ) !*PHPClosure {
+        const f = try allocator.create(PHPClosure);
         errdefer allocator.destroy(f);
-        f.* = .{ .func = func, .ref_count = 1, .allocator = allocator };
+
+        const caps = try allocator.alloc(Value, captures.len);
+        errdefer allocator.free(caps);
+        @memcpy(caps, captures);
+        
+        // Retain captures
+        for (caps) |c| {
+            _ = c.retain();
+        }
+
+        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .allocator = allocator };
         return f;
     }
 
-    pub fn retain(self: *PHPFunction) void {
+    pub fn retain(self: *PHPClosure) void {
         self.ref_count += 1;
     }
 
-    pub fn release(self: *PHPFunction) void {
+    pub fn release(self: *PHPClosure, allocator: Allocator) void {
         if (self.ref_count == 0) return;
         self.ref_count -= 1;
         if (self.ref_count == 0) {
-            self.allocator.destroy(self);
+            for (self.captures) |c| {
+                c.release(allocator);
+            }
+            allocator.free(self.captures);
+            allocator.destroy(self);
         }
     }
 };
 
 const BuiltinFunctionEntry = struct {
     name: []const u8,
-    func: *const fn (args: []const Value, allocator: Allocator) anyerror!Value,
+    func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value,
 };
 
-fn lookupBuiltinFunction(name: []const u8) ?*const fn (args: []const Value, allocator: Allocator) anyerror!Value {
+fn lookupBuiltinFunction(name: []const u8) ?*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     const builtin_functions = comptime blk: {
         @setEvalBranchQuota(10000);
         break :blk [_]BuiltinFunctionEntry{
@@ -693,50 +724,95 @@ fn lookupBuiltinFunction(name: []const u8) ?*const fn (args: []const Value, allo
     return null;
 }
 
-fn wrapBuiltin_strlen(args: []const Value, allocator: Allocator) !Value {
+pub fn php_create_closure(name: Value, captures: Value, allocator: Allocator) !Value {
+    if (!name.isString()) return error.InvalidClosureName;
+    if (!captures.isArray()) return error.InvalidCaptureList;
+
+    const func_name = name.asString().data;
+    const caps_arr = captures.asArray();
+    
+    // Convert PHPArray to []Value slice
+    // We need to iterate the array.
+    var cap_list = std.ArrayListUnmanaged(Value){};
+    defer cap_list.deinit(allocator);
+
+    // Assuming captures is a list (indexed 0..N)
+    var i: usize = 0;
+    while (i < caps_arr.elements.count()) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        if (caps_arr.elements.get(key)) |val| {
+            try cap_list.append(allocator, val);
+        } else {
+            break; 
+        }
+    }
+
+    // Lookup function
+    var func_ptr: ?*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value = null;
+    
+    if (user_function_registry) |registry| {
+        func_ptr = registry.get(func_name);
+    }
+    
+    if (func_ptr == null) return error.UnknownFunction;
+
+    const closure = try PHPClosure.init(allocator, func_ptr.?, cap_list.items);
+    return Value.initFunction(closure);
+}
+
+fn wrapBuiltin_strlen(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_strlen(args[0]);
 }
 
-fn wrapBuiltin_strtoupper(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_strtoupper(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_strtoupper(args[0], allocator);
 }
 
-fn wrapBuiltin_strtolower(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_strtolower(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_strtolower(args[0], allocator);
 }
 
-fn wrapBuiltin_trim(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_trim(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_trim(args[0], allocator);
 }
 
-fn wrapBuiltin_count(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_count(args[0]);
 }
 
-fn wrapBuiltin_strval(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_strval(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_strval(args[0], allocator);
 }
 
-fn wrapBuiltin_array_map(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_array_map(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
     return php_array_map(args[0], args[1], allocator);
 }
 
-fn wrapBuiltin_array_filter(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_array_filter(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     const callback = if (args.len >= 2) args[1] else Value.initNull();
     return php_array_filter(args[0], callback, allocator);
 }
 
-fn wrapBuiltin_array_reduce(args: []const Value, allocator: Allocator) !Value {
+fn wrapBuiltin_array_reduce(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
     const initial = if (args.len >= 3) args[2] else Value.initNull();
     return php_array_reduce(args[0], args[1], initial, allocator);
@@ -744,15 +820,42 @@ fn wrapBuiltin_array_reduce(args: []const Value, allocator: Allocator) !Value {
 
 pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allocator) !Value {
     if (callback.isFunction()) {
-        const f = callback.asFunction();
-        return f.func(args, allocator);
+        const closure = callback.asFunction();
+        // 传递闭包自身作为上下文
+        return closure.func(callback, args, allocator);
     }
     if (callback.isString()) {
         const func_name = callback.asString().data;
         if (lookupBuiltinFunction(func_name)) |func| {
-            return func(args, allocator);
+            // 普通函数调用，上下文为 null
+            return func(Value.initNull(), args, allocator);
+        }
+        // 查找用户定义函数
+        if (user_function_registry) |registry| {
+            if (registry.get(func_name)) |func| {
+                return func(Value.initNull(), args, allocator);
+            }
         }
         return error.UnknownFunction;
+    }
+    if (callback.isArray()) {
+        const arr = callback.asArray();
+        if (arr.elements.count() != 2) return error.InvalidCallback;
+
+        const key0 = ArrayKey{ .integer = 0 };
+        const key1 = ArrayKey{ .integer = 1 };
+
+        const val0 = arr.elements.get(key0) orelse return error.InvalidCallback;
+        const val1 = arr.elements.get(key1) orelse return error.InvalidCallback;
+
+        if (!val1.isString()) return error.InvalidCallback;
+        const method_name = val1.asString().data;
+
+        if (Value_isObject(val0)) {
+            const obj_ptr = Value_asObject(val0);
+            return obj_ptr.callMethod(method_name, args);
+        }
+        return error.NotImplemented;
     }
     return error.InvalidCallback;
 }

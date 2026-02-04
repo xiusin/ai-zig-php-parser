@@ -103,6 +103,7 @@ pub const NativeLinker = struct {
     func_return_types: std.StringHashMap(bool), // 函数名 -> 是否有返回值
     current_reg_types: ?*const std.AutoHashMap(usize, IR.Type),
     current_reg_is_value: ?[]bool,
+    current_function_has_this: bool = false,
 
     const Self = @This();
 
@@ -150,6 +151,7 @@ pub const NativeLinker = struct {
             .func_return_types = std.StringHashMap(bool).init(allocator),
             .current_reg_types = null,
             .current_reg_is_value = null,
+            .current_function_has_this = false,
         };
         return self;
     }
@@ -259,6 +261,9 @@ pub const NativeLinker = struct {
         // 生成类注册函数
         try self.generateClassRegistration(writer, ir_module);
 
+        // 生成函数注册函数
+        try self.generateFunctionRegistration(writer, ir_module);
+
         // 生成全局清理函数
         try writer.writeAll(
             \\
@@ -298,9 +303,11 @@ pub const NativeLinker = struct {
             \\    
             \\    // 注册所有类
             \\    registerAllClasses(allocator) catch {};
+            \\    // 注册所有函数
+            \\    registerAllFunctions() catch {};
             \\    defer cleanupAllClasses();
             \\    
-            \\    _ = try @"__main__"();
+            \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
             \\}
             \\
         );
@@ -312,6 +319,70 @@ pub const NativeLinker = struct {
     fn generateGlobalVariable(_: *Self, writer: anytype, global: *const IR.Global) !void {
         // 生成全局变量声明
         try writer.print("var @\"{s}\": runtime.Value = undefined;\n", .{global.name});
+    }
+
+    /// 生成函数注册代码
+    fn generateFunctionRegistration(self: *Self, writer: anytype, ir_module: *const IR.Module) !void {
+        _ = self;
+        try writer.writeAll(
+            \\
+            \\fn registerAllFunctions() !void {
+            \\
+        );
+
+        for (ir_module.functions.items) |func| {
+            // 跳过类方法
+            if (std.mem.indexOf(u8, func.name, "::") != null) continue;
+            // 跳过内部函数
+            if (std.mem.eql(u8, func.name, "__main__")) continue;
+
+            // 直接注册函数，因为函数签名已经统一
+            try writer.print("    try runtime.registerUserFunction(\"{s}\", @\"{s}\");\n", .{func.name, func.name});
+        }
+
+        try writer.writeAll(
+            \\}
+            \\
+        );
+    }
+
+    /// 查找函数定义
+    fn findFunction(self: *Self, ir_module: *const IR.Module, name: []const u8) ?*const IR.Function {
+        _ = self;
+        for (ir_module.functions.items) |func| {
+            if (std.mem.eql(u8, func.name, name)) {
+                return func;
+            }
+        }
+        return null;
+    }
+
+    /// 检查函数是否有返回值
+    fn functionHasReturnValue(self: *Self, func: *const IR.Function) bool {
+        _ = self;
+        for (func.blocks.items) |block| {
+            if (block.terminator) |term| {
+                if (term == .ret and term.ret != null) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// 检查参数是否被使用
+    fn isParamUsed(self: *Self, func: *const IR.Function, param_name: []const u8) bool {
+        _ = self;
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.op == .param) {
+                    if (std.mem.eql(u8, inst.op.param.name, param_name)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /// 生成类注册代码
@@ -372,35 +443,6 @@ pub const NativeLinker = struct {
             return;
         }
 
-        try writer.writeAll("\n// 类方法包装器\n");
-        for (0..class_count) |ci| {
-            const cname = class_names[ci];
-            for (0..method_counts[ci]) |mi| {
-                const mname = method_lists[ci][mi];
-                if (std.mem.eql(u8, mname, "__construct")) {
-                    try writer.print(
-                        \\fn @"{s}___construct_wrapper"(this: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {{
-                        \\    _ = allocator;
-                        \\    const arg0 = if (args.len > 0) args[0] else runtime.Value.initNull();
-                        \\    const arg1 = if (args.len > 1) args[1] else runtime.Value.initNull();
-                        \\    try @"{s}::__construct"(this, arg0, arg1);
-                        \\    return runtime.Value.initNull();
-                        \\}}
-                        \\
-                    , .{ cname, cname });
-                } else {
-                    try writer.print(
-                        \\fn @"{s}_{s}_wrapper"(this: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {{
-                        \\    _ = args;
-                        \\    _ = allocator;
-                        \\    return try @"{s}::{s}"(this);
-                        \\}}
-                        \\
-                    , .{ cname, mname, cname, mname });
-                }
-            }
-        }
-
         try writer.writeAll(
             \\
             \\fn registerAllClasses(allocator: std.mem.Allocator) !void {
@@ -437,7 +479,7 @@ pub const NativeLinker = struct {
 
             for (0..method_counts[ci]) |mi| {
                 const mname = method_lists[ci][mi];
-                try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}_{s}_wrapper\", .is_static = false }});\n", .{ cname, mname, cname, mname });
+                try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = false }});\n", .{ cname, mname, cname, mname });
             }
 
             var has_construct = false;
@@ -448,7 +490,7 @@ pub const NativeLinker = struct {
                 }
             }
             if (has_construct) {
-                try writer.print("    {s}_meta.magic_construct = @\"{s}___construct_wrapper\";\n", .{ cname, cname });
+                try writer.print("    {s}_meta.magic_construct = @\"{s}::__construct\";\n", .{ cname, cname });
             }
 
             try writer.print("    try runtime.registerClass({s}_meta);\n", .{cname});
@@ -487,6 +529,7 @@ pub const NativeLinker = struct {
             // 数组函数
                 "array_push",   "array_pop",
             "array_slice", "array_merge",  "array_keys", "array_values",
+            "array_map",   "array_filter", "array_reduce", "array_chunk",
 
             // 时间函数
             "microtime",
@@ -503,6 +546,7 @@ pub const NativeLinker = struct {
             "php_array_iter_init",
             "php_array_iter_key",
             "php_array_iter_free",
+            "php_create_closure",
         };
 
         for (needs_allocator) |name| {
@@ -532,9 +576,10 @@ pub const NativeLinker = struct {
             "join",             "str_split",    "strcmp",       "strcasecmp",
 
             // 数组函数
-                 "count",
+            "count",
             "array_push",       "array_pop",    "array_shift",  "array_unshift",   "in_array",
             "array_key_exists", "array_keys",   "array_values", "array_slice",     "array_merge",
+            "array_map",        "array_filter", "array_reduce", "array_chunk",
 
             // 数学函数
             "abs",              "sqrt",         "round",        "floor",           "ceil",
@@ -622,6 +667,10 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "array_values")) return "php_array_values";
         if (std.mem.eql(u8, func_name, "array_slice")) return "php_array_slice";
         if (std.mem.eql(u8, func_name, "array_merge")) return "php_array_merge";
+        if (std.mem.eql(u8, func_name, "array_map")) return "php_array_map";
+        if (std.mem.eql(u8, func_name, "array_filter")) return "php_array_filter";
+        if (std.mem.eql(u8, func_name, "array_reduce")) return "php_array_reduce";
+        if (std.mem.eql(u8, func_name, "array_chunk")) return "php_array_chunk";
 
         // 数学函数
         if (std.mem.eql(u8, func_name, "abs")) return "php_abs";
@@ -697,6 +746,9 @@ pub const NativeLinker = struct {
 
     /// 生成函数
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), func: *const IR.Function) !void {
+        const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
+        self.current_function_has_this = has_this;
+
         // 验证函数名
         if (func.name.len == 0 or !std.unicode.utf8ValidateSlice(func.name)) {
             return error.InvalidFunctionName;
@@ -723,24 +775,14 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, func.name);
         try code.appendSlice(self.allocator, "\"(");
 
-        // 参数列表
-        for (func.params.items, 0..) |param, i| {
-            if (i > 0) try code.appendSlice(self.allocator, ", ");
-            try code.appendSlice(self.allocator, "@\"");
-            try code.appendSlice(self.allocator, param.name);
-            try code.appendSlice(self.allocator, "\": runtime.Value");
-        }
+        // 统一函数签名：(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value
+        try code.appendSlice(self.allocator, "ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {\n");
+        try code.appendSlice(self.allocator, "    _ = &ctx;\n");
+        try code.appendSlice(self.allocator, "    _ = &args;\n");
+        try code.appendSlice(self.allocator, "    _ = allocator;\n");
+        try code.appendSlice(self.allocator, "    _ = runtime;\n");
 
-        // 返回类型：根据是否有返回值决定
-        try code.appendSlice(self.allocator, ") !");
-        if (has_return_value) {
-            try code.appendSlice(self.allocator, "runtime.Value");
-        } else {
-            const return_type_str = self.irTypeToZigTypeString(func.return_type);
-            try code.appendSlice(self.allocator, return_type_str);
-        }
-        try code.appendSlice(self.allocator, " {\n");
-        try code.appendSlice(self.allocator, "    _ = runtime;\n\n");
+        // 变量声明
 
         // 收集寄存器信息
         var all_registers = std.AutoHashMap(usize, IR.Type).init(self.allocator);
@@ -890,15 +932,18 @@ pub const NativeLinker = struct {
                         }
 
                         if (ret_val) |reg| {
-                            try code.appendSlice(self.allocator, "    return reg_");
-                            try code.writer(self.allocator).print("{d}", .{reg.id});
-                            try code.appendSlice(self.allocator, ";\n");
-                        } else {
-                            if (has_return_value) {
-                                try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
+                            const type_tag = @as(std.meta.Tag(IR.Type), all_registers.get(reg.id) orelse reg.type_);
+                            if (type_tag == .i64) {
+                                try code.writer(self.allocator).print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                            } else if (type_tag == .f64) {
+                                try code.writer(self.allocator).print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                            } else if (type_tag == .bool) {
+                                try code.writer(self.allocator).print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
                             } else {
-                                try code.appendSlice(self.allocator, "    return;\n");
+                                try code.writer(self.allocator).print("    return reg_{d};\n", .{reg.id});
                             }
+                        } else {
+                            try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
                         }
                     },
                     else => {
@@ -917,11 +962,7 @@ pub const NativeLinker = struct {
                             }
                         }
 
-                        if (has_return_value) {
-                            try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
-                        } else {
-                            try code.appendSlice(self.allocator, "    return;\n");
-                        }
+                        try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
                     },
                 }
             } else {
@@ -940,11 +981,7 @@ pub const NativeLinker = struct {
                     }
                 }
 
-                if (has_return_value) {
-                    try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
-                } else {
-                    try code.appendSlice(self.allocator, "    return;\n");
-                }
+                try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
             }
         } else {
             try self.generateControlFlowStateMachine(code, func, cleanup_registers.items, &alloca_registers);
@@ -1329,11 +1366,7 @@ pub const NativeLinker = struct {
                             try code.appendSlice(self.allocator, cleanup);
                         }
                     }
-                    if (func_has_return_value) {
-                        try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
-                    } else {
-                        try code.appendSlice(self.allocator, "                return;\n");
-                    }
+                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
                 }
             }
 
@@ -1384,7 +1417,11 @@ pub const NativeLinker = struct {
                 };
                 defer self.allocator.free(src_expr);
 
-                try writer.print("        {d} => reg_{d} = {s},\n", .{ idx, result_reg.id, src_expr });
+                try writer.print("        {d} => {{ reg_{d} = {s};", .{ idx, result_reg.id, src_expr });
+                if (dest_is_value) {
+                    try writer.print(" reg_{d}.retain();", .{ result_reg.id });
+                }
+                try writer.writeAll(" },\n");
             } else {
                 // Predecessor block not found (likely removed by optimization)
                 // We just skip this case, assuming it will never be taken at runtime
@@ -1396,7 +1433,7 @@ pub const NativeLinker = struct {
     }
 
     /// 生成终止指令（简化版，用于状态机）
-    fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void), func: *const IR.Function, _: usize, func_has_return_value: bool) !void {
+    fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void), func: *const IR.Function, _: usize, _: bool) !void {
         switch (term) {
             .ret => |ret_val| {
                 if (cleanup_regs.len > 0) {
@@ -1413,37 +1450,27 @@ pub const NativeLinker = struct {
                     }
                 }
                 if (ret_val) |reg| {
-                    if (func_has_return_value) {
-                        const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
-                        const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                        if (reg_type_tag == .i64) {
-                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initInt(reg_{d});\n", .{reg.id});
-                            defer self.allocator.free(ret_stmt);
-                            try code.appendSlice(self.allocator, ret_stmt);
-                        } else if (reg_type_tag == .f64) {
-                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
-                            defer self.allocator.free(ret_stmt);
-                            try code.appendSlice(self.allocator, ret_stmt);
-                        } else if (reg_type_tag == .bool) {
-                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initBool(reg_{d});\n", .{reg.id});
-                            defer self.allocator.free(ret_stmt);
-                            try code.appendSlice(self.allocator, ret_stmt);
-                        } else {
-                            const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return reg_{d};\n", .{reg.id});
-                            defer self.allocator.free(ret_stmt);
-                            try code.appendSlice(self.allocator, ret_stmt);
-                        }
+                    const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
+                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                    if (reg_type_tag == .i64) {
+                        const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                        defer self.allocator.free(ret_stmt);
+                        try code.appendSlice(self.allocator, ret_stmt);
+                    } else if (reg_type_tag == .f64) {
+                        const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                        defer self.allocator.free(ret_stmt);
+                        try code.appendSlice(self.allocator, ret_stmt);
+                    } else if (reg_type_tag == .bool) {
+                        const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                        defer self.allocator.free(ret_stmt);
+                        try code.appendSlice(self.allocator, ret_stmt);
                     } else {
                         const ret_stmt = try std.fmt.allocPrint(self.allocator, "                return reg_{d};\n", .{reg.id});
                         defer self.allocator.free(ret_stmt);
                         try code.appendSlice(self.allocator, ret_stmt);
                     }
                 } else {
-                    if (func_has_return_value) {
-                        try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
-                    } else {
-                        try code.appendSlice(self.allocator, "                return;\n");
-                    }
+                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
                 }
             },
             .br => |target| {
@@ -1487,11 +1514,7 @@ pub const NativeLinker = struct {
                 try code.appendSlice(self.allocator, cond);
             },
             else => {
-                if (func_has_return_value) {
-                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
-                } else {
-                    try code.appendSlice(self.allocator, "                return;\n");
-                }
+                try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
             },
         }
     }
@@ -2079,7 +2102,28 @@ pub const NativeLinker = struct {
             .nop => {},
             .param => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = @\"{s}\";\n", .{ reg.id, op.name });
+                    if (std.mem.eql(u8, op.name, "this")) {
+                        try writer.print("    reg_{d} = ctx;\n", .{reg.id});
+                    } else {
+                        const arg_idx = if (self.current_function_has_this) op.index - 1 else op.index;
+                        try writer.print("    reg_{d} = if (args.len > {d}) args[{d}] else runtime.Value.initNull();\n", .{ reg.id, arg_idx, arg_idx });
+                    }
+                }
+            },
+            .capture_get => |op| {
+                if (inst.result) |reg| {
+                    // ctx is the closure object
+                    try writer.print("    reg_{d} = ctx.asFunction().captures[{d}];\n", .{ reg.id, op.index });
+                }
+            },
+            .const_null => {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                }
+            },
+            .arg_count => {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = @intCast(args.len);\n", .{reg.id});
                 }
             },
             .eq => |op| {
@@ -2480,10 +2524,10 @@ pub const NativeLinker = struct {
                         const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
                         if (func_has_return_value) {
                             // 函数返回Value，直接赋值
-                            try writer.print("    reg_{d} = try @\"{s}\"({s});\n", .{ reg.id, op.func_name, args_buf.items });
+                            try writer.print("    reg_{d} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{ {s} }}, runtime.runtime_allocator);\n", .{ reg.id, op.func_name, args_buf.items });
                         } else {
                             // 函数返回void，调用后赋值null
-                            try writer.print("    try @\"{s}\"({s});\n", .{ op.func_name, args_buf.items });
+                            try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{ {s} }}, runtime.runtime_allocator);\n", .{ op.func_name, args_buf.items });
                             try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                         }
                     }
@@ -2504,8 +2548,35 @@ pub const NativeLinker = struct {
                         }
                     } else {
                         // 用户定义函数
-                        try writer.print("    try @\"{s}\"({s});\n", .{ op.func_name, args_buf.items });
+                        try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{ {s} }}, runtime.runtime_allocator);\n", .{ op.func_name, args_buf.items });
                     }
+                }
+            },
+            .call_indirect => |op| {
+                // 格式化参数列表
+                var args_buf = std.ArrayList(u8){};
+                defer args_buf.deinit(self.allocator);
+                const args_writer = args_buf.writer(self.allocator);
+
+                for (op.args, 0..) |arg, i| {
+                    if (i > 0) try args_writer.writeAll(", ");
+
+                    const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                    if (arg_type_tag == .i64) {
+                        try args_writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                    } else if (arg_type_tag == .f64) {
+                        try args_writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                    } else if (arg_type_tag == .bool) {
+                        try args_writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                    } else {
+                        try args_writer.print("reg_{d}", .{arg.id});
+                    }
+                }
+
+                if (inst.result) |reg| {
+                     try writer.print("    reg_{d} = try runtime.php_invoke_callable(reg_{d}, &[_]runtime.Value{{ {s} }}, runtime.runtime_allocator);\n", .{ reg.id, op.func_ptr.id, args_buf.items });
+                } else {
+                     try writer.print("    _ = try runtime.php_invoke_callable(reg_{d}, &[_]runtime.Value{{ {s} }}, runtime.runtime_allocator);\n", .{ op.func_ptr.id, args_buf.items });
                 }
             },
             .array_new => |op| {
@@ -4140,6 +4211,26 @@ pub const NativeLinker = struct {
             },
             .const_null => {
                 try writer.print("        {s} = runtime.Value.initNull();\n", .{result_reg.?});
+            },
+            .param => |op| {
+                if (inst.result) |_| {
+                    if (std.mem.eql(u8, op.name, "this")) {
+                        try writer.print("        {s} = ctx;\n", .{result_reg.?});
+                    } else {
+                        const arg_idx = if (self.current_function_has_this) op.index - 1 else op.index;
+                        try writer.print("        {s} = if (args.len > {d}) args[{d}] else runtime.Value.initNull();\n", .{ result_reg.?, arg_idx, arg_idx });
+                    }
+                }
+            },
+            .capture_get => |op| {
+                if (inst.result) |_| {
+                    try writer.print("        {s} = ctx.asFunction().captures[{d}];\n", .{ result_reg.?, op.index });
+                }
+            },
+            .arg_count => {
+                if (inst.result) |_| {
+                    try writer.print("        {s} = @intCast(args.len);\n", .{result_reg.?});
+                }
             },
 
             // ========================================================================

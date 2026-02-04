@@ -1648,7 +1648,7 @@ pub const IROptimizer = struct {
                 }
             },
             // Instructions with no register operands
-            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .param => {},
+            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .param, .capture_get, .arg_count => {},
             .try_begin, .try_end, .get_exception, .clear_exception => {},
             .mutex_lock, .mutex_unlock, .mutex_new => {},
             .catch_ => {},
@@ -1713,7 +1713,7 @@ pub const IROptimizer = struct {
             .and_, .or_, .not => false,
             .neg => false,
             .const_int, .const_float, .const_bool, .const_string, .const_null => false,
-            .param => false,
+            .param, .capture_get, .arg_count => false,
             .cast, .type_check, .get_type => false,
             .box, .unbox => false,
             .phi, .select => false,

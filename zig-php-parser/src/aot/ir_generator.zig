@@ -576,14 +576,63 @@ pub const IRGenerator = struct {
             });
         }
 
-        // Emit param instruction
-        const param_reg = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
-
         // Create register for parameter (alloca)
         const alloca_reg = try self.getOrCreateVarRegister(param_name, param_type);
 
-        // Store param value to alloca
-        _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_reg } }, null);
+        if (param_data.default_value) |default_expr_idx| {
+            // Has default value - generate conditional logic
+            const func = self.current_function.?;
+            
+            // 1. Get argument count
+            const argc_reg = try self.emitWithResult(.{ .arg_count = {} }, .i64);
+            
+            // 2. Compare argc > param_idx
+            // Create constant for param index
+            const idx_reg = func.newRegister(.i64);
+            const idx_inst = try self.allocator.create(Instruction);
+            idx_inst.* = .{
+                .result = idx_reg,
+                .op = .{ .const_int = @intCast(param_idx) },
+                .location = self.current_location,
+            };
+            try self.current_block.?.appendInstruction(idx_inst);
+
+            const cond_reg = try self.emitWithResult(.{ 
+                .gt = .{ .lhs = argc_reg, .rhs = idx_reg } 
+            }, .bool);
+
+            // 3. Create blocks
+            const present_block = try func.createBlock("param_present");
+            const missing_block = try func.createBlock("param_missing");
+            const merge_block = try func.createBlock("param_merge");
+
+            // 4. Branch
+            self.current_block.?.setTerminator(.{ .cond_br = .{ 
+                .cond = cond_reg, 
+                .then_block = present_block, 
+                .else_block = missing_block 
+            } });
+
+            // 5. Present Block
+            self.current_block = present_block;
+            const param_val = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
+            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_val } }, null);
+            self.current_block.?.setTerminator(.{ .br = merge_block });
+
+            // 6. Missing Block
+            self.current_block = missing_block;
+            const default_val = try self.generateExpression(default_expr_idx);
+            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = default_val } }, null);
+            self.current_block.?.setTerminator(.{ .br = merge_block });
+
+            // 7. Merge Block
+            self.current_block = merge_block;
+        } else {
+            // Emit param instruction
+            const param_reg = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
+            // Store param value to alloca
+            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_reg } }, null);
+        }
     }
 
     /// Resolve a type node to IR Type
@@ -798,8 +847,14 @@ pub const IRGenerator = struct {
                     .is_variadic = false,
                     .is_reference = false,
                 });
+                
+                // Emit param instruction
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = 0, .name = "this" } }, Type{ .php_object = class_name });
+
                 // 同时注册$this变量，以便在方法体中通过$this访问
                 const this_reg = try self.getOrCreateVarRegister("this", .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = this_reg, .value = param_reg } }, null);
+                
                 try self.var_registers.put(self.allocator, "$this", this_reg);
             }
 
@@ -2201,7 +2256,32 @@ pub const IRGenerator = struct {
 
         var func_name: []const u8 = "";
         if (name_node.tag == .variable) {
-            func_name = self.getString(name_node.data.variable.name);
+            const is_variable_token = name_node.main_token.tag == .t_variable;
+            if (is_variable_token) {
+                const var_name = self.getString(name_node.data.variable.name);
+                // Get variable register
+                var func_reg: Register = undefined;
+                if (self.var_registers.get(var_name)) |reg| {
+                    func_reg = try self.emitWithResult(.{ .load = .{ .ptr = reg, .type_ = .php_value } }, .php_value);
+                } else {
+                    func_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                }
+                
+                // Generate arguments
+                const args = try self.allocator.alloc(Register, call_data.args.len);
+                for (call_data.args, 0..) |arg_idx, i| {
+                    args[i] = try self.generateExpression(arg_idx);
+                }
+
+                return self.emitWithResult(.{ .call_indirect = .{
+                    .func_ptr = func_reg,
+                    .args = args,
+                    .return_type = .php_value,
+                } }, .php_value);
+            } else {
+                // Static function call (identifier)
+                func_name = self.getString(name_node.data.variable.name);
+            }
         } else if (name_node.tag == .literal_string) {
             func_name = self.getString(name_node.data.literal_string.value);
         }
@@ -2461,6 +2541,30 @@ pub const IRGenerator = struct {
     fn generateClosure(self: *Self, node: *const Node) !Register {
         const closure_data = node.data.closure;
 
+        // 1. Capture variables from parent scope
+        var captures = std.ArrayListUnmanaged(Register){};
+        defer captures.deinit(self.allocator);
+
+        for (closure_data.captures) |cap_idx| {
+            const cap_node = self.getNode(cap_idx) orelse continue;
+            // Assuming capture node is a variable
+            var var_name: []const u8 = undefined;
+            if (cap_node.tag == .variable) {
+                var_name = self.getString(cap_node.data.variable.name);
+            } else {
+                continue;
+            }
+            
+            // Get from parent scope
+            var val_reg: Register = undefined;
+            if (self.var_registers.get(var_name)) |ptr_reg| {
+                val_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+            } else {
+                val_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+            }
+            try captures.append(self.allocator, val_reg);
+        }
+
         // Create anonymous function
         var buf: [64]u8 = undefined;
         const func_name = std.fmt.bufPrint(&buf, "__closure_{d}", .{self.block_counter}) catch "__closure";
@@ -2491,6 +2595,24 @@ pub const IRGenerator = struct {
             try self.generateParameter(param_idx);
         }
 
+        // Process captures (inject into local scope)
+        for (closure_data.captures, 0..) |cap_idx, i| {
+            const cap_node = self.getNode(cap_idx) orelse continue;
+            var var_name: []const u8 = undefined;
+            if (cap_node.tag == .variable) {
+                var_name = self.getString(cap_node.data.variable.name);
+            } else {
+                continue;
+            }
+
+            // Generate capture_get
+            const capture_val = try self.emitWithResult(.{ .capture_get = .{ .index = @intCast(i), .name = var_name } }, .php_value);
+            
+            // Create local variable and store
+            const local_ptr = try self.getOrCreateVarRegister(var_name, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = local_ptr, .value = capture_val } }, null);
+        }
+
         // Generate body
         try self.generateStatement(closure_data.body);
 
@@ -2504,9 +2626,25 @@ pub const IRGenerator = struct {
         self.current_block = prev_block;
 
         // Return callable reference
+        // Create array for captures
+        const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);
+        
+        for (captures.items) |cap_reg| {
+             _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg } }, null);
+        }
+
+        // Closure name
+        const name_id = try self.module.?.internString(func_name);
+        const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_string);
+
+        // Call php_create_closure
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = name_reg;
+        args[1] = caps_arr_reg;
+        
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
-            .args = try self.allocator.alloc(Register, 0),
+            .args = args,
             .return_type = .php_callable,
         } }, .php_callable);
     }
