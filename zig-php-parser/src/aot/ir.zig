@@ -292,6 +292,8 @@ pub const BasicBlock = struct {
     predecessors: std.ArrayListUnmanaged(*BasicBlock),
     /// Successor blocks
     successors: std.ArrayListUnmanaged(*BasicBlock),
+    /// Exception handler block (if any)
+    exception_handler: ?*BasicBlock,
 
     const Self = @This();
 
@@ -305,6 +307,7 @@ pub const BasicBlock = struct {
             .terminator = null,
             .predecessors = .{},
             .successors = .{},
+            .exception_handler = null,
         };
     }
 

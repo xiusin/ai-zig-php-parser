@@ -30,12 +30,38 @@ pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: 
 /// 全局常量表
 pub var constants: std.StringHashMap(Value) = undefined;
 
+/// 当前异常（线程局部）
+threadlocal var current_exception: Value = undefined;
+threadlocal var has_exception: bool = false;
+
 /// 初始化运行时
 pub fn initRuntime(allocator: Allocator) void {
     runtime_allocator = allocator;
     initClassRegistry(allocator);
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(allocator);
     constants = std.StringHashMap(Value).init(allocator);
+    current_exception = Value.initNull();
+    has_exception = false;
+}
+
+/// 设置异常
+pub fn setException(ex: Value) void {
+    if (has_exception) {
+        current_exception.release(runtime_allocator);
+    }
+    ex.retain();
+    current_exception = ex;
+    has_exception = true;
+}
+
+/// 获取异常（并清除当前异常状态）
+pub fn getException() Value {
+    if (has_exception) {
+        has_exception = false;
+        // 转移所有权，不释放
+        return current_exception;
+    }
+    return Value.initNull();
 }
 
 /// 清理运行时
@@ -653,6 +679,9 @@ pub const Value = struct {
         }
         if (self.isFunction()) {
             return PHPString.init(allocator, "Function");
+        }
+        if (Value_isObject(self)) {
+            return Value_asObject(self).toString(allocator);
         }
         return PHPString.init(allocator, "");
     }
@@ -2442,6 +2471,77 @@ pub const ClassMeta = struct {
         return null;
     }
 
+    /// 注册内置 Exception 类
+    pub fn registerExceptionClass(allocator: Allocator) !void {
+        const meta = try ClassMeta.init(allocator, "Exception");
+        
+        // __construct($message = "", $code = 0, $previous = null)
+        try meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    if (args.len > 0) {
+                        try this.setProperty("message", args[0]);
+                    } else {
+                        try this.setProperty("message", Value.initString(try PHPString.init(runtime_alloc, "")));
+                    }
+                    if (args.len > 1) {
+                        try this.setProperty("code", args[1]);
+                    } else {
+                        try this.setProperty("code", Value.initInt(0));
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // getMessage()
+        try meta.addMethod(.{
+            .name = "getMessage",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    _ = args;
+                    const this = Value_asObject(ctx);
+                    if (this.getProperty("message")) |val| {
+                        val.retain();
+                        return val;
+                    }
+                    return Value.initString(try PHPString.init(runtime_alloc, ""));
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // __toString()
+        try meta.addMethod(.{
+            .name = "__toString",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    _ = args;
+                    const this = Value_asObject(ctx);
+                    var msg = try PHPString.init(runtime_alloc, "Exception: ");
+                    
+                    if (this.getProperty("message")) |val| {
+                        if (val.isString()) {
+                            const new_str = try std.fmt.allocPrint(runtime_alloc, "{s}{s}", .{msg.data, val.asString().data});
+                            defer runtime_alloc.free(new_str);
+                            msg.release(runtime_alloc);
+                            return Value.initString(try PHPString.init(runtime_alloc, new_str));
+                        }
+                    }
+                    return Value.initString(msg);
+                }
+            }.call,
+            .is_static = false,
+        });
+        
+        meta.magic_toString = meta.methods.get("__toString").?.func;
+
+        try registerClass(meta);
+    }
+
     /// 添加属性定义
     pub fn addProperty(self: *ClassMeta, prop: ClassProperty) !void {
         try self.properties.put(prop.name, prop);
@@ -2683,7 +2783,7 @@ pub const PHPObject = struct {
             }
             // 调用 __call 魔法函数
             if (meta.magic_call) |call_fn| {
-                const name_val = Value.initString(PHPString.initStatic(method_name));
+                const name_val = Value.initString(try PHPString.init(self.allocator, method_name));
                 const args_arr = try PHPArray.init(self.allocator);
                 for (args) |arg| {
                     try args_arr.push(self.allocator, arg);
@@ -3033,25 +3133,30 @@ pub fn php_get_class(obj_val: Value, allocator: Allocator) !Value {
 /// 当前异常（全局状态）
 /// 注意：这是一个简化的异常处理机制
 /// 在真实的PHP实现中，异常应该是线程局部的
-var current_exception: ?Value = null;
+// var current_exception: ?Value = null; // 已在文件顶部定义为 threadlocal
 
 /// 设置当前异常
 ///
 /// @param exception 异常Value
-pub fn setException(exception: Value) void {
-    current_exception = exception;
-}
+// pub fn setException(exception: Value) void { // 已在文件顶部定义
+//     current_exception = exception;
+// }
 
 /// 获取当前异常
 ///
 /// @return 当前异常，如果没有异常返回null
 pub fn getCurrentException() ?Value {
-    return current_exception;
+    if (has_exception) return current_exception;
+    return null;
 }
 
 /// 清除当前异常
 pub fn clearException() void {
-    current_exception = null;
+    if (has_exception) {
+        current_exception.release(runtime_allocator);
+        current_exception = Value.initNull();
+        has_exception = false;
+    }
 }
 
 /// 抛出异常
@@ -3070,7 +3175,7 @@ pub fn throwException(message: []const u8, allocator: Allocator) !Value {
 ///
 /// @return 如果有异常返回true
 pub fn hasException() bool {
-    return current_exception != null;
+    return has_exception;
 }
 
 // ============================================================================

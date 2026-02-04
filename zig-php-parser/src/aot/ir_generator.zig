@@ -276,7 +276,15 @@ pub const IRGenerator = struct {
         const label = std.fmt.bufPrint(&buf, "{s}_{d}", .{ prefix, self.block_counter }) catch prefix;
         self.block_counter += 1;
 
-        return func.createBlock(label);
+        const block = try func.createBlock(label);
+
+        // 设置异常处理器
+        if (self.try_stack.items.len > 0) {
+            const context = self.try_stack.items[self.try_stack.items.len - 1];
+            block.exception_handler = context.catch_block;
+        }
+
+        return block;
     }
 
     /// Set the current block
@@ -1414,6 +1422,9 @@ pub const IRGenerator = struct {
             .finally_block = finally_block,
         });
 
+        // Fix up try_block handler (it was created before push)
+        try_block.exception_handler = catch_block;
+
         // Jump to try block
         self.setTerminator(.{ .br = try_block });
 
@@ -1478,17 +1489,17 @@ pub const IRGenerator = struct {
             }
         }
 
-        // Emit catch instruction
-        _ = try self.emit(.{ .catch_ = .{ .exception_type = exception_type } }, .php_value);
+        // Emit catch instruction (returns exception object)
+        const catch_reg = try self.emitWithResult(.{ .catch_ = .{ .exception_type = exception_type } }, .php_value);
 
         // Set up exception variable if present
         if (catch_data.variable) |var_idx| {
             const var_node = self.getNode(var_idx);
             if (var_node != null and var_node.?.tag == .variable) {
                 const var_name = self.getString(var_node.?.data.variable.name);
-                const ex_reg = try self.emitWithResult(.get_exception, .php_value);
+                // Use catch_reg directly
                 const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = ex_reg } }, null);
+                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg } }, null);
             }
         }
 

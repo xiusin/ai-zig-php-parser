@@ -104,6 +104,9 @@ pub const NativeLinker = struct {
     current_reg_types: ?*const std.AutoHashMap(usize, IR.Type),
     current_reg_is_value: ?[]bool,
     current_function_has_this: bool = false,
+    current_exception_handler: ?u32 = null,
+    current_cleanup_regs: ?[]const usize = null,
+    current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
 
     const Self = @This();
 
@@ -436,7 +439,7 @@ pub const NativeLinker = struct {
             try writer.writeAll(
                 \\
                 \\fn registerAllClasses(allocator: std.mem.Allocator) !void {
-                \\    _ = allocator;
+                \\    try runtime.ClassMeta.registerExceptionClass(allocator);
                 \\}
                 \\
             );
@@ -446,6 +449,7 @@ pub const NativeLinker = struct {
         try writer.writeAll(
             \\
             \\fn registerAllClasses(allocator: std.mem.Allocator) !void {
+            \\    try runtime.ClassMeta.registerExceptionClass(allocator);
             \\
         );
 
@@ -1343,8 +1347,21 @@ pub const NativeLinker = struct {
         // 检查函数是否有返回值
         const func_has_return_value = self.func_return_types.get(func.name) orelse false;
 
+        self.current_cleanup_regs = cleanup_regs;
+        self.current_alloca_regs = alloca_regs;
+
         for (func.blocks.items, 0..) |block, block_idx| {
-            const case_start = try std.fmt.allocPrint(self.allocator, "            {d} => {{ // {s}\n", .{ block_idx, block.label });
+            // 设置当前异常处理器
+            if (block.exception_handler) |handler| {
+                self.current_exception_handler = handler.index;
+            } else {
+                self.current_exception_handler = null;
+            }
+
+            const case_start = if (block.exception_handler) |handler|
+                try std.fmt.allocPrint(self.allocator, "            {d} => {{ // {s} (handler: {d})\n", .{ block_idx, block.label, handler.index })
+            else
+                try std.fmt.allocPrint(self.allocator, "            {d} => {{ // {s}\n", .{ block_idx, block.label });
             defer self.allocator.free(case_start);
             try code.appendSlice(self.allocator, case_start);
 
@@ -1522,6 +1539,32 @@ pub const NativeLinker = struct {
                 const cond = try std.fmt.allocPrint(self.allocator, "                prev_block = current_block;\n                if ({s}) {{\n                    current_block = {d};\n                }} else {{\n                    current_block = {d};\n                }}\n", .{ cond_expr, then_idx, else_idx });
                 defer self.allocator.free(cond);
                 try code.appendSlice(self.allocator, cond);
+            },
+            .throw => |ex_reg| {
+                const ex_stmt = try std.fmt.allocPrint(self.allocator, "                runtime.setException(reg_{d});\n", .{ex_reg.id});
+                defer self.allocator.free(ex_stmt);
+                try code.appendSlice(self.allocator, ex_stmt);
+                
+                // 清理资源
+                if (cleanup_regs.len > 0) {
+                    try code.appendSlice(self.allocator, "                // Cleanup before throw\n");
+                    for (cleanup_regs) |reg_id| {
+                        // 不要释放异常对象本身，因为它已经被 setException 接管（retain）了？
+                        // 不，setException 会 retain 它。所以这里 release 是正确的（释放当前寄存器的持有权）。
+                        const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
+                        const cleanup = try std.fmt.allocPrint(self.allocator, "                reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
+                        defer self.allocator.free(cleanup);
+                        try code.appendSlice(self.allocator, cleanup);
+                    }
+                }
+
+                if (self.current_exception_handler) |handler_idx| {
+                    const jump = try std.fmt.allocPrint(self.allocator, "                current_block = {d};\n", .{handler_idx});
+                    defer self.allocator.free(jump);
+                    try code.appendSlice(self.allocator, jump);
+                } else {
+                    try code.appendSlice(self.allocator, "                return error.RuntimeError;\n");
+                }
             },
             else => {
                 try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
@@ -1862,6 +1905,18 @@ pub const NativeLinker = struct {
         }
 
         return true;
+    }
+
+    fn generateCleanupCode(self: *Self, writer: anytype) !void {
+        if (self.current_cleanup_regs) |regs| {
+            if (regs.len > 0) {
+                try writer.writeAll("        // Cleanup on exception\n");
+                for (regs) |reg_id| {
+                    const suffix = if (self.current_alloca_regs.?.contains(reg_id)) ".*" else "";
+                    try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
+                }
+            }
+        }
     }
 
     /// 生成指令（简化版）
@@ -2541,6 +2596,17 @@ pub const NativeLinker = struct {
                             try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                         }
                     }
+
+                    // 检查是否产生了异常
+                    try writer.writeAll("    if (runtime.hasException()) {\n");
+                    try self.generateCleanupCode(writer);
+                    if (self.current_exception_handler) |handler_idx| {
+                        try writer.print("        current_block = {d};\n", .{handler_idx});
+                        try writer.print("        continue;\n", .{});
+                    } else {
+                        try writer.writeAll("        return error.RuntimeError;\n");
+                    }
+                    try writer.writeAll("    }\n");
                 } else {
                     // 无返回值寄存器
                     if (is_builtin) {
@@ -2560,6 +2626,17 @@ pub const NativeLinker = struct {
                         // 用户定义函数
                         try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{ {s} }}, runtime.runtime_allocator);\n", .{ op.func_name, args_buf.items });
                     }
+
+                    // 检查是否产生了异常
+                    try writer.writeAll("    if (runtime.hasException()) {\n");
+                    try self.generateCleanupCode(writer);
+                    if (self.current_exception_handler) |handler_idx| {
+                        try writer.print("        current_block = {d};\n", .{handler_idx});
+                        try writer.print("        continue;\n", .{});
+                    } else {
+                        try writer.writeAll("        return error.RuntimeError;\n");
+                    }
+                    try writer.writeAll("    }\n");
                 }
             },
             .call_indirect => |op| {
@@ -2766,6 +2843,17 @@ pub const NativeLinker = struct {
                         // 无参数时也尝试调用构造函数
                         try writer.print("    _ = runtime.php_object_call(reg_{d}, \"__construct\", &[_]runtime.Value{{}}) catch {{}};\n", .{reg.id});
                     }
+                    
+                    // 检查异常
+                    try writer.writeAll("    if (runtime.hasException()) {\n");
+                    try self.generateCleanupCode(writer);
+                    if (self.current_exception_handler) |handler_idx| {
+                        try writer.print("        current_block = {d};\n", .{handler_idx});
+                        try writer.print("        continue;\n", .{});
+                    } else {
+                        try writer.writeAll("        return error.RuntimeError;\n");
+                    }
+                    try writer.writeAll("    }\n");
                 }
             },
             .property_get => |op| {
@@ -2817,6 +2905,17 @@ pub const NativeLinker = struct {
                 } else {
                     try writer.print("    _ = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{{s}}});\n", .{ op.object.id, op.method_name, args_buf.items });
                 }
+
+                // 检查异常
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.print("        continue;\n", .{});
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             // ============ 异常处理指令 ============
             .try_begin => {
@@ -2833,13 +2932,18 @@ pub const NativeLinker = struct {
                 }
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = runtime.getCurrentException() orelse runtime.Value.initNull();\n", .{reg.id});
+                    try writer.print("    reg_{d} = runtime.getException();\n", .{reg.id});
+                } else {
+                    try writer.writeAll("    if (runtime.hasException()) {\n");
+                    try writer.writeAll("        var ignored_ex = runtime.getException();\n");
+                    try writer.writeAll("        ignored_ex.release(runtime.runtime_allocator);\n");
+                    try writer.writeAll("    }\n");
                 }
             },
             .get_exception => {
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = runtime.getCurrentException() orelse runtime.Value.initNull();\n", .{reg.id});
+                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                 }
             },
             .clear_exception => {
@@ -4701,6 +4805,45 @@ pub const NativeLinker = struct {
             },
 
             // ========================================================================
+            // 异常处理指令
+            // ========================================================================
+            .try_begin => {
+                // Zig中不需要特殊的try_begin指令，但我们可以用来标记
+                try writer.print("        // try begin\n", .{});
+            },
+            .try_end => {
+                try writer.print("        // try end\n", .{});
+            },
+            .catch_ => |op| {
+                _ = op;
+                // catch块的开始已经在BasicBlock处理中隐含了（通过switch状态机跳转）
+                // 这里我们可能需要从runtime获取当前的exception
+                // 注意：在NativeLinker中，我们实际上通过switch状态机来模拟控制流
+                // 当发生异常时，throw指令会设置状态并break
+                try writer.print("        // catch clause\n", .{});
+            },
+            .throw => |ex_reg| {
+                const ex = try self.formatRegister(ex_reg);
+                defer self.allocator.free(ex);
+                // 设置异常并返回错误
+                try writer.print("        // throw {s}\n", .{ex});
+                try writer.print("        runtime.setException({s});\n", .{ex});
+                
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.print("        continue;\n", .{});
+                } else {
+                    try writer.print("        return error.RuntimeError;\n", .{});
+                }
+            },
+            .get_exception => {
+                // 获取当前捕获的异常
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.getException();\n", .{result_reg.?});
+                }
+            },
+
+            // ========================================================================
             // PHI指令（用于三元运算符等控制流合并）
             // ========================================================================
             .phi => |op| {
@@ -4746,6 +4889,12 @@ pub const NativeLinker = struct {
             &[_][]const u8{ temp_dir, "main.zig" },
         );
         defer self.allocator.free(zig_file_path);
+        
+        // Debug: Write to local file for inspection
+        const debug_path = "debug_aot.zig";
+        const debug_file = try std.fs.cwd().createFile(debug_path, .{});
+        try debug_file.writeAll(zig_code);
+        debug_file.close();
 
         {
             const file = try std.fs.cwd().createFile(zig_file_path, .{});
