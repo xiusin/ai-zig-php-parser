@@ -2680,18 +2680,18 @@ pub fn cleanupAllClasses() void {
     // 清理所有对象
     if (global_object_registry) |*registry| {
         while (registry.items.len > 0) {
-            const obj = registry.pop();
+            const obj = registry.pop().?;
             obj.release();
         }
-        registry.deinit();
+        registry.deinit(runtime_allocator);
         global_object_registry = null;
     }
 
     // 清理所有类
-    if (class_registry) |registry| {
+    if (class_registry) |*registry| {
         var iter = registry.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.deinit();
+            entry.value_ptr.*.deinit();
         }
         registry.deinit();
         class_registry = null;

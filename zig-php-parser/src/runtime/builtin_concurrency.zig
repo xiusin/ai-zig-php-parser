@@ -309,16 +309,17 @@ fn registerChannelClass(vm: anytype) !void {
 }
 
 fn channelDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    _ = allocator;
     const channel = @as(*concurrency.PHPChannel, @ptrCast(@alignCast(ptr)));
     channel.deinit();
-    allocator.destroy(channel);
 }
 
 pub fn channelConstructor(vm: anytype, args: []Value) !Value {
-    const capacity: usize = if (args.len > 0 and args[0].getTag() == .integer)
+    const requested: usize = if (args.len > 0 and args[0].getTag() == .integer)
         @intCast(@max(0, args[0].asInt()))
     else
-        0;
+        1;
+    const capacity: usize = if (requested == 0) 1 else requested;
 
     const channel = try concurrency.PHPChannel.init(vm.allocator, capacity);
 

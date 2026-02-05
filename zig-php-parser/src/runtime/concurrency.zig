@@ -1025,12 +1025,11 @@ pub const PHPChannel = struct {
     }
     
     pub fn trySend(self: *PHPChannel, data: Value) bool {
-        self.channel.send(data) catch return false;
-        return true;
+        return self.channel.trySend(data) catch false;
     }
     
     pub fn tryRecv(self: *PHPChannel) ?Value {
-        return self.channel.recv() catch null;
+        return self.channel.tryRecv();
     }
     
     pub fn close(self: *PHPChannel) void {

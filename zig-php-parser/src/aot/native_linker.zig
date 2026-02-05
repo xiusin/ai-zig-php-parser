@@ -155,6 +155,9 @@ pub const NativeLinker = struct {
             .current_reg_types = null,
             .current_reg_is_value = null,
             .current_function_has_this = false,
+            .current_exception_handler = null,
+            .current_cleanup_regs = null,
+            .current_alloca_regs = null,
         };
         return self;
     }
@@ -796,7 +799,7 @@ pub const NativeLinker = struct {
         defer alloca_registers.deinit();
 
         // 收集需要释放的寄存器（字符串、数组等）
-        var cleanup_registers = std.ArrayList(usize){};
+        var cleanup_registers: std.ArrayList(usize) = .empty;
         defer cleanup_registers.deinit(self.allocator);
 
         // 收集寄存器定义
@@ -819,6 +822,11 @@ pub const NativeLinker = struct {
                             .call => {
                                 // 内置函数调用可能返回需要释放的资源（如字符串、数组）
                                 // 我们保守地释放所有Value类型的返回值
+                                if (reg.type_ == .php_value) {
+                                    try cleanup_registers.append(self.allocator, reg.id);
+                                }
+                            },
+                            .load => {
                                 if (reg.type_ == .php_value) {
                                     try cleanup_registers.append(self.allocator, reg.id);
                                 }
@@ -906,6 +914,9 @@ pub const NativeLinker = struct {
 
         self.current_alloca_regs = &alloca_registers;
         defer self.current_alloca_regs = null;
+
+        self.current_cleanup_regs = cleanup_registers.items;
+        defer self.current_cleanup_regs = null;
 
         // 生成代码体
         if (func.blocks.items.len == 1) {
@@ -1340,8 +1351,14 @@ pub const NativeLinker = struct {
         // 检查函数是否有返回值
         const func_has_return_value = self.func_return_types.get(func.name) orelse false;
 
+        const prev_cleanup_regs = self.current_cleanup_regs;
+        const prev_alloca_regs = self.current_alloca_regs;
         self.current_cleanup_regs = cleanup_regs;
         self.current_alloca_regs = alloca_regs;
+        defer {
+            self.current_cleanup_regs = prev_cleanup_regs;
+            self.current_alloca_regs = prev_alloca_regs;
+        }
 
         for (func.blocks.items, 0..) |block, block_idx| {
             // 设置当前异常处理器
@@ -1672,7 +1689,7 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "        // Loop body\n");
 
         // 收集body块中需要释放的临时寄存器
-        var body_temps = std.ArrayList(usize){};
+        var body_temps: std.ArrayList(usize) = .empty;
         defer body_temps.deinit(self.allocator);
 
         for (body_block.instructions.items) |inst| {
@@ -1850,7 +1867,7 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "        // Loop body\n");
 
         // 收集body块中需要释放的临时寄存器
-        var body_temps = std.ArrayList(usize){};
+        var body_temps: std.ArrayList(usize) = .empty;
         defer body_temps.deinit(self.allocator);
 
         for (body_block.instructions.items) |inst| {
@@ -2016,6 +2033,7 @@ pub const NativeLinker = struct {
                         try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, ptr_prefix, op.ptr.id });
                     } else {
                         try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, ptr_prefix, op.ptr.id });
+                        try writer.print("    reg_{d}.retain();\n", .{ reg.id });
                     }
                 }
             },

@@ -184,18 +184,50 @@ const CommandResult = struct {
 };
 
 fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, timeout_ms: u64) !CommandResult {
-    _ = timeout_ms;
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv,
-        .max_output_bytes = 16 * 1024 * 1024,
-    });
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
 
-    const stdout = result.stdout;
-    const stderr = result.stderr;
-    const term = result.term;
+    try child.spawn();
 
-    const exit_code: u8 = switch (term) {
+    var done = std.atomic.Value(bool).init(false);
+    var killed = std.atomic.Value(bool).init(false);
+    const killer = try std.Thread.spawn(.{}, killAfterTimeout, .{ &child, &done, &killed, timeout_ms });
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+
+    child.collectOutput(allocator, &stdout_buf, &stderr_buf, 16 * 1024 * 1024) catch |err| switch (err) {
+        error.StdoutStreamTooLong, error.StderrStreamTooLong => {},
+        else => return err,
+    };
+
+    const stdout = try stdout_buf.toOwnedSlice(allocator);
+    errdefer allocator.free(stdout);
+    var stderr = try stderr_buf.toOwnedSlice(allocator);
+    errdefer allocator.free(stderr);
+
+    const term = child.wait() catch std.process.Child.Term{ .Signal = 15 };
+    done.store(true, .release);
+    killer.join();
+
+    if (killed.load(.acquire)) {
+        const suffix = "\n[AOT-DIFF] timeout\n";
+        const combined = allocator.alloc(u8, stderr.len + suffix.len) catch return CommandResult{
+            .stdout = stdout,
+            .stderr = stderr,
+            .exit_code = 124,
+        };
+        @memcpy(combined[0..stderr.len], stderr);
+        @memcpy(combined[stderr.len..], suffix);
+        allocator.free(stderr);
+        stderr = combined;
+    }
+
+    const exit_code: u8 = if (killed.load(.acquire)) 124 else switch (term) {
         .Exited => |code| code,
         else => 255,
     };
@@ -208,8 +240,13 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, timeout_ms
 }
 
 fn killAfterTimeout(child: *std.process.Child, done: *std.atomic.Value(bool), killed: *std.atomic.Value(bool), timeout_ms: u64) void {
-    std.Thread.sleep(timeout_ms * std.time.ns_per_ms);
-    if (done.load(.acquire)) return;
+    var remaining = timeout_ms;
+    while (remaining > 0) {
+        const slice_ms: u64 = if (remaining > 50) 50 else remaining;
+        std.Thread.sleep(slice_ms * std.time.ns_per_ms);
+        if (done.load(.acquire)) return;
+        remaining -= slice_ms;
+    }
     std.posix.kill(child.id, std.posix.SIG.KILL) catch |err| switch (err) {
         error.ProcessNotFound => return,
         else => return,
