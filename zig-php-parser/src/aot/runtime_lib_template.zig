@@ -2678,9 +2678,10 @@ pub fn findClass(name: []const u8) ?*ClassMeta {
 /// 清理所有注册的类和对象
 pub fn cleanupAllClasses() void {
     // 清理所有对象
-    if (global_object_registry) |registry| {
-        for (registry.items) |obj| {
-            obj.release(); // 减少引用计数，会自动deinit如果计数为0
+    if (global_object_registry) |*registry| {
+        while (registry.items.len > 0) {
+            const obj = registry.pop();
+            obj.release();
         }
         registry.deinit();
         global_object_registry = null;
@@ -2768,6 +2769,17 @@ pub const PHPObject = struct {
             if (meta.magic_destruct) |destruct| {
                 const this_val = Value_initObject(self);
                 _ = destruct(this_val, &.{}, self.allocator) catch {};
+            }
+        }
+
+        if (global_object_registry) |*registry| {
+            var i: usize = 0;
+            while (i < registry.items.len) : (i += 1) {
+                if (registry.items[i] == self) {
+                    registry.items[i] = registry.items[registry.items.len - 1];
+                    _ = registry.pop();
+                    break;
+                }
             }
         }
 
@@ -3070,6 +3082,12 @@ pub fn php_class_exists(class_name: Value, allocator: Allocator) !Value {
     return Value.initBool(findClass(name) != null);
 }
 
+pub fn @"class_exists"(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.MissingArgument;
+    return php_class_exists(args[0], allocator);
+}
+
 /// instanceof 检查
 pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
     if (!Value_isObject(obj_val)) return Value.initBool(false);
@@ -3118,6 +3136,13 @@ pub fn php_method_exists(obj_val: Value, method_name: Value) !Value {
     return Value.initBool(false);
 }
 
+pub fn @"method_exists"(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.MissingArgument;
+    return php_method_exists(args[0], args[1]);
+}
+
 /// 检查属性是否存在
 pub fn php_property_exists(obj_val: Value, property_name: Value) !Value {
     if (!property_name.isString()) return Value.initBool(false);
@@ -3128,6 +3153,13 @@ pub fn php_property_exists(obj_val: Value, property_name: Value) !Value {
         return Value.initBool(obj.hasProperty(name));
     }
     return Value.initBool(false);
+}
+
+pub fn @"property_exists"(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.MissingArgument;
+    return php_property_exists(args[0], args[1]);
 }
 
 /// 调用静态方法
@@ -3181,6 +3213,12 @@ pub fn php_get_class(obj_val: Value, allocator: Allocator) !Value {
     const obj = Value_asObject(obj_val);
     const class_name_str = try PHPString.init(allocator, obj.class_name);
     return Value.initString(class_name_str);
+}
+
+pub fn @"get_class"(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.MissingArgument;
+    return php_get_class(args[0], allocator);
 }
 
 // ============================================================================
@@ -5076,9 +5114,9 @@ pub fn php_go(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Va
     _ = callable.retain();
     
     const scheduler = try concurrency.getScheduler(allocator);
-    _ = try scheduler.spawn(php_coroutine_entry, context);
+    const coro_id = try scheduler.spawn(php_coroutine_entry, context);
     
-    return Value.initBool(true);
+    return Value.initInt(@intCast(coro_id));
 }
 
 pub fn go_spawn(func_name: []const u8, args: []const Value, allocator: Allocator) !Value {
@@ -5092,7 +5130,7 @@ pub fn go_spawn(func_name: []const u8, args: []const Value, allocator: Allocator
 }
 
 pub fn channel_new(capacity: i64, allocator: Allocator) !Value {
-    const obj = try php_object_new("Zig\\Channel", allocator);
+    const obj = try php_object_new("Channel", allocator);
     const channel = try concurrency.Channel(Value).init(allocator, @intCast(capacity));
     const ptr_val = Value.initInt(@intCast(@intFromPtr(channel)));
     try Value_asObject(obj).setProperty("_ptr", ptr_val);
@@ -5114,7 +5152,10 @@ pub fn channel_recv(ch: Value) !Value {
     const obj = Value_asObject(ch);
     if (obj.getProperty("_ptr")) |ptr_val| {
          const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
-         return try channel.recv();
+         return channel.recv() catch |err| {
+             if (err == error.ChannelClosed) return Value.initNull();
+             return err;
+         };
     }
     return Value.initNull();
 }
@@ -5128,9 +5169,9 @@ pub fn channel_close(ch: Value) void {
     }
 }
 
-fn registerZigChannel(allocator: Allocator) !void {
-    const meta = try ClassMeta.init(allocator, "Zig\\Channel");
-    
+fn registerChannelClassNamed(allocator: Allocator, class_name: []const u8) !void {
+    const meta = try ClassMeta.init(allocator, class_name);
+
     try meta.addMethod(.{
         .name = "__construct",
         .func = struct {
@@ -5156,10 +5197,10 @@ fn registerZigChannel(allocator: Allocator) !void {
                 _ = runtime_alloc;
                 const this = Value_asObject(ctx);
                 if (args.len < 1) return error.MissingArgument;
-                
+
                 const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
                 const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
-                
+
                 const val = args[0];
                 _ = val.retain();
                 try channel.send(val);
@@ -5176,11 +5217,59 @@ fn registerZigChannel(allocator: Allocator) !void {
                 _ = runtime_alloc;
                 _ = args;
                 const this = Value_asObject(ctx);
-                
+
                 const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
                 const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
-                
-                return try channel.recv();
+
+                return channel.recv() catch |err| {
+                    if (err == error.ChannelClosed) return Value.initNull();
+                    return err;
+                };
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "trySend",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                const this = Value_asObject(ctx);
+                if (args.len < 1) return error.MissingArgument;
+
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+
+                const val = args[0];
+                _ = val.retain();
+                const ok = channel.trySend(val) catch {
+                    val.release(runtime_alloc);
+                    return Value.initBool(false);
+                };
+                if (!ok) {
+                    val.release(runtime_alloc);
+                }
+                return Value.initBool(ok);
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "tryRecv",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                _ = args;
+                const this = Value_asObject(ctx);
+
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+
+                if (channel.tryRecv()) |val| {
+                    return val;
+                }
+                return Value.initNull();
             }
         }.call,
         .is_static = false,
@@ -5193,28 +5282,76 @@ fn registerZigChannel(allocator: Allocator) !void {
                 _ = runtime_alloc;
                 _ = args;
                 const this = Value_asObject(ctx);
-                
+
                 const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
                 const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
-                
+
                 channel.close();
                 return Value.initNull();
             }
         }.call,
         .is_static = false,
     });
-    
+
+    try meta.addMethod(.{
+        .name = "isClosed",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                _ = args;
+                const this = Value_asObject(ctx);
+
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                return Value.initBool(channel.isClosed());
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "len",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                _ = args;
+                const this = Value_asObject(ctx);
+
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                return Value.initInt(@intCast(channel.len()));
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "capacity",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                _ = args;
+                const this = Value_asObject(ctx);
+
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                return Value.initInt(@intCast(channel.getCapacity()));
+            }
+        }.call,
+        .is_static = false,
+    });
+
     try meta.addMethod(.{
         .name = "__destruct",
         .func = struct {
             fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
                 _ = args;
                 const this = Value_asObject(ctx);
-                
+
                 if (this.getProperty("_ptr")) |ptr_val| {
                     const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
                     while (channel.tryRecv()) |val| {
-                         val.release(runtime_alloc);
+                        val.release(runtime_alloc);
                     }
                     channel.deinit();
                 }
@@ -5223,12 +5360,14 @@ fn registerZigChannel(allocator: Allocator) !void {
         }.call,
         .is_static = false,
     });
-    
-    meta.magic_destruct = meta.findMethod("__destruct").?.func;
 
+    meta.magic_destruct = meta.findMethod("__destruct").?.func;
     try registerClass(meta);
-    
-    // Register go function
+}
+
+fn registerZigChannel(allocator: Allocator) !void {
+    try registerChannelClassNamed(allocator, "Channel");
+    try registerChannelClassNamed(allocator, "Zig\\Channel");
     try registerUserFunction("go", php_go);
 }
 
@@ -5281,9 +5420,15 @@ fn registerZigSelect(allocator: Allocator) !void {
                                  }
                              } else if (op == 1) { // send
                                  const send_val = case_arr.get(ArrayKey{ .integer = 2 }) orelse Value.initNull();
-                                 if (try channel.trySend(send_val)) {
-                                     return Value.initInt(@intCast(index));
-                                 }
+                                _ = send_val.retain();
+                                const ok = channel.trySend(send_val) catch {
+                                    send_val.release(runtime_alloc);
+                                    continue;
+                                };
+                                if (ok) {
+                                    return Value.initInt(@intCast(index));
+                                }
+                                send_val.release(runtime_alloc);
                              }
                         }
                     }

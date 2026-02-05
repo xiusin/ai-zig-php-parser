@@ -114,9 +114,9 @@ pub const NativeLinker = struct {
         const tag = std.meta.activeTag(inst.op);
         const op_name = @tagName(tag);
         switch (self.config.lowering_policy) {
-            .warn => self.diagnostics.reportWarning(inst.location, "AOT lowering 未实现 IR op: {s}", .{op_name}),
+            .warn => self.diagnostics.reportWarning(inst.location, "AOT lowering 未实现 IR op: {s}（参考 docs/2026-02-05/aot_interpreter_feature_gap_matrix.md）", .{op_name}),
             .@"error" => {
-                self.diagnostics.reportError(inst.location, "AOT lowering 未实现 IR op: {s}", .{op_name});
+                self.diagnostics.reportError(inst.location, "AOT lowering 未实现 IR op: {s}（参考 docs/2026-02-05/aot_interpreter_feature_gap_matrix.md）", .{op_name});
                 return error.UnsupportedIrOp;
             },
         }
@@ -267,39 +267,11 @@ pub const NativeLinker = struct {
         // 生成函数注册函数
         try self.generateFunctionRegistration(writer, ir_module);
 
-        // 生成全局清理函数
-        try writer.writeAll(
-            \\
-            \\fn cleanupAllClasses() void {
-            \\    // 清理所有对象
-            \\    if (runtime.global_object_registry) |*registry| {
-            \\        for (registry.items) |obj| {
-            \\            obj.release(); // 减少引用计数，会自动deinit如果计数为0
-            \\        }
-            \\        registry.deinit(runtime.runtime_allocator);
-            \\        runtime.global_object_registry = null;
-            \\    }
-            \\    
-            \\    // 清理所有类
-            \\    if (runtime.class_registry) |*registry| {
-            \\        var iter = registry.iterator();
-            \\        while (iter.next()) |entry| {
-            \\            entry.value_ptr.*.deinit();
-            \\        }
-            \\        registry.deinit();
-            \\        runtime.class_registry = null;
-            \\    }
-            \\}
-            \\
-        );
-
         // 生成主入口
         try writer.writeAll(
             \\
             \\pub fn main() !void {
-            \\    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-            \\    defer _ = gpa.deinit();
-            \\    const allocator = gpa.allocator();
+            \\    const allocator = std.heap.page_allocator;
             \\    
             \\    runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
@@ -308,7 +280,7 @@ pub const NativeLinker = struct {
             \\    registerAllClasses(allocator) catch {};
             \\    // 注册所有函数
             \\    registerAllFunctions() catch {};
-            \\    defer cleanupAllClasses();
+            \\    defer runtime.cleanupAllClasses();
             \\    
             \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
             \\}
@@ -556,6 +528,8 @@ pub const NativeLinker = struct {
             "php_constant_get",
             "go",
             "php_go_builtin",
+            "class_exists",
+            "get_class",
         };
 
         for (needs_allocator) |name| {
@@ -624,6 +598,8 @@ pub const NativeLinker = struct {
             "isset",            "empty",            "unset",
             "die",              "exit",
             "go",
+            "class_exists",     "method_exists",    "property_exists",
+            "get_class",
         };
 
         for (builtins) |builtin| {
@@ -650,6 +626,12 @@ pub const NativeLinker = struct {
         // 常量函数
         if (std.mem.eql(u8, func_name, "define")) return "php_define";
         if (std.mem.eql(u8, func_name, "defined")) return "php_defined";
+
+        // 反射/对象查询
+        if (std.mem.eql(u8, func_name, "class_exists")) return "php_class_exists";
+        if (std.mem.eql(u8, func_name, "method_exists")) return "php_method_exists";
+        if (std.mem.eql(u8, func_name, "property_exists")) return "php_property_exists";
+        if (std.mem.eql(u8, func_name, "get_class")) return "php_get_class";
 
         // 字符串函数
         if (std.mem.eql(u8, func_name, "strlen")) return "php_strlen";
@@ -921,6 +903,9 @@ pub const NativeLinker = struct {
 
         self.current_reg_is_value = reg_is_value;
         defer self.current_reg_is_value = null;
+
+        self.current_alloca_regs = &alloca_registers;
+        defer self.current_alloca_regs = null;
 
         // 生成代码体
         if (func.blocks.items.len == 1) {
@@ -1982,8 +1967,9 @@ pub const NativeLinker = struct {
             .store => |op| {
                 // 检查值的类型
                 const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
-                const ptr_reg = self.ir.getRegister(op.ptr.id);
-                const ptr_prefix = if (ptr_reg.is_ref) "" else "&";
+                // 检查是否是 alloca 寄存器（即指针类型）
+                const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                const ptr_prefix = if (is_ptr) "" else "&";
                 
                 // 1. 释放旧值
                 try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ op.ptr.id });
@@ -2018,14 +2004,18 @@ pub const NativeLinker = struct {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
                     }
 
+                    // 检查是否是 alloca 寄存器（即指针类型）
+                    const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                    const ptr_prefix = if (is_ptr) "" else "&";
+
                     if (type_tag == .i64) {
-                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*.asInt();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ reg.id, ptr_prefix, op.ptr.id });
                     } else if (type_tag == .f64) {
-                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*.asFloat();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ reg.id, ptr_prefix, op.ptr.id });
                     } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*.asBool();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, ptr_prefix, op.ptr.id });
                     } else {
-                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*;\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, ptr_prefix, op.ptr.id });
                     }
                 }
             },
@@ -3399,8 +3389,9 @@ pub const NativeLinker = struct {
                 try code.appendSlice(self.allocator, instr);
             },
             .load => |op| {
-                const ptr_reg = self.ir.getRegister(op.ptr.id);
-                const ptr_prefix = if (ptr_reg.is_ref) "" else "&";
+                // 检查是否是 alloca 寄存器（即指针类型）
+                const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                const ptr_prefix = if (is_ptr) "" else "&";
                 const type_tag = @as(std.meta.Tag(IR.Type), inst.result.?.type_);
                 
                 var instr: []u8 = undefined;
@@ -3418,8 +3409,9 @@ pub const NativeLinker = struct {
             },
             .store => |op| {
                 const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
-                const ptr_reg = self.ir.getRegister(op.ptr.id);
-                const ptr_prefix = if (ptr_reg.is_ref) "" else "&";
+                // 检查是否是 alloca 寄存器（即指针类型）
+                const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                const ptr_prefix = if (is_ptr) "" else "&";
 
                 // 释放旧值
                 const release = try std.fmt.allocPrint(self.allocator, "        reg_{d}.release(runtime.runtime_allocator);\n", .{op.ptr.id});

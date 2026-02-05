@@ -3,6 +3,8 @@ const std = @import("std");
 // Configuration
 const TEST_DIR = "test/aot_diff";
 const INTERPRETER_BIN = "zig-out/bin/php-interpreter";
+const SKIP_LIST = "test/aot_diff/.skip";
+const XFAIL_LIST = "test/aot_diff/.xfail";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -26,6 +28,15 @@ pub fn main() !void {
     std.debug.print("Test Directory: {s}\n", .{TEST_DIR});
     std.debug.print("Interpreter: {s}\n", .{interpreter_path});
 
+    const timeout_interp_ms = getenvU64(allocator, "AOT_DIFF_TIMEOUT_INTERP_MS") orelse 5_000;
+    const timeout_compile_ms = getenvU64(allocator, "AOT_DIFF_TIMEOUT_COMPILE_MS") orelse 120_000;
+    const timeout_run_ms = getenvU64(allocator, "AOT_DIFF_TIMEOUT_RUN_MS") orelse 10_000;
+
+    var skip = try loadListFile(allocator, SKIP_LIST);
+    defer freeListMap(allocator, &skip);
+    var xfail = try loadListFile(allocator, XFAIL_LIST);
+    defer freeListMap(allocator, &xfail);
+
     // Walk directory
     var dir = try std.fs.cwd().openDir(TEST_DIR, .{ .iterate = true });
     defer dir.close();
@@ -36,6 +47,9 @@ pub fn main() !void {
     var total_tests: usize = 0;
     var passed_tests: usize = 0;
     var failed_tests: usize = 0;
+    var skipped_tests: usize = 0;
+    var xfailed_tests: usize = 0;
+    var xpassed_tests: usize = 0;
 
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
@@ -47,18 +61,31 @@ pub fn main() !void {
         
         std.debug.print("[TEST] {s} ... ", .{entry.path});
 
+        if (skip.contains(entry.path)) {
+            std.debug.print("SKIP\n", .{});
+            skipped_tests += 1;
+            continue;
+        }
+
+        const is_xfail = xfail.get(entry.path) != null;
+
         // 1. Run Interpreter
         const interp_args = &[_][]const u8{interpreter_path, relative_path};
-        const interp_result = try runCommand(allocator, interp_args);
+        const interp_result = try runCommand(allocator, interp_args, timeout_interp_ms);
         defer {
             allocator.free(interp_result.stdout);
             allocator.free(interp_result.stderr);
         }
 
         if (interp_result.exit_code != 0) {
-            std.debug.print("FAIL (Interpreter Error)\n", .{});
-            std.debug.print("Stderr: {s}\n", .{interp_result.stderr});
-            failed_tests += 1;
+            if (is_xfail) {
+                std.debug.print("XFAIL (Interpreter Error)\n", .{});
+                xfailed_tests += 1;
+            } else {
+                std.debug.print("FAIL (Interpreter Error)\n", .{});
+                std.debug.print("Stderr: {s}\n", .{interp_result.stderr});
+                failed_tests += 1;
+            }
             continue;
         }
 
@@ -81,22 +108,27 @@ pub fn main() !void {
             relative_path
         };
 
-        const compile_result = try runCommand(allocator, compile_args);
+        const compile_result = try runCommand(allocator, compile_args, timeout_compile_ms);
         defer {
             allocator.free(compile_result.stdout);
             allocator.free(compile_result.stderr);
         }
 
         if (compile_result.exit_code != 0) {
-            std.debug.print("FAIL (Compilation Error)\n", .{});
-            std.debug.print("Stderr: {s}\n", .{compile_result.stderr});
-            failed_tests += 1;
+            if (is_xfail) {
+                std.debug.print("XFAIL (Compilation Error)\n", .{});
+                xfailed_tests += 1;
+            } else {
+                std.debug.print("FAIL (Compilation Error)\n", .{});
+                std.debug.print("Stderr: {s}\n", .{compile_result.stderr});
+                failed_tests += 1;
+            }
             continue;
         }
 
         // 3. Run AOT Binary
         const aot_args = &[_][]const u8{temp_bin_path};
-        const aot_result = try runCommand(allocator, aot_args);
+        const aot_result = try runCommand(allocator, aot_args, timeout_run_ms);
         defer {
             allocator.free(aot_result.stdout);
             allocator.free(aot_result.stderr);
@@ -105,27 +137,42 @@ pub fn main() !void {
         }
 
         if (aot_result.exit_code != 0) {
-            std.debug.print("FAIL (Runtime Error)\n", .{});
-            std.debug.print("Stderr: {s}\n", .{aot_result.stderr});
-            failed_tests += 1;
+            if (is_xfail) {
+                std.debug.print("XFAIL (Runtime Error)\n", .{});
+                xfailed_tests += 1;
+            } else {
+                std.debug.print("FAIL (Runtime Error)\n", .{});
+                std.debug.print("Stderr: {s}\n", .{aot_result.stderr});
+                failed_tests += 1;
+            }
             continue;
         }
 
         // 4. Compare Output
         if (!std.mem.eql(u8, interp_result.stdout, aot_result.stdout)) {
-             std.debug.print("FAIL (Output Mismatch)\n", .{});
-             std.debug.print("--- Interpreter Output ---\n{s}\n", .{interp_result.stdout});
-             std.debug.print("--- AOT Output ---\n{s}\n", .{aot_result.stdout});
-             failed_tests += 1;
+            if (is_xfail) {
+                std.debug.print("XFAIL (Output Mismatch)\n", .{});
+                xfailed_tests += 1;
+            } else {
+                std.debug.print("FAIL (Output Mismatch)\n", .{});
+                std.debug.print("--- Interpreter Output ---\n{s}\n", .{interp_result.stdout});
+                std.debug.print("--- AOT Output ---\n{s}\n", .{aot_result.stdout});
+                failed_tests += 1;
+            }
         } else {
-            std.debug.print("PASS\n", .{});
-            passed_tests += 1;
+            if (is_xfail) {
+                std.debug.print("XPASS\n", .{});
+                xpassed_tests += 1;
+            } else {
+                std.debug.print("PASS\n", .{});
+                passed_tests += 1;
+            }
         }
     }
 
-    std.debug.print("\nSummary: {d} Tests, {d} Passed, {d} Failed\n", .{total_tests, passed_tests, failed_tests});
+    std.debug.print("\nSummary: {d} Tests, {d} Passed, {d} Failed, {d} Skipped, {d} XFailed, {d} XPassed\n", .{total_tests, passed_tests, failed_tests, skipped_tests, xfailed_tests, xpassed_tests});
     
-    if (failed_tests > 0) {
+    if (failed_tests > 0 or xpassed_tests > 0) {
         std.process.exit(1);
     }
 }
@@ -136,18 +183,18 @@ const CommandResult = struct {
     exit_code: u8,
 };
 
-fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !CommandResult {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, timeout_ms: u64) !CommandResult {
+    _ = timeout_ms;
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv,
+        .max_output_bytes = 16 * 1024 * 1024,
+    });
 
-    try child.spawn();
-    
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1024 * 1024);
-    
-    const term = try child.wait();
-    
+    const stdout = result.stdout;
+    const stderr = result.stderr;
+    const term = result.term;
+
     const exit_code: u8 = switch (term) {
         .Exited => |code| code,
         else => 255,
@@ -158,4 +205,53 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !CommandRe
         .stderr = stderr,
         .exit_code = exit_code,
     };
+}
+
+fn killAfterTimeout(child: *std.process.Child, done: *std.atomic.Value(bool), killed: *std.atomic.Value(bool), timeout_ms: u64) void {
+    std.Thread.sleep(timeout_ms * std.time.ns_per_ms);
+    if (done.load(.acquire)) return;
+    std.posix.kill(child.id, std.posix.SIG.KILL) catch |err| switch (err) {
+        error.ProcessNotFound => return,
+        else => return,
+    };
+    killed.store(true, .release);
+}
+
+fn getenvU64(allocator: std.mem.Allocator, name: []const u8) ?u64 {
+    const raw = std.process.getEnvVarOwned(allocator, name) catch return null;
+    defer allocator.free(raw);
+    return std.fmt.parseInt(u64, raw, 10) catch null;
+}
+
+fn loadListFile(allocator: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
+    var map = std.StringHashMap([]const u8).init(allocator);
+    const file = std.fs.cwd().openFile(path, .{}) catch return map;
+    defer file.close();
+
+    const contents = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(contents);
+
+    var it = std.mem.splitScalar(u8, contents, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0) continue;
+        if (line[0] == '#') continue;
+
+        var parts = std.mem.splitScalar(u8, line, '\t');
+        const file_name = parts.next() orelse continue;
+        const reason = parts.next() orelse "";
+        const key = try allocator.dupe(u8, file_name);
+        const val = try allocator.dupe(u8, reason);
+        try map.put(key, val);
+    }
+    return map;
+}
+
+fn freeListMap(allocator: std.mem.Allocator, map: *std.StringHashMap([]const u8)) void {
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        allocator.free(entry.value_ptr.*);
+    }
+    map.deinit();
 }

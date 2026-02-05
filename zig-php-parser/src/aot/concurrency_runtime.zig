@@ -155,6 +155,22 @@ pub fn Channel(comptime T: type) type {
             self.not_full.signal();
             return value;
         }
+
+        pub fn isClosed(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.closed;
+        }
+
+        pub fn len(self: *Self) usize {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.buffer.items.len;
+        }
+
+        pub fn getCapacity(self: *Self) usize {
+            return self.capacity;
+        }
     };
 }
 
@@ -168,6 +184,7 @@ pub const Scheduler = struct {
     blocked_queue: std.ArrayList(*Coroutine),
     finished_queue: std.ArrayList(*Coroutine),
     next_id: std.atomic.Value(u64),
+    active_count: std.atomic.Value(u64),
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
     allocator: Allocator,
@@ -181,6 +198,7 @@ pub const Scheduler = struct {
             .blocked_queue = std.ArrayList(*Coroutine){},
             .finished_queue = std.ArrayList(*Coroutine){},
             .next_id = std.atomic.Value(u64).init(1),
+            .active_count = std.atomic.Value(u64).init(0),
             .mutex = .{},
             .cond = .{},
             .allocator = allocator,
@@ -211,6 +229,25 @@ pub const Scheduler = struct {
         self.finished_queue.deinit(self.allocator);
         self.worker_threads.deinit(self.allocator);
         self.allocator.destroy(self);
+    }
+
+    pub fn drain(self: *Scheduler, timeout_ms: ?u64) bool {
+        const start_ms = std.time.milliTimestamp();
+        while (true) {
+            self.mutex.lock();
+            const ready_len = self.ready_queue.items.len;
+            const blocked_len = self.blocked_queue.items.len;
+            self.mutex.unlock();
+
+            const active = self.active_count.load(.acquire);
+            if (ready_len == 0 and blocked_len == 0 and active == 0) return true;
+
+            if (timeout_ms) |timeout| {
+                const elapsed: u64 = @intCast(std.time.milliTimestamp() - start_ms);
+                if (elapsed >= timeout) return false;
+            }
+            std.Thread.sleep(1 * std.time.ns_per_ms);
+        }
     }
 
     /// 启动worker线程
@@ -251,6 +288,7 @@ pub const Scheduler = struct {
                 break :blk self.ready_queue.orderedRemove(0);
             };
 
+            _ = self.active_count.fetchAdd(1, .acq_rel);
             {
                 const c = coro;
                 c.state = .running;
@@ -263,6 +301,7 @@ pub const Scheduler = struct {
                 self.finished_queue.append(self.allocator, c) catch c.deinit();
                 self.mutex.unlock();
             }
+            _ = self.active_count.fetchSub(1, .acq_rel);
         }
     }
 };
@@ -293,9 +332,21 @@ pub fn shutdownScheduler() void {
     defer scheduler_mutex.unlock();
 
     if (global_scheduler) |sched| {
+        _ = sched.drain(10_000);
         sched.deinit();
         global_scheduler = null;
     }
+}
+
+pub fn drainScheduler(timeout_ms: ?u64) bool {
+    scheduler_mutex.lock();
+    const sched = global_scheduler;
+    scheduler_mutex.unlock();
+
+    if (sched) |s| {
+        return s.drain(timeout_ms);
+    }
+    return true;
 }
 
 // ============================================================================
@@ -348,6 +399,6 @@ pub fn selectChannels(cases: []const SelectCase, timeout_ms: ?u64) !usize {
         }
 
         // 短暂休眠避免忙等待
-        std.time.sleep(1 * std.time.ns_per_ms);
+        std.Thread.sleep(1 * std.time.ns_per_ms);
     }
 }
