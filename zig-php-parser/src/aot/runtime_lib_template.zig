@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const concurrency = @import("concurrency_runtime.zig");
 
 // ============================================================================
 // 全局运行时状态
@@ -38,6 +39,8 @@ threadlocal var has_exception: bool = false;
 pub fn initRuntime(allocator: Allocator) void {
     runtime_allocator = allocator;
     initClassRegistry(allocator);
+    registerZigChannel(allocator) catch {};
+    registerZigSelect(allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(allocator);
     constants = std.StringHashMap(Value).init(allocator);
     current_exception = Value.initNull();
@@ -64,8 +67,16 @@ pub fn getException() Value {
     return Value.initNull();
 }
 
+pub fn php_handle_uncaught_exception() void {
+    if (has_exception) {
+        std.debug.print("Uncaught exception in coroutine\n", .{});
+        has_exception = false;
+    }
+}
+
 /// 清理运行时
 pub fn deinitRuntime() void {
+    concurrency.shutdownScheduler();
     if (user_function_registry) |*registry| {
         registry.deinit();
         user_function_registry = null;
@@ -753,6 +764,34 @@ pub const PHPClosure = struct {
         }
     }
 };
+
+/// 变量赋值
+pub fn val_assign(target: *Value, value: Value) void {
+    // 释放旧值
+    // 注意：这里需要传入allocator，但为了简化API，我们假设 target 已经包含了必要的生命周期管理
+    // 或者我们应该让 val_assign 接受 allocator
+    // 现在的实现：如果 target 是引用，则更新引用的值
+    if (target.isRef()) {
+        const ptr = target.asRef();
+        // 递归赋值，处理引用链
+        val_assign(ptr, value);
+        return;
+    }
+    
+    // 如果不是引用，直接覆盖值
+    // 注意：调用者负责释放旧值的资源，或者我们在AOT生成的代码中处理
+    // 这里的 val_assign 主要是处理引用语义
+    target.* = value;
+}
+
+/// 变量解引用
+pub fn val_deref(val: *Value) *Value {
+    if (val.isRef()) {
+        const ptr = val.asRef();
+        return val_deref(ptr);
+    }
+    return val;
+}
 
 const BuiltinFunctionEntry = struct {
     name: []const u8,
@@ -4378,14 +4417,24 @@ fn skipWhitespace(json: []const u8, pos: *usize) void {
 /// sleep - 延迟执行（秒）
 pub fn php_sleep(seconds: Value) !Value {
     const secs = @max(0, seconds.toInt());
-    std.time.sleep(@as(u64, @intCast(secs)) * std.time.ns_per_s);
+    // Workaround: busy wait to avoid std.time.sleep issues
+    var i: usize = 0;
+    const count = @as(usize, @intCast(secs)) * 50000000; // 50M iterations
+    while (i < count) : (i += 1) {
+        std.Thread.yield() catch {};
+    }
     return Value.initInt(0);
 }
 
 /// usleep - 延迟执行（微秒）
 pub fn php_usleep(microseconds: Value) !Value {
     const usecs = @max(0, microseconds.toInt());
-    std.time.sleep(@as(u64, @intCast(usecs)) * std.time.ns_per_us);
+    // Workaround: busy wait
+    var i: usize = 0;
+    const count = @as(usize, @intCast(usecs)) * 50; // Rough approximation
+    while (i < count) : (i += 1) {
+        std.Thread.yield() catch {};
+    }
     return Value.initNull();
 }
 
@@ -4952,144 +5001,310 @@ pub fn php_base64_decode(str: Value, allocator: Allocator) !Value {
     return Value.initString(php_str);
 }
 
+
 // ============================================================================
-// 并发/协程支持函数 - 真正的实现
+// Concurrency Support
 // ============================================================================
 
-const concurrency = @import("concurrency_runtime.zig");
+const CoroutineContext = struct {
+    callable: Value,
+    args: []Value,
+    allocator: Allocator,
+};
 
-/// 全局互斥锁
-var global_mutex: std.Thread.Mutex = .{};
-
-/// 获取互斥锁
-pub fn mutex_lock() void {
-    global_mutex.lock();
+fn php_coroutine_entry(context: ?*anyopaque) anyerror!void {
+    if (context) |ptr| {
+        const ctx = @as(*CoroutineContext, @ptrCast(@alignCast(ptr)));
+        defer ctx.allocator.destroy(ctx);
+        defer ctx.allocator.free(ctx.args);
+        
+        // Ensure values are released when we are done
+        defer {
+            ctx.callable.release(ctx.allocator);
+            for (ctx.args) |arg| {
+                arg.release(ctx.allocator);
+            }
+        }
+        
+        // Execute the callable
+        if (ctx.callable.isString()) {
+            const func_name = ctx.callable.asString().data;
+            if (user_function_registry) |registry| {
+                if (registry.get(func_name)) |func| {
+                    _ = func(Value.initNull(), ctx.args, ctx.allocator) catch |err| {
+                        std.debug.print("Uncaught exception in coroutine: {}\n", .{err});
+                        if (has_exception) {
+                            php_handle_uncaught_exception();
+                        }
+                        return err;
+                    };
+                } else {
+                     std.debug.print("Function not found: {s}\n", .{func_name});
+                }
+            }
+        } else if (ctx.callable.isFunction()) {
+            const closure = ctx.callable.asFunction();
+            _ = closure.func(Value.initFunction(closure), ctx.args, ctx.allocator) catch |err| {
+                std.debug.print("Uncaught exception in coroutine: {}\n", .{err});
+                if (has_exception) {
+                    php_handle_uncaught_exception();
+                }
+                return err;
+            };
+        }
+    }
 }
 
-/// 释放互斥锁
-pub fn mutex_unlock() void {
-    global_mutex.unlock();
+pub fn php_go(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.MissingArgument;
+    
+    const callable = args[0];
+    
+    const coro_args = try allocator.alloc(Value, args.len - 1);
+    for (args[1..], 0..) |arg, i| {
+        coro_args[i] = arg;
+        _ = arg.retain();
+    }
+    
+    const context = try allocator.create(CoroutineContext);
+    context.* = .{
+        .callable = callable,
+        .args = coro_args,
+        .allocator = allocator,
+    };
+    _ = callable.retain();
+    
+    const scheduler = try concurrency.getScheduler(allocator);
+    _ = try scheduler.spawn(php_coroutine_entry, context);
+    
+    return Value.initBool(true);
 }
 
-/// 创建新的互斥锁（返回Value包装）
-pub fn mutex_new(allocator: Allocator) !Value {
-    _ = allocator;
+pub fn go_spawn(func_name: []const u8, args: []const Value, allocator: Allocator) !Value {
+    const callable = Value.initString(try PHPString.init(allocator, func_name));
+    const full_args = try allocator.alloc(Value, args.len + 1);
+    full_args[0] = callable;
+    @memcpy(full_args[1..], args);
+    defer allocator.free(full_args);
+    
+    return php_go(Value.initNull(), full_args, allocator);
+}
+
+pub fn channel_new(capacity: i64, allocator: Allocator) !Value {
+    const obj = try php_object_new("Zig\\Channel", allocator);
+    const channel = try concurrency.Channel(Value).init(allocator, @intCast(capacity));
+    const ptr_val = Value.initInt(@intCast(@intFromPtr(channel)));
+    try Value_asObject(obj).setProperty("_ptr", ptr_val);
+    return obj;
+}
+
+pub fn channel_send(ch: Value, val: Value) !void {
+    if (!Value_isObject(ch)) return error.InvalidChannel;
+    const obj = Value_asObject(ch);
+    if (obj.getProperty("_ptr")) |ptr_val| {
+         const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+         _ = val.retain();
+         try channel.send(val);
+    }
+}
+
+pub fn channel_recv(ch: Value) !Value {
+    if (!Value_isObject(ch)) return error.InvalidChannel;
+    const obj = Value_asObject(ch);
+    if (obj.getProperty("_ptr")) |ptr_val| {
+         const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+         return try channel.recv();
+    }
     return Value.initNull();
 }
 
-/// Channel包装类型
-const ChannelWrapper = struct {
-    channel: *concurrency.Channel(Value),
-
-    pub fn init(allocator: Allocator, buffer_size: u32) !*ChannelWrapper {
-        const wrapper = try allocator.create(ChannelWrapper);
-        wrapper.channel = try concurrency.Channel(Value).init(allocator, buffer_size);
-        return wrapper;
-    }
-
-    pub fn deinit(self: *ChannelWrapper, allocator: Allocator) void {
-        self.channel.deinit();
-        allocator.destroy(self);
-    }
-};
-
-/// 协程函数包装器
-const CoroutineFunc = struct {
-    func_name: []const u8,
-    args: []const Value,
-    allocator: Allocator,
-
-    pub fn run(args_ptr: []const anyopaque) !void {
-        const self = @as(*const CoroutineFunc, @ptrCast(@alignCast(args_ptr.ptr)));
-        _ = self;
-        // TODO: 通过函数名查找并调用实际函数
-    }
-};
-
-/// 启动协程/goroutine - 真正的实现
-pub fn go_spawn(func_name: []const u8, args: []const Value, allocator: Allocator) !Value {
-    const sched = try concurrency.getScheduler(allocator);
-
-    // 创建协程函数包装
-    const func_wrapper = try allocator.create(CoroutineFunc);
-    func_wrapper.* = .{
-        .func_name = func_name,
-        .args = args,
-        .allocator = allocator,
-    };
-
-    const args_slice = std.mem.asBytes(func_wrapper);
-    const coro_id = try sched.spawn(CoroutineFunc.run, args_slice);
-
-    return Value.initInt(@intCast(coro_id));
-}
-
-/// 创建通道 - 真正的实现
-pub fn channel_new(buffer_size: u32, allocator: Allocator) !Value {
-    const wrapper = try ChannelWrapper.init(allocator, buffer_size);
-    const ptr_int = @intFromPtr(wrapper);
-    return Value.initInt(@intCast(ptr_int));
-}
-
-/// 发送到通道 - 真正的实现
-pub fn channel_send(channel: Value, value: Value) !void {
-    if (!channel.isInt()) return error.InvalidChannel;
-
-    const ptr_int: usize = @intCast(channel.asInt());
-    const wrapper = @as(*ChannelWrapper, @ptrFromInt(ptr_int));
-
-    try wrapper.channel.send(value);
-}
-
-/// 从通道接收 - 真正的实现
-pub fn channel_recv(channel: Value) !Value {
-    if (!channel.isInt()) return error.InvalidChannel;
-
-    const ptr_int: usize = @intCast(channel.asInt());
-    const wrapper = @as(*ChannelWrapper, @ptrFromInt(ptr_int));
-
-    return try wrapper.channel.recv();
-}
-
-/// 关闭通道 - 真正的实现
-pub fn channel_close(channel: Value) void {
-    if (!channel.isInt()) return;
-
-    const ptr_int: usize = @intCast(channel.asInt());
-    const wrapper = @as(*ChannelWrapper, @ptrFromInt(ptr_int));
-
-    wrapper.channel.close();
-}
-
-/// 等待异步结果
-pub fn await_result(future: Value) !Value {
-    // 简单实现：直接返回future值
-    return future;
-}
-
-// ============================================================================
-// Reference Support
-// ============================================================================
-
-pub fn val_assign(target: *Value, val: Value) void {
-    if (target.isRef()) {
-        target.asRef().* = val;
-    } else {
-        target.* = val;
+pub fn channel_close(ch: Value) void {
+    if (!Value_isObject(ch)) return;
+    const obj = Value_asObject(ch);
+    if (obj.getProperty("_ptr")) |ptr_val| {
+         const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+         channel.close();
     }
 }
 
-pub fn val_deref(ptr: *Value) *Value {
-    if (ptr.isRef()) {
-        return ptr.asRef();
-    }
-    return ptr;
+fn registerZigChannel(allocator: Allocator) !void {
+    const meta = try ClassMeta.init(allocator, "Zig\\Channel");
+    
+    try meta.addMethod(.{
+        .name = "__construct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                const this = Value_asObject(ctx);
+                var capacity: usize = 0;
+                if (args.len > 0) {
+                    capacity = @intCast(args[0].toInt());
+                }
+                const channel = try concurrency.Channel(Value).init(runtime_alloc, capacity);
+                const ptr_val = Value.initInt(@intCast(@intFromPtr(channel)));
+                try this.setProperty("_ptr", ptr_val);
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "send",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                if (args.len < 1) return error.MissingArgument;
+                
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                
+                const val = args[0];
+                _ = val.retain();
+                try channel.send(val);
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "recv",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                _ = args;
+                const this = Value_asObject(ctx);
+                
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                
+                return try channel.recv();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "close",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                _ = args;
+                const this = Value_asObject(ctx);
+                
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidChannel;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                
+                channel.close();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    
+    try meta.addMethod(.{
+        .name = "__destruct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                const this = Value_asObject(ctx);
+                
+                if (this.getProperty("_ptr")) |ptr_val| {
+                    const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                    while (channel.tryRecv()) |val| {
+                         val.release(runtime_alloc);
+                    }
+                    channel.deinit();
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    
+    meta.magic_destruct = meta.findMethod("__destruct").?.func;
+
+    try registerClass(meta);
+    
+    // Register go function
+    try registerUserFunction("go", php_go);
 }
 
-pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
-    _ = allocator;
-    if (ptr.isRef()) {
-        return ptr.*;
-    }
-    return Value.initRef(ptr);
+fn registerZigSelect(allocator: Allocator) !void {
+    const meta = try ClassMeta.init(allocator, "Zig\\Select");
+    
+    try meta.addMethod(.{
+        .name = "select",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = ctx;
+                if (args.len < 1) return error.MissingArgument;
+                const cases_arg = args[0];
+                if (!cases_arg.isArray()) return error.InvalidArgument;
+                
+                var timeout: ?i64 = null;
+                if (args.len > 1 and !args[1].isNull()) {
+                    timeout = args[1].toInt();
+                }
+
+                const array = cases_arg.asArray();
+                const start_time = std.time.milliTimestamp();
+
+                while (true) {
+                    var iter = array.elements.iterator();
+                    var index: usize = 0;
+                    while (iter.next()) |entry| : (index += 1) {
+                        const case_val = entry.value_ptr.*;
+                        if (!case_val.isArray()) continue;
+                        
+                        const case_arr = case_val.asArray();
+                        
+                        // [channel, op, ?value]
+                        const ch_val = case_arr.get(ArrayKey{ .integer = 0 }) orelse continue;
+                        const op_val = case_arr.get(ArrayKey{ .integer = 1 }) orelse continue;
+                        
+                        if (!Value_isObject(ch_val)) continue;
+                        const ch_obj = Value_asObject(ch_val);
+                        if (ch_obj.getProperty("_ptr")) |ptr_val| {
+                             const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                             const op = op_val.toInt(); // 0=recv, 1=send
+                             
+                             if (op == 0) { // recv
+                                 if (channel.tryRecv()) |val| {
+                                     // Return array [index, value]
+                                     const res_arr = try PHPArray.init(runtime_alloc);
+                                     try res_arr.push(runtime_alloc, Value.initInt(@intCast(index)));
+                                     try res_arr.push(runtime_alloc, val);
+                                     return Value.initArray(res_arr);
+                                 }
+                             } else if (op == 1) { // send
+                                 const send_val = case_arr.get(ArrayKey{ .integer = 2 }) orelse Value.initNull();
+                                 if (try channel.trySend(send_val)) {
+                                     return Value.initInt(@intCast(index));
+                                 }
+                             }
+                        }
+                    }
+                    
+                    if (timeout) |t| {
+                        if (std.time.milliTimestamp() - start_time >= t) {
+                            return Value.initNull();
+                        }
+                    }
+                    
+                    std.Thread.yield() catch {};
+                }
+            }
+        }.call,
+        .is_static = true,
+    });
+
+    try registerClass(meta);
+}
+
+pub fn php_go_builtin(callable: Value, allocator: Allocator) !Value {
+    const args = [_]Value{callable};
+    return php_go(Value.initNull(), &args, allocator);
 }

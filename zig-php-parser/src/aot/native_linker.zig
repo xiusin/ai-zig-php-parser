@@ -554,6 +554,8 @@ pub const NativeLinker = struct {
             "php_define",
             "define",
             "php_constant_get",
+            "go",
+            "php_go_builtin",
         };
 
         for (needs_allocator) |name| {
@@ -600,6 +602,7 @@ pub const NativeLinker = struct {
 
             // 时间函数
             "time",             "microtime",    "date",
+            "sleep",            "usleep",
 
             // 随机数函数
                     "srand",           "mt_srand",
@@ -620,6 +623,7 @@ pub const NativeLinker = struct {
             // 其他
             "isset",            "empty",            "unset",
             "die",              "exit",
+            "go",
         };
 
         for (builtins) |builtin| {
@@ -717,6 +721,8 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "time")) return "php_time";
         if (std.mem.eql(u8, func_name, "microtime")) return "php_microtime";
         if (std.mem.eql(u8, func_name, "date")) return "php_date";
+        if (std.mem.eql(u8, func_name, "sleep")) return "php_sleep";
+        if (std.mem.eql(u8, func_name, "usleep")) return "php_usleep";
 
         // 随机数函数
         if (std.mem.eql(u8, func_name, "srand")) return "php_srand";
@@ -752,6 +758,8 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "rmdir")) return "php_rmdir";
         if (std.mem.eql(u8, func_name, "basename")) return "php_basename";
         if (std.mem.eql(u8, func_name, "dirname")) return "php_dirname";
+
+        if (std.mem.eql(u8, func_name, "go")) return "php_go_builtin";
 
         // 默认：添加php_前缀
         // 注意：这里应该分配新的字符串，但为了简单起见，我们假设调用者会处理
@@ -1923,6 +1931,11 @@ pub const NativeLinker = struct {
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
         const writer = code.writer(self.allocator);
 
+        // Add source location comment
+        if (inst.location.line > 0) {
+            try writer.print("    // {s}:{d}\n", .{ inst.location.file, inst.location.line });
+        }
+
         switch (inst.op) {
             .const_int => |val| {
                 if (inst.result) |reg| {
@@ -1969,21 +1982,27 @@ pub const NativeLinker = struct {
             .store => |op| {
                 // 检查值的类型
                 const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
+                const ptr_reg = self.ir.getRegister(op.ptr.id);
+                const ptr_prefix = if (ptr_reg.is_ref) "" else "&";
                 
                 // 1. 释放旧值
-                try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ op.ptr.id });
+                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ op.ptr.id });
 
                 // 2. 增加新值引用计数并赋值
                 if (value_type_tag == .i64) {
-                    try writer.print("    runtime.val_assign(reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ op.ptr.id, op.value.id });
+                    try writer.print("    runtime.val_assign({s}reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                 } else if (value_type_tag == .f64) {
-                    try writer.print("    runtime.val_assign(reg_{d}, runtime.Value.initFloat(reg_{d}));\n", .{ op.ptr.id, op.value.id });
+                    try writer.print("    runtime.val_assign({s}reg_{d}, runtime.Value.initFloat(reg_{d}));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                 } else if (value_type_tag == .bool) {
-                    try writer.print("    runtime.val_assign(reg_{d}, runtime.Value.initBool(reg_{d}));\n", .{ op.ptr.id, op.value.id });
-                } else {
+                    try writer.print("    runtime.val_assign({s}reg_{d}, runtime.Value.initBool(reg_{d}));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                } else if (value_type_tag == .php_value or value_type_tag == .php_string or value_type_tag == .php_array or value_type_tag == .php_object or value_type_tag == .php_callable) {
                     // 已经是Value类型，需要retain
                     try writer.print("    reg_{d}.retain();\n", .{ op.value.id });
-                    try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ op.ptr.id, op.value.id });
+                    try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                } else {
+                    // Fallback for other types
+                    try writer.print("    reg_{d}.retain();\n", .{ op.value.id });
+                    try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                 }
             },
             .make_ref => |op| {
@@ -2000,13 +2019,13 @@ pub const NativeLinker = struct {
                     }
 
                     if (type_tag == .i64) {
-                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*.asInt();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*.asInt();\n", .{ reg.id, op.ptr.id });
                     } else if (type_tag == .f64) {
-                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*.asFloat();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*.asFloat();\n", .{ reg.id, op.ptr.id });
                     } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*.asBool();\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*.asBool();\n", .{ reg.id, op.ptr.id });
                     } else {
-                        try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*;\n", .{ reg.id, op.ptr.id });
+                        try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*;\n", .{ reg.id, op.ptr.id });
                     }
                 }
             },
@@ -2906,8 +2925,10 @@ pub const NativeLinker = struct {
                     }
 
                     // 创建对象
+                    const escaped_class = try self.escapeString(op.class_name);
+                    defer self.allocator.free(escaped_class);
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                    try writer.print("    reg_{d} = try runtime.php_object_new(\"{s}\", runtime.runtime_allocator);\n", .{ reg.id, op.class_name });
+                    try writer.print("    reg_{d} = try runtime.php_object_new(\"{s}\", runtime.runtime_allocator);\n", .{ reg.id, escaped_class });
 
                     // 调用构造函数（如果有参数）
                     if (op.args.len > 0) {
@@ -2931,8 +2952,10 @@ pub const NativeLinker = struct {
             },
             .property_get => |op| {
                 if (inst.result) |reg| {
+                    const escaped_prop = try self.escapeString(op.property_name);
+                    defer self.allocator.free(escaped_prop);
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                    try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, op.property_name });
+                    try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
                 }
             },
             .property_set => |op| {
@@ -2950,7 +2973,9 @@ pub const NativeLinker = struct {
                     try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.value.id});
                 defer self.allocator.free(value_expr);
 
-                try writer.print("    try runtime.php_object_set(reg_{d}, \"{s}\", {s});\n", .{ op.object.id, op.property_name, value_expr });
+                const escaped_prop = try self.escapeString(op.property_name);
+                defer self.allocator.free(escaped_prop);
+                try writer.print("    try runtime.php_object_set(reg_{d}, \"{s}\", {s});\n", .{ op.object.id, escaped_prop, value_expr });
             },
             .method_call => |op| {
                 // 生成参数列表
@@ -2972,11 +2997,14 @@ pub const NativeLinker = struct {
                     }
                 }
 
+                const escaped_method = try self.escapeString(op.method_name);
+                defer self.allocator.free(escaped_method);
+
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                    try writer.print("    reg_{d} = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{{s}}});\n", .{ reg.id, op.object.id, op.method_name, args_buf.items });
+                    try writer.print("    reg_{d} = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{{s}}});\n", .{ reg.id, op.object.id, escaped_method, args_buf.items });
                 } else {
-                    try writer.print("    _ = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{{s}}});\n", .{ op.object.id, op.method_name, args_buf.items });
+                    try writer.print("    _ = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{{s}}});\n", .{ op.object.id, escaped_method, args_buf.items });
                 }
 
                 // 检查异常
@@ -3311,6 +3339,11 @@ pub const NativeLinker = struct {
 
     /// 生成指令（直接操作ArrayList）
     fn generateInstructionDirect(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
+        // Add source location comment
+        if (inst.location.line > 0) {
+            try code.writer(self.allocator).print("        // {s}:{d}\n", .{ inst.location.file, inst.location.line });
+        }
+
         const result_reg = if (inst.result) |r| r.id else null;
 
         switch (inst.op) {
@@ -3366,55 +3399,52 @@ pub const NativeLinker = struct {
                 try code.appendSlice(self.allocator, instr);
             },
             .load => |op| {
-                const ptr_inner_type = switch (op.ptr.type_) {
-                    .ptr => |inner| inner.*,
-                    else => .php_value,
-                };
-                const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_inner_type);
-                const load_tag = @as(std.meta.Tag(IR.Type), op.type_);
-
-                const instr = if (ptr_tag == load_tag)
-                    try std.fmt.allocPrint(self.allocator, "        reg_{d} = reg_{d}.*;\n", .{ result_reg.?, op.ptr.id })
-                else if (load_tag == .php_value)
-                    switch (ptr_tag) {
-                        .i64 => try std.fmt.allocPrint(self.allocator, "        reg_{d} = runtime.Value.initInt(reg_{d}.*);\n", .{ result_reg.?, op.ptr.id }),
-                        .f64 => try std.fmt.allocPrint(self.allocator, "        reg_{d} = runtime.Value.initFloat(reg_{d}.*);\n", .{ result_reg.?, op.ptr.id }),
-                        .bool => try std.fmt.allocPrint(self.allocator, "        reg_{d} = runtime.Value.initBool(reg_{d}.*);\n", .{ result_reg.?, op.ptr.id }),
-                        else => try std.fmt.allocPrint(self.allocator, "        reg_{d} = reg_{d}.*;\n", .{ result_reg.?, op.ptr.id }),
-                    }
-                else
-                    try std.fmt.allocPrint(self.allocator, "        reg_{d} = reg_{d}.*;\n", .{ result_reg.?, op.ptr.id });
+                const ptr_reg = self.ir.getRegister(op.ptr.id);
+                const ptr_prefix = if (ptr_reg.is_ref) "" else "&";
+                const type_tag = @as(std.meta.Tag(IR.Type), inst.result.?.type_);
+                
+                var instr: []u8 = undefined;
+                if (type_tag == .i64) {
+                     instr = try std.fmt.allocPrint(self.allocator, "        reg_{d} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ result_reg.?, ptr_prefix, op.ptr.id });
+                } else if (type_tag == .f64) {
+                     instr = try std.fmt.allocPrint(self.allocator, "        reg_{d} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ result_reg.?, ptr_prefix, op.ptr.id });
+                } else if (type_tag == .bool) {
+                     instr = try std.fmt.allocPrint(self.allocator, "        reg_{d} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ result_reg.?, ptr_prefix, op.ptr.id });
+                } else {
+                     instr = try std.fmt.allocPrint(self.allocator, "        reg_{d} = runtime.val_deref({s}reg_{d}).*;\n", .{ result_reg.?, ptr_prefix, op.ptr.id });
+                }
                 defer self.allocator.free(instr);
                 try code.appendSlice(self.allocator, instr);
             },
             .store => |op| {
-                // 获取指针指向的类型
-                const ptr_inner_type = switch (op.ptr.type_) {
-                    .ptr => |inner| inner.*,
-                    else => .php_value,
-                };
-                const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_inner_type);
-                const value_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
+                const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
+                const ptr_reg = self.ir.getRegister(op.ptr.id);
+                const ptr_prefix = if (ptr_reg.is_ref) "" else "&";
 
                 // 释放旧值
-                if (ptr_tag == .php_value) {
-                    const release = try std.fmt.allocPrint(self.allocator, "        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.ptr.id});
-                    defer self.allocator.free(release);
-                    try code.appendSlice(self.allocator, release);
-                }
+                const release = try std.fmt.allocPrint(self.allocator, "        reg_{d}.release(runtime.runtime_allocator);\n", .{op.ptr.id});
+                defer self.allocator.free(release);
+                try code.appendSlice(self.allocator, release);
 
                 // 存储新值
-                const instr = if (ptr_tag == value_tag)
-                    try std.fmt.allocPrint(self.allocator, "        reg_{d}.* = reg_{d};\n", .{ op.ptr.id, op.value.id })
-                else if (ptr_tag == .php_value)
-                    switch (value_tag) {
-                        .i64 => try std.fmt.allocPrint(self.allocator, "        reg_{d}.* = runtime.Value.initInt(reg_{d});\n", .{ op.ptr.id, op.value.id }),
-                        .f64 => try std.fmt.allocPrint(self.allocator, "        reg_{d}.* = runtime.Value.initFloat(reg_{d});\n", .{ op.ptr.id, op.value.id }),
-                        .bool => try std.fmt.allocPrint(self.allocator, "        reg_{d}.* = runtime.Value.initBool(reg_{d});\n", .{ op.ptr.id, op.value.id }),
-                        else => try std.fmt.allocPrint(self.allocator, "        reg_{d}.* = reg_{d};\n", .{ op.ptr.id, op.value.id }),
-                    }
-                else
-                    try std.fmt.allocPrint(self.allocator, "        reg_{d}.* = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                var instr: []u8 = undefined;
+                if (value_type_tag == .i64) {
+                    instr = try std.fmt.allocPrint(self.allocator, "        runtime.val_assign({s}reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                } else if (value_type_tag == .f64) {
+                    instr = try std.fmt.allocPrint(self.allocator, "        runtime.val_assign({s}reg_{d}, runtime.Value.initFloat(reg_{d}));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                } else if (value_type_tag == .bool) {
+                    instr = try std.fmt.allocPrint(self.allocator, "        runtime.val_assign({s}reg_{d}, runtime.Value.initBool(reg_{d}));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                } else if (value_type_tag == .php_value or value_type_tag == .php_string or value_type_tag == .php_array or value_type_tag == .php_object or value_type_tag == .php_callable) {
+                    const retain = try std.fmt.allocPrint(self.allocator, "        reg_{d}.retain();\n", .{op.value.id});
+                    defer self.allocator.free(retain);
+                    try code.appendSlice(self.allocator, retain);
+                    instr = try std.fmt.allocPrint(self.allocator, "        runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                } else {
+                    const retain = try std.fmt.allocPrint(self.allocator, "        reg_{d}.retain();\n", .{op.value.id});
+                    defer self.allocator.free(retain);
+                    try code.appendSlice(self.allocator, retain);
+                    instr = try std.fmt.allocPrint(self.allocator, "        runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                }
                 defer self.allocator.free(instr);
                 try code.appendSlice(self.allocator, instr);
             },
@@ -4350,6 +4380,11 @@ pub const NativeLinker = struct {
 
     /// 生成指令
     fn generateInstruction(self: *Self, writer: anytype, inst: *const IR.Instruction) !void {
+        // Add source location comment
+        if (inst.location.line > 0) {
+            try writer.print("        // {s}:{d}\n", .{ inst.location.file, inst.location.line });
+        }
+
         // 生成结果寄存器声明（如果有）
         const result_reg = if (inst.result) |r| try std.fmt.allocPrint(
             self.allocator,
@@ -4940,6 +4975,24 @@ pub const NativeLinker = struct {
 
         // 使用 self 避免编译器警告
         _ = self.config.verbose;
+    }
+
+    /// Escape a string for use in Zig source code
+    fn escapeString(self: *Self, str: []const u8) ![]const u8 {
+        var buf = std.ArrayList(u8){};
+        defer buf.deinit(self.allocator);
+        const writer = buf.writer(self.allocator);
+        for (str) |c| {
+            switch (c) {
+                '\\' => try writer.writeAll("\\\\"),
+                '"' => try writer.writeAll("\\\""),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => try writer.writeByte(c),
+            }
+        }
+        return buf.toOwnedSlice(self.allocator);
     }
 
     /// 格式化寄存器名称

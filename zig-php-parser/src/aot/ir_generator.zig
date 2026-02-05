@@ -1568,6 +1568,16 @@ pub const IRGenerator = struct {
                 .func_name = func_name,
                 .args = args,
             } }, null);
+        } else {
+             // Fallback: treat as expression and call php_go_builtin
+             const expr_reg = try self.generateExpression(go_data.call);
+             const args = try self.allocator.alloc(Register, 1);
+             args[0] = expr_reg;
+             _ = try self.emit(.{ .call = .{
+                 .func_name = "php_go_builtin",
+                 .args = args,
+                 .return_type = .php_value,
+             } }, null);
         }
     }
 
@@ -2702,7 +2712,7 @@ pub const IRGenerator = struct {
         }
 
         // Closure name
-        const name_id = try self.module.?.internString(func_name);
+        const name_id = try self.module.?.internString(name_copy);
         const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_string);
 
         // Call php_create_closure

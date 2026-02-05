@@ -822,12 +822,13 @@ pub const AOTCompiler = struct {
         };
 
         // Generate IR module using the correct root index
+        const rel_path = self.diagnostics.relativizePath(self.options.input_file);
         self.ir_module = ir_gen.generateFromRoot(
             self.ast_nodes.?,
             self.string_table.?,
             self.root_index,
-            self.options.input_file,
-            self.options.input_file,
+            rel_path,
+            rel_path,
         ) catch |err| {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },

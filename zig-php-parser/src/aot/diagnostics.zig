@@ -288,7 +288,7 @@ pub const DiagnosticEngine = struct {
         };
     }
 
-    fn relativizePath(self: *const Self, path: []const u8) []const u8 {
+    pub fn relativizePath(self: *const Self, path: []const u8) []const u8 {
         const base = self.path_base orelse return path;
         if (std.mem.startsWith(u8, path, base)) {
             return path[base.len..];
