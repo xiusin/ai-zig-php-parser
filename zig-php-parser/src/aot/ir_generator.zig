@@ -732,6 +732,8 @@ pub const IRGenerator = struct {
         const class_name = self.getString(class_data.name);
 
         var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+        var traits = std.ArrayListUnmanaged([]const u8){};
+        defer traits.deinit(self.allocator);
 
         // Create type definition
         const type_def = try self.allocator.create(TypeDef);
@@ -749,6 +751,7 @@ pub const IRGenerator = struct {
                 break :blk null;
             } else null,
             .interfaces = &.{},
+            .traits = &.{},
             .properties = &.{},
             .methods = &.{},
             .location = self.current_location,
@@ -793,11 +796,24 @@ pub const IRGenerator = struct {
                     try self.generatePropertyDecl(member, class_name);
                 },
                 .const_decl => try self.generateClassConstDecl(member, class_name),
+                .trait_use => {
+                    const tu = member.data.trait_use;
+                    for (tu.traits) |tidx| {
+                        const tnode = self.getNode(tidx) orelse continue;
+                        switch (tnode.tag) {
+                            .named_type => try traits.append(self.allocator, self.getString(tnode.data.named_type.name)),
+                            .variable => try traits.append(self.allocator, self.getString(tnode.data.variable.name)),
+                            .literal_string => try traits.append(self.allocator, self.getString(tnode.data.literal_string.value)),
+                            else => {},
+                        }
+                    }
+                },
                 else => {},
             }
         }
 
         type_def.properties = try properties.toOwnedSlice(self.allocator);
+        type_def.traits = try traits.toOwnedSlice(self.allocator);
 
         // Leave class scope
         self.symbol_table.leaveScope();
@@ -814,6 +830,7 @@ pub const IRGenerator = struct {
             .kind = .interface,
             .parent = null,
             .interfaces = &.{},
+            .traits = &.{},
             .properties = &.{},
             .methods = &.{},
             .location = self.current_location,
@@ -829,12 +846,15 @@ pub const IRGenerator = struct {
         const trait_data = node.data.container_decl;
         const trait_name = self.getString(trait_data.name);
 
+        var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
             .name = trait_name,
             .kind = .trait,
             .parent = null,
             .interfaces = &.{},
+            .traits = &.{},
             .properties = &.{},
             .methods = &.{},
             .location = self.current_location,
@@ -843,6 +863,43 @@ pub const IRGenerator = struct {
         if (self.module) |module| {
             try module.addTypeDef(type_def);
         }
+
+        _ = try self.symbol_table.enterScope(.class, trait_name);
+        defer self.symbol_table.leaveScope();
+
+        for (trait_data.members) |member_idx| {
+            const member = self.getNode(member_idx) orelse continue;
+            switch (member.tag) {
+                .method_decl => try self.generateMethodDecl(member, trait_name),
+                .property_decl => {
+                    const prop_data = member.data.property_decl;
+                    const prop_name = self.getString(prop_data.name);
+                    const prop_type = if (prop_data.type) |t| try self.resolveTypeNode(t) else .php_value;
+                    const default_inst = if (prop_data.default_value) |dv| try self.tryMakeConstInstruction(dv) else null;
+
+                    const visibility: TypeDef.Visibility = if (prop_data.modifiers.is_private)
+                        .private
+                    else if (prop_data.modifiers.is_protected)
+                        .protected
+                    else
+                        .public;
+
+                    try properties.append(self.allocator, .{
+                        .name = prop_name,
+                        .type_ = prop_type,
+                        .default_value = default_inst,
+                        .is_static = prop_data.modifiers.is_static,
+                        .visibility = visibility,
+                    });
+
+                    try self.generatePropertyDecl(member, trait_name);
+                },
+                .const_decl => try self.generateClassConstDecl(member, trait_name),
+                else => {},
+            }
+        }
+
+        type_def.properties = try properties.toOwnedSlice(self.allocator);
     }
 
     /// Generate IR for method declaration

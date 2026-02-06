@@ -461,7 +461,7 @@ pub const NativeLinker = struct {
         var class_count: usize = 0;
         var class_names: [64][]const u8 = undefined;
         var type_def_idx: [64]?usize = [_]?usize{null} ** 64;
-        var method_lists: [64][16][]const u8 = undefined;
+        var method_lists: [64][64][]const u8 = undefined;
         var method_counts: [64]usize = [_]usize{0} ** 64;
 
         for (ir_module.types.items, 0..) |td_ptr, idx| {
@@ -486,15 +486,8 @@ pub const NativeLinker = struct {
                     }
                 }
 
-                if (found_idx == null and class_count < 64) {
-                    class_names[class_count] = cname;
-                    type_def_idx[class_count] = null;
-                    found_idx = class_count;
-                    class_count += 1;
-                }
-
                 if (found_idx) |idx| {
-                    if (method_counts[idx] < 16) {
+                    if (method_counts[idx] < 64) {
                         method_lists[idx][method_counts[idx]] = mname;
                         method_counts[idx] += 1;
                     }
@@ -566,6 +559,63 @@ pub const NativeLinker = struct {
                         try writer.writeAll(");\n");
                     }
                 }
+
+                for (td.traits) |tname| {
+                    var trait_td: ?*const IR.TypeDef = null;
+                    for (ir_module.types.items) |tptr| {
+                        const tdef = tptr.*;
+                        if (tdef.kind == .trait and std.mem.eql(u8, tdef.name, tname)) {
+                            trait_td = tptr;
+                            break;
+                        }
+                    }
+
+                    if (trait_td) |tptr| {
+                        const tdef = tptr.*;
+                        for (tdef.properties) |prop| {
+                            const is_public = prop.visibility == .public;
+                            try writer.print("    if ({s}_meta.properties.get(\"{s}\") == null) {{\n", .{ cname, prop.name });
+                            try writer.print("        try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ cname, prop.name });
+                            if (prop.default_value) |dv| {
+                                switch (dv.op) {
+                                    .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+                                    .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                                    .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
+                                    .const_null => try writer.writeAll("runtime.Value.initNull()"),
+                                    .const_string => |sid| try writer.print(
+                                        "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
+                                        .{sid},
+                                    ),
+                                    else => try writer.writeAll("runtime.Value.initNull()"),
+                                }
+                            } else {
+                                try writer.writeAll("runtime.Value.initNull()");
+                            }
+                            try writer.print(", .is_static = {}, .is_public = {}, .is_readonly = false }});\n", .{ prop.is_static, is_public });
+
+                            if (prop.is_static) {
+                                try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", ", .{ cname, prop.name });
+                                if (prop.default_value) |dv| {
+                                    switch (dv.op) {
+                                        .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+                                        .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                                        .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
+                                        .const_null => try writer.writeAll("runtime.Value.initNull()"),
+                                        .const_string => |sid| try writer.print(
+                                            "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
+                                            .{sid},
+                                        ),
+                                        else => try writer.writeAll("runtime.Value.initNull()"),
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(");\n");
+                            }
+                            try writer.writeAll("    }\n");
+                        }
+                    }
+                }
             }
 
             for (0..method_counts[ci]) |mi| {
@@ -583,38 +633,27 @@ pub const NativeLinker = struct {
                 try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = {} }});\n", .{ cname, mname, cname, mname, is_static });
             }
 
-            var has_construct = false;
-            var has_destruct = false;
-            var has_get = false;
-            var has_set = false;
-            var has_call = false;
-            var has_call_static = false;
-            for (0..method_counts[ci]) |mi| {
-                const mname = method_lists[ci][mi];
-                if (std.mem.eql(u8, mname, "__construct")) has_construct = true;
-                if (std.mem.eql(u8, mname, "__destruct")) has_destruct = true;
-                if (std.mem.eql(u8, mname, "__get")) has_get = true;
-                if (std.mem.eql(u8, mname, "__set")) has_set = true;
-                if (std.mem.eql(u8, mname, "__call")) has_call = true;
-                if (std.mem.eql(u8, mname, "__callStatic")) has_call_static = true;
-            }
-            if (has_construct) {
-                try writer.print("    {s}_meta.magic_construct = @\"{s}::__construct\";\n", .{ cname, cname });
-            }
-            if (has_destruct) {
-                try writer.print("    {s}_meta.magic_destruct = @\"{s}::__destruct\";\n", .{ cname, cname });
-            }
-            if (has_get) {
-                try writer.print("    {s}_meta.magic_get = @\"{s}::__get\";\n", .{ cname, cname });
-            }
-            if (has_set) {
-                try writer.print("    {s}_meta.magic_set = @\"{s}::__set\";\n", .{ cname, cname });
-            }
-            if (has_call) {
-                try writer.print("    {s}_meta.magic_call = @\"{s}::__call\";\n", .{ cname, cname });
-            }
-            if (has_call_static) {
-                try writer.print("    {s}_meta.magic_callStatic = @\"{s}::__callStatic\";\n", .{ cname, cname });
+            if (type_def_idx[ci]) |tdi| {
+                const td = ir_module.types.items[tdi].*;
+                for (td.traits) |tname| {
+                    for (ir_module.functions.items) |tfunc| {
+                        if (std.mem.indexOf(u8, tfunc.name, "::")) |sep_pos| {
+                            const tcname = tfunc.name[0..sep_pos];
+                            if (!std.mem.eql(u8, tcname, tname)) continue;
+                            const tmname = tfunc.name[sep_pos + 2 ..];
+
+                            var is_static: bool = false;
+                            if (!(tfunc.params.items.len > 0 and std.mem.eql(u8, tfunc.params.items[0].name, "this"))) {
+                                is_static = true;
+                            }
+
+                            try writer.print(
+                                "    if ({s}_meta.methods.get(\"{s}\") == null) try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = {} }});\n",
+                                .{ cname, tmname, cname, tmname, tname, tmname, is_static },
+                            );
+                        }
+                    }
+                }
             }
 
             try writer.print("    try runtime.registerClass({s}_meta);\n", .{cname});
@@ -632,6 +671,20 @@ pub const NativeLinker = struct {
                     );
                 }
             }
+        }
+
+        for (0..class_count) |ci| {
+            const cname = class_names[ci];
+            try writer.print("    if ({s}_meta.findMethod(\"__construct\")) |m| {{ {s}_meta.magic_construct = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__destruct\")) |m| {{ {s}_meta.magic_destruct = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__get\")) |m| {{ {s}_meta.magic_get = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__set\")) |m| {{ {s}_meta.magic_set = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__call\")) |m| {{ {s}_meta.magic_call = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__callStatic\")) |m| {{ {s}_meta.magic_callStatic = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__sleep\")) |m| {{ {s}_meta.magic_sleep = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__wakeup\")) |m| {{ {s}_meta.magic_wakeup = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__serialize\")) |m| {{ {s}_meta.magic_serialize = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__unserialize\")) |m| {{ {s}_meta.magic_unserialize = m.func; }}\n", .{ cname, cname });
         }
 
         try writer.writeAll("}\n");
@@ -693,6 +746,8 @@ pub const NativeLinker = struct {
             "php_go_builtin",
             "class_exists",
             "get_class",
+            "serialize",
+            "unserialize",
         };
 
         for (needs_allocator) |name| {
@@ -763,6 +818,7 @@ pub const NativeLinker = struct {
             "go",
             "class_exists",     "method_exists",    "property_exists",
             "get_class",
+            "serialize",        "unserialize",
         };
 
         for (builtins) |builtin| {
@@ -795,6 +851,8 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "method_exists")) return "php_method_exists";
         if (std.mem.eql(u8, func_name, "property_exists")) return "php_property_exists";
         if (std.mem.eql(u8, func_name, "get_class")) return "php_get_class";
+        if (std.mem.eql(u8, func_name, "serialize")) return "php_serialize";
+        if (std.mem.eql(u8, func_name, "unserialize")) return "php_unserialize";
 
         // 字符串函数
         if (std.mem.eql(u8, func_name, "strlen")) return "php_strlen";
@@ -3096,15 +3154,7 @@ pub const NativeLinker = struct {
                     const escaped_class = try self.escapeString(op.class_name);
                     defer self.allocator.free(escaped_class);
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                    try writer.print("    reg_{d} = try runtime.php_object_new(\"{s}\", runtime.runtime_allocator);\n", .{ reg.id, escaped_class });
-
-                    // 调用构造函数（如果有参数）
-                    if (op.args.len > 0) {
-                        try writer.print("    _ = try runtime.php_object_call(reg_{d}, \"__construct\", &[_]runtime.Value{{{s}}});\n", .{ reg.id, args_buf.items });
-                    } else {
-                        // 无参数时也尝试调用构造函数
-                        try writer.print("    _ = runtime.php_object_call(reg_{d}, \"__construct\", &[_]runtime.Value{{}}) catch {{}};\n", .{reg.id});
-                    }
+                    try writer.print("    reg_{d} = try runtime.php_object_new_with_constructor(\"{s}\", &[_]runtime.Value{{{s}}}, runtime.runtime_allocator);\n", .{ reg.id, escaped_class, args_buf.items });
                     
                     // 检查异常
                     try writer.writeAll("    if (runtime.hasException()) {\n");

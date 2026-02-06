@@ -2673,6 +2673,10 @@ pub const ClassMeta = struct {
     magic_toString: ?MethodFn = null,
     magic_invoke: ?MethodFn = null,
     magic_clone: ?MethodFn = null,
+    magic_sleep: ?MethodFn = null,
+    magic_wakeup: ?MethodFn = null,
+    magic_serialize: ?MethodFn = null,
+    magic_unserialize: ?MethodFn = null,
 
     pub fn init(allocator: Allocator, name: []const u8) !*ClassMeta {
         const meta = try allocator.create(ClassMeta);
@@ -2703,6 +2707,16 @@ pub const ClassMeta = struct {
     /// 添加方法
     pub fn addMethod(self: *ClassMeta, method: ClassMethod) !void {
         try self.methods.put(method.name, method);
+        if (std.mem.eql(u8, method.name, "__construct")) self.magic_construct = method.func;
+        if (std.mem.eql(u8, method.name, "__destruct")) self.magic_destruct = method.func;
+        if (std.mem.eql(u8, method.name, "__get")) self.magic_get = method.func;
+        if (std.mem.eql(u8, method.name, "__set")) self.magic_set = method.func;
+        if (std.mem.eql(u8, method.name, "__call")) self.magic_call = method.func;
+        if (std.mem.eql(u8, method.name, "__callStatic")) self.magic_callStatic = method.func;
+        if (std.mem.eql(u8, method.name, "__sleep")) self.magic_sleep = method.func;
+        if (std.mem.eql(u8, method.name, "__wakeup")) self.magic_wakeup = method.func;
+        if (std.mem.eql(u8, method.name, "__serialize")) self.magic_serialize = method.func;
+        if (std.mem.eql(u8, method.name, "__unserialize")) self.magic_unserialize = method.func;
     }
 
     /// 查找方法（包括继承链）
@@ -3392,6 +3406,317 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
 pub fn php_set_static_property(class_name: []const u8, property_name: []const u8, value: Value) !void {
     var meta = findClass(class_name) orelse return error.ClassNotFound;
     try meta.setStaticProperty(property_name, value);
+}
+
+fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: Allocator) !void {
+    if (value.isNull()) {
+        try buffer.appendSlice(allocator, "N;");
+        return;
+    }
+    if (value.isBool()) {
+        try buffer.writer(allocator).print("b:{d};", .{if (value.toBool()) @as(i64, 1) else @as(i64, 0)});
+        return;
+    }
+    if (value.isInt()) {
+        try buffer.writer(allocator).print("i:{d};", .{value.toInt()});
+        return;
+    }
+    if (value.isFloat()) {
+        try buffer.writer(allocator).print("d:{d};", .{value.toFloat()});
+        return;
+    }
+    if (value.isString()) {
+        const str = value.asString().data;
+        try buffer.writer(allocator).print("s:{d}:\"", .{str.len});
+        try buffer.appendSlice(allocator, str);
+        try buffer.appendSlice(allocator, "\";");
+        return;
+    }
+    if (value.isArray()) {
+        const arr = value.asArray();
+        const count = arr.elements.count();
+        try buffer.writer(allocator).print("a:{d}:{{", .{count});
+        var it = arr.elements.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            switch (key) {
+                .integer => |i| try buffer.writer(allocator).print("i:{d};", .{i}),
+                .string => |s| {
+                    const k = s.data;
+                    try buffer.writer(allocator).print("s:{d}:\"", .{k.len});
+                    try buffer.appendSlice(allocator, k);
+                    try buffer.appendSlice(allocator, "\";");
+                },
+            }
+            try serializeValue(buffer, entry.value_ptr.*, allocator);
+        }
+        try buffer.appendSlice(allocator, "}");
+        return;
+    }
+    if (Value_isObject(value)) {
+        const obj = Value_asObject(value);
+        const class_name = obj.class_name;
+
+        if (obj.class_meta) |meta| {
+            if (meta.magic_serialize) |serializer| {
+                const arr_val = try serializer(value, &.{}, allocator);
+                defer arr_val.release(allocator);
+
+                if (arr_val.isArray()) {
+                    const arr = arr_val.asArray();
+                    const count = arr.elements.count();
+                    try buffer.writer(allocator).print("O:{d}:\"", .{class_name.len});
+                    try buffer.appendSlice(allocator, class_name);
+                    try buffer.writer(allocator).print("\":{d}:{{", .{count});
+
+                    var it = arr.elements.iterator();
+                    while (it.next()) |entry| {
+                        const key = entry.key_ptr.*;
+                        switch (key) {
+                            .integer => |i| try buffer.writer(allocator).print("i:{d};", .{i}),
+                            .string => |s| {
+                                const k = s.data;
+                                try buffer.writer(allocator).print("s:{d}:\"", .{k.len});
+                                try buffer.appendSlice(allocator, k);
+                                try buffer.appendSlice(allocator, "\";");
+                            },
+                        }
+                        try serializeValue(buffer, entry.value_ptr.*, allocator);
+                    }
+                    try buffer.appendSlice(allocator, "}");
+                    return;
+                }
+            }
+        }
+
+        var allow_list: ?*PHPArray = null;
+        var allow_val: Value = Value.initNull();
+        defer if (!allow_val.isNull()) allow_val.release(allocator);
+
+        if (obj.class_meta) |meta| {
+            if (meta.magic_sleep) |sleeper| {
+                allow_val = sleeper(value, &.{}, allocator) catch Value.initNull();
+                if (allow_val.isArray()) {
+                    allow_list = allow_val.asArray();
+                }
+            }
+        }
+
+        const count: usize = if (allow_list) |list| list.elements.count() else obj.properties.count();
+
+        try buffer.writer(allocator).print("O:{d}:\"", .{class_name.len});
+        try buffer.appendSlice(allocator, class_name);
+        try buffer.writer(allocator).print("\":{d}:{{", .{count});
+
+        if (allow_list) |list| {
+            var it_allow = list.elements.iterator();
+            while (it_allow.next()) |entry| {
+                const v = entry.value_ptr.*;
+                if (!v.isString()) continue;
+                const prop_name = v.asString().data;
+                const prop_val = obj.properties.get(prop_name) orelse Value.initNull();
+
+                const full_len: usize = class_name.len + prop_name.len + 2;
+                try buffer.writer(allocator).print("s:{d}:\"", .{full_len});
+                try buffer.appendSlice(allocator, &[_]u8{0});
+                try buffer.appendSlice(allocator, class_name);
+                try buffer.appendSlice(allocator, &[_]u8{0});
+                try buffer.appendSlice(allocator, prop_name);
+                try buffer.appendSlice(allocator, "\";");
+
+                try serializeValue(buffer, prop_val, allocator);
+            }
+        } else {
+            var it_props = obj.properties.iterator();
+            while (it_props.next()) |entry| {
+                const prop_name = entry.key_ptr.*;
+                const prop_val = entry.value_ptr.*;
+
+                const full_len: usize = class_name.len + prop_name.len + 2;
+                try buffer.writer(allocator).print("s:{d}:\"", .{full_len});
+                try buffer.appendSlice(allocator, &[_]u8{0});
+                try buffer.appendSlice(allocator, class_name);
+                try buffer.appendSlice(allocator, &[_]u8{0});
+                try buffer.appendSlice(allocator, prop_name);
+                try buffer.appendSlice(allocator, "\";");
+
+                try serializeValue(buffer, prop_val, allocator);
+            }
+        }
+
+        try buffer.appendSlice(allocator, "}");
+        return;
+    }
+
+    try buffer.appendSlice(allocator, "N;");
+}
+
+pub fn php_serialize(value: Value, allocator: Allocator) !Value {
+    var buffer = std.ArrayListUnmanaged(u8){};
+    defer buffer.deinit(allocator);
+    try serializeValue(&buffer, value, allocator);
+    const s = try PHPString.init(allocator, buffer.items);
+    return Value.initString(s);
+}
+
+fn unserializeValue(data: []const u8, pos: *usize, allocator: Allocator) !Value {
+    if (pos.* >= data.len) return Value.initNull();
+    const type_char = data[pos.*];
+    pos.* += 1;
+
+    switch (type_char) {
+        'N' => {
+            pos.* += 1;
+            return Value.initNull();
+        },
+        'b' => {
+            pos.* += 1;
+            const end = std.mem.indexOfScalarPos(u8, data, pos.*, ';') orelse data.len;
+            const bool_str = data[pos.*..end];
+            pos.* = end + 1;
+            return Value.initBool(std.mem.eql(u8, bool_str, "1"));
+        },
+        'i' => {
+            pos.* += 1;
+            const end = std.mem.indexOfScalarPos(u8, data, pos.*, ';') orelse data.len;
+            const int_str = data[pos.*..end];
+            pos.* = end + 1;
+            const v = std.fmt.parseInt(i64, int_str, 10) catch 0;
+            return Value.initInt(v);
+        },
+        'd' => {
+            pos.* += 1;
+            const end = std.mem.indexOfScalarPos(u8, data, pos.*, ';') orelse data.len;
+            const float_str = data[pos.*..end];
+            pos.* = end + 1;
+            const v = std.fmt.parseFloat(f64, float_str) catch 0;
+            return Value.initFloat(v);
+        },
+        's' => {
+            pos.* += 1;
+            const colon = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const len_str = data[pos.*..colon];
+            pos.* = colon + 1;
+            const len = std.fmt.parseInt(usize, len_str, 10) catch 0;
+            pos.* += 1;
+            const str_val = data[pos.* .. pos.* + len];
+            pos.* += len + 2;
+            const ps = try PHPString.init(allocator, str_val);
+            return Value.initString(ps);
+        },
+        'a' => {
+            pos.* += 1;
+            const count_end = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const count_str = data[pos.*..count_end];
+            pos.* = count_end + 1;
+            const count = std.fmt.parseInt(usize, count_str, 10) catch 0;
+            pos.* += 1;
+
+            const arr = try PHPArray.init(allocator);
+            const arr_val = Value.initArray(arr);
+
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const key_val = try unserializeValue(data, pos, allocator);
+                const val = try unserializeValue(data, pos, allocator);
+                defer key_val.release(allocator);
+                defer val.release(allocator);
+
+                const key: ArrayKey = if (key_val.isString())
+                    ArrayKey{ .string = key_val.asString() }
+                else
+                    ArrayKey{ .integer = key_val.toInt() };
+
+                try arr.set(allocator, key, val);
+            }
+
+            pos.* += 1;
+            return arr_val;
+        },
+        'O' => {
+            pos.* += 1;
+            const colon1 = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const len_str = data[pos.*..colon1];
+            pos.* = colon1 + 1;
+            const name_len = std.fmt.parseInt(usize, len_str, 10) catch 0;
+            pos.* += 1;
+            const class_name = data[pos.* .. pos.* + name_len];
+            pos.* += name_len + 2;
+            pos.* += 1;
+            const colon2 = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const count_str = data[pos.*..colon2];
+            pos.* = colon2 + 1;
+            const count = std.fmt.parseInt(usize, count_str, 10) catch 0;
+            pos.* += 1;
+
+            const class_name_copy = try allocator.dupe(u8, class_name);
+            defer allocator.free(class_name_copy);
+            const obj_val = try php_object_new(class_name_copy, allocator);
+            const obj = Value_asObject(obj_val);
+
+            const data_arr = try PHPArray.init(allocator);
+            const data_arr_val = Value.initArray(data_arr);
+            defer data_arr_val.release(allocator);
+
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const key_val = try unserializeValue(data, pos, allocator);
+                const val = try unserializeValue(data, pos, allocator);
+                defer key_val.release(allocator);
+                defer val.release(allocator);
+
+                if (!key_val.isString()) continue;
+                const raw_key = key_val.asString().data;
+                var prop_name: []const u8 = raw_key;
+                if (raw_key.len > 0 and raw_key[0] == 0) {
+                    if (std.mem.indexOfScalarPos(u8, raw_key, 1, 0)) |nul2| {
+                        if (nul2 + 1 <= raw_key.len) {
+                            prop_name = raw_key[nul2 + 1 ..];
+                        }
+                    }
+                }
+
+                const prop_str = try PHPString.init(allocator, prop_name);
+                defer prop_str.release(allocator);
+                const prop_key = ArrayKey{ .string = prop_str };
+                try data_arr.set(allocator, prop_key, val);
+            }
+
+            pos.* += 1;
+
+            if (obj.class_meta) |meta| {
+                if (meta.magic_unserialize) |unser_fn| {
+                    const args = [_]Value{data_arr_val};
+                    _ = try unser_fn(obj_val, &args, allocator);
+                    return obj_val;
+                }
+            }
+
+            var it = data_arr.elements.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.* == .string) {
+                    const k = entry.key_ptr.string.data;
+                    try obj.setProperty(k, entry.value_ptr.*);
+                }
+            }
+
+            if (obj.class_meta) |meta| {
+                if (meta.magic_wakeup) |wake| {
+                    _ = wake(obj_val, &.{}, allocator) catch {};
+                }
+            }
+
+            return obj_val;
+        },
+        else => return Value.initNull(),
+    }
+}
+
+pub fn php_unserialize(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return error.InvalidArgumentType;
+    const data = str.asString().data;
+    var pos: usize = 0;
+    return unserializeValue(data, &pos, allocator);
 }
 
 /// 检查是否是对象

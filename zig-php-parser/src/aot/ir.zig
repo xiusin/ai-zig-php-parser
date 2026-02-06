@@ -145,6 +145,8 @@ pub const TypeDef = struct {
     parent: ?[]const u8,
     /// Implemented interfaces
     interfaces: []const []const u8,
+    /// Used traits (for classes)
+    traits: []const []const u8,
     /// Properties
     properties: []const Property,
     /// Methods (references to functions)
@@ -1122,6 +1124,14 @@ pub const IRPrinter = struct {
             for (type_def.interfaces, 0..) |iface, i| {
                 if (i > 0) try self.write(", ");
                 try self.print("{s}", .{iface});
+            }
+        }
+
+        if (type_def.traits.len > 0) {
+            try self.write(" uses ");
+            for (type_def.traits, 0..) |tr, i| {
+                if (i > 0) try self.write(", ");
+                try self.print("{s}", .{tr});
             }
         }
 
