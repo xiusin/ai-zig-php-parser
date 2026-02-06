@@ -70,7 +70,7 @@ pub fn main() !void {
         const is_xfail = xfail.get(entry.path) != null;
 
         // 1. Run Interpreter
-        const interp_args = &[_][]const u8{interpreter_path, relative_path};
+        const interp_args = &[_][]const u8{ interpreter_path, "--mode=tree", relative_path };
         const interp_result = try runCommand(allocator, interp_args, timeout_interp_ms);
         defer {
             allocator.free(interp_result.stdout);
@@ -103,6 +103,7 @@ pub fn main() !void {
 
         const compile_args = &[_][]const u8{
             interpreter_path,
+            "--mode=tree",
             "--compile",
             output_arg,
             relative_path

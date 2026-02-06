@@ -2994,9 +2994,12 @@ pub const PHPObject = struct {
         if (self.class_meta) |meta| {
             if (meta.magic_get) |getter| {
                 const this_val = Value_initObject(self);
-                const name_val = Value.initString(PHPString.initStatic(name));
+                const name_str = PHPString.init(self.allocator, name) catch return null;
+                const name_val = Value.initString(name_str);
+                defer name_val.release(self.allocator);
                 const args = [_]Value{name_val};
-                return getter(this_val, &args, self.allocator) catch null;
+                const result = getter(this_val, &args, self.allocator) catch return null;
+                return result;
             }
         }
         return null;
@@ -3009,7 +3012,9 @@ pub const PHPObject = struct {
             if (self.class_meta) |meta| {
                 if (meta.magic_set) |setter| {
                     const this_val = Value_initObject(self);
-                    const name_val = Value.initString(PHPString.initStatic(name));
+                    const name_str = try PHPString.init(self.allocator, name);
+                    const name_val = Value.initString(name_str);
+                    defer name_val.release(self.allocator);
                     const args = [_]Value{ name_val, value };
                     _ = try setter(this_val, &args, self.allocator);
                     return;
@@ -3363,7 +3368,9 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
 
     // 调用 __callStatic 魔法函数
     if (meta.magic_callStatic) |call_static| {
-        const name_val = Value.initString(PHPString.initStatic(method_name));
+        const name_str = try PHPString.init(allocator, method_name);
+        const name_val = Value.initString(name_str);
+        defer name_val.release(allocator);
         const args_arr = try PHPArray.init(allocator);
         for (args) |arg| {
             try args_arr.push(allocator, arg);

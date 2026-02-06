@@ -740,8 +740,11 @@ pub const IRGenerator = struct {
             .kind = .class,
             .parent = if (class_data.extends) |ext_idx| blk: {
                 const ext_node = self.getNode(ext_idx) orelse break :blk null;
-                if (ext_node.tag == .named_type) {
-                    break :blk self.getString(ext_node.data.named_type.name);
+                switch (ext_node.tag) {
+                    .named_type => break :blk self.getString(ext_node.data.named_type.name),
+                    .variable => break :blk self.getString(ext_node.data.variable.name),
+                    .literal_string => break :blk self.getString(ext_node.data.literal_string.value),
+                    else => {},
                 }
                 break :blk null;
             } else null,
@@ -1699,6 +1702,15 @@ pub const IRGenerator = struct {
                     .return_type = .php_value,
                 } }, null);
             },
+            .static_property_access => {
+                const class_name = self.getString(target_node.data.static_property_access.class_name);
+                const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                _ = try self.emit(.{ .static_property_set = .{
+                    .class_name = class_name,
+                    .property_name = prop_name,
+                    .value = value_reg,
+                } }, null);
+            },
             else => {},
         }
     }
@@ -1776,6 +1788,15 @@ pub const IRGenerator = struct {
                     .func_name = "php_object_set_dynamic",
                     .args = args,
                     .return_type = .php_value,
+                } }, null);
+            },
+            .static_property_access => {
+                const class_name = self.getString(target_node.data.static_property_access.class_name);
+                const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                _ = try self.emit(.{ .static_property_set = .{
+                    .class_name = class_name,
+                    .property_name = prop_name,
+                    .value = result_reg,
                 } }, null);
             },
             else => {},
@@ -2422,15 +2443,10 @@ pub const IRGenerator = struct {
             args[i] = try self.generateExpression(arg_idx);
         }
 
-        // Mangle name for static call
-        var buf: [256]u8 = undefined;
-        const full_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method_name }) catch method_name;
-        const name_copy = try self.allocator.dupe(u8, full_name);
-
-        return self.emitWithResult(.{ .call = .{
-            .func_name = name_copy,
+        return self.emitWithResult(.{ .static_method_call = .{
+            .class_name = class_name,
+            .method_name = method_name,
             .args = args,
-            .return_type = .php_value,
         } }, .php_value);
     }
 
@@ -2597,15 +2613,9 @@ pub const IRGenerator = struct {
         const class_name = self.getString(access_data.class_name);
         const prop_name = self.getString(access_data.property_name);
 
-        // Static properties are accessed via runtime call
-        var buf: [256]u8 = undefined;
-        const full_name = std.fmt.bufPrint(&buf, "{s}::${s}", .{ class_name, prop_name }) catch prop_name;
-        const name_copy = try self.allocator.dupe(u8, full_name);
-
-        return self.emitWithResult(.{ .call = .{
-            .func_name = name_copy,
-            .args = try self.allocator.alloc(Register, 0),
-            .return_type = .php_value,
+        return self.emitWithResult(.{ .static_property_get = .{
+            .class_name = class_name,
+            .property_name = prop_name,
         } }, .php_value);
     }
 
