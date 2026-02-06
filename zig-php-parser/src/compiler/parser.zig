@@ -1489,6 +1489,7 @@ pub const Parser = struct {
                     .variable => left_node.data.variable.name,
                     .self_expr => left_node.data.variable.name,
                     .parent_expr => left_node.data.variable.name,
+                    .static_expr => left_node.data.variable.name,
                     else => {
                         self.reportError("Invalid static access target");
                         return error.InvalidStaticAccess;
@@ -1753,6 +1754,11 @@ pub const Parser = struct {
                 const t = try self.eat(.k_parent);
                 const name_id = try self.context.intern("parent");
                 return self.createNode(.{ .tag = .parent_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
+            .k_static => {
+                const t = try self.eat(.k_static);
+                const name_id = try self.context.intern("static");
+                return self.createNode(.{ .tag = .static_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
             },
             .k_true => {
                 const t = try self.eat(.k_true);

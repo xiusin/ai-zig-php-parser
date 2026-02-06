@@ -2573,6 +2573,12 @@ pub const IRGenerator = struct {
             class_name = self.getString(class_node.data.named_type.name);
         } else if (class_node.tag == .variable) {
             class_name = self.getString(class_node.data.variable.name);
+        } else if (class_node.tag == .self_expr) {
+            class_name = self.getString(class_node.data.variable.name);
+        } else if (class_node.tag == .parent_expr) {
+            class_name = self.getString(class_node.data.variable.name);
+        } else if (class_node.tag == .static_expr) {
+            class_name = self.getString(class_node.data.variable.name);
         }
 
         // Generate constructor arguments

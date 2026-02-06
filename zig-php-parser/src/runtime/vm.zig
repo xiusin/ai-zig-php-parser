@@ -6529,6 +6529,13 @@ pub const VM = struct {
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' outside of class scope", self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
+            } else if (std.mem.eql(u8, var_name, "static")) {
+                if (self.current_class) |class| {
+                    name = class.name.data;
+                } else {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'static' outside of class scope", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
             } else if (var_name.len > 0 and var_name[0] == '$') {
                 // It's a variable class name like new $className()
                 // Evaluate the variable to get its value
@@ -6567,6 +6574,13 @@ pub const VM = struct {
                 }
             } else {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'parent' outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            }
+        } else if (class_name_node.tag == .static_expr) {
+            if (self.current_class) |class| {
+                name = class.name.data;
+            } else {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'static' outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
             }
         } else {
@@ -9660,10 +9674,15 @@ pub const VM = struct {
         const class_name = self.context.string_pool.keys()[static_call_data.class_name];
         const method_name = self.context.string_pool.keys()[static_call_data.method_name];
 
-        // 解析类引用：self、parent、具体类名或变量（$obj::method()）
+        // 解析类引用：self、parent、static、具体类名或变量（$obj::method()）
         const class = if (std.mem.eql(u8, class_name, "self")) blk: {
             break :blk self.current_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (std.mem.eql(u8, class_name, "static")) blk: {
+            break :blk self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access static:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
             };
         } else if (std.mem.eql(u8, class_name, "parent")) blk: {
@@ -9858,10 +9877,15 @@ pub const VM = struct {
         const class_name = self.context.string_pool.keys()[const_access_data.class_name];
         const constant_name = self.context.string_pool.keys()[const_access_data.constant_name];
 
-        // 解析类引用：self、parent、具体类名或变量（$obj::$prop）
+        // 解析类引用：self、parent、static、具体类名或变量（$obj::$prop）
         const class = if (std.mem.eql(u8, class_name, "self")) blk: {
             break :blk self.current_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+        } else if (std.mem.eql(u8, class_name, "static")) blk: {
+            break :blk self.current_class orelse {
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access static:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
             };
         } else if (std.mem.eql(u8, class_name, "parent")) blk: {

@@ -2853,6 +2853,21 @@ pub var class_registry: ?std.StringHashMap(*ClassMeta) = null;
 /// 全局对象跟踪（用于内存泄露检测和清理）
 pub var global_object_registry: ?std.ArrayList(*PHPObject) = null;
 
+pub var current_called_class: ?*const ClassMeta = null;
+
+fn resolveSpecialClassName(class_name: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+        const meta = current_called_class orelse return error.ClassNotFound;
+        return meta.name;
+    }
+    if (std.mem.eql(u8, class_name, "parent")) {
+        const meta = current_called_class orelse return error.ClassNotFound;
+        const parent = meta.parent orelse return error.ClassNotFound;
+        return parent.name;
+    }
+    return class_name;
+}
+
 /// 初始化类注册表
 pub fn initClassRegistry(allocator: Allocator) void {
     class_registry = std.StringHashMap(*ClassMeta).init(allocator);
@@ -3053,6 +3068,10 @@ pub const PHPObject = struct {
         const this_val = Value_initObject(self);
 
         if (self.class_meta) |meta| {
+            const prev_called = current_called_class;
+            current_called_class = meta;
+            defer current_called_class = prev_called;
+
             // 查找方法（包括继承链）
             if (meta.findMethod(method_name)) |method| {
                 return method.func(this_val, args, self.allocator);
@@ -3141,10 +3160,11 @@ pub fn Value_asObject(self: Value) *PHPObject {
 /// @param allocator 内存分配器
 /// @return 对象Value
 pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
-    const obj = if (findClass(class_name)) |meta|
+    const resolved = try resolveSpecialClassName(class_name);
+    const obj = if (findClass(resolved)) |meta|
         try PHPObject.initWithMeta(allocator, meta)
     else
-        try PHPObject.init(allocator, class_name);
+        try PHPObject.init(allocator, resolved);
 
     // 注册对象以便程序退出时清理
     if (global_object_registry) |*registry| {
@@ -3263,16 +3283,20 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
 
 /// 创建新对象并调用构造函数
 pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Value, allocator: Allocator) !Value {
-    const meta = findClass(class_name);
+    const resolved = try resolveSpecialClassName(class_name);
+    const meta = findClass(resolved);
     const obj = if (meta) |m|
         try PHPObject.initWithMeta(allocator, m)
     else
-        try PHPObject.init(allocator, class_name);
+        try PHPObject.init(allocator, resolved);
 
     const obj_val = Value_initObject(obj);
 
     // 调用 __construct
     if (obj.class_meta) |m| {
+        const prev_called = current_called_class;
+        current_called_class = m;
+        defer current_called_class = prev_called;
         if (m.magic_construct) |construct| {
             _ = try construct(obj_val, args, allocator);
         }
@@ -3371,7 +3395,11 @@ pub fn @"property_exists"(ctx: Value, args: []const Value, allocator: Allocator)
 
 /// 调用静态方法
 pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
-    const meta = findClass(class_name) orelse return error.ClassNotFound;
+    const resolved = try resolveSpecialClassName(class_name);
+    const meta = findClass(resolved) orelse return error.ClassNotFound;
+    const prev_called = current_called_class;
+    current_called_class = meta;
+    defer current_called_class = prev_called;
 
     // 查找静态方法
     if (meta.findMethod(method_name)) |method| {
@@ -3398,13 +3426,15 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
 
 /// 获取静态属性
 pub fn php_get_static_property(class_name: []const u8, property_name: []const u8) !Value {
-    const meta = findClass(class_name) orelse return error.ClassNotFound;
+    const resolved = try resolveSpecialClassName(class_name);
+    const meta = findClass(resolved) orelse return error.ClassNotFound;
     return meta.getStaticProperty(property_name) orelse Value.initNull();
 }
 
 /// 设置静态属性
 pub fn php_set_static_property(class_name: []const u8, property_name: []const u8, value: Value) !void {
-    var meta = findClass(class_name) orelse return error.ClassNotFound;
+    const resolved = try resolveSpecialClassName(class_name);
+    var meta = findClass(resolved) orelse return error.ClassNotFound;
     try meta.setStaticProperty(property_name, value);
 }
 
