@@ -451,9 +451,9 @@ pub const IRGenerator = struct {
                 // 根据当前模式确定变量前缀
                 const var_prefix = if (self.isGoMode()) "" else "$";
 
-                // 报告未使用变量错误，使用变量定义时的位置信息
+                // PHP 解释执行通常不会因为未使用变量而报错；这里降级为 warning 以便 AOT 与解释器行为更一致
                 self.diagnostics.report(
-                    .@"error",
+                    .warning,
                     usage_info.location,
                     "未使用的变量: {s}{s}",
                     .{ var_prefix, var_name },
@@ -2395,40 +2395,30 @@ pub const IRGenerator = struct {
             return self.emitWithResult(.const_null, .php_value);
         };
 
+        // If callee is not a direct identifier, treat it as a runtime callable and use call_indirect.
+        // This covers patterns like: ($arr[$k])($x), ($obj->prop)($x), ("strlen")($x), etc.
         var func_name: []const u8 = "";
+        var indirect_callee: ?Register = null;
         if (name_node.tag == .variable) {
             const is_variable_token = name_node.main_token.tag == .t_variable;
             if (is_variable_token) {
                 const var_name = self.getString(name_node.data.variable.name);
-                // Get variable register
-                var func_reg: Register = undefined;
                 if (self.var_registers.get(var_name)) |reg| {
-                    func_reg = try self.emitWithResult(.{ .load = .{ .ptr = reg, .type_ = .php_value } }, .php_value);
+                    indirect_callee = try self.emitWithResult(.{ .load = .{ .ptr = reg, .type_ = .php_value } }, .php_value);
                 } else {
-                    func_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    indirect_callee = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                 }
-                
-                // Generate arguments
-                const args = try self.allocator.alloc(Register, call_data.args.len);
-                for (call_data.args, 0..) |arg_idx, i| {
-                    args[i] = try self.generateExpression(arg_idx);
-                }
-
-                return self.emitWithResult(.{ .call_indirect = .{
-                    .func_ptr = func_reg,
-                    .args = args,
-                    .return_type = .php_value,
-                } }, .php_value);
             } else {
-                // Static function call (identifier)
                 func_name = self.getString(name_node.data.variable.name);
             }
         } else if (name_node.tag == .literal_string) {
             func_name = self.getString(name_node.data.literal_string.value);
+        } else {
+            indirect_callee = try self.generateExpression(call_data.name);
         }
 
         // Generate arguments
-        const args = try self.allocator.alloc(Register, call_data.args.len);
+        var args = try self.allocator.alloc(Register, call_data.args.len);
         
         // Lookup function symbol to check for reference parameters
         const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
@@ -2458,6 +2448,24 @@ pub const IRGenerator = struct {
             } else {
                 args[i] = try self.generateExpression(arg_idx);
             }
+        }
+
+        // Builtins with optional boolean flag: print_r($v[, $return]) / var_export($v[, $return])
+        if (func_name.len != 0 and (std.mem.eql(u8, func_name, "print_r") or std.mem.eql(u8, func_name, "var_export"))) {
+            if (args.len == 1) {
+                const padded = try self.allocator.alloc(Register, 2);
+                padded[0] = args[0];
+                padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+                args = padded;
+            }
+        }
+
+        if (indirect_callee) |callee_reg| {
+            return self.emitWithResult(.{ .call_indirect = .{
+                .func_ptr = callee_reg,
+                .args = args,
+                .return_type = .php_value,
+            } }, .php_value);
         }
 
         return self.emitWithResult(.{ .call = .{
@@ -2704,34 +2712,65 @@ pub const IRGenerator = struct {
     fn generateClosure(self: *Self, node: *const Node) !Register {
         const closure_data = node.data.closure;
 
-        // 1. Capture variables from parent scope
+        // 1. Capture variables from parent scope (keep indices dense, handle &capture)
+        var cap_names = std.ArrayListUnmanaged([]const u8){};
+        defer cap_names.deinit(self.allocator);
         var captures = std.ArrayListUnmanaged(Register){};
         defer captures.deinit(self.allocator);
 
         for (closure_data.captures) |cap_idx| {
             const cap_node = self.getNode(cap_idx) orelse continue;
-            // Assuming capture node is a variable
+
             var var_name: []const u8 = undefined;
-            if (cap_node.tag == .variable) {
-                var_name = self.getString(cap_node.data.variable.name);
-            } else {
-                continue;
+            var by_ref: bool = false;
+
+            switch (cap_node.tag) {
+                .variable => {
+                    var_name = self.getString(cap_node.data.variable.name);
+                },
+                .unary_expr => {
+                    if (cap_node.data.unary_expr.op == .ampersand) {
+                        const inner = self.getNode(cap_node.data.unary_expr.expr) orelse continue;
+                        if (inner.tag == .variable) {
+                            var_name = self.getString(inner.data.variable.name);
+                            by_ref = true;
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                },
+                else => continue,
             }
-            
+
             // Get from parent scope
-            var val_reg: Register = undefined;
-            if (self.var_registers.get(var_name)) |ptr_reg| {
-                val_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+            if (by_ref) {
+                if (self.var_registers.get(var_name)) |ptr_reg| {
+                    const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = ptr_reg } }, .php_value);
+                    try captures.append(self.allocator, ref_reg);
+                    try cap_names.append(self.allocator, var_name);
+                } else {
+                    const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    try captures.append(self.allocator, null_reg);
+                    try cap_names.append(self.allocator, var_name);
+                }
             } else {
-                val_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                var val_reg: Register = undefined;
+                if (self.var_registers.get(var_name)) |ptr_reg| {
+                    val_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+                } else {
+                    val_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                }
+                try captures.append(self.allocator, val_reg);
+                try cap_names.append(self.allocator, var_name);
             }
-            try captures.append(self.allocator, val_reg);
         }
 
-        // Create anonymous function
+        // Create anonymous function (must be globally unique within the generated Zig compilation unit)
+        const unique_id: usize = if (self.module) |m| m.functions.items.len else 0;
         var buf: [64]u8 = undefined;
-        const func_name = std.fmt.bufPrint(&buf, "__closure_{d}", .{self.block_counter}) catch "__closure";
-        self.block_counter += 1;
+        const func_name = std.fmt.bufPrint(&buf, "__closure_{d}", .{unique_id}) catch "__closure";
         const name_copy = try self.allocator.dupe(u8, func_name);
 
         const func = try self.allocator.create(Function);
@@ -2759,19 +2798,8 @@ pub const IRGenerator = struct {
         }
 
         // Process captures (inject into local scope)
-        for (closure_data.captures, 0..) |cap_idx, i| {
-            const cap_node = self.getNode(cap_idx) orelse continue;
-            var var_name: []const u8 = undefined;
-            if (cap_node.tag == .variable) {
-                var_name = self.getString(cap_node.data.variable.name);
-            } else {
-                continue;
-            }
-
-            // Generate capture_get
+        for (cap_names.items, 0..) |var_name, i| {
             const capture_val = try self.emitWithResult(.{ .capture_get = .{ .index = @intCast(i), .name = var_name } }, .php_value);
-            
-            // Create local variable and store
             const local_ptr = try self.getOrCreateVarRegister(var_name, .php_value);
             _ = try self.emit(.{ .store = .{ .ptr = local_ptr, .value = capture_val } }, null);
         }
@@ -2816,10 +2844,25 @@ pub const IRGenerator = struct {
     fn generateArrowFunction(self: *Self, node: *const Node) !Register {
         const arrow_data = node.data.arrow_function;
 
-        // Arrow functions are similar to closures but with implicit return
+        // Arrow functions are similar to closures but with implicit return and auto-capture.
+        // For parity with the interpreter implementation, capture all visible locals from the parent scope.
+        var cap_names = std.ArrayListUnmanaged([]const u8){};
+        defer cap_names.deinit(self.allocator);
+        var captures = std.ArrayListUnmanaged(Register){};
+        defer captures.deinit(self.allocator);
+
+        var parent_iter = self.var_registers.iterator();
+        while (parent_iter.next()) |entry| {
+            const var_name = entry.key_ptr.*;
+            const ptr_reg = entry.value_ptr.*;
+            const val_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+            try captures.append(self.allocator, val_reg);
+            try cap_names.append(self.allocator, var_name);
+        }
+
+        const unique_id: usize = if (self.module) |m| m.functions.items.len else 0;
         var buf: [64]u8 = undefined;
-        const func_name = std.fmt.bufPrint(&buf, "__arrow_{d}", .{self.block_counter}) catch "__arrow";
-        self.block_counter += 1;
+        const func_name = std.fmt.bufPrint(&buf, "__arrow_{d}", .{unique_id}) catch "__arrow";
         const name_copy = try self.allocator.dupe(u8, func_name);
 
         const func = try self.allocator.create(Function);
@@ -2844,6 +2887,13 @@ pub const IRGenerator = struct {
             try self.generateParameter(param_idx);
         }
 
+        // Inject captures into local scope
+        for (cap_names.items, 0..) |cap_name, i| {
+            const capture_val = try self.emitWithResult(.{ .capture_get = .{ .index = @intCast(i), .name = cap_name } }, .php_value);
+            const local_ptr = try self.getOrCreateVarRegister(cap_name, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = local_ptr, .value = capture_val } }, null);
+        }
+
         // Arrow function body is an expression that's implicitly returned
         const result_reg = try self.generateExpression(arrow_data.body);
         self.setTerminator(.{ .ret = result_reg });
@@ -2853,9 +2903,23 @@ pub const IRGenerator = struct {
         self.current_function = prev_function;
         self.current_block = prev_block;
 
+        // Create array for captures
+        const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);
+        for (captures.items) |cap_reg| {
+            _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg } }, null);
+        }
+
+        // Closure name
+        const name_id = try self.module.?.internString(name_copy);
+        const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_string);
+
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = name_reg;
+        args[1] = caps_arr_reg;
+
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
-            .args = try self.allocator.alloc(Register, 0),
+            .args = args,
             .return_type = .php_callable,
         } }, .php_callable);
     }

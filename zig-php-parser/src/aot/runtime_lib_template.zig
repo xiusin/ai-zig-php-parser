@@ -792,6 +792,11 @@ pub fn val_deref(val: *Value) *Value {
     return val;
 }
 
+pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
+    _ = allocator;
+    return Value.initRef(ptr);
+}
+
 const BuiltinFunctionEntry = struct {
     name: []const u8,
     func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value,
@@ -806,6 +811,7 @@ fn lookupBuiltinFunction(name: []const u8) ?*const fn (ctx: Value, args: []const
             .{ .name = "strtolower", .func = wrapBuiltin_strtolower },
             .{ .name = "trim", .func = wrapBuiltin_trim },
             .{ .name = "count", .func = wrapBuiltin_count },
+            .{ .name = "sqrt", .func = wrapBuiltin_sqrt },
             .{ .name = "strval", .func = wrapBuiltin_strval },
             .{ .name = "array_map", .func = wrapBuiltin_array_map },
             .{ .name = "array_filter", .func = wrapBuiltin_array_filter },
@@ -894,6 +900,13 @@ fn wrapBuiltin_count(ctx: Value, args: []const Value, allocator: Allocator) !Val
     _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_count(args[0]);
+}
+
+fn wrapBuiltin_sqrt(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sqrt(args[0]);
 }
 
 fn wrapBuiltin_strval(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -1236,6 +1249,9 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
         if (Value_isObject(val0)) {
             const obj_ptr = Value_asObject(val0);
             return obj_ptr.callMethod(method_name, args);
+        }
+        if (val0.isString()) {
+            return php_call_static(val0.asString().data, method_name, args, allocator);
         }
         return error.NotImplemented;
     }
@@ -2240,8 +2256,8 @@ pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
         if (!first) total_len += glue_str.length;
         const val = entry.value_ptr.*;
         const str = try val.toString(allocator);
-        defer allocator.free(str);
-        total_len += str.len;
+        defer str.release(allocator);
+        total_len += str.length;
         first = false;
     }
 
@@ -2259,9 +2275,9 @@ pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
         }
         const val = entry.value_ptr.*;
         const str = try val.toString(allocator);
-        defer allocator.free(str);
-        @memcpy(buffer[write_pos .. write_pos + str.len], str);
-        write_pos += str.len;
+        defer str.release(allocator);
+        @memcpy(buffer[write_pos .. write_pos + str.length], str.data);
+        write_pos += str.length;
         first = false;
     }
 
@@ -5439,6 +5455,14 @@ pub fn php_empty(val: Value) !Value {
 /// isset - 检查变量是否已设置且非null
 pub fn php_isset(val: Value) !Value {
     return Value.initBool(!val.isNull());
+}
+
+pub fn empty(val: Value) !Value {
+    return php_empty(val);
+}
+
+pub fn isset(val: Value) !Value {
+    return php_isset(val);
 }
 
 // ============================================================================

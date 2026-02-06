@@ -781,6 +781,8 @@ pub const NativeLinker = struct {
             "get_class",
             "serialize",
             "unserialize",
+            "php_json_encode",
+            "json_encode",
         };
 
         for (needs_allocator) |name| {
@@ -816,7 +818,7 @@ pub const NativeLinker = struct {
             "count",
             "array_push",       "array_pop",    "array_shift",  "array_unshift",   "in_array",
             "array_key_exists", "array_keys",   "array_values", "array_slice",     "array_merge",
-            "array_map",        "array_filter", "array_reduce", "array_chunk",
+            "array_map",        "array_filter", "array_reduce", "array_chunk",     "array_sum",
 
             // 数学函数
             "abs",              "sqrt",         "round",        "floor",           "ceil",
@@ -852,6 +854,7 @@ pub const NativeLinker = struct {
             "class_exists",     "method_exists",    "property_exists",
             "get_class",
             "serialize",        "unserialize",
+            "json_encode",
         };
 
         for (builtins) |builtin| {
@@ -886,6 +889,7 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "get_class")) return "php_get_class";
         if (std.mem.eql(u8, func_name, "serialize")) return "php_serialize";
         if (std.mem.eql(u8, func_name, "unserialize")) return "php_unserialize";
+        if (std.mem.eql(u8, func_name, "json_encode")) return "php_json_encode";
 
         // 字符串函数
         if (std.mem.eql(u8, func_name, "strlen")) return "php_strlen";
@@ -913,6 +917,7 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "strcasecmp")) return "php_strcasecmp";
 
         // 数组函数
+        if (std.mem.eql(u8, func_name, "array_sum")) return "php_array_sum";
         if (std.mem.eql(u8, func_name, "count")) return "php_count";
         if (std.mem.eql(u8, func_name, "array_push")) return "php_array_push";
         if (std.mem.eql(u8, func_name, "array_pop")) return "php_array_pop";
@@ -2420,14 +2425,31 @@ pub const NativeLinker = struct {
                     if (type_tag == .i64 and lhs_tag == .i64 and rhs_tag == .i64) {
                         try writer.print("    reg_{d} = @rem(reg_{d}, reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else {
+                        const want_i64 = type_tag == .i64;
                         if (lhs_tag == .i64 and rhs_tag == .i64) {
-                            try writer.print("    reg_{d} = try runtime.php_mod(runtime.Value.initInt(reg_{d}), runtime.Value.initInt(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            if (want_i64) {
+                                try writer.print("    reg_{d} = (try runtime.php_mod(runtime.Value.initInt(reg_{d}), runtime.Value.initInt(reg_{d}))).toInt();\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            } else {
+                                try writer.print("    reg_{d} = try runtime.php_mod(runtime.Value.initInt(reg_{d}), runtime.Value.initInt(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            }
                         } else if (lhs_tag == .i64) {
-                            try writer.print("    reg_{d} = try runtime.php_mod(runtime.Value.initInt(reg_{d}), reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            if (want_i64) {
+                                try writer.print("    reg_{d} = (try runtime.php_mod(runtime.Value.initInt(reg_{d}), reg_{d})).toInt();\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            } else {
+                                try writer.print("    reg_{d} = try runtime.php_mod(runtime.Value.initInt(reg_{d}), reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            }
                         } else if (rhs_tag == .i64) {
-                            try writer.print("    reg_{d} = try runtime.php_mod(reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            if (want_i64) {
+                                try writer.print("    reg_{d} = (try runtime.php_mod(reg_{d}, runtime.Value.initInt(reg_{d}))).toInt();\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            } else {
+                                try writer.print("    reg_{d} = try runtime.php_mod(reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            }
                         } else {
-                            try writer.print("    reg_{d} = try runtime.php_mod(reg_{d}, reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            if (want_i64) {
+                                try writer.print("    reg_{d} = (try runtime.php_mod(reg_{d}, reg_{d})).toInt();\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            } else {
+                                try writer.print("    reg_{d} = try runtime.php_mod(reg_{d}, reg_{d});\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                            }
                         }
                     }
                 }
@@ -2454,7 +2476,16 @@ pub const NativeLinker = struct {
                         try writer.print("    reg_{d} = ctx;\n", .{reg.id});
                     } else {
                         const arg_idx = if (self.current_function_has_this) op.index - 1 else op.index;
-                        try writer.print("    reg_{d} = if (args.len > {d}) args[{d}] else runtime.Value.initNull();\n", .{ reg.id, arg_idx, arg_idx });
+                        const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                        if (type_tag == .i64) {
+                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}].toInt() else 0;\n", .{ reg.id, arg_idx, arg_idx });
+                        } else if (type_tag == .f64) {
+                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}].toFloat() else 0.0;\n", .{ reg.id, arg_idx, arg_idx });
+                        } else if (type_tag == .bool) {
+                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}].toBool() else false;\n", .{ reg.id, arg_idx, arg_idx });
+                        } else {
+                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}] else runtime.Value.initNull();\n", .{ reg.id, arg_idx, arg_idx });
+                        }
                     }
                 }
             },
@@ -2462,6 +2493,34 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     // ctx is the closure object
                     try writer.print("    reg_{d} = ctx.asFunction().captures[{d}];\n", .{ reg.id, op.index });
+                }
+            },
+            .type_check => |op| {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = reg_{d}.isNull();\n", .{ reg.id, op.value.id });
+                }
+            },
+            .select => |op| {
+                if (inst.result) |reg| {
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    if (type_tag == .i64) {
+                        try writer.print("    reg_{d} = if (reg_{d}) reg_{d} else reg_{d};\n", .{ reg.id, op.cond.id, op.then_value.id, op.else_value.id });
+                    } else if (type_tag == .f64) {
+                        try writer.print("    reg_{d} = if (reg_{d}) reg_{d} else reg_{d};\n", .{ reg.id, op.cond.id, op.then_value.id, op.else_value.id });
+                    } else if (type_tag == .bool) {
+                        try writer.print("    reg_{d} = if (reg_{d}) reg_{d} else reg_{d};\n", .{ reg.id, op.cond.id, op.then_value.id, op.else_value.id });
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                        try writer.writeAll("    if (");
+                        try writer.print("reg_{d}", .{op.cond.id});
+                        try writer.writeAll(") {\n");
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.then_value.id });
+                        try writer.print("        reg_{d}.retain();\n", .{ reg.id });
+                        try writer.writeAll("    } else {\n");
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.else_value.id });
+                        try writer.print("        reg_{d}.retain();\n", .{ reg.id });
+                        try writer.writeAll("    }\n");
+                    }
                 }
             },
             .const_null => {
