@@ -1541,6 +1541,194 @@ pub fn php_var_dump(value: Value) !void {
     }
 }
 
+pub fn var_dump(value: Value) !Value {
+    try php_var_dump(value);
+    return Value.initNull();
+}
+
+pub fn print_r(value: Value, return_output: Value) !Value {
+    const want_return = return_output.toBool();
+    var buffer = try std.ArrayList(u8).initCapacity(runtime_allocator, 256);
+    defer buffer.deinit(runtime_allocator);
+
+    try printValue(buffer.writer(runtime_allocator), value, 0);
+
+    if (want_return) {
+        return Value.initString(try PHPString.init(runtime_allocator, buffer.items));
+    }
+    std.debug.print("{s}", .{buffer.items});
+    return Value.initBool(true);
+}
+
+pub fn var_export(value: Value, return_output: Value) !Value {
+    const want_return = return_output.toBool();
+    var buffer = try std.ArrayList(u8).initCapacity(runtime_allocator, 256);
+    defer buffer.deinit(runtime_allocator);
+
+    try exportValue(buffer.writer(runtime_allocator), value, 0);
+
+    if (want_return) {
+        return Value.initString(try PHPString.init(runtime_allocator, buffer.items));
+    }
+    std.debug.print("{s}", .{buffer.items});
+    return Value.initNull();
+}
+
+fn writeIndent(writer: anytype, indent: usize) !void {
+    var i: usize = 0;
+    while (i < indent) : (i += 1) {
+        try writer.writeAll("  ");
+    }
+}
+
+fn printValue(writer: anytype, value: Value, indent: usize) !void {
+    if (value.isNull()) {
+        try writer.writeAll("NULL");
+        return;
+    }
+    if (value.isBool()) {
+        try writer.writeAll(if (value.asBool()) "true" else "false");
+        return;
+    }
+    if (value.isInt()) {
+        try writer.print("{d}", .{value.asInt()});
+        return;
+    }
+    if (value.isFloat()) {
+        try writer.print("{d}", .{value.asFloat()});
+        return;
+    }
+    if (value.isString()) {
+        try writer.writeAll(value.asString().data);
+        return;
+    }
+    if (value.isArray()) {
+        const arr = value.asArray();
+        try writer.writeAll("Array\n");
+        try writeIndent(writer, indent);
+        try writer.writeAll("(\n");
+        var iter = arr.elements.iterator();
+        while (iter.next()) |entry| {
+            try writeIndent(writer, indent + 1);
+            switch (entry.key_ptr.*) {
+                .integer => |i| try writer.print("[{d}] => ", .{i}),
+                .string => |s| try writer.print("[{s}] => ", .{s.data}),
+            }
+            try printValue(writer, entry.value_ptr.*, indent + 1);
+            try writer.writeAll("\n");
+        }
+        try writeIndent(writer, indent);
+        try writer.writeAll(")\n");
+        return;
+    }
+    if (Value_isObject(value)) {
+        const obj = Value_asObject(value);
+        try writer.print("{s} Object\n", .{obj.class_name});
+        try writeIndent(writer, indent);
+        try writer.writeAll("(\n");
+        var it = obj.properties.iterator();
+        while (it.next()) |entry| {
+            try writeIndent(writer, indent + 1);
+            try writer.print("[{s}] => ", .{entry.key_ptr.*});
+            try printValue(writer, entry.value_ptr.*, indent + 1);
+            try writer.writeAll("\n");
+        }
+        try writeIndent(writer, indent);
+        try writer.writeAll(")\n");
+        return;
+    }
+    try writer.writeAll("Unknown");
+}
+
+fn exportValue(writer: anytype, value: Value, indent: usize) !void {
+    if (value.isNull()) {
+        try writer.writeAll("NULL");
+        return;
+    }
+    if (value.isBool()) {
+        try writer.writeAll(if (value.asBool()) "true" else "false");
+        return;
+    }
+    if (value.isInt()) {
+        try writer.print("{d}", .{value.asInt()});
+        return;
+    }
+    if (value.isFloat()) {
+        try writer.print("{d}", .{value.asFloat()});
+        return;
+    }
+    if (value.isString()) {
+        try writer.writeAll("'");
+        const s = value.asString().data;
+        for (s) |c| {
+            if (c == '\'') {
+                try writer.writeAll("\\'");
+            } else if (c == '\\') {
+                try writer.writeAll("\\\\");
+            } else {
+                try writer.writeByte(c);
+            }
+        }
+        try writer.writeAll("'");
+        return;
+    }
+    if (value.isArray()) {
+        const arr = value.asArray();
+        try writer.writeAll("array (\n");
+        var iter = arr.elements.iterator();
+        while (iter.next()) |entry| {
+            try writeIndent(writer, indent + 1);
+            switch (entry.key_ptr.*) {
+                .integer => |i| try writer.print("{d}", .{i}),
+                .string => |k| {
+                    try writer.writeAll("'");
+                    for (k.data) |c| {
+                        if (c == '\'') {
+                            try writer.writeAll("\\'");
+                        } else if (c == '\\') {
+                            try writer.writeAll("\\\\");
+                        } else {
+                            try writer.writeByte(c);
+                        }
+                    }
+                    try writer.writeAll("'");
+                },
+            }
+            try writer.writeAll(" => ");
+            try exportValue(writer, entry.value_ptr.*, indent + 1);
+            try writer.writeAll(",\n");
+        }
+        try writeIndent(writer, indent);
+        try writer.writeAll(")");
+        return;
+    }
+    if (Value_isObject(value)) {
+        const obj = Value_asObject(value);
+        try writer.writeAll("(object) array(\n");
+        var it = obj.properties.iterator();
+        while (it.next()) |entry| {
+            try writeIndent(writer, indent + 1);
+            try writer.writeAll("'");
+            for (entry.key_ptr.*) |c| {
+                if (c == '\'') {
+                    try writer.writeAll("\\'");
+                } else if (c == '\\') {
+                    try writer.writeAll("\\\\");
+                } else {
+                    try writer.writeByte(c);
+                }
+            }
+            try writer.writeAll("' => ");
+            try exportValue(writer, entry.value_ptr.*, indent + 1);
+            try writer.writeAll(",\n");
+        }
+        try writeIndent(writer, indent);
+        try writer.writeAll(")");
+        return;
+    }
+    try writer.writeAll("NULL");
+}
+
 // ============================================================================
 // 常量函数
 // ============================================================================
