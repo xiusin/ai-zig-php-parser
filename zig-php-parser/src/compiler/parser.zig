@@ -286,7 +286,10 @@ pub const Parser = struct {
             .k_throw => self.parseThrow(),
             .k_echo => self.parseEcho(),
             .k_global => self.parseGlobal(),
-            .k_static => self.parseStatic(),
+            .k_static => {
+                if (self.peek.tag == .double_colon) return self.parseExpressionStatement();
+                return self.parseStatic();
+            },
             .k_const => self.parseConst(),
             .k_go => self.parseGo(),
             .k_lock => self.parseLock(),

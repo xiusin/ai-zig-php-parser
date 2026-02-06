@@ -814,6 +814,9 @@ fn lookupBuiltinFunction(name: []const u8) ?*const fn (ctx: Value, args: []const
             .{ .name = "get_class_methods", .func = wrapBuiltin_get_class_methods },
             .{ .name = "get_class_vars", .func = wrapBuiltin_get_class_vars },
             .{ .name = "get_object_vars", .func = wrapBuiltin_get_object_vars },
+            .{ .name = "get_called_class", .func = wrapBuiltin_get_called_class },
+            .{ .name = "forward_static_call", .func = wrapBuiltin_forward_static_call },
+            .{ .name = "forward_static_call_array", .func = wrapBuiltin_forward_static_call_array },
         };
     };
 
@@ -943,6 +946,92 @@ fn wrapBuiltin_get_object_vars(ctx: Value, args: []const Value, allocator: Alloc
     return php_get_object_vars(args[0], allocator);
 }
 
+fn wrapBuiltin_get_called_class(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    const called = getCurrentCalledClass() orelse return error.ClassNotFound;
+    const s = try PHPString.init(allocator, called.name);
+    return Value.initString(s);
+}
+
+fn php_forward_static_call(callback: Value, args: []const Value, allocator: Allocator) !Value {
+    if (!callback.isString()) return error.InvalidCallback;
+    const cb = callback.asString().data;
+
+    const sep = std.mem.indexOf(u8, cb, "::") orelse return error.InvalidCallback;
+    if (sep == 0 or sep + 2 >= cb.len) return error.InvalidCallback;
+
+    const class_part = cb[0..sep];
+    const method_part = cb[sep + 2 ..];
+
+    const lookup_meta = blk: {
+        if (std.mem.eql(u8, class_part, "self")) {
+            break :blk getCurrentScopeClass() orelse return error.ClassNotFound;
+        }
+        if (std.mem.eql(u8, class_part, "parent")) {
+            const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
+            break :blk scope.parent orelse return error.ClassNotFound;
+        }
+        if (std.mem.eql(u8, class_part, "static")) {
+            break :blk getCurrentCalledClass() orelse return error.ClassNotFound;
+        }
+        break :blk findClass(class_part) orelse return error.ClassNotFound;
+    };
+
+    const called_meta = getCurrentCalledClass() orelse lookup_meta;
+
+    if (lookup_meta.findMethodLookup(method_part)) |lookup| {
+        const guard = ClassContext.init(called_meta, lookup.owner);
+        defer guard.deinit();
+        return lookup.method.func(Value.initNull(), args, allocator);
+    }
+
+    if (lookup_meta.findMethodLookup("__callStatic")) |lookup| {
+        const name_str = try PHPString.init(allocator, method_part);
+        const name_val = Value.initString(name_str);
+        defer name_val.release(allocator);
+
+        const args_arr = try PHPArray.init(allocator);
+        for (args) |arg| {
+            try args_arr.push(allocator, arg);
+        }
+        const call_args = [_]Value{ name_val, Value.initArray(args_arr) };
+        const guard = ClassContext.init(called_meta, lookup.owner);
+        defer guard.deinit();
+        return lookup.method.func(Value.initNull(), &call_args, allocator);
+    }
+
+    return error.MethodNotFound;
+}
+
+fn wrapBuiltin_forward_static_call(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_forward_static_call(args[0], args[1..], allocator);
+}
+
+fn wrapBuiltin_forward_static_call_array(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len != 2) return error.InvalidArgumentCount;
+    if (!args[1].isArray()) return error.InvalidArgument;
+
+    const arr = args[1].asArray();
+    var list = std.ArrayListUnmanaged(Value){};
+    defer list.deinit(allocator);
+
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        if (arr.elements.get(key)) |v| {
+            try list.append(allocator, v);
+        } else {
+            break;
+        }
+    }
+
+    return php_forward_static_call(args[0], list.items, allocator);
+}
+
 pub fn php_select_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     _ = ctx;
     return php_select(args, allocator);
@@ -964,6 +1053,18 @@ pub fn php_get_object_vars_builtin(ctx: Value, args: []const Value, allocator: A
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_get_object_vars(args[0], allocator);
+}
+
+pub fn php_get_called_class_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    return wrapBuiltin_get_called_class(ctx, args, allocator);
+}
+
+pub fn php_forward_static_call_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    return wrapBuiltin_forward_static_call(ctx, args, allocator);
+}
+
+pub fn php_forward_static_call_array_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    return wrapBuiltin_forward_static_call_array(ctx, args, allocator);
 }
 
 fn php_get_class_methods(class_name_val: Value, allocator: Allocator) !Value {
@@ -2719,6 +2820,21 @@ pub const ClassMeta = struct {
         if (std.mem.eql(u8, method.name, "__unserialize")) self.magic_unserialize = method.func;
     }
 
+    pub const MethodLookup = struct {
+        owner: *const ClassMeta,
+        method: *const ClassMethod,
+    };
+
+    pub fn findMethodLookup(self: *const ClassMeta, name: []const u8) ?MethodLookup {
+        if (self.methods.getPtr(name)) |method| {
+            return .{ .owner = self, .method = method };
+        }
+        if (self.parent) |parent| {
+            return parent.findMethodLookup(name);
+        }
+        return null;
+    }
+
     /// 查找方法（包括继承链）
     pub fn findMethod(self: *const ClassMeta, name: []const u8) ?ClassMethod {
         if (self.methods.get(name)) |method| {
@@ -2853,15 +2969,55 @@ pub var class_registry: ?std.StringHashMap(*ClassMeta) = null;
 /// 全局对象跟踪（用于内存泄露检测和清理）
 pub var global_object_registry: ?std.ArrayList(*PHPObject) = null;
 
-pub var current_called_class: ?*const ClassMeta = null;
+fn getCurrentCalledClass() ?*const ClassMeta {
+    const ptr = concurrency.getExecutionContext().called_class orelse return null;
+    return @ptrFromInt(ptr);
+}
+
+fn setCurrentCalledClass(meta: ?*const ClassMeta) void {
+    concurrency.getExecutionContext().called_class = if (meta) |m| @intFromPtr(m) else null;
+}
+
+fn getCurrentScopeClass() ?*const ClassMeta {
+    const ptr = concurrency.getExecutionContext().scope_class orelse return null;
+    return @ptrFromInt(ptr);
+}
+
+fn setCurrentScopeClass(meta: ?*const ClassMeta) void {
+    concurrency.getExecutionContext().scope_class = if (meta) |m| @intFromPtr(m) else null;
+}
+
+const ClassContext = struct {
+    prev_called: ?*const ClassMeta,
+    prev_scope: ?*const ClassMeta,
+
+    pub fn init(called: ?*const ClassMeta, scope: ?*const ClassMeta) ClassContext {
+        const prev = ClassContext{
+            .prev_called = getCurrentCalledClass(),
+            .prev_scope = getCurrentScopeClass(),
+        };
+        setCurrentCalledClass(called);
+        setCurrentScopeClass(scope);
+        return prev;
+    }
+
+    pub fn deinit(self: *const ClassContext) void {
+        setCurrentCalledClass(self.prev_called);
+        setCurrentScopeClass(self.prev_scope);
+    }
+};
 
 fn resolveSpecialClassName(class_name: []const u8) ![]const u8 {
-    if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
-        const meta = current_called_class orelse return error.ClassNotFound;
+    if (std.mem.eql(u8, class_name, "static")) {
+        const meta = getCurrentCalledClass() orelse return error.ClassNotFound;
+        return meta.name;
+    }
+    if (std.mem.eql(u8, class_name, "self")) {
+        const meta = getCurrentScopeClass() orelse return error.ClassNotFound;
         return meta.name;
     }
     if (std.mem.eql(u8, class_name, "parent")) {
-        const meta = current_called_class orelse return error.ClassNotFound;
+        const meta = getCurrentScopeClass() orelse return error.ClassNotFound;
         const parent = meta.parent orelse return error.ClassNotFound;
         return parent.name;
     }
@@ -2983,9 +3139,11 @@ pub const PHPObject = struct {
     fn deinit(self: *PHPObject) void {
         // 调用 __destruct 魔法函数
         if (self.class_meta) |meta| {
-            if (meta.magic_destruct) |destruct| {
+            if (meta.findMethodLookup("__destruct")) |lookup| {
                 const this_val = Value_initObject(self);
-                _ = destruct(this_val, &.{}, self.allocator) catch {};
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                _ = lookup.method.func(this_val, &.{}, self.allocator) catch {};
             }
         }
 
@@ -3021,13 +3179,15 @@ pub const PHPObject = struct {
         }
         // 调用 __get 魔法函数
         if (self.class_meta) |meta| {
-            if (meta.magic_get) |getter| {
+            if (meta.findMethodLookup("__get")) |lookup| {
                 const this_val = Value_initObject(self);
                 const name_str = PHPString.init(self.allocator, name) catch return null;
                 const name_val = Value.initString(name_str);
                 defer name_val.release(self.allocator);
                 const args = [_]Value{name_val};
-                const result = getter(this_val, &args, self.allocator) catch return null;
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                const result = lookup.method.func(this_val, &args, self.allocator) catch return null;
                 return result;
             }
         }
@@ -3039,13 +3199,15 @@ pub const PHPObject = struct {
         // 检查是否有 __set 魔法函数且属性不存在
         if (self.properties.get(name) == null) {
             if (self.class_meta) |meta| {
-                if (meta.magic_set) |setter| {
+                if (meta.findMethodLookup("__set")) |lookup| {
                     const this_val = Value_initObject(self);
                     const name_str = try PHPString.init(self.allocator, name);
                     const name_val = Value.initString(name_str);
                     defer name_val.release(self.allocator);
                     const args = [_]Value{ name_val, value };
-                    _ = try setter(this_val, &args, self.allocator);
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    _ = try lookup.method.func(this_val, &args, self.allocator);
                     return;
                 }
             }
@@ -3068,23 +3230,23 @@ pub const PHPObject = struct {
         const this_val = Value_initObject(self);
 
         if (self.class_meta) |meta| {
-            const prev_called = current_called_class;
-            current_called_class = meta;
-            defer current_called_class = prev_called;
-
             // 查找方法（包括继承链）
-            if (meta.findMethod(method_name)) |method| {
-                return method.func(this_val, args, self.allocator);
+            if (meta.findMethodLookup(method_name)) |lookup| {
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                return lookup.method.func(this_val, args, self.allocator);
             }
             // 调用 __call 魔法函数
-            if (meta.magic_call) |call_fn| {
+            if (meta.findMethodLookup("__call")) |lookup| {
                 const name_val = Value.initString(try PHPString.init(self.allocator, method_name));
                 const args_arr = try PHPArray.init(self.allocator);
                 for (args) |arg| {
                     try args_arr.push(self.allocator, arg);
                 }
                 const call_args = [_]Value{ name_val, Value.initArray(args_arr) };
-                return call_fn(this_val, &call_args, self.allocator);
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                return lookup.method.func(this_val, &call_args, self.allocator);
             }
         }
         return error.MethodNotFound;
@@ -3094,11 +3256,13 @@ pub const PHPObject = struct {
     pub fn hasProperty(self: *PHPObject, name: []const u8) bool {
         if (self.properties.contains(name)) return true;
         if (self.class_meta) |meta| {
-            if (meta.magic_isset) |isset_fn| {
+            if (meta.findMethodLookup("__isset")) |lookup| {
                 const this_val = Value_initObject(self);
                 const name_val = Value.initString(PHPString.initStatic(name));
                 const args = [_]Value{name_val};
-                const result = isset_fn(this_val, &args, self.allocator) catch return false;
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                const result = lookup.method.func(this_val, &args, self.allocator) catch return false;
                 return result.toBool();
             }
         }
@@ -3294,11 +3458,10 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
 
     // 调用 __construct
     if (obj.class_meta) |m| {
-        const prev_called = current_called_class;
-        current_called_class = m;
-        defer current_called_class = prev_called;
-        if (m.magic_construct) |construct| {
-            _ = try construct(obj_val, args, allocator);
+        if (m.findMethodLookup("__construct")) |lookup| {
+            const guard = ClassContext.init(m, lookup.owner);
+            defer guard.deinit();
+            _ = try lookup.method.func(obj_val, args, allocator);
         }
     }
 
@@ -3395,21 +3558,41 @@ pub fn @"property_exists"(ctx: Value, args: []const Value, allocator: Allocator)
 
 /// 调用静态方法
 pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
-    const resolved = try resolveSpecialClassName(class_name);
-    const meta = findClass(resolved) orelse return error.ClassNotFound;
-    const prev_called = current_called_class;
-    current_called_class = meta;
-    defer current_called_class = prev_called;
+    const lookup_meta = blk: {
+        if (std.mem.eql(u8, class_name, "self")) {
+            break :blk getCurrentScopeClass() orelse return error.ClassNotFound;
+        }
+        if (std.mem.eql(u8, class_name, "parent")) {
+            const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
+            break :blk scope.parent orelse return error.ClassNotFound;
+        }
+        if (std.mem.eql(u8, class_name, "static")) {
+            break :blk getCurrentCalledClass() orelse return error.ClassNotFound;
+        }
+        break :blk findClass(class_name) orelse return error.ClassNotFound;
+    };
+
+    const called_meta = blk: {
+        if (std.mem.eql(u8, class_name, "self") or
+            std.mem.eql(u8, class_name, "parent") or
+            std.mem.eql(u8, class_name, "static"))
+        {
+            break :blk getCurrentCalledClass() orelse return error.ClassNotFound;
+        }
+        break :blk lookup_meta;
+    };
 
     // 查找静态方法
-    if (meta.findMethod(method_name)) |method| {
-        if (method.is_static) {
-            return method.func(Value.initNull(), args, allocator);
+    if (lookup_meta.findMethodLookup(method_name)) |lookup| {
+        if (lookup.method.is_static) {
+            const guard = ClassContext.init(called_meta, lookup.owner);
+            defer guard.deinit();
+            return lookup.method.func(Value.initNull(), args, allocator);
         }
     }
 
     // 调用 __callStatic 魔法函数
-    if (meta.magic_callStatic) |call_static| {
+    if (lookup_meta.findMethodLookup("__callStatic")) |lookup| {
         const name_str = try PHPString.init(allocator, method_name);
         const name_val = Value.initString(name_str);
         defer name_val.release(allocator);
@@ -3418,7 +3601,9 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
             try args_arr.push(allocator, arg);
         }
         const call_args = [_]Value{ name_val, Value.initArray(args_arr) };
-        return call_static(Value.initNull(), &call_args, allocator);
+        const guard = ClassContext.init(called_meta, lookup.owner);
+        defer guard.deinit();
+        return lookup.method.func(Value.initNull(), &call_args, allocator);
     }
 
     return error.MethodNotFound;
@@ -3426,15 +3611,37 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
 
 /// 获取静态属性
 pub fn php_get_static_property(class_name: []const u8, property_name: []const u8) !Value {
-    const resolved = try resolveSpecialClassName(class_name);
-    const meta = findClass(resolved) orelse return error.ClassNotFound;
+    const meta = blk: {
+        if (std.mem.eql(u8, class_name, "self")) {
+            break :blk getCurrentScopeClass() orelse return error.ClassNotFound;
+        }
+        if (std.mem.eql(u8, class_name, "parent")) {
+            const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
+            break :blk scope.parent orelse return error.ClassNotFound;
+        }
+        if (std.mem.eql(u8, class_name, "static")) {
+            break :blk getCurrentCalledClass() orelse return error.ClassNotFound;
+        }
+        break :blk findClass(class_name) orelse return error.ClassNotFound;
+    };
     return meta.getStaticProperty(property_name) orelse Value.initNull();
 }
 
 /// 设置静态属性
 pub fn php_set_static_property(class_name: []const u8, property_name: []const u8, value: Value) !void {
-    const resolved = try resolveSpecialClassName(class_name);
-    var meta = findClass(resolved) orelse return error.ClassNotFound;
+    var meta = blk: {
+        if (std.mem.eql(u8, class_name, "self")) {
+            break :blk @constCast(getCurrentScopeClass() orelse return error.ClassNotFound);
+        }
+        if (std.mem.eql(u8, class_name, "parent")) {
+            const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
+            break :blk @constCast(scope.parent orelse return error.ClassNotFound);
+        }
+        if (std.mem.eql(u8, class_name, "static")) {
+            break :blk @constCast(getCurrentCalledClass() orelse return error.ClassNotFound);
+        }
+        break :blk findClass(class_name) orelse return error.ClassNotFound;
+    };
     try meta.setStaticProperty(property_name, value);
 }
 

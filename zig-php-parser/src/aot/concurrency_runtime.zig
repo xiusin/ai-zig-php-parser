@@ -6,6 +6,17 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub const ExecutionContext = struct {
+    called_class: ?usize = null,
+    scope_class: ?usize = null,
+};
+
+threadlocal var execution_context: ExecutionContext = .{};
+
+pub fn getExecutionContext() *ExecutionContext {
+    return &execution_context;
+}
+
 // ============================================================================
 // 协程状态和上下文
 // ============================================================================
@@ -333,6 +344,9 @@ pub const Scheduler = struct {
             {
                 const c = coro;
                 c.state = .running;
+                const prev_ctx = execution_context;
+                execution_context = .{};
+                defer execution_context = prev_ctx;
                 c.func_ptr(c.context) catch |err| {
                     c.err = err;
                 };

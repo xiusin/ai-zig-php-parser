@@ -1261,6 +1261,29 @@ pub const PHPClass = struct {
         return false;
     }
 
+    pub const MethodLookup = struct {
+        owner: *PHPClass,
+        method: *Method,
+    };
+
+    pub fn getMethodLookup(self: *PHPClass, name: []const u8) ?MethodLookup {
+        if (self.methods.getPtr(name)) |method| {
+            return .{ .owner = self, .method = method };
+        }
+
+        if (self.parent) |parent| {
+            if (parent.getMethodLookup(name)) |lookup| return lookup;
+        }
+
+        for (self.traits) |trait| {
+            if (trait.methods.getPtr(name)) |method| {
+                return .{ .owner = self, .method = method };
+            }
+        }
+
+        return null;
+    }
+
     pub fn getMethod(self: *PHPClass, name: []const u8) ?*Method {
         // Check own methods first
         if (self.methods.getPtr(name)) |method| return method;
@@ -2115,8 +2138,8 @@ pub const PHPObject = struct {
         const class_name = self.class.name.data;
         const name = method_name;
 
-        const method = self.class.getMethod(name);
-        if (method == null) {
+        const lookup = self.class.getMethodLookup(name);
+        if (lookup == null) {
             // Method doesn't exist in class - check if it's a built-in class method
             // For Mutex builtin methods
             if (std.mem.eql(u8, class_name, "Mutex")) {
@@ -2155,8 +2178,10 @@ pub const PHPObject = struct {
             return error.UndefinedMethod;
         }
 
+        const method = lookup.?.method;
+
         // Special handling for built-in classes with null method bodies
-        if (method.?.body == null) {
+        if (method.body == null) {
             // For Exception classes, handle __construct specially
             if (std.mem.eql(u8, name, "__construct")) {
                 // For Exception/Error classes, set properties from arguments
@@ -2218,7 +2243,7 @@ pub const PHPObject = struct {
         try vm_instance.setVariable("$this", object_value);
 
         // Inject arguments
-        for (method.?.parameters, 0..) |param, i| {
+        for (method.parameters, 0..) |param, i| {
             if (i < args.len) {
                 try vm_instance.setVariable(param.name.data, args[i]);
             } else if (param.default_value) |default| {
@@ -2227,12 +2252,17 @@ pub const PHPObject = struct {
         }
 
         // Set current class for 'self' resolution
-        const old_class = vm_instance.current_class;
-        vm_instance.current_class = self.class;
-        defer vm_instance.current_class = old_class;
+        const old_scope_class = vm_instance.current_class;
+        const old_called_class = vm_instance.current_called_class;
+        vm_instance.current_called_class = self.class;
+        vm_instance.current_class = lookup.?.owner;
+        defer {
+            vm_instance.current_class = old_scope_class;
+            vm_instance.current_called_class = old_called_class;
+        }
 
         // Check if this is a generator function (contains yield)
-        if (method.?.body) |body_ptr| {
+        if (method.body) |body_ptr| {
             const compiler = @import("compiler");
             const ast = compiler.ast;
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));

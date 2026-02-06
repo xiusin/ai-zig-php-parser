@@ -323,10 +323,16 @@ pub const NativeLinker = struct {
         var has_get_class_methods: bool = false;
         var has_get_class_vars: bool = false;
         var has_get_object_vars: bool = false;
+        var has_get_called_class: bool = false;
+        var has_forward_static_call: bool = false;
+        var has_forward_static_call_array: bool = false;
         for (ir_module.functions.items) |func| {
             if (std.mem.eql(u8, func.name, "get_class_methods")) has_get_class_methods = true;
             if (std.mem.eql(u8, func.name, "get_class_vars")) has_get_class_vars = true;
             if (std.mem.eql(u8, func.name, "get_object_vars")) has_get_object_vars = true;
+            if (std.mem.eql(u8, func.name, "get_called_class")) has_get_called_class = true;
+            if (std.mem.eql(u8, func.name, "forward_static_call")) has_forward_static_call = true;
+            if (std.mem.eql(u8, func.name, "forward_static_call_array")) has_forward_static_call_array = true;
         }
         if (!has_get_class_methods) {
             try writer.writeAll(
@@ -351,6 +357,33 @@ pub const NativeLinker = struct {
                 \\
                 \\pub fn @"get_object_vars"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
                 \\    return runtime.php_get_object_vars_builtin(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+        if (!has_get_called_class) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"get_called_class"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_get_called_class_builtin(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+        if (!has_forward_static_call) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"forward_static_call"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_forward_static_call_builtin(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+        if (!has_forward_static_call_array) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"forward_static_call_array"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_forward_static_call_array_builtin(ctx, args, allocator);
                 \\}
                 \\
             );

@@ -779,6 +779,22 @@ fn getClassFn(vm: *VM, args: []const Value) !Value {
     return Value.initStringWithManager(&vm.memory_manager, object.class.name.data);
 }
 
+fn getCalledClassFn(vm: *VM, args: []const Value) !Value {
+    if (args.len != 0) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 0, @intCast(args.len), "get_called_class", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const called = vm.current_called_class orelse {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "get_called_class() must be called from within a class", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    };
+
+    return Value.initStringWithManager(&vm.memory_manager, called.name.data);
+}
+
 fn getClassMethodsFn(vm: *VM, args: []const Value) !Value {
     if (args.len != 1) {
         const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "get_class_methods", "builtin", 0);
@@ -1514,6 +1530,162 @@ fn getDefinedFunctionsFn(vm: *VM, args: []const Value) !Value {
     return php_array_value;
 }
 
+fn forwardStaticCallFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "forward_static_call", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const callback = args[0];
+    if (callback.getTag() != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "forward_static_call() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const cb = callback.getAsString().data.data;
+    const sep = std.mem.indexOf(u8, cb, "::") orelse {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "forward_static_call() expects parameter 1 to be a static method callable", "builtin", 0);
+        return vm.throwException(exception);
+    };
+    if (sep == 0 or sep + 2 >= cb.len) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "forward_static_call() expects parameter 1 to be a static method callable", "builtin", 0);
+        return vm.throwException(exception);
+    }
+
+    const class_part = cb[0..sep];
+    const method_part = cb[sep + 2 ..];
+
+    const lookup_class = if (std.mem.eql(u8, class_part, "self")) blk: {
+        break :blk vm.current_class orelse {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "Cannot access self:: outside of class scope", vm.current_file, vm.current_line);
+            return vm.throwException(exception);
+        };
+    } else if (std.mem.eql(u8, class_part, "parent")) blk: {
+        const scope = vm.current_class orelse {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "Cannot access parent:: outside of class scope", vm.current_file, vm.current_line);
+            return vm.throwException(exception);
+        };
+        break :blk scope.parent orelse {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "Cannot access parent:: when class has no parent", vm.current_file, vm.current_line);
+            return vm.throwException(exception);
+        };
+    } else if (std.mem.eql(u8, class_part, "static")) blk: {
+        break :blk vm.current_called_class orelse {
+            const exception = try ExceptionFactory.createTypeError(vm.allocator, "Cannot access static:: outside of class scope", vm.current_file, vm.current_line);
+            return vm.throwException(exception);
+        };
+    } else blk: {
+        break :blk vm.getClass(class_part) orelse {
+            const exception = try ExceptionFactory.createUndefinedClassError(vm.allocator, class_part, vm.current_file, vm.current_line);
+            return vm.throwException(exception);
+        };
+    };
+
+    const called_class = vm.current_called_class orelse lookup_class;
+
+    const method_lookup = lookup_class.getMethodLookup(method_part);
+    if (method_lookup) |lookup| {
+        const m = lookup.method;
+        const full_method_name = try std.fmt.allocPrint(vm.allocator, "{s}::{s}", .{ lookup_class.name.data, method_part });
+        defer vm.allocator.free(full_method_name);
+        try vm.pushCallFrame(full_method_name, vm.current_file, vm.current_line);
+        defer vm.popCallFrame();
+
+        const call_args = args[1..];
+        for (m.parameters, 0..) |param, i| {
+            if (i < call_args.len) {
+                try vm.setVariable(param.name.data, call_args[i]);
+            } else if (param.default_value) |default| {
+                try vm.setVariable(param.name.data, default);
+            }
+        }
+
+        const old_scope_class = vm.current_class;
+        const old_called_class = vm.current_called_class;
+        vm.current_called_class = called_class;
+        vm.current_class = lookup.owner;
+        defer {
+            vm.current_class = old_scope_class;
+            vm.current_called_class = old_called_class;
+        }
+
+        if (m.body) |body_ptr| {
+            const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+            return vm.eval(body_node) catch |err| {
+                if (err == error.Return) {
+                    if (vm.return_value) |val| {
+                        const ret = val;
+                        vm.return_value = null;
+                        return ret;
+                    }
+                    return Value.initNull();
+                }
+                return err;
+            };
+        }
+        return Value.initNull();
+    }
+
+    if (lookup_class.getMethodLookup("__callStatic")) |call_static_lookup| {
+        const name_val = try Value.initString(vm.allocator, method_part);
+        defer name_val.release(vm.allocator);
+
+        const args_array_val = try Value.initArrayWithManager(&vm.memory_manager);
+        const args_array = args_array_val.getAsArray().data;
+        for (args[1..]) |arg| {
+            try args_array.push(vm.allocator, arg);
+        }
+        defer args_array_val.release(vm.allocator);
+
+        const magic_args = [_]Value{ name_val, args_array_val };
+
+        const full_method_name = try std.fmt.allocPrint(vm.allocator, "{s}::__callStatic", .{lookup_class.name.data});
+        defer vm.allocator.free(full_method_name);
+        try vm.pushCallFrame(full_method_name, vm.current_file, vm.current_line);
+        defer vm.popCallFrame();
+
+        const inner_call_static = call_static_lookup.method;
+        for (inner_call_static.parameters, 0..) |param, i| {
+            if (i < magic_args.len) {
+                try vm.setVariable(param.name.data, magic_args[i]);
+            }
+        }
+
+        const old_scope_class = vm.current_class;
+        const old_called_class = vm.current_called_class;
+        vm.current_called_class = called_class;
+        vm.current_class = call_static_lookup.owner;
+        defer {
+            vm.current_class = old_scope_class;
+            vm.current_called_class = old_called_class;
+        }
+
+        if (inner_call_static.body) |body_ptr| {
+            const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
+            return vm.eval(body_node) catch |err| {
+                if (err == error.Return) {
+                    if (vm.return_value) |val| {
+                        const ret = val;
+                        vm.return_value = null;
+                        return ret;
+                    }
+                    return Value.initNull();
+                }
+                return err;
+            };
+        }
+
+        return Value.initNull();
+    }
+
+    const msg = try std.fmt.allocPrint(vm.allocator, "Call to undefined method {s}::{s}()", .{ lookup_class.name.data, method_part });
+    defer vm.allocator.free(msg);
+    const exception = try ExceptionFactory.createTypeError(vm.allocator, msg, vm.current_file, vm.current_line);
+    return vm.throwException(exception);
+}
+
 // forward_static_call_array() - Call a static method and pass arguments as array
 fn forwardStaticCallArrayFn(vm: *VM, args: []const Value) !Value {
     if (args.len != 2) {
@@ -1530,8 +1702,25 @@ fn forwardStaticCallArrayFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    // Just return null for now - static method calling is complex
-    return Value.initNull();
+    var arg_list = std.ArrayList(Value){};
+    defer arg_list.deinit(vm.allocator);
+
+    const params = params_array.getAsArray().data;
+    var i: i64 = 0;
+    while (true) : (i += 1) {
+        const key = types.ArrayKey{ .integer = i };
+        if (params.get(key)) |v| {
+            try arg_list.append(vm.allocator, v);
+        } else {
+            break;
+        }
+    }
+
+    const packed_args = try vm.allocator.alloc(Value, 1 + arg_list.items.len);
+    defer vm.allocator.free(packed_args);
+    packed_args[0] = args[0];
+    @memcpy(packed_args[1..], arg_list.items);
+    return forwardStaticCallFn(vm, packed_args);
 }
 
 // ==================== Medium Priority Functions ====================
@@ -1955,6 +2144,7 @@ pub const VM = struct {
     string_intern_pool: std.StringHashMap(*types.gc.Box(*types.PHPString)),
     request_arena: std.heap.ArenaAllocator,
     current_class: ?*types.PHPClass = null,
+    current_called_class: ?*types.PHPClass = null,
     return_value: ?Value = null,
     break_level: u32 = 0,
     continue_level: u32 = 0,
@@ -2041,6 +2231,7 @@ pub const VM = struct {
             .string_intern_pool = std.StringHashMap(*types.gc.Box(*types.PHPString)).init(allocator),
             .request_arena = std.heap.ArenaAllocator.init(allocator),
             .current_class = null,
+            .current_called_class = null,
             .return_value = null,
             .break_level = 0,
             .continue_level = 0,
@@ -2457,6 +2648,7 @@ pub const VM = struct {
         try self.defineBuiltin("function_exists", functionExistsFn);
         try self.defineBuiltin("property_exists", propertyExistsFn);
         try self.defineBuiltin("get_class", getClassFn);
+        try self.defineBuiltin("get_called_class", getCalledClassFn);
         try self.defineBuiltin("get_class_methods", getClassMethodsFn);
         try self.defineBuiltin("get_class_vars", getClassVarsFn);
         try self.defineBuiltin("get_object_vars", getObjectVarsFn);
@@ -2500,6 +2692,7 @@ pub const VM = struct {
         try self.defineBuiltin("get_defined_vars", getDefinedVarsFn);
         try self.defineBuiltin("get_defined_constants", getDefinedConstantsFn);
         try self.defineBuiltin("get_defined_functions", getDefinedFunctionsFn);
+        try self.defineBuiltin("forward_static_call", forwardStaticCallFn);
         try self.defineBuiltin("forward_static_call_array", forwardStaticCallArrayFn);
 
         // Medium priority functions
@@ -5786,6 +5979,11 @@ pub const VM = struct {
                             const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
                             return self.throwException(exception);
                         };
+                    } else if (std.mem.eql(u8, class_name, "static")) blk: {
+                        break :blk self.current_called_class orelse {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access static:: outside of class scope", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        };
                     } else if (std.mem.eql(u8, class_name, "parent")) blk: {
                         const curr_class = self.current_class orelse {
                             const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
@@ -6530,7 +6728,7 @@ pub const VM = struct {
                     return self.throwException(exception);
                 }
             } else if (std.mem.eql(u8, var_name, "static")) {
-                if (self.current_class) |class| {
+                if (self.current_called_class) |class| {
                     name = class.name.data;
                 } else {
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'static' outside of class scope", self.current_file, self.current_line);
@@ -6577,7 +6775,7 @@ pub const VM = struct {
                 return self.throwException(exception);
             }
         } else if (class_name_node.tag == .static_expr) {
-            if (self.current_class) |class| {
+            if (self.current_called_class) |class| {
                 name = class.name.data;
             } else {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use 'static' outside of class scope", self.current_file, self.current_line);
@@ -7324,6 +7522,11 @@ pub const VM = struct {
                 const class = if (std.mem.eql(u8, class_name, "self")) blk: {
                     break :blk self.current_class orelse {
                         const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                } else if (std.mem.eql(u8, class_name, "static")) blk: {
+                    break :blk self.current_called_class orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access static:: outside of class scope", self.current_file, self.current_line);
                         return self.throwException(exception);
                     };
                 } else if (std.mem.eql(u8, class_name, "parent")) blk: {
@@ -9675,25 +9878,32 @@ pub const VM = struct {
         const method_name = self.context.string_pool.keys()[static_call_data.method_name];
 
         // 解析类引用：self、parent、static、具体类名或变量（$obj::method()）
+        var called_class: *types.PHPClass = undefined;
         const class = if (std.mem.eql(u8, class_name, "self")) blk: {
-            break :blk self.current_class orelse {
+            const scope = self.current_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
             };
+            called_class = self.current_called_class orelse scope;
+            break :blk scope;
         } else if (std.mem.eql(u8, class_name, "static")) blk: {
-            break :blk self.current_class orelse {
+            const called = self.current_called_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access static:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
             };
+            called_class = called;
+            break :blk called;
         } else if (std.mem.eql(u8, class_name, "parent")) blk: {
             const curr_class = self.current_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
             };
-            break :blk curr_class.parent orelse {
+            const parent = curr_class.parent orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
                 return self.throwException(exception);
             };
+            called_class = self.current_called_class orelse curr_class;
+            break :blk parent;
         } else if (class_name.len > 0 and class_name[0] == '$') blk: {
             // 变量形式的静态调用：$obj::method()
             const var_value = self.getVariable(class_name) orelse {
@@ -9701,23 +9911,29 @@ pub const VM = struct {
                 return self.throwException(exception);
             };
             if (var_value.isObject()) {
-                break :blk var_value.getAsObject().data.class;
+                const c = var_value.getAsObject().data.class;
+                called_class = c;
+                break :blk c;
             } else if (var_value.isString()) {
                 // 字符串作为类名
                 const str_class_name = var_value.getAsString().data.data;
-                break :blk self.getClass(str_class_name) orelse {
+                const c = self.getClass(str_class_name) orelse {
                     const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, str_class_name, self.current_file, self.current_line);
                     return self.throwException(exception);
                 };
+                called_class = c;
+                break :blk c;
             } else {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use non-object as class in static method call", self.current_file, self.current_line);
                 return self.throwException(exception);
             }
         } else blk: {
-            break :blk self.getClass(class_name) orelse {
+            const c = self.getClass(class_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             };
+            called_class = c;
+            break :blk c;
         };
 
         // Evaluate arguments
@@ -9735,13 +9951,10 @@ pub const VM = struct {
             try args.append(self.allocator, arg_value);
         }
 
-        // 查找并调用静态方法（也支持调用非静态方法，与PHP兼容）
-        const method = class.getMethod(method_name) orelse blk: {
-            // Check for __callStatic magic method later
-            break :blk null;
-        };
+        const method_lookup = class.getMethodLookup(method_name);
 
-        if (method) |m| {
+        if (method_lookup) |lookup| {
+            const m = lookup.method;
             // Push call frame
             const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
             defer self.allocator.free(full_method_name);
@@ -9768,10 +9981,14 @@ pub const VM = struct {
                 }
             }
 
-            // Set current class for 'self' resolution
-            const old_class = self.current_class;
-            self.current_class = class;
-            defer self.current_class = old_class;
+            const old_scope_class = self.current_class;
+            const old_called_class = self.current_called_class;
+            self.current_called_class = called_class;
+            self.current_class = lookup.owner;
+            defer {
+                self.current_class = old_scope_class;
+                self.current_called_class = old_called_class;
+            }
 
             // Execute method body
             if (m.body) |body_ptr| {
@@ -9813,9 +10030,7 @@ pub const VM = struct {
 
             return Value.initNull();
         } else {
-            // Check for __callStatic magic method
-            if (class.methods.get("__callStatic")) |call_static| {
-                _ = call_static;
+            if (class.getMethodLookup("__callStatic")) |call_static_lookup| {
                 const name_val = try Value.initString(self.allocator, method_name);
                 defer name_val.release(self.allocator);
 
@@ -9829,13 +10044,18 @@ pub const VM = struct {
 
                 const magic_args = [_]Value{ name_val, args_array_val };
 
-                // Set current class for 'self' resolution
-                const old_class = self.current_class;
-                self.current_class = class;
-                defer self.current_class = old_class;
+                const old_scope_class = self.current_class;
+                const old_called_class = self.current_called_class;
+                self.current_called_class = called_class;
+                self.current_class = call_static_lookup.owner;
+                defer {
+                    self.current_class = old_scope_class;
+                    self.current_called_class = old_called_class;
+                }
 
                 // Call __callStatic
-                if (class.methods.get("__callStatic")) |inner_call_static| {
+                {
+                    const inner_call_static = call_static_lookup.method;
                     const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::__callStatic", .{class_name});
                     defer self.allocator.free(full_method_name);
                     try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
@@ -9856,7 +10076,7 @@ pub const VM = struct {
                                     const ret = val;
                                     self.return_value = null;
                                     return ret;
-                                }
+                }
                                 return Value.initNull();
                             }
                             return err;
@@ -9884,7 +10104,7 @@ pub const VM = struct {
                 return self.throwException(exception);
             };
         } else if (std.mem.eql(u8, class_name, "static")) blk: {
-            break :blk self.current_class orelse {
+            break :blk self.current_called_class orelse {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access static:: outside of class scope", self.current_file, self.current_line);
                 return self.throwException(exception);
             };
