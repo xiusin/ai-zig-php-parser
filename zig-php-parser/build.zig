@@ -167,7 +167,7 @@ pub fn build(b: *std.Build) void {
     }
     // PHP compatibility tests
     const compat_test_step = b.step("test-compat", "Run PHP compatibility tests");
-    const compat_test_cmd = b.addSystemCommand(&[_][]const u8{"./run_compatibility_tests.sh"});
+    const compat_test_cmd = b.addSystemCommand(&[_][]const u8{ "bash", "run_compatibility_tests.sh" });
     compat_test_cmd.step.dependOn(b.getInstallStep());
     compat_test_step.dependOn(&compat_test_cmd.step);
 

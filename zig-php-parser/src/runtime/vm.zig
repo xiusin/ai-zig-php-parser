@@ -1702,24 +1702,28 @@ fn forwardStaticCallArrayFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    var arg_list = std.ArrayList(Value){};
-    defer arg_list.deinit(vm.allocator);
-
     const params = params_array.getAsArray().data;
-    var i: i64 = 0;
-    while (true) : (i += 1) {
-        const key = types.ArrayKey{ .integer = i };
-        if (params.get(key)) |v| {
-            try arg_list.append(vm.allocator, v);
-        } else {
-            break;
+    const params_count = params.count();
+
+    const packed_args = try vm.allocator.alloc(Value, 1 + params_count);
+    defer {
+        for (packed_args[1..]) |arg| {
+            vm.releaseValue(arg);
         }
+        vm.allocator.free(packed_args);
     }
 
-    const packed_args = try vm.allocator.alloc(Value, 1 + arg_list.items.len);
-    defer vm.allocator.free(packed_args);
     packed_args[0] = args[0];
-    @memcpy(packed_args[1..], arg_list.items);
+
+    var i: usize = 0;
+    var iterator = params.getElements().iterator();
+    while (iterator.next()) |entry| {
+        const v = entry.value_ptr.*;
+        packed_args[1 + i] = v;
+        vm.retainValue(v);
+        i += 1;
+    }
+
     return forwardStaticCallFn(vm, packed_args);
 }
 

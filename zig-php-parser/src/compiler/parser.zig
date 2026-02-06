@@ -208,8 +208,7 @@ pub const Parser = struct {
                 self.nextToken();
                 continue;
             }
-            const stmt = self.parseStatement() catch |err| {
-                std.debug.print("DEBUG: parseStatement failed with error: {any} at token: {any} ({s})\n", .{ err, self.curr.tag, self.lexer.buffer[self.curr.loc.start..self.curr.loc.end] });
+            const stmt = self.parseStatement() catch {
                 self.synchronize();
                 continue;
             };

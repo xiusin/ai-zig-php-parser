@@ -1019,14 +1019,9 @@ fn wrapBuiltin_forward_static_call_array(ctx: Value, args: []const Value, alloca
     var list = std.ArrayListUnmanaged(Value){};
     defer list.deinit(allocator);
 
-    var i: usize = 0;
-    while (true) : (i += 1) {
-        const key = ArrayKey{ .integer = @intCast(i) };
-        if (arr.elements.get(key)) |v| {
-            try list.append(allocator, v);
-        } else {
-            break;
-        }
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        try list.append(allocator, entry.value_ptr.*);
     }
 
     return php_forward_static_call(args[0], list.items, allocator);
