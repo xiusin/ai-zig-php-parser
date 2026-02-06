@@ -25,6 +25,7 @@ pub const Coroutine = struct {
     func_ptr: *const fn (?*anyopaque) anyerror!void,
     context: ?*anyopaque,
     result: ?*anyopaque,
+    err: ?anyerror,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, id: u64, func: *const fn (?*anyopaque) anyerror!void, context: ?*anyopaque) !*Coroutine {
@@ -35,6 +36,7 @@ pub const Coroutine = struct {
             .func_ptr = func,
             .context = context,
             .result = null,
+            .err = null,
             .allocator = allocator,
         };
         return coro;
@@ -187,9 +189,11 @@ pub const Scheduler = struct {
     active_count: std.atomic.Value(u64),
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
+    finished_cond: std.Thread.Condition,
     allocator: Allocator,
     worker_threads: std.ArrayList(std.Thread),
     running: std.atomic.Value(bool),
+    started: bool,
 
     pub fn init(allocator: Allocator) !*Scheduler {
         const sched = try allocator.create(Scheduler);
@@ -201,9 +205,11 @@ pub const Scheduler = struct {
             .active_count = std.atomic.Value(u64).init(0),
             .mutex = .{},
             .cond = .{},
+            .finished_cond = .{},
             .allocator = allocator,
             .worker_threads = std.ArrayList(std.Thread){},
             .running = std.atomic.Value(bool).init(true),
+            .started = false,
         };
         return sched;
     }
@@ -252,11 +258,18 @@ pub const Scheduler = struct {
 
     /// 启动worker线程
     pub fn start(self: *Scheduler, num_workers: usize) !void {
+        if (self.started) return;
+        self.started = true;
         var i: usize = 0;
         while (i < num_workers) : (i += 1) {
             const thread = try std.Thread.spawn(.{}, workerLoop, .{self});
             try self.worker_threads.append(self.allocator, thread);
         }
+    }
+
+    fn ensureStarted(self: *Scheduler) !void {
+        if (self.started) return;
+        try self.start(4);
     }
 
     /// 调度一个新协程
@@ -270,6 +283,34 @@ pub const Scheduler = struct {
         try self.ready_queue.append(self.allocator, coro);
         self.cond.signal();
         return id;
+    }
+
+    pub fn join(self: *Scheduler, id: u64) anyerror!void {
+        try self.ensureStarted();
+        var finished: *Coroutine = undefined;
+        while (true) {
+            self.mutex.lock();
+            var idx: usize = 0;
+            while (idx < self.finished_queue.items.len) : (idx += 1) {
+                if (self.finished_queue.items[idx].id == id) {
+                    finished = self.finished_queue.orderedRemove(idx);
+                    self.mutex.unlock();
+                    break;
+                }
+            } else {
+                self.finished_cond.wait(&self.mutex);
+                self.mutex.unlock();
+                continue;
+            }
+            break;
+        }
+
+        defer finished.deinit();
+        if (finished.err) |e| return e;
+    }
+
+    pub fn waitAll(self: *Scheduler) void {
+        _ = self.drain(null);
     }
 
     /// Worker线程循环
@@ -293,12 +334,13 @@ pub const Scheduler = struct {
                 const c = coro;
                 c.state = .running;
                 c.func_ptr(c.context) catch |err| {
-                    std.debug.print("Coroutine {d} error: {}\n", .{ c.id, err });
+                    c.err = err;
                 };
 
                 self.mutex.lock();
                 c.state = .finished;
                 self.finished_queue.append(self.allocator, c) catch c.deinit();
+                self.finished_cond.broadcast();
                 self.mutex.unlock();
             }
             _ = self.active_count.fetchSub(1, .acq_rel);
@@ -320,7 +362,6 @@ pub fn getScheduler(allocator: Allocator) !*Scheduler {
 
     if (global_scheduler == null) {
         global_scheduler = try Scheduler.init(allocator);
-        try global_scheduler.?.start(4); // 启动4个worker线程
     }
 
     return global_scheduler.?;
@@ -340,10 +381,9 @@ pub fn shutdownScheduler() void {
 
 pub fn drainScheduler(timeout_ms: ?u64) bool {
     scheduler_mutex.lock();
-    const sched = global_scheduler;
-    scheduler_mutex.unlock();
-
-    if (sched) |s| {
+    defer scheduler_mutex.unlock();
+    if (global_scheduler) |s| {
+        s.ensureStarted() catch return false;
         return s.drain(timeout_ms);
     }
     return true;

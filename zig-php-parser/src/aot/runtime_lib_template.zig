@@ -69,7 +69,6 @@ pub fn getException() Value {
 
 pub fn php_handle_uncaught_exception() void {
     if (has_exception) {
-        std.debug.print("Uncaught exception in coroutine\n", .{});
         has_exception = false;
     }
 }
@@ -811,6 +810,10 @@ fn lookupBuiltinFunction(name: []const u8) ?*const fn (ctx: Value, args: []const
             .{ .name = "array_map", .func = wrapBuiltin_array_map },
             .{ .name = "array_filter", .func = wrapBuiltin_array_filter },
             .{ .name = "array_reduce", .func = wrapBuiltin_array_reduce },
+            .{ .name = "select", .func = wrapBuiltin_select },
+            .{ .name = "get_class_methods", .func = wrapBuiltin_get_class_methods },
+            .{ .name = "get_class_vars", .func = wrapBuiltin_get_class_vars },
+            .{ .name = "get_object_vars", .func = wrapBuiltin_get_object_vars },
         };
     };
 
@@ -914,6 +917,191 @@ fn wrapBuiltin_array_reduce(ctx: Value, args: []const Value, allocator: Allocato
     if (args.len < 2) return error.InvalidArgumentCount;
     const initial = if (args.len >= 3) args[2] else Value.initNull();
     return php_array_reduce(args[0], args[1], initial, allocator);
+}
+
+fn wrapBuiltin_select(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_select(args, allocator);
+}
+
+fn wrapBuiltin_get_class_methods(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_class_methods(args[0], allocator);
+}
+
+fn wrapBuiltin_get_class_vars(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_class_vars(args[0], allocator);
+}
+
+fn wrapBuiltin_get_object_vars(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_object_vars(args[0], allocator);
+}
+
+pub fn php_select_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    return php_select(args, allocator);
+}
+
+pub fn php_get_class_methods_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_class_methods(args[0], allocator);
+}
+
+pub fn php_get_class_vars_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_class_vars(args[0], allocator);
+}
+
+pub fn php_get_object_vars_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_object_vars(args[0], allocator);
+}
+
+fn php_get_class_methods(class_name_val: Value, allocator: Allocator) !Value {
+    var meta_opt: ?*const ClassMeta = null;
+    if (class_name_val.isString()) {
+        meta_opt = findClass(class_name_val.asString().data);
+    } else if (Value_isObject(class_name_val)) {
+        const obj = Value_asObject(class_name_val);
+        meta_opt = obj.class_meta orelse findClass(obj.class_name);
+    } else {
+        return error.InvalidArgument;
+    }
+
+    const meta = meta_opt orelse return Value.initNull();
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    const res_arr = try PHPArray.init(allocator);
+
+    var cur: ?*const ClassMeta = meta;
+    while (cur) |m| : (cur = m.parent) {
+        var iter = m.methods.iterator();
+        while (iter.next()) |entry| {
+            const method = entry.value_ptr.*;
+            if (!method.is_public) continue;
+            if (seen.contains(entry.key_ptr.*)) continue;
+            try seen.put(entry.key_ptr.*, {}) ;
+
+            const s = try PHPString.init(allocator, entry.key_ptr.*);
+            const v = Value.initString(s);
+            try res_arr.push(allocator, v);
+            v.release(allocator);
+        }
+    }
+
+    return Value.initArray(res_arr);
+}
+
+fn php_get_class_vars(class_name_val: Value, allocator: Allocator) !Value {
+    var meta_opt: ?*const ClassMeta = null;
+    if (class_name_val.isString()) {
+        meta_opt = findClass(class_name_val.asString().data);
+    } else if (Value_isObject(class_name_val)) {
+        const obj = Value_asObject(class_name_val);
+        meta_opt = obj.class_meta orelse findClass(obj.class_name);
+    } else {
+        return error.InvalidArgument;
+    }
+
+    const meta = meta_opt orelse return Value.initNull();
+    const res_arr = try PHPArray.init(allocator);
+
+    var iter = meta.properties.iterator();
+    while (iter.next()) |entry| {
+        const prop = entry.value_ptr.*;
+        if (prop.is_static) continue;
+        if (!prop.is_public) continue;
+        const key_str = try PHPString.init(allocator, entry.key_ptr.*);
+        try res_arr.set(allocator, ArrayKey{ .string = key_str }, prop.default_value orelse Value.initNull());
+        key_str.release(allocator);
+    }
+
+    return Value.initArray(res_arr);
+}
+
+fn php_get_object_vars(obj_val: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) return error.InvalidArgument;
+    const obj = Value_asObject(obj_val);
+
+    const res_arr = try PHPArray.init(allocator);
+    var iter = obj.properties.iterator();
+    while (iter.next()) |entry| {
+        const key_str = try PHPString.init(allocator, entry.key_ptr.*);
+        try res_arr.set(allocator, ArrayKey{ .string = key_str }, entry.value_ptr.*);
+        key_str.release(allocator);
+    }
+    return Value.initArray(res_arr);
+}
+
+fn php_select(args: []const Value, allocator: Allocator) !Value {
+    const cases_arg = args[0];
+    if (!cases_arg.isArray()) return error.InvalidArgument;
+
+    var timeout: ?i64 = null;
+    if (args.len > 1 and !args[1].isNull()) {
+        timeout = args[1].toInt();
+    }
+
+    const array = cases_arg.asArray();
+    const start_time = std.time.milliTimestamp();
+
+    while (true) {
+        var iter = array.elements.iterator();
+        var index: usize = 0;
+        while (iter.next()) |entry| : (index += 1) {
+            const case_val = entry.value_ptr.*;
+            if (!case_val.isArray()) continue;
+
+            const case_arr = case_val.asArray();
+            const ch_val = case_arr.get(ArrayKey{ .integer = 0 }) orelse continue;
+            const op_val = case_arr.get(ArrayKey{ .integer = 1 }) orelse continue;
+
+            if (!Value_isObject(ch_val)) continue;
+            const ch_obj = Value_asObject(ch_val);
+            if (ch_obj.getProperty("_ptr")) |ptr_val| {
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                const op = op_val.toInt();
+
+                if (op == 0) {
+                    if (channel.tryRecv()) |val| {
+                        const res_arr = try PHPArray.init(allocator);
+                        try res_arr.push(allocator, Value.initInt(@intCast(index)));
+                        try res_arr.push(allocator, val);
+                        return Value.initArray(res_arr);
+                    }
+                } else if (op == 1) {
+                    const send_val = case_arr.get(ArrayKey{ .integer = 2 }) orelse Value.initNull();
+                    _ = send_val.retain();
+                    const ok = channel.trySend(send_val) catch {
+                        send_val.release(allocator);
+                        continue;
+                    };
+                    if (ok) {
+                        return Value.initInt(@intCast(index));
+                    }
+                    send_val.release(allocator);
+                }
+            }
+        }
+
+        if (timeout) |t| {
+            if (std.time.milliTimestamp() - start_time >= t) {
+                return Value.initNull();
+            }
+        }
+        std.Thread.yield() catch {};
+    }
 }
 
 pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allocator) !Value {
@@ -5070,20 +5258,17 @@ fn php_coroutine_entry(context: ?*anyopaque) anyerror!void {
             if (user_function_registry) |registry| {
                 if (registry.get(func_name)) |func| {
                     _ = func(Value.initNull(), ctx.args, ctx.allocator) catch |err| {
-                        std.debug.print("Uncaught exception in coroutine: {}\n", .{err});
                         if (has_exception) {
                             php_handle_uncaught_exception();
                         }
                         return err;
                     };
                 } else {
-                     std.debug.print("Function not found: {s}\n", .{func_name});
                 }
             }
         } else if (ctx.callable.isFunction()) {
             const closure = ctx.callable.asFunction();
             _ = closure.func(Value.initFunction(closure), ctx.args, ctx.allocator) catch |err| {
-                std.debug.print("Uncaught exception in coroutine: {}\n", .{err});
                 if (has_exception) {
                     php_handle_uncaught_exception();
                 }
@@ -5119,6 +5304,27 @@ pub fn php_go(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Va
     return Value.initInt(@intCast(coro_id));
 }
 
+pub fn php_go_wait_all(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    _ = args;
+    _ = allocator;
+    _ = concurrency.drainScheduler(null);
+    return Value.initNull();
+}
+
+pub fn php_go_join(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len == 0 or args[0].isNull()) {
+        _ = concurrency.drainScheduler(null);
+        return Value.initNull();
+    }
+    const id = @as(u64, @intCast(args[0].toInt()));
+    const scheduler = try concurrency.getScheduler(runtime_allocator);
+    try scheduler.join(id);
+    return Value.initNull();
+}
+
 pub fn go_spawn(func_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     const callable = Value.initString(try PHPString.init(allocator, func_name));
     const full_args = try allocator.alloc(Value, args.len + 1);
@@ -5128,6 +5334,240 @@ pub fn go_spawn(func_name: []const u8, args: []const Value, allocator: Allocator
     
     return php_go(Value.initNull(), full_args, allocator);
 }
+
+pub const PHPMutex = struct {
+    mutex: std.Thread.Mutex,
+    lock_count: std.atomic.Value(u32),
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator) !*PHPMutex {
+        const self = try allocator.create(PHPMutex);
+        self.* = .{
+            .mutex = .{},
+            .lock_count = std.atomic.Value(u32).init(0),
+            .allocator = allocator,
+        };
+        return self;
+    }
+
+    pub fn deinit(self: *PHPMutex) void {
+        self.allocator.destroy(self);
+    }
+
+    pub fn lock(self: *PHPMutex) void {
+        self.mutex.lock();
+        _ = self.lock_count.fetchAdd(1, .monotonic);
+    }
+
+    pub fn unlock(self: *PHPMutex) void {
+        _ = self.lock_count.fetchSub(1, .monotonic);
+        self.mutex.unlock();
+    }
+
+    pub fn tryLock(self: *PHPMutex) bool {
+        if (self.mutex.tryLock()) {
+            _ = self.lock_count.fetchAdd(1, .monotonic);
+            return true;
+        }
+        return false;
+    }
+
+    pub fn getLockCount(self: *const PHPMutex) u32 {
+        return self.lock_count.load(.monotonic);
+    }
+};
+
+pub const PHPAtomic = struct {
+    value: std.atomic.Value(i64),
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, initial: i64) !*PHPAtomic {
+        const self = try allocator.create(PHPAtomic);
+        self.* = .{
+            .value = std.atomic.Value(i64).init(initial),
+            .allocator = allocator,
+        };
+        return self;
+    }
+
+    pub fn deinit(self: *PHPAtomic) void {
+        self.allocator.destroy(self);
+    }
+
+    pub fn load(self: *const PHPAtomic) i64 {
+        return self.value.load(.monotonic);
+    }
+
+    pub fn store(self: *PHPAtomic, v: i64) void {
+        self.value.store(v, .monotonic);
+    }
+
+    pub fn increment(self: *PHPAtomic) i64 {
+        return self.value.fetchAdd(1, .monotonic) + 1;
+    }
+
+    pub fn decrement(self: *PHPAtomic) i64 {
+        return self.value.fetchSub(1, .monotonic) - 1;
+    }
+
+    pub fn add(self: *PHPAtomic, delta: i64) i64 {
+        return self.value.fetchAdd(delta, .monotonic);
+    }
+
+    pub fn sub(self: *PHPAtomic, delta: i64) i64 {
+        return self.value.fetchSub(delta, .monotonic);
+    }
+
+    pub fn swap(self: *PHPAtomic, new_value: i64) i64 {
+        return self.value.swap(new_value, .monotonic);
+    }
+
+    pub fn compareAndSwap(self: *PHPAtomic, expected: i64, new_value: i64) bool {
+        return self.value.cmpxchgStrong(expected, new_value, .monotonic, .monotonic) == null;
+    }
+};
+
+pub const PHPRWLock = struct {
+    rwlock: std.Thread.RwLock,
+    readers: std.atomic.Value(i32),
+    writer: std.atomic.Value(bool),
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator) !*PHPRWLock {
+        const self = try allocator.create(PHPRWLock);
+        self.* = .{
+            .rwlock = .{},
+            .readers = std.atomic.Value(i32).init(0),
+            .writer = std.atomic.Value(bool).init(false),
+            .allocator = allocator,
+        };
+        return self;
+    }
+
+    pub fn deinit(self: *PHPRWLock) void {
+        self.allocator.destroy(self);
+    }
+
+    pub fn lockRead(self: *PHPRWLock) void {
+        self.rwlock.lockShared();
+        _ = self.readers.fetchAdd(1, .monotonic);
+    }
+
+    pub fn unlockRead(self: *PHPRWLock) void {
+        _ = self.readers.fetchSub(1, .monotonic);
+        self.rwlock.unlockShared();
+    }
+
+    pub fn lockWrite(self: *PHPRWLock) void {
+        self.rwlock.lock();
+        self.writer.store(true, .monotonic);
+    }
+
+    pub fn unlockWrite(self: *PHPRWLock) void {
+        self.writer.store(false, .monotonic);
+        self.rwlock.unlock();
+    }
+
+    pub fn getReaderCount(self: *const PHPRWLock) i32 {
+        return self.readers.load(.monotonic);
+    }
+
+    pub fn getWriterCount(self: *const PHPRWLock) i32 {
+        return if (self.writer.load(.monotonic)) 1 else 0;
+    }
+};
+
+pub const PHPSharedData = struct {
+    data: std.StringHashMap([]const u8),
+    mutex: std.Thread.Mutex,
+    allocator: Allocator,
+    access_count: std.atomic.Value(u64),
+
+    pub fn init(allocator: Allocator) !*PHPSharedData {
+        const self = try allocator.create(PHPSharedData);
+        self.* = .{
+            .data = std.StringHashMap([]const u8).init(allocator),
+            .mutex = .{},
+            .allocator = allocator,
+            .access_count = std.atomic.Value(u64).init(0),
+        };
+        return self;
+    }
+
+    pub fn deinit(self: *PHPSharedData) void {
+        var iter = self.data.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.data.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn get(self: *PHPSharedData, key: []const u8) ?[]const u8 {
+        _ = self.access_count.fetchAdd(1, .monotonic);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.data.get(key);
+    }
+
+    pub fn set(self: *PHPSharedData, key: []const u8, value: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.data.fetchRemove(key)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
+
+        const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
+        const value_copy = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(value_copy);
+
+        try self.data.put(key_copy, value_copy);
+    }
+
+    pub fn remove(self: *PHPSharedData, key: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.data.fetchRemove(key)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+            return true;
+        }
+        return false;
+    }
+
+    pub fn has(self: *PHPSharedData, key: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.data.contains(key);
+    }
+
+    pub fn size(self: *PHPSharedData) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.data.count();
+    }
+
+    pub fn clear(self: *PHPSharedData) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var iter = self.data.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.data.clearRetainingCapacity();
+    }
+
+    pub fn getAccessCount(self: *const PHPSharedData) u64 {
+        return self.access_count.load(.monotonic);
+    }
+};
 
 pub fn channel_new(capacity: i64, allocator: Allocator) !Value {
     const obj = try php_object_new("Channel", allocator);
@@ -5365,10 +5805,544 @@ fn registerChannelClassNamed(allocator: Allocator, class_name: []const u8) !void
     try registerClass(meta);
 }
 
+fn registerMutexClassNamed(allocator: Allocator, class_name: []const u8) !void {
+    const meta = try ClassMeta.init(allocator, class_name);
+
+    try meta.addMethod(.{
+        .name = "__construct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                const this = Value_asObject(ctx);
+                const m = try PHPMutex.init(runtime_alloc);
+                const ptr_val = Value.initInt(@intCast(@intFromPtr(m)));
+                try this.setProperty("_ptr", ptr_val);
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "lock",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidArgument;
+                const m = @as(*PHPMutex, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                m.lock();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "unlock",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidArgument;
+                const m = @as(*PHPMutex, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                m.unlock();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "tryLock",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidArgument;
+                const m = @as(*PHPMutex, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                return Value.initBool(m.tryLock());
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "getLockCount",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                const ptr_val = this.getProperty("_ptr") orelse return error.InvalidArgument;
+                const m = @as(*PHPMutex, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                return Value.initInt(@intCast(m.getLockCount()));
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "__destruct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                if (this.getProperty("_ptr")) |ptr_val| {
+                    const m = @as(*PHPMutex, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                    m.deinit();
+                    try this.setProperty("_ptr", Value.initNull());
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    meta.magic_destruct = meta.findMethod("__destruct").?.func;
+    try registerClass(meta);
+}
+
+fn registerAtomicClassNamed(allocator: Allocator, class_name: []const u8) !void {
+    const meta = try ClassMeta.init(allocator, class_name);
+
+    try meta.addMethod(.{
+        .name = "__construct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                const this = Value_asObject(ctx);
+                const initial: i64 = if (args.len > 0) args[0].toInt() else 0;
+                const a = try PHPAtomic.init(runtime_alloc, initial);
+                const ptr_val = Value.initInt(@intCast(@intFromPtr(a)));
+                try this.setProperty("_ptr", ptr_val);
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    const get_ptr = struct {
+        fn ptr(ctx: Value) !*PHPAtomic {
+            const this = Value_asObject(ctx);
+            const ptr_val = this.getProperty("_ptr") orelse return error.InvalidArgument;
+            return @as(*PHPAtomic, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+        }
+    }.ptr;
+
+    try meta.addMethod(.{
+        .name = "load",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const a = try get_ptr(ctx);
+                return Value.initInt(a.load());
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "store",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                if (args.len < 1) return error.MissingArgument;
+                const a = try get_ptr(ctx);
+                a.store(args[0].toInt());
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "increment",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const a = try get_ptr(ctx);
+                return Value.initInt(a.increment());
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "decrement",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const a = try get_ptr(ctx);
+                return Value.initInt(a.decrement());
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "add",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                if (args.len < 1) return error.MissingArgument;
+                const a = try get_ptr(ctx);
+                return Value.initInt(a.add(args[0].toInt()));
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "sub",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                if (args.len < 1) return error.MissingArgument;
+                const a = try get_ptr(ctx);
+                return Value.initInt(a.sub(args[0].toInt()));
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "swap",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                if (args.len < 1) return error.MissingArgument;
+                const a = try get_ptr(ctx);
+                return Value.initInt(a.swap(args[0].toInt()));
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "compareAndSwap",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                if (args.len < 2) return error.MissingArgument;
+                const a = try get_ptr(ctx);
+                return Value.initBool(a.compareAndSwap(args[0].toInt(), args[1].toInt()));
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "__destruct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                if (this.getProperty("_ptr")) |ptr_val| {
+                    const a = @as(*PHPAtomic, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                    a.deinit();
+                    try this.setProperty("_ptr", Value.initNull());
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    meta.magic_destruct = meta.findMethod("__destruct").?.func;
+    try registerClass(meta);
+}
+
+fn registerRWLockClassNamed(allocator: Allocator, class_name: []const u8) !void {
+    const meta = try ClassMeta.init(allocator, class_name);
+
+    try meta.addMethod(.{
+        .name = "__construct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                const this = Value_asObject(ctx);
+                const l = try PHPRWLock.init(runtime_alloc);
+                const ptr_val = Value.initInt(@intCast(@intFromPtr(l)));
+                try this.setProperty("_ptr", ptr_val);
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    const get_ptr = struct {
+        fn ptr(ctx: Value) !*PHPRWLock {
+            const this = Value_asObject(ctx);
+            const ptr_val = this.getProperty("_ptr") orelse return error.InvalidArgument;
+            return @as(*PHPRWLock, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+        }
+    }.ptr;
+
+    try meta.addMethod(.{
+        .name = "lockRead",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const l = try get_ptr(ctx);
+                l.lockRead();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "unlockRead",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const l = try get_ptr(ctx);
+                l.unlockRead();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "lockWrite",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const l = try get_ptr(ctx);
+                l.lockWrite();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "unlockWrite",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const l = try get_ptr(ctx);
+                l.unlockWrite();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "getReaderCount",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const l = try get_ptr(ctx);
+                return Value.initInt(@intCast(l.getReaderCount()));
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "getWriterCount",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const l = try get_ptr(ctx);
+                return Value.initInt(@intCast(l.getWriterCount()));
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "__destruct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                if (this.getProperty("_ptr")) |ptr_val| {
+                    const l = @as(*PHPRWLock, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                    l.deinit();
+                    try this.setProperty("_ptr", Value.initNull());
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    meta.magic_destruct = meta.findMethod("__destruct").?.func;
+    try registerClass(meta);
+}
+
+fn registerSharedDataClassNamed(allocator: Allocator, class_name: []const u8) !void {
+    const meta = try ClassMeta.init(allocator, class_name);
+
+    try meta.addMethod(.{
+        .name = "__construct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                const this = Value_asObject(ctx);
+                const s = try PHPSharedData.init(runtime_alloc);
+                const ptr_val = Value.initInt(@intCast(@intFromPtr(s)));
+                try this.setProperty("_ptr", ptr_val);
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    const get_ptr = struct {
+        fn ptr(ctx: Value) !*PHPSharedData {
+            const this = Value_asObject(ctx);
+            const ptr_val = this.getProperty("_ptr") orelse return error.InvalidArgument;
+            return @as(*PHPSharedData, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+        }
+    }.ptr;
+
+    try meta.addMethod(.{
+        .name = "set",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                if (args.len < 2) return error.MissingArgument;
+                if (!args[0].isString()) return error.InvalidArgument;
+                const s = try get_ptr(ctx);
+                const key = args[0].asString().data;
+                const val_str = if (args[1].isString()) args[1] else try php_strval(args[1], runtime_alloc);
+                defer if (!args[1].isString()) val_str.release(runtime_alloc);
+                try s.set(key, val_str.asString().data);
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "get",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                if (args.len < 1) return error.MissingArgument;
+                if (!args[0].isString()) return error.InvalidArgument;
+                const s = try get_ptr(ctx);
+                const key = args[0].asString().data;
+                if (s.get(key)) |val| {
+                    return Value.initString(try PHPString.init(runtime_alloc, val));
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "remove",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                if (args.len < 1) return error.MissingArgument;
+                if (!args[0].isString()) return error.InvalidArgument;
+                const s = try get_ptr(ctx);
+                const key = args[0].asString().data;
+                return Value.initBool(s.remove(key));
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "has",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = runtime_alloc;
+                if (args.len < 1) return error.MissingArgument;
+                if (!args[0].isString()) return error.InvalidArgument;
+                const s = try get_ptr(ctx);
+                const key = args[0].asString().data;
+                return Value.initBool(s.has(key));
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "size",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const s = try get_ptr(ctx);
+                return Value.initInt(@intCast(s.size()));
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "clear",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const s = try get_ptr(ctx);
+                s.clear();
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "getAccessCount",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const s = try get_ptr(ctx);
+                return Value.initInt(@intCast(s.getAccessCount()));
+            }
+        }.call,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "__destruct",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                _ = args;
+                _ = runtime_alloc;
+                const this = Value_asObject(ctx);
+                if (this.getProperty("_ptr")) |ptr_val| {
+                    const s = @as(*PHPSharedData, @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                    s.deinit();
+                    try this.setProperty("_ptr", Value.initNull());
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    meta.magic_destruct = meta.findMethod("__destruct").?.func;
+    try registerClass(meta);
+}
+
 fn registerZigChannel(allocator: Allocator) !void {
     try registerChannelClassNamed(allocator, "Channel");
     try registerChannelClassNamed(allocator, "Zig\\Channel");
+    try registerMutexClassNamed(allocator, "Mutex");
+    try registerMutexClassNamed(allocator, "Zig\\Mutex");
+    try registerAtomicClassNamed(allocator, "Atomic");
+    try registerAtomicClassNamed(allocator, "Zig\\Atomic");
+    try registerRWLockClassNamed(allocator, "RWLock");
+    try registerRWLockClassNamed(allocator, "Zig\\RWLock");
+    try registerSharedDataClassNamed(allocator, "SharedData");
+    try registerSharedDataClassNamed(allocator, "Zig\\SharedData");
     try registerUserFunction("go", php_go);
+    try registerUserFunction("go_wait_all", php_go_wait_all);
+    try registerUserFunction("go_join", php_go_join);
 }
 
 fn registerZigSelect(allocator: Allocator) !void {

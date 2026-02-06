@@ -985,6 +985,7 @@ pub const PriorityQueue = struct {
 pub const CoroutineManager = struct {
     allocator: std.mem.Allocator,
     coroutines: std.AutoHashMap(u64, *Coroutine),
+    finished: std.AutoHashMap(u64, FinishedCoroutine),
     /// 优先级就绪队列（替代原来的简单队列）
     priority_queue: PriorityQueue,
     /// 保留原始队列用于兼容
@@ -1011,6 +1012,10 @@ pub const CoroutineManager = struct {
     /// 异步IO反应器（可选）
     io_reactor: ?*AsyncIOReactor,
 
+    const FinishedCoroutine = struct {
+        err: ?anyerror,
+    };
+
     pub const SchedulingPolicy = enum {
         /// 简单FIFO（兼容模式）
         fifo,
@@ -1024,6 +1029,7 @@ pub const CoroutineManager = struct {
         return CoroutineManager{
             .allocator = allocator,
             .coroutines = std.AutoHashMap(u64, *Coroutine).init(allocator),
+            .finished = std.AutoHashMap(u64, FinishedCoroutine).init(allocator),
             .priority_queue = PriorityQueue.init(allocator),
             .ready_queue = .{},
             .sleeping_queue = .{},
@@ -1052,6 +1058,7 @@ pub const CoroutineManager = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.coroutines.deinit();
+        self.finished.deinit();
 
         // 清理队列
         self.priority_queue.deinit();
@@ -1109,59 +1116,67 @@ pub const CoroutineManager = struct {
         return id;
     }
 
+    pub fn processOneStep(self: *CoroutineManager, vm: *anyopaque) !bool {
+        try self.wakeUpSleeping();
+        try self.pollIOEvents();
+        self.checkStarvation();
+
+        const next_coroutine = self.getNextReady();
+        if (next_coroutine == null) return false;
+
+        const co = next_coroutine.?;
+        self.current_coroutine = co;
+        co.scheduled_count += 1;
+
+        var exec_err: ?anyerror = null;
+        const result = co.resumeExecution(vm) catch |err| blk: {
+            exec_err = err;
+            break :blk Value.initNull();
+        };
+
+        if (exec_err) |err| {
+            co.state = .completed;
+            co.result = Value.initNull();
+            self.finished.put(co.id, .{ .err = err }) catch {};
+            self.recycleCoroutine(co);
+            self.current_coroutine = null;
+            return true;
+        }
+
+        switch (co.state) {
+            .completed => {
+                co.result = result;
+                self.finished.put(co.id, .{ .err = null }) catch {};
+                self.recycleCoroutine(co);
+            },
+            .yielded => {
+                self.mutex.lock();
+                switch (self.scheduling_policy) {
+                    .fifo => self.ready_queue.append(self.allocator, co) catch {},
+                    .priority, .weighted_fair => self.priority_queue.enqueue(co) catch {},
+                }
+                self.mutex.unlock();
+            },
+            .sleeping => {
+                self.mutex.lock();
+                self.sleeping_queue.append(self.allocator, co) catch {};
+                self.mutex.unlock();
+            },
+            .waiting => {},
+            else => {},
+        }
+
+        self.current_coroutine = null;
+        return true;
+    }
+
     /// 运行调度器
     pub fn run(self: *CoroutineManager, vm: *anyopaque) !void {
         self.scheduler_running.store(true, .seq_cst);
 
         while (self.scheduler_running.load(.seq_cst)) {
-            // 检查睡眠协程
-            try self.wakeUpSleeping();
-
-            // 轮询IO事件并唤醒就绪的协程
-            try self.pollIOEvents();
-
-            // 检查饥饿并提升优先级
-            self.checkStarvation();
-
-            // 获取下一个就绪协程
-            const next_coroutine = self.getNextReady();
-
-            if (next_coroutine) |co| {
-                self.current_coroutine = co;
-                co.scheduled_count += 1;
-
-                // 执行协程
-                const result = co.resumeExecution(vm);
-
-                switch (co.state) {
-                    .completed => {
-                        // 协程完成，存储结果
-                        co.result = result catch Value.initNull();
-                        self.recycleCoroutine(co);
-                    },
-                    .yielded => {
-                        // 协程让出，重新加入就绪队列
-                        self.mutex.lock();
-                        switch (self.scheduling_policy) {
-                            .fifo => self.ready_queue.append(self.allocator, co) catch {},
-                            .priority, .weighted_fair => self.priority_queue.enqueue(co) catch {},
-                        }
-                        self.mutex.unlock();
-                    },
-                    .sleeping => {
-                        // 协程休眠，加入睡眠队列
-                        self.mutex.lock();
-                        self.sleeping_queue.append(self.allocator, co) catch {};
-                        self.mutex.unlock();
-                    },
-                    .waiting => {
-                        // 等待IO或其他事件，协程已在IO等待队列中
-                    },
-                    else => {},
-                }
-
-                self.current_coroutine = null;
-            } else {
+            if (try self.processOneStep(vm)) continue;
+            {
                 // 没有就绪协程，检查是否还有等待中的协程
                 self.mutex.lock();
                 const has_ready = switch (self.scheduling_policy) {
@@ -1210,6 +1225,58 @@ pub const CoroutineManager = struct {
             return co.result;
         }
         return null;
+    }
+
+    pub fn join(self: *CoroutineManager, vm: *anyopaque, id: u64) anyerror!void {
+        if (self.currentId()) |current| {
+            if (current == id) return error.InvalidArgument;
+        }
+
+        while (true) {
+            if (self.finished.get(id)) |finished| {
+                _ = self.finished.remove(id);
+                if (finished.err) |err| return err;
+                return;
+            }
+
+            if (self.coroutines.get(id) == null) return error.InvalidArgument;
+
+            if (try self.processOneStep(vm)) continue;
+
+            self.mutex.lock();
+            const has_ready = switch (self.scheduling_policy) {
+                .fifo => self.ready_queue.items.len > 0,
+                .priority, .weighted_fair => !self.priority_queue.isEmpty(),
+            };
+            const has_sleeping = self.sleeping_queue.items.len > 0;
+            const has_io_waiting = self.io_waiting_queue.items.len > 0;
+            const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000;
+            if (has_ready or has_sleeping or has_io_waiting) {
+                self.cond.timedWait(&self.mutex, wait_time) catch {};
+            }
+            self.mutex.unlock();
+        }
+    }
+
+    pub fn drain(self: *CoroutineManager, vm: *anyopaque) !void {
+        while (true) {
+            if (try self.processOneStep(vm)) continue;
+
+            self.mutex.lock();
+            const has_ready = switch (self.scheduling_policy) {
+                .fifo => self.ready_queue.items.len > 0,
+                .priority, .weighted_fair => !self.priority_queue.isEmpty(),
+            };
+            const has_sleeping = self.sleeping_queue.items.len > 0;
+            const has_io_waiting = self.io_waiting_queue.items.len > 0;
+            if (!has_ready and !has_sleeping and !has_io_waiting) {
+                self.mutex.unlock();
+                return;
+            }
+            const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000;
+            self.cond.timedWait(&self.mutex, wait_time) catch {};
+            self.mutex.unlock();
+        }
     }
 
     /// 取消协程

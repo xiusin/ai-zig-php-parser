@@ -220,6 +220,9 @@ pub const NativeLinker = struct {
             }
             try self.func_return_types.put(func.name, has_return_value);
         }
+        if (!self.func_return_types.contains("select")) {
+            try self.func_return_types.put("select", true);
+        }
 
         // 生成文件头
         try writer.writeAll(
@@ -264,6 +267,95 @@ pub const NativeLinker = struct {
             try self.generateFunction(&code, func);
         }
 
+        var has_select: bool = false;
+        for (ir_module.functions.items) |func| {
+            if (std.mem.eql(u8, func.name, "select")) {
+                has_select = true;
+                break;
+            }
+        }
+        if (!has_select) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"select"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_select_builtin(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+
+        var has_go: bool = false;
+        var has_go_wait_all: bool = false;
+        var has_go_join: bool = false;
+        for (ir_module.functions.items) |func| {
+            if (std.mem.eql(u8, func.name, "go")) has_go = true;
+            if (std.mem.eql(u8, func.name, "go_wait_all")) has_go_wait_all = true;
+            if (std.mem.eql(u8, func.name, "go_join")) has_go_join = true;
+        }
+        if (!has_go) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"go"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_go(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+        if (!has_go_wait_all) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"go_wait_all"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_go_wait_all(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+        if (!has_go_join) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"go_join"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_go_join(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+
+        var has_get_class_methods: bool = false;
+        var has_get_class_vars: bool = false;
+        var has_get_object_vars: bool = false;
+        for (ir_module.functions.items) |func| {
+            if (std.mem.eql(u8, func.name, "get_class_methods")) has_get_class_methods = true;
+            if (std.mem.eql(u8, func.name, "get_class_vars")) has_get_class_vars = true;
+            if (std.mem.eql(u8, func.name, "get_object_vars")) has_get_object_vars = true;
+        }
+        if (!has_get_class_methods) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"get_class_methods"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_get_class_methods_builtin(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+        if (!has_get_class_vars) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"get_class_vars"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_get_class_vars_builtin(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+        if (!has_get_object_vars) {
+            try writer.writeAll(
+                \\
+                \\pub fn @"get_object_vars"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+                \\    return runtime.php_get_object_vars_builtin(ctx, args, allocator);
+                \\}
+                \\
+            );
+        }
+
         // 生成类注册函数
         try self.generateClassRegistration(writer, ir_module);
 
@@ -286,6 +378,7 @@ pub const NativeLinker = struct {
             \\    defer runtime.cleanupAllClasses();
             \\    
             \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
+            \\    _ = runtime.php_go_wait_all(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch {};
             \\}
             \\
         );
@@ -516,6 +609,7 @@ pub const NativeLinker = struct {
 
             // 文件函数
             "file_get_contents", "file_put_contents",
+            "basename", "dirname",
 
             // 随机数函数
                    "random_bytes",
@@ -3134,7 +3228,18 @@ pub const NativeLinker = struct {
                     }
                 }
 
-                try writer.print("    _ = try runtime.go_spawn(\"{s}\", &[_]runtime.Value{{{s}}}, runtime.runtime_allocator);\n", .{ op.func_name, args_buf.items });
+                try writer.writeAll("    _ = try runtime.go_spawn(\"");
+                for (op.func_name) |c| {
+                    switch (c) {
+                        '\n' => try writer.writeAll("\\n"),
+                        '\r' => try writer.writeAll("\\r"),
+                        '\t' => try writer.writeAll("\\t"),
+                        '\\' => try writer.writeAll("\\\\"),
+                        '"' => try writer.writeAll("\\\""),
+                        else => try writer.writeByte(c),
+                    }
+                }
+                try writer.print("\", &[_]runtime.Value{{{s}}}, runtime.runtime_allocator);\n", .{args_buf.items});
             },
             .channel_new => |op| {
                 if (inst.result) |reg| {

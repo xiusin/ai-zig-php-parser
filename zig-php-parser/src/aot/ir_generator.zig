@@ -1555,7 +1555,19 @@ pub const IRGenerator = struct {
 
         if (call_node.tag == .function_call) {
             const call_data = call_node.data.function_call;
-            const func_name = self.getString(call_data.name);
+            const name_node = self.getNode(call_data.name) orelse return;
+            if (name_node.tag != .literal_string) {
+                const expr_reg = try self.generateExpression(go_data.call);
+                const args = try self.allocator.alloc(Register, 1);
+                args[0] = expr_reg;
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_go_builtin",
+                    .args = args,
+                    .return_type = .php_value,
+                } }, null);
+                return;
+            }
+            const func_name = self.getString(name_node.data.literal_string.value);
 
             // 生成参数
             const args = try self.allocator.alloc(Register, call_data.args.len);
