@@ -4875,15 +4875,7 @@ pub const VM = struct {
     }
 
     pub fn callUserFunc(self: *VM, function_name: []const u8, args: []const Value) !Value {
-        // Fast path: Check builtin dispatch table first (zero HashMap overhead)
-        // Requirements: 4.1, 4.2 - Direct dispatch for builtin functions
-        if (builtin_dispatch.lookup(function_name)) |_| {
-            // Found in builtin dispatch table, use stdlib for actual call
-            // This avoids HashMap lookup in stdlib.getFunction()
-            if (self.stdlib.getFunction(function_name)) |builtin_func| {
-                return builtin_func.call(self, args);
-            }
-        }
+        if (try StandardLibrary.callBuiltinFast(self, function_name, args)) |v| return v;
 
         // Second, check extension functions (Requirements: 9.2)
         if (self.extension_registry) |ext_reg| {
@@ -6557,15 +6549,7 @@ pub const VM = struct {
     }
 
     pub fn callFunctionByNameWithRefs(self: *VM, name: []const u8, args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
-        // Fast path: Check builtin dispatch table first (zero HashMap overhead)
-        // Requirements: 4.1, 4.2 - Direct dispatch for builtin functions
-        if (builtin_dispatch.lookup(name)) |_| {
-            // Found in builtin dispatch table, use stdlib for actual call
-            if (self.stdlib.getFunction(name)) |builtin_func| {
-                // Stdlib functions don't support named args or refs, just use positional
-                return builtin_func.call(self, args);
-            }
-        }
+        if (try StandardLibrary.callBuiltinFast(self, name, args)) |v| return v;
 
         // Then check global functions
         const function_val = self.global.get(name) orelse {

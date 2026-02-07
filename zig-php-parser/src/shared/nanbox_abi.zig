@@ -1,3 +1,6 @@
+const builtin = @import("builtin");
+const std = @import("std");
+
 pub const SIGN_BIT: u64 = 0x8000000000000000;
 pub const QNAN: u64 = 0x7FFC000000000000;
 
@@ -28,10 +31,13 @@ pub inline fn decodeInt(v: u64) i64 {
 }
 
 pub inline fn encodePtr(addr: usize, type_tag: u64) u64 {
+    if (builtin.mode == .Debug) {
+        std.debug.assert((type_tag & ~TYPE_MASK) == 0);
+        std.debug.assert((@as(u64, addr) & ~ADDR_MASK) == 0);
+    }
     return TAG_PTR | type_tag | (@as(u64, addr) & ADDR_MASK);
 }
 
 pub inline fn decodePtr(v: u64) usize {
     return @as(usize, v & ADDR_MASK);
 }
-

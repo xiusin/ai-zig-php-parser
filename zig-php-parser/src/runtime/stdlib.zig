@@ -23,6 +23,7 @@ const SimdString = simd_ops.SimdString;
 
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
+const builtin_dispatch = @import("builtin_dispatch.zig");
 
 // Helper function to create string return value (inline for performance)
 inline fn createStringReturn(allocator: std.mem.Allocator, str: *PHPString) !Value {
@@ -104,6 +105,51 @@ pub const StandardLibrary = struct {
 
     pub fn getFunction(self: *StandardLibrary, name: []const u8) ?*const BuiltinFunction {
         return self.functions.get(name);
+    }
+
+    pub fn callBuiltinFast(vm: *VM, name: []const u8, args: []const Value) anyerror!?Value {
+        const id = builtin_dispatch.lookup(name) orelse return null;
+
+        const b_strlen: BuiltinFunction = .{ .name = "strlen", .min_args = 1, .max_args = 1, .handler = strlenFn };
+        const b_count: BuiltinFunction = .{ .name = "count", .min_args = 1, .max_args = 2, .handler = countFn };
+        const b_sizeof: BuiltinFunction = .{ .name = "sizeof", .min_args = 1, .max_args = 2, .handler = countFn };
+        const b_strpos: BuiltinFunction = .{ .name = "strpos", .min_args = 2, .max_args = 3, .handler = strposFn };
+        const b_stripos: BuiltinFunction = .{ .name = "stripos", .min_args = 2, .max_args = 3, .handler = striposFn };
+        const b_substr: BuiltinFunction = .{ .name = "substr", .min_args = 2, .max_args = 3, .handler = substrFn };
+        const b_strtolower: BuiltinFunction = .{ .name = "strtolower", .min_args = 1, .max_args = 1, .handler = strtolowerFn };
+        const b_strtoupper: BuiltinFunction = .{ .name = "strtoupper", .min_args = 1, .max_args = 1, .handler = strtoupperFn };
+        const b_trim: BuiltinFunction = .{ .name = "trim", .min_args = 1, .max_args = 2, .handler = trimFn };
+        const b_ltrim: BuiltinFunction = .{ .name = "ltrim", .min_args = 1, .max_args = 2, .handler = ltrimFn };
+        const b_rtrim: BuiltinFunction = .{ .name = "rtrim", .min_args = 1, .max_args = 2, .handler = rtrimFn };
+        const b_array_map: BuiltinFunction = .{ .name = "array_map", .min_args = 2, .max_args = 255, .handler = arrayMapFn };
+        const b_array_filter: BuiltinFunction = .{ .name = "array_filter", .min_args = 1, .max_args = 3, .handler = arrayFilterFn };
+        const b_array_reduce: BuiltinFunction = .{ .name = "array_reduce", .min_args = 2, .max_args = 3, .handler = arrayReduceFn };
+        const b_json_encode: BuiltinFunction = .{ .name = "json_encode", .min_args = 1, .max_args = 3, .handler = jsonEncodeFn };
+        const b_json_decode: BuiltinFunction = .{ .name = "json_decode", .min_args = 1, .max_args = 4, .handler = jsonDecodeFn };
+        const b_echo: BuiltinFunction = .{ .name = "echo", .min_args = 1, .max_args = 255, .handler = echoFn };
+
+        const result = switch (id) {
+            .strlen => try b_strlen.call(vm, args),
+            .count => try b_count.call(vm, args),
+            .sizeof => try b_sizeof.call(vm, args),
+            .strpos => try b_strpos.call(vm, args),
+            .stripos => try b_stripos.call(vm, args),
+            .substr => try b_substr.call(vm, args),
+            .strtolower => try b_strtolower.call(vm, args),
+            .strtoupper => try b_strtoupper.call(vm, args),
+            .trim => try b_trim.call(vm, args),
+            .ltrim => try b_ltrim.call(vm, args),
+            .rtrim => try b_rtrim.call(vm, args),
+            .array_map => try b_array_map.call(vm, args),
+            .array_filter => try b_array_filter.call(vm, args),
+            .array_reduce => try b_array_reduce.call(vm, args),
+            .json_encode => try b_json_encode.call(vm, args),
+            .json_decode => try b_json_decode.call(vm, args),
+            .echo => try b_echo.call(vm, args),
+            else => return null,
+        };
+
+        return result;
     }
 
     // Array Functions
