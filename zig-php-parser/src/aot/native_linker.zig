@@ -772,6 +772,8 @@ pub const NativeLinker = struct {
             "php_array_iter_key",
             "php_array_iter_free",
             "php_create_closure",
+            "php_args_append_spread",
+            "php_invoke_callable_args_array",
             "php_define",
             "define",
             "php_constant_get",
@@ -2478,13 +2480,13 @@ pub const NativeLinker = struct {
                         const arg_idx = if (self.current_function_has_this) op.index - 1 else op.index;
                         const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                         if (type_tag == .i64) {
-                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}].toInt() else 0;\n", .{ reg.id, arg_idx, arg_idx });
+                            try writer.print("    reg_{d} = if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toInt() else 0;\n", .{ reg.id, arg_idx, arg_idx, arg_idx });
                         } else if (type_tag == .f64) {
-                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}].toFloat() else 0.0;\n", .{ reg.id, arg_idx, arg_idx });
+                            try writer.print("    reg_{d} = if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toFloat() else 0.0;\n", .{ reg.id, arg_idx, arg_idx, arg_idx });
                         } else if (type_tag == .bool) {
-                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}].toBool() else false;\n", .{ reg.id, arg_idx, arg_idx });
+                            try writer.print("    reg_{d} = if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toBool() else false;\n", .{ reg.id, arg_idx, arg_idx, arg_idx });
                         } else {
-                            try writer.print("    reg_{d} = if (args.len > {d}) args[{d}] else runtime.Value.initNull();\n", .{ reg.id, arg_idx, arg_idx });
+                            try writer.print("    reg_{d} = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ reg.id, arg_idx, arg_idx, arg_idx });
                         }
                     }
                 }
@@ -2528,9 +2530,19 @@ pub const NativeLinker = struct {
                     try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                 }
             },
+            .const_missing => {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = runtime.Value.initMissing();\n", .{reg.id});
+                }
+            },
             .arg_count => {
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d} = @intCast(args.len);\n", .{reg.id});
+                }
+            },
+            .has_arg => |op| {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = (args.len > {d}) and !args[{d}].isMissing();\n", .{ reg.id, op.index, op.index });
                 }
             },
             .eq => |op| {

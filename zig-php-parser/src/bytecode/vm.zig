@@ -197,6 +197,7 @@ pub const BytecodeVM = struct {
     string_pool: std.ArrayListUnmanaged(*Value.String),
     array_pool: std.ArrayListUnmanaged(*Value.Array),
     object_pool: std.ArrayListUnmanaged(*Value.Object),
+    closure_pool: std.ArrayListUnmanaged(*Value.Closure),
     /// OPT-001: 字符串intern缓存
     string_cache: std.StringHashMapUnmanaged(*Value.String),
     /// OPT-002: 空闲对象列表 - 复用已释放对象
@@ -271,6 +272,7 @@ pub const BytecodeVM = struct {
             .string_pool = .{},
             .array_pool = .{},
             .object_pool = .{},
+            .closure_pool = .{},
             .string_cache = .{},
             .free_strings = .{},
             .free_arrays = .{},
@@ -405,6 +407,13 @@ pub const BytecodeVM = struct {
             self.allocator.destroy(obj);
         }
         self.object_pool.deinit(self.allocator);
+
+        // 释放闭包池
+        for (self.closure_pool.items) |closure| {
+            self.allocator.free(closure.captured);
+            self.allocator.destroy(closure);
+        }
+        self.closure_pool.deinit(self.allocator);
 
         // 释放类型反馈收集器
         self.type_feedback_collector.deinit();
@@ -683,6 +692,20 @@ pub const BytecodeVM = struct {
         try self.array_pool.append(self.allocator, arr);
         self.bytes_allocated += @sizeOf(Value.Array);
         return arr;
+    }
+
+    pub fn createClosure(self: *BytecodeVM, func: *CompiledFunction, captured: []Value) !*Value.Closure {
+        self.stats.memory_allocations += 1;
+        const closure = try self.allocator.create(Value.Closure);
+        closure.* = .{
+            .function = func,
+            .captured = captured,
+            .ref_count = 1,
+            .marked = false,
+        };
+        try self.closure_pool.append(self.allocator, closure);
+        self.bytes_allocated += @sizeOf(Value.Closure) + captured.len * @sizeOf(Value);
+        return closure;
     }
 
     /// 创建对象
@@ -3851,22 +3874,143 @@ fn handleNop(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!D
     return .continue_execution;
 }
 
-fn handleCaptureVar(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    return .continue_execution;
-}
-
-fn handleMakeClosure(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+fn handleCaptureVar(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    const mode = inst.operand2;
+    if (mode == 0) {
+        const idx = frame.base_pointer + inst.operand1;
+        try vm.push(vm.stack[idx]);
+        return .continue_execution;
+    }
     try vm.push(.null_val);
     return .continue_execution;
 }
 
-fn handleClosureCall(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+fn resolveFunctionForClosure(vm: *BytecodeVM, frame: *CallFrame, operand1: u16) ?*CompiledFunction {
+    if (operand1 < frame.function.constants.len) {
+        const func_const = frame.function.constants[operand1];
+        return switch (func_const) {
+            .func_ref => |ref_idx| vm.getFunctionByIndex(ref_idx),
+            .string_val => |name| vm.functions.get(name),
+            else => null,
+        };
+    }
+    return vm.getFunctionByIndex(operand1);
+}
+
+fn handleMakeClosure(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    const func = resolveFunctionForClosure(vm, frame, inst.operand1) orelse return BytecodeVM.VMError.UndefinedFunction;
+    const capture_count: usize = inst.operand2;
+    const captured = vm.allocator.alloc(Value, capture_count) catch return BytecodeVM.VMError.OutOfMemory;
+
+    var i: usize = capture_count;
+    while (i > 0) {
+        i -= 1;
+        captured[i] = try vm.pop();
+    }
+
+    const closure = vm.createClosure(func, captured) catch {
+        vm.allocator.free(captured);
+        return BytecodeVM.VMError.OutOfMemory;
+    };
+    try vm.push(.{ .closure_val = closure });
+    return .continue_execution;
+}
+
+fn enterFunctionFrame(vm: *BytecodeVM, current_frame: *CallFrame, func: *CompiledFunction, arg_count: u16) BytecodeVM.VMError!void {
+    if (vm.frame_count >= BytecodeVM.FRAMES_MAX) {
+        return BytecodeVM.VMError.StackOverflow;
+    }
+
+    const new_frame = &vm.frames[vm.frame_count];
+    new_frame.* = CallFrame{
+        .function = func,
+        .ip = 0,
+        .base_pointer = vm.stack_top - arg_count,
+        .return_address = current_frame.ip,
+    };
+    vm.frame_count += 1;
+
+    const required_top: u32 = new_frame.base_pointer + func.local_count;
+    if (required_top > BytecodeVM.STACK_MAX) {
+        return BytecodeVM.VMError.StackOverflow;
+    }
+    var i: u32 = vm.stack_top;
+    while (i < required_top) : (i += 1) {
+        vm.stack[i] = .null_val;
+    }
+    vm.stack_top = required_top;
+}
+
+fn callRuntimeName(vm: *BytecodeVM, current_frame: *CallFrame, name: []const u8, arg_count: u16) BytecodeVM.VMError!void {
+    if (vm.functions.get(name)) |func| {
+        try enterFunctionFrame(vm, current_frame, func, arg_count);
+        return;
+    }
+    if (vm.builtins.get(name)) |builtin_fn| {
+        const args_slice = vm.stack[vm.stack_top - arg_count .. vm.stack_top];
+        vm.stack_top -= arg_count;
+        const result = builtin_fn(vm, args_slice) catch .null_val;
+        try vm.push(result);
+        return;
+    }
+    if (name.len > 0 and name[0] == '\\') {
+        const short = name[1..];
+        if (vm.functions.get(short)) |func| {
+            try enterFunctionFrame(vm, current_frame, func, arg_count);
+            return;
+        }
+        if (vm.builtins.get(short)) |builtin_fn| {
+            const args_slice = vm.stack[vm.stack_top - arg_count .. vm.stack_top];
+            vm.stack_top -= arg_count;
+            const result = builtin_fn(vm, args_slice) catch .null_val;
+            try vm.push(result);
+            return;
+        }
+    }
     return BytecodeVM.VMError.UndefinedFunction;
 }
 
+fn handleClosureCall(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    const arg_count: u16 = inst.operand2;
+    if (vm.stack_top < arg_count + 1) {
+        return BytecodeVM.VMError.StackUnderflow;
+    }
+
+    const callable_index: u32 = vm.stack_top - arg_count - 1;
+    const callable = vm.stack[callable_index];
+
+    var i: u32 = 0;
+    while (i < arg_count) : (i += 1) {
+        vm.stack[callable_index + i] = vm.stack[callable_index + 1 + i];
+    }
+    vm.stack_top -= 1;
+
+    switch (callable) {
+        .closure_val => |closure| {
+            try enterFunctionFrame(vm, frame, closure.function, arg_count);
+            const new_frame = &vm.frames[vm.frame_count - 1];
+            const slots = closure.function.capture_local_slots;
+            const cap_len: usize = @min(slots.len, closure.captured.len);
+            var j: usize = 0;
+            while (j < cap_len) : (j += 1) {
+                const slot_idx: u32 = new_frame.base_pointer + slots[j];
+                if (slot_idx < vm.stack_top) {
+                    vm.stack[slot_idx] = closure.captured[j];
+                }
+            }
+            return .frame_changed;
+        },
+        .string_val => |s| {
+            try callRuntimeName(vm, frame, s.data, arg_count);
+            return .frame_changed;
+        },
+        else => return BytecodeVM.VMError.TypeMismatch,
+    }
+}
+
 fn handleArrowFn(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    try vm.push(.null_val);
-    return .continue_execution;
+    _ = vm;
+    return BytecodeVM.VMError.InvalidOpcode;
 }
 
 /// PUSH_CONST - 压入常量

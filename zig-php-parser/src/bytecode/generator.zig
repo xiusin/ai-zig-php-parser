@@ -52,6 +52,7 @@ pub const BytecodeGenerator = struct {
     loop_stack: std.ArrayListUnmanaged(LoopContext),
     current_line: u32,
     functions: std.StringHashMapUnmanaged(*CompiledFunction),
+    anon_fn_counter: u32,
     /// 逃逸分析器
     escape_analyzer: ?*EscapeAnalyzer,
     /// 栈分配优化器
@@ -93,6 +94,7 @@ pub const BytecodeGenerator = struct {
             .loop_stack = .{},
             .current_line = 1,
             .functions = .{},
+            .anon_fn_counter = 0,
             .escape_analyzer = null,
             .stack_optimizer = null,
             .scalar_optimizer = null,
@@ -815,22 +817,77 @@ pub const BytecodeGenerator = struct {
         const node = self.getNode(index);
         const call_data = node.data.function_call;
 
-        // 压入参数
-        for (call_data.args) |arg_idx| {
-            try self.visitNode(arg_idx);
-        }
-
-        // 获取函数名
         const name_node = self.getNode(call_data.name);
         if (name_node.tag == .variable) {
-            const func_name = self.getString(name_node.data.variable.name);
-            const name_const = try self.addConstant(.{ .string_val = func_name });
-            const arg_count: u16 = @intCast(call_data.args.len);
-            try self.emit(.call, name_const, arg_count);
+            const raw_name = self.getString(name_node.data.variable.name);
+            const is_runtime_callable = raw_name.len > 0 and raw_name[0] == '$';
+            if (!is_runtime_callable) {
+                // 直接函数名调用：foo(...)
+                var actual_arg_count: u16 = 0;
+                for (call_data.args) |arg_idx| {
+                    const arg_node = self.getNode(arg_idx);
+                    if (arg_node.tag == .unpacking_expr) {
+                        const inner_idx = arg_node.data.unpacking_expr.expr;
+                        const inner_node = self.getNode(inner_idx);
+                        if (inner_node.tag == .array_init) {
+                            const arr = inner_node.data.array_init;
+                            for (arr.elements) |item_idx| {
+                                const item_node = self.getNode(item_idx);
+                                if (item_node.tag == .array_pair) {
+                                    try self.visitNode(item_node.data.array_pair.value);
+                                } else {
+                                    try self.visitNode(item_idx);
+                                }
+                                actual_arg_count += 1;
+                            }
+                            continue;
+                        }
+                    }
+                    try self.visitNode(arg_idx);
+                    actual_arg_count += 1;
+                }
+                const name_const = try self.addConstant(.{ .string_val = raw_name });
+                try self.emit(.call, name_const, actual_arg_count);
+
+                var i: u16 = 0;
+                while (i < actual_arg_count) : (i += 1) {
+                    self.popStack();
+                }
+                self.pushStack();
+                return;
+            }
         }
 
-        // 参数弹出，结果压入
-        for (call_data.args) |_| {
+        // 动态可调用：($expr)(...) / $f(...) / $obj->m(...)
+        try self.visitNode(call_data.name);
+        var actual_arg_count: u16 = 0;
+        for (call_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx);
+            if (arg_node.tag == .unpacking_expr) {
+                const inner_idx = arg_node.data.unpacking_expr.expr;
+                const inner_node = self.getNode(inner_idx);
+                if (inner_node.tag == .array_init) {
+                    const arr = inner_node.data.array_init;
+                    for (arr.elements) |item_idx| {
+                        const item_node = self.getNode(item_idx);
+                        if (item_node.tag == .array_pair) {
+                            try self.visitNode(item_node.data.array_pair.value);
+                        } else {
+                            try self.visitNode(item_idx);
+                        }
+                        actual_arg_count += 1;
+                    }
+                    continue;
+                }
+            }
+            try self.visitNode(arg_idx);
+            actual_arg_count += 1;
+        }
+        try self.emit(.closure_call, 0, actual_arg_count);
+
+        self.popStack(); // callee
+        var i: u16 = 0;
+        while (i < actual_arg_count) : (i += 1) {
             self.popStack();
         }
         self.pushStack();
@@ -1085,27 +1142,254 @@ pub const BytecodeGenerator = struct {
         const node = self.getNode(index);
         const closure_data = node.data.closure;
 
-        // 捕获变量
+        const closure_name_buf = std.fmt.allocPrint(self.allocator, "__closure_{d}", .{self.anon_fn_counter}) catch return CompileError.OutOfMemory;
+        defer self.allocator.free(closure_name_buf);
+        self.anon_fn_counter += 1;
+        const closure_name_id = self.context.intern(closure_name_buf) catch return CompileError.OutOfMemory;
+        const closure_name = self.getString(closure_name_id);
+
+        var capture_local_slots = std.ArrayListUnmanaged(u16){};
+        defer capture_local_slots.deinit(self.allocator);
+
+        // 保存并重置状态：编译闭包体为独立 CompiledFunction
+        const saved_locals = self.locals;
+        const saved_local_count = self.local_count;
+        const saved_instructions = self.instructions;
+        const saved_constants = self.constants;
+        const saved_max_stack = self.max_stack;
+        const saved_current_stack = self.current_stack;
+        const saved_label_counter = self.label_counter;
+        const saved_labels = self.labels;
+        const saved_pending_jumps = self.pending_jumps;
+        const saved_loop_stack = self.loop_stack;
+
+        self.locals = .{};
+        self.local_count = 0;
+        self.instructions = .{};
+        self.constants = .{};
+        self.max_stack = 0;
+        self.current_stack = 0;
+        self.label_counter = 0;
+        self.labels = .{};
+        self.pending_jumps = .{};
+        self.loop_stack = .{};
+
+        for (closure_data.params) |param_idx| {
+            const param_node = self.getNode(param_idx);
+            const param_name = self.getString(param_node.data.parameter.name);
+            _ = self.getOrCreateLocal(param_name) catch return CompileError.OutOfMemory;
+        }
+
+        for (closure_data.captures) |capture_idx| {
+            const capture_node = self.getNode(capture_idx);
+            if (capture_node.tag == .variable) {
+                const var_name = self.getString(capture_node.data.variable.name);
+                const slot = self.getOrCreateLocal(var_name) catch return CompileError.OutOfMemory;
+                capture_local_slots.append(self.allocator, slot) catch return CompileError.OutOfMemory;
+            } else if (capture_node.tag == .unary_expr and capture_node.data.unary_expr.op == .ampersand) {
+                const inner = self.getNode(capture_node.data.unary_expr.expr);
+                if (inner.tag == .variable) {
+                    const var_name = self.getString(inner.data.variable.name);
+                    const slot = self.getOrCreateLocal(var_name) catch return CompileError.OutOfMemory;
+                    capture_local_slots.append(self.allocator, slot) catch return CompileError.OutOfMemory;
+                }
+            }
+        }
+
+        try self.visitNode(closure_data.body);
+        try self.emit(.ret_void, 0, 0);
+        try self.resolveJumps();
+
+        const compiled = self.allocator.create(CompiledFunction) catch return CompileError.OutOfMemory;
+        compiled.* = CompiledFunction{
+            .name = closure_name,
+            .bytecode = self.instructions.toOwnedSlice(self.allocator) catch return CompileError.OutOfMemory,
+            .constants = self.constants.toOwnedSlice(self.allocator) catch return CompileError.OutOfMemory,
+            .local_count = self.local_count,
+            .arg_count = @intCast(closure_data.params.len),
+            .max_stack = self.max_stack,
+            .flags = .{ .is_closure = true },
+            .line_table = &[_]CompiledFunction.LineInfo{},
+            .exception_table = &[_]CompiledFunction.ExceptionEntry{},
+            .capture_local_slots = capture_local_slots.toOwnedSlice(self.allocator) catch return CompileError.OutOfMemory,
+        };
+        self.functions.put(self.allocator, closure_name, compiled) catch return CompileError.OutOfMemory;
+
+        // 恢复状态
+        self.locals.deinit(self.allocator);
+        self.locals = saved_locals;
+        self.local_count = saved_local_count;
+        self.instructions.deinit(self.allocator);
+        self.instructions = saved_instructions;
+        self.constants.deinit(self.allocator);
+        self.constants = saved_constants;
+        self.max_stack = saved_max_stack;
+        self.current_stack = saved_current_stack;
+        self.labels.deinit(self.allocator);
+        self.labels = saved_labels;
+        self.pending_jumps.deinit(self.allocator);
+        self.pending_jumps = saved_pending_jumps;
+        self.loop_stack.deinit(self.allocator);
+        self.loop_stack = saved_loop_stack;
+        self.label_counter = saved_label_counter;
+
+        var effective_capture_count: u16 = 0;
         for (closure_data.captures) |capture_idx| {
             const capture_node = self.getNode(capture_idx);
             if (capture_node.tag == .variable) {
                 const var_name = self.getString(capture_node.data.variable.name);
                 if (self.locals.get(var_name)) |slot| {
                     try self.emit(.capture_var, slot, 0);
+                } else {
+                    try self.emit(.capture_var, 0, 1);
+                }
+                self.pushStack();
+                effective_capture_count += 1;
+            } else if (capture_node.tag == .unary_expr and capture_node.data.unary_expr.op == .ampersand) {
+                const inner = self.getNode(capture_node.data.unary_expr.expr);
+                if (inner.tag == .variable) {
+                    const var_name = self.getString(inner.data.variable.name);
+                    if (self.locals.get(var_name)) |slot| {
+                        try self.emit(.capture_var, slot, 0);
+                    } else {
+                        try self.emit(.capture_var, 0, 1);
+                    }
+                    self.pushStack();
+                    effective_capture_count += 1;
                 }
             }
         }
 
-        const capture_count: u16 = @intCast(closure_data.captures.len);
-        try self.emit(.make_closure, 0, capture_count);
+        const name_const = try self.addConstant(.{ .string_val = closure_name });
+        try self.emit(.make_closure, name_const, effective_capture_count);
+        var i: u16 = 0;
+        while (i < effective_capture_count) : (i += 1) {
+            self.popStack();
+        }
         self.pushStack();
     }
 
     /// 访问箭头函数
     fn visitArrowFunction(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
-        _ = node;
-        try self.emit(.arrow_fn, 0, 0);
+        const arrow_data = node.data.arrow_function;
+
+        const arrow_name_buf = std.fmt.allocPrint(self.allocator, "__arrow_{d}", .{self.anon_fn_counter}) catch return CompileError.OutOfMemory;
+        defer self.allocator.free(arrow_name_buf);
+        self.anon_fn_counter += 1;
+        const arrow_name_id = self.context.intern(arrow_name_buf) catch return CompileError.OutOfMemory;
+        const arrow_name = self.getString(arrow_name_id);
+
+        var param_set = std.StringHashMapUnmanaged(void){};
+        defer param_set.deinit(self.allocator);
+        for (arrow_data.params) |param_idx| {
+            const param_node = self.getNode(param_idx);
+            const param_name = self.getString(param_node.data.parameter.name);
+            param_set.put(self.allocator, param_name, {}) catch return CompileError.OutOfMemory;
+        }
+
+        var capture_names = std.ArrayListUnmanaged([]const u8){};
+        defer capture_names.deinit(self.allocator);
+        var iter = self.locals.iterator();
+        while (iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (name.len == 0 or name[0] != '$') continue;
+            if (param_set.contains(name)) continue;
+            capture_names.append(self.allocator, name) catch return CompileError.OutOfMemory;
+        }
+        std.mem.sort([]const u8, capture_names.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+
+        var capture_local_slots = std.ArrayListUnmanaged(u16){};
+        defer capture_local_slots.deinit(self.allocator);
+
+        const saved_locals = self.locals;
+        const saved_local_count = self.local_count;
+        const saved_instructions = self.instructions;
+        const saved_constants = self.constants;
+        const saved_max_stack = self.max_stack;
+        const saved_current_stack = self.current_stack;
+        const saved_label_counter = self.label_counter;
+        const saved_labels = self.labels;
+        const saved_pending_jumps = self.pending_jumps;
+        const saved_loop_stack = self.loop_stack;
+
+        self.locals = .{};
+        self.local_count = 0;
+        self.instructions = .{};
+        self.constants = .{};
+        self.max_stack = 0;
+        self.current_stack = 0;
+        self.label_counter = 0;
+        self.labels = .{};
+        self.pending_jumps = .{};
+        self.loop_stack = .{};
+
+        for (arrow_data.params) |param_idx| {
+            const param_node = self.getNode(param_idx);
+            const param_name = self.getString(param_node.data.parameter.name);
+            _ = self.getOrCreateLocal(param_name) catch return CompileError.OutOfMemory;
+        }
+
+        for (capture_names.items) |cap_name| {
+            const slot = self.getOrCreateLocal(cap_name) catch return CompileError.OutOfMemory;
+            capture_local_slots.append(self.allocator, slot) catch return CompileError.OutOfMemory;
+        }
+
+        try self.visitNode(arrow_data.body);
+        try self.emit(.ret, 0, 0);
+        try self.resolveJumps();
+
+        const compiled = self.allocator.create(CompiledFunction) catch return CompileError.OutOfMemory;
+        compiled.* = CompiledFunction{
+            .name = arrow_name,
+            .bytecode = self.instructions.toOwnedSlice(self.allocator) catch return CompileError.OutOfMemory,
+            .constants = self.constants.toOwnedSlice(self.allocator) catch return CompileError.OutOfMemory,
+            .local_count = self.local_count,
+            .arg_count = @intCast(arrow_data.params.len),
+            .max_stack = self.max_stack,
+            .flags = .{ .is_closure = true },
+            .line_table = &[_]CompiledFunction.LineInfo{},
+            .exception_table = &[_]CompiledFunction.ExceptionEntry{},
+            .capture_local_slots = capture_local_slots.toOwnedSlice(self.allocator) catch return CompileError.OutOfMemory,
+        };
+        self.functions.put(self.allocator, arrow_name, compiled) catch return CompileError.OutOfMemory;
+
+        self.locals.deinit(self.allocator);
+        self.locals = saved_locals;
+        self.local_count = saved_local_count;
+        self.instructions.deinit(self.allocator);
+        self.instructions = saved_instructions;
+        self.constants.deinit(self.allocator);
+        self.constants = saved_constants;
+        self.max_stack = saved_max_stack;
+        self.current_stack = saved_current_stack;
+        self.labels.deinit(self.allocator);
+        self.labels = saved_labels;
+        self.pending_jumps.deinit(self.allocator);
+        self.pending_jumps = saved_pending_jumps;
+        self.loop_stack.deinit(self.allocator);
+        self.loop_stack = saved_loop_stack;
+        self.label_counter = saved_label_counter;
+
+        for (capture_names.items) |cap_name| {
+            if (self.locals.get(cap_name)) |slot| {
+                try self.emit(.capture_var, slot, 0);
+            } else {
+                try self.emit(.capture_var, 0, 1);
+            }
+            self.pushStack();
+        }
+
+        const name_const = try self.addConstant(.{ .string_val = arrow_name });
+        try self.emit(.make_closure, name_const, @intCast(capture_names.items.len));
+        var i: usize = 0;
+        while (i < capture_names.items.len) : (i += 1) {
+            self.popStack();
+        }
         self.pushStack();
     }
 

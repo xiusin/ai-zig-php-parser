@@ -223,6 +223,7 @@ pub const IROptimizer = struct {
         float: f64,
         bool_val: bool,
         null_val: void,
+        missing_val: void,
         string_id: u32,
     };
 
@@ -550,7 +551,7 @@ pub const IROptimizer = struct {
             .box => |op| return self.isInvariant(op.value, loop),
             .unbox => |op| return self.isInvariant(op.value, loop),
             // Constants are always invariant
-            .const_int, .const_float, .const_bool, .const_string, .const_null => return true,
+            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .arg_count, .has_arg => return true,
             // Allocas are invariant (address is constant)
             .alloca => return true, 
             else => return false, // Conservative
@@ -1651,7 +1652,7 @@ pub const IROptimizer = struct {
                 }
             },
             // Instructions with no register operands
-            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .param, .capture_get, .arg_count => {},
+            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .param, .capture_get, .arg_count, .has_arg => {},
             .try_begin, .try_end, .get_exception, .clear_exception => {},
             .mutex_lock, .mutex_unlock, .mutex_new => {},
             .catch_ => {},
@@ -1715,8 +1716,8 @@ pub const IROptimizer = struct {
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => false,
             .and_, .or_, .not => false,
             .neg => false,
-            .const_int, .const_float, .const_bool, .const_string, .const_null => false,
-            .param, .capture_get, .arg_count => false,
+            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => false,
+            .param, .capture_get, .arg_count, .has_arg => false,
             .cast, .type_check, .get_type => false,
             .box, .unbox => false,
             .phi, .select => false,
@@ -1852,6 +1853,7 @@ pub const IROptimizer = struct {
             .const_float => |val| .{ .float = val },
             .const_bool => |val| .{ .bool_val = val },
             .const_null => .{ .null_val = {} },
+            .const_missing => .{ .missing_val = {} },
             .const_string => |id| .{ .string_id = id },
             else => null,
         };
@@ -2340,7 +2342,7 @@ pub const IROptimizer = struct {
                 .ptr = remapRegister(st.ptr, reg_map),
                 .value = remapRegister(st.value, reg_map),
             } },
-            .const_int, .const_float, .const_bool, .const_string, .const_null => op,
+            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .arg_count, .has_arg => op,
             .alloca => op,
             .param => op,
             
@@ -2419,6 +2421,7 @@ pub const IROptimizer = struct {
                         .const_bool => try known_types.put(result.id, .bool),
                         .const_string => try known_types.put(result.id, .php_string),
                         .const_null => try known_types.put(result.id, .void),
+                        .const_missing => try known_types.put(result.id, .php_value),
                         .array_new => try known_types.put(result.id, .php_array),
                         else => {},
                     }
@@ -2992,6 +2995,9 @@ pub const IROptimizer = struct {
             },
             .const_null => {
                 hasher.update("const_null");
+            },
+            .const_missing => {
+                hasher.update("const_missing");
             },
             else => return 0, // Not hashable (has side effects or complex)
         }

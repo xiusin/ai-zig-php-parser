@@ -355,6 +355,7 @@ pub const CompiledFunction = struct {
     min_args: u16 = 0,
     max_args: u16 = 0,
     is_variadic: bool = false,
+    capture_local_slots: []u16 = &[_]u16{},
 
     pub const FunctionFlags = packed struct {
         is_generator: bool = false,
@@ -434,6 +435,9 @@ pub const CompiledFunction = struct {
         allocator.free(self.exception_table);
         if (self.param_info.len > 0) {
             allocator.free(self.param_info);
+        }
+        if (self.capture_local_slots.len > 0) {
+            allocator.free(self.capture_local_slots);
         }
         allocator.destroy(self);
     }

@@ -535,6 +535,28 @@ pub const IRGenerator = struct {
         const func_data = node.data.function_decl;
         const func_name = self.getString(func_data.name);
 
+        const params_info = try self.allocator.alloc(SymbolTableMod.Symbol.ParameterInfo, func_data.params.len);
+        for (func_data.params, 0..) |param_idx, i| {
+            params_info[i] = .{
+                .name = "",
+                .type_ = .dynamic,
+                .has_default = false,
+                .is_reference = false,
+            };
+            if (self.getNode(param_idx)) |pnode| {
+                if (pnode.tag == .parameter) {
+                    const pdata = pnode.data.parameter;
+                    params_info[i] = .{
+                        .name = self.getString(pdata.name),
+                        .type_ = .dynamic,
+                        .has_default = pdata.default_value != null,
+                        .is_reference = pdata.is_reference,
+                    };
+                }
+            }
+        }
+        try self.symbol_table.defineFunction(func_name, params_info, .dynamic, self.current_location);
+
         // Create function
         const func = try self.allocator.create(Function);
         func.* = Function.init(self.allocator, func_name);
@@ -620,22 +642,8 @@ pub const IRGenerator = struct {
             // Has default value - generate conditional logic
             const func = self.current_function.?;
             
-            // 1. Get argument count
-            const argc_reg = try self.emitWithResult(.{ .arg_count = {} }, .i64);
-            
-            // 2. Compare argc > param_idx
-            // Create constant for param index
-            const idx_reg = func.newRegister(.i64);
-            const idx_inst = try self.allocator.create(Instruction);
-            idx_inst.* = .{
-                .result = idx_reg,
-                .op = .{ .const_int = @intCast(param_idx) },
-                .location = self.current_location,
-            };
-            try self.current_block.?.appendInstruction(idx_inst);
-
-            const cond_reg = try self.emitWithResult(.{ 
-                .gt = .{ .lhs = argc_reg, .rhs = idx_reg } 
+            const cond_reg = try self.emitWithResult(.{
+                .has_arg = .{ .index = param_idx },
             }, .bool);
 
             // 3. Create blocks
@@ -2417,36 +2425,139 @@ pub const IRGenerator = struct {
             indirect_callee = try self.generateExpression(call_data.name);
         }
 
-        // Generate arguments
-        var args = try self.allocator.alloc(Register, call_data.args.len);
-        
-        // Lookup function symbol to check for reference parameters
+        var has_unpacking: bool = false;
+        for (call_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .unpacking_expr) {
+                has_unpacking = true;
+                break;
+            }
+        }
+        if (has_unpacking) {
+            const callback_reg = if (indirect_callee) |r| r else blk: {
+                if (func_name.len == 0) {
+                    break :blk try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                }
+                const sid = try self.module.?.internString(func_name);
+                break :blk try self.emitWithResult(.{ .const_string = sid }, .php_value);
+            };
+
+            const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                    const spread_args = try self.allocator.alloc(Register, 2);
+                    spread_args[0] = args_arr;
+                    spread_args[1] = spread_reg;
+                    _ = try self.emit(.{ .call = .{ .func_name = "php_args_append_spread", .args = spread_args, .return_type = .php_value } }, null);
+                    continue;
+                }
+
+                const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
+                const val_reg = try self.generateExpression(expr_idx);
+                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+            }
+
+            const invoke_args = try self.allocator.alloc(Register, 2);
+            invoke_args[0] = callback_reg;
+            invoke_args[1] = args_arr;
+            return self.emitWithResult(.{ .call = .{ .func_name = "php_invoke_callable_args_array", .args = invoke_args, .return_type = .php_value } }, .php_value);
+        }
+
+        // Generate arguments (positional + named)
         const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
 
-        for (call_data.args, 0..) |arg_idx, i| {
-            // Check if argument is passed by reference
-            var is_ref = false;
-            if (func_symbol) |sym| {
-                if (sym.metadata == .function) {
-                    const params = sym.metadata.function.params;
-                    if (i < params.len) {
-                        is_ref = params[i].is_reference;
+        var has_named: bool = false;
+        var positional_args = std.ArrayListUnmanaged(Node.Index){};
+        defer positional_args.deinit(self.allocator);
+        var named_args = std.StringHashMapUnmanaged(Node.Index){};
+        defer named_args.deinit(self.allocator);
+
+        for (call_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .named_arg) {
+                has_named = true;
+                const arg_name = self.getString(arg_node.data.named_arg.name);
+                try named_args.put(self.allocator, arg_name, arg_node.data.named_arg.value);
+            } else {
+                try positional_args.append(self.allocator, arg_idx);
+            }
+        }
+
+        var args: []Register = &[_]Register{};
+
+        if (has_named and indirect_callee == null and func_symbol != null and func_symbol.?.metadata == .function) {
+            const params = func_symbol.?.metadata.function.params;
+            var final_args = std.ArrayListUnmanaged(Register){};
+            defer final_args.deinit(self.allocator);
+            try final_args.ensureTotalCapacity(self.allocator, params.len + positional_args.items.len);
+
+            var pos_i: usize = 0;
+            for (params) |p| {
+                var chosen: ?Node.Index = null;
+                const p_name = if (p.name.len > 0 and p.name[0] == '$') p.name[1..] else p.name;
+                if (named_args.get(p_name)) |named_idx| {
+                    chosen = named_idx;
+                } else if (pos_i < positional_args.items.len) {
+                    chosen = positional_args.items[pos_i];
+                    pos_i += 1;
+                }
+
+                if (chosen) |expr_idx| {
+                    if (p.is_reference) {
+                        const chosen_node = self.getNode(expr_idx);
+                        if (chosen_node != null and chosen_node.?.tag == .variable) {
+                            const var_name = self.getString(chosen_node.?.data.variable.name);
+                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                            const r = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                            try final_args.append(self.allocator, r);
+                            continue;
+                        }
                     }
+                    const r = try self.generateExpression(expr_idx);
+                    try final_args.append(self.allocator, r);
+                } else {
+                    const r = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
+                    try final_args.append(self.allocator, r);
                 }
             }
 
-            if (is_ref) {
-                // Pass by reference
+            while (pos_i < positional_args.items.len) : (pos_i += 1) {
+                const r = try self.generateExpression(positional_args.items[pos_i]);
+                try final_args.append(self.allocator, r);
+            }
+
+            args = try final_args.toOwnedSlice(self.allocator);
+        } else {
+            args = try self.allocator.alloc(Register, call_data.args.len);
+            for (call_data.args, 0..) |arg_idx, i| {
                 const arg_node = self.getNode(arg_idx);
-                if (arg_node != null and arg_node.?.tag == .variable) {
-                    const var_name = self.getString(arg_node.?.data.variable.name);
-                    const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                    args[i] = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
-                } else {
-                    args[i] = try self.generateExpression(arg_idx);
+                const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) arg_node.?.data.named_arg.value else arg_idx;
+
+                var is_ref = false;
+                if (func_symbol) |sym| {
+                    if (sym.metadata == .function) {
+                        const params = sym.metadata.function.params;
+                        if (i < params.len) {
+                            is_ref = params[i].is_reference;
+                        }
+                    }
                 }
-            } else {
-                args[i] = try self.generateExpression(arg_idx);
+
+                if (is_ref) {
+                    const real_node = self.getNode(expr_idx);
+                    if (real_node != null and real_node.?.tag == .variable) {
+                        const var_name = self.getString(real_node.?.data.variable.name);
+                        const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                        args[i] = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                    } else {
+                        args[i] = try self.generateExpression(expr_idx);
+                    }
+                } else {
+                    args[i] = try self.generateExpression(expr_idx);
+                }
             }
         }
 

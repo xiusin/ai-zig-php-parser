@@ -632,6 +632,8 @@ pub const Instruction = struct {
         const_string: u32,
         /// Null constant
         const_null: void,
+        /// Missing argument sentinel (used for named args holes)
+        const_missing: void,
 
         // ============ Function Operations ============
         /// Function call
@@ -760,6 +762,8 @@ pub const Instruction = struct {
         capture_get: CaptureGetOp,
         /// Get argument count
         arg_count: void,
+        /// Check whether argument at index is present and not missing
+        has_arg: HasArgOp,
     };
 
     /// Parameter operation
@@ -772,6 +776,10 @@ pub const Instruction = struct {
     pub const CaptureGetOp = struct {
         index: u32,
         name: []const u8,
+    };
+
+    pub const HasArgOp = struct {
+        index: u32,
     };
 
     /// Binary operation operands
@@ -1263,6 +1271,7 @@ pub const IRPrinter = struct {
             .const_bool => |val| try self.print("const.bool {any}", .{val}),
             .const_string => |id| try self.print("const.string ${d}", .{id}),
             .const_null => try self.write("const.null"),
+            .const_missing => try self.write("const.missing"),
 
             // Function calls
             .call => |op| {
@@ -1410,6 +1419,7 @@ pub const IRPrinter = struct {
             .param => |op| try self.print("param {d} ({s})", .{ op.index, op.name }),
             .capture_get => |op| try self.print("capture_get {d} ({s})", .{ op.index, op.name }),
             .arg_count => try self.write("arg_count"),
+            .has_arg => |op| try self.print("has_arg {d}", .{op.index}),
         }
     }
 

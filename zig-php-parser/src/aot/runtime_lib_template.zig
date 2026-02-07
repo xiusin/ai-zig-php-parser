@@ -434,6 +434,7 @@ pub const Value = struct {
     pub const TAG_NIL: u64 = 1;
     pub const TAG_FALSE: u64 = 2;
     pub const TAG_TRUE: u64 = 3;
+    pub const TAG_MISSING: u64 = 4;
     pub const TAG_INT_MARKER: u64 = SIGN_BIT | QNAN;
 
     // 指针类型标记
@@ -457,6 +458,10 @@ pub const Value = struct {
     /// 创建null值
     pub fn initNull() Value {
         return .{ .val = QNAN | TAG_NIL };
+    }
+
+    pub fn initMissing() Value {
+        return .{ .val = QNAN | TAG_MISSING };
     }
 
     /// 创建布尔值
@@ -510,6 +515,10 @@ pub const Value = struct {
 
     pub fn isNull(self: Value) bool {
         return self.val == (QNAN | TAG_NIL);
+    }
+
+    pub fn isMissing(self: Value) bool {
+        return self.val == (QNAN | TAG_MISSING);
     }
 
     pub fn isBool(self: Value) bool {
@@ -1256,6 +1265,46 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
         return error.NotImplemented;
     }
     return error.InvalidCallback;
+}
+
+pub fn php_args_append_spread(dest: Value, src: Value, allocator: Allocator) !Value {
+    if (!dest.isArray() or !src.isArray()) {
+        return throwException("Only arrays can be unpacked", allocator);
+    }
+
+    const dest_arr = dest.asArray();
+    const src_arr = src.asArray();
+    const n: usize = @intCast(src_arr.next_index);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        if (src_arr.get(key)) |v| {
+            try dest_arr.push(allocator, v);
+        }
+    }
+    return dest;
+}
+
+pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, allocator: Allocator) !Value {
+    if (!args_array.isArray()) {
+        return throwException("Only arrays can be unpacked", allocator);
+    }
+
+    const arr = args_array.asArray();
+    const max_count: usize = @intCast(arr.next_index);
+    const tmp_args = try allocator.alloc(Value, max_count);
+    defer allocator.free(tmp_args);
+
+    var used: usize = 0;
+    var i: usize = 0;
+    while (i < max_count) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        if (arr.get(key)) |v| {
+            tmp_args[used] = v;
+            used += 1;
+        }
+    }
+    return php_invoke_callable(callback, tmp_args[0..used], allocator);
 }
 
 // ============================================================================

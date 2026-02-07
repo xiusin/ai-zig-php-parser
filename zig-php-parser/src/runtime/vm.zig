@@ -4908,9 +4908,6 @@ pub const VM = struct {
             .closure => {
                 return self.callClosure(function_val.getAsClosure().data, args);
             },
-            .arrow_function => {
-                return self.callArrowFunction(function_val.getAsArrowFunc().data, args);
-            },
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Not a callable function", self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -6432,6 +6429,21 @@ pub const VM = struct {
                 const param_name = self.context.string_pool.keys()[name_id];
                 const arg_value = try self.eval(arg_node.data.named_arg.value);
                 try named_args.put(param_name, arg_value);
+            } else if (arg_node.tag == .unpacking_expr) {
+                const unpack_val = try self.eval(arg_node.data.unpacking_expr.expr);
+                defer self.releaseValue(unpack_val);
+
+                if (unpack_val.getTag() != .array) {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Only arrays can be unpacked", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+
+                var it = unpack_val.getAsArray().data.iterator();
+                while (it.next()) |entry| {
+                    const v = entry.value.retain();
+                    try args.append(self.allocator, v);
+                    try ref_var_names.append(self.allocator, "");
+                }
             } else {
                 // Track variable name for reference parameter support
                 if (arg_node.tag == .variable) {
