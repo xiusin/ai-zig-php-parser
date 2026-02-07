@@ -16,6 +16,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const concurrency = @import("concurrency_runtime.zig");
+const array_ops_shared = @import("array_ops_shared.zig");
 
 // ============================================================================
 // 全局运行时状态
@@ -30,6 +31,7 @@ pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: 
 
 /// 全局常量表
 pub var constants: std.StringHashMap(Value) = undefined;
+var array_internal_pointers: ?std.AutoHashMap(*PHPArray, usize) = null;
 
 /// 当前异常（线程局部）
 threadlocal var current_exception: Value = undefined;
@@ -43,6 +45,7 @@ pub fn initRuntime(allocator: Allocator) void {
     registerZigSelect(allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(allocator);
     constants = std.StringHashMap(Value).init(allocator);
+    array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(allocator);
     current_exception = Value.initNull();
     has_exception = false;
 }
@@ -76,6 +79,7 @@ pub fn php_handle_uncaught_exception() void {
 /// 清理运行时
 pub fn deinitRuntime() void {
     concurrency.shutdownScheduler();
+    cleanupAllClasses();
     if (user_function_registry) |*registry| {
         registry.deinit();
         user_function_registry = null;
@@ -88,6 +92,10 @@ pub fn deinitRuntime() void {
         entry.value_ptr.release(runtime_allocator);
     }
     constants.deinit();
+    if (array_internal_pointers) |*m| {
+        m.deinit();
+        array_internal_pointers = null;
+    }
 }
 
 /// 注册用户定义函数
@@ -338,6 +346,9 @@ pub const PHPArray = struct {
 
     /// 释放数组
     fn deinit(self: *PHPArray, allocator: Allocator) void {
+        if (array_internal_pointers) |*m| {
+            _ = m.remove(self);
+        }
         var iter = self.elements.iterator();
         while (iter.next()) |entry| {
             entry.value_ptr.release(allocator);
@@ -614,7 +625,7 @@ pub const Value = struct {
     // 引用计数
     // ========================================================================
 
-    pub fn retain(self: Value) void {
+    pub fn retain(self: Value) Value {
         if (self.isString()) {
             self.asString().retain();
         } else if (self.isArray()) {
@@ -624,6 +635,7 @@ pub const Value = struct {
         } else if (self.isFunction()) {
             self.asFunction().retain();
         }
+        return self;
     }
 
     pub fn release(self: Value, allocator: Allocator) void {
@@ -2527,17 +2539,7 @@ pub fn php_array_pop(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
-    if (php_arr.count() == 0) return Value.initNull();
-
-    const last_key = ArrayKey{ .integer = php_arr.next_index - 1 };
-    const value = php_arr.get(last_key) orelse return Value.initNull();
-
-    // 移除元素
-    _ = php_arr.elements.remove(last_key);
-    php_arr.next_index -= 1;
-
-    // 不需要release，因为我们返回了这个值
-    _ = allocator;
+    const value = array_ops_shared.pop(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index) orelse return Value.initNull();
     return value;
 }
 
@@ -4660,18 +4662,8 @@ pub fn php_array_shift(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
-    if (php_arr.count() == 0) return Value.initNull();
-
-    // 获取第一个元素
-    var it = php_arr.elements.iterator();
-    if (it.next()) |entry| {
-        const first_value = entry.value_ptr.*;
-        // 移除第一个元素
-        _ = php_arr.elements.orderedRemove(entry.key_ptr.*);
-        return first_value;
-    }
-    _ = allocator;
-    return Value.initNull();
+    const v = array_ops_shared.shift(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index) orelse return Value.initNull();
+    return v;
 }
 
 /// array_unshift - 在数组开头添加元素
@@ -4679,14 +4671,7 @@ pub fn php_array_unshift(arr: Value, values: []const Value, allocator: Allocator
     if (!arr.isArray()) return Value.initInt(0);
 
     const php_arr = arr.asArray();
-
-    // 为新元素分配空间并移动现有元素
-    var i: usize = values.len;
-    while (i > 0) {
-        i -= 1;
-        try php_arr.prepend(allocator, values[i]);
-    }
-
+    try array_ops_shared.unshift(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index, values);
     return Value.initInt(@intCast(php_arr.count()));
 }
 
@@ -4704,8 +4689,11 @@ pub fn php_array_search(needle: Value, haystack: Value) !Value {
         if (eq_result.asBool()) {
             // 返回键
             return switch (entry.key_ptr.*) {
-                .int => |k| Value.initInt(k),
-                .string => |k| Value.initString(k),
+                .integer => |k| Value.initInt(k),
+                .string => |k| blk: {
+                    k.retain();
+                    break :blk Value.initString(k);
+                },
             };
         }
     }
@@ -4812,7 +4800,7 @@ pub fn php_array_unique(arr: Value, allocator: Allocator) !Value {
         }
 
         if (!exists) {
-            try result.setByKey(allocator, entry.key_ptr.*, val);
+            try result.set(allocator, entry.key_ptr.*, val);
         }
     }
 
@@ -4833,13 +4821,13 @@ pub fn php_array_flip(arr: Value, allocator: Allocator) !Value {
 
         // 值变成键，键变成值
         if (val.isInt()) {
-            try result.set(allocator, val.asInt(), switch (key) {
-                .int => |k| Value.initInt(k),
+            try result.set(allocator, .{ .integer = val.asInt() }, switch (key) {
+                .integer => |k| Value.initInt(k),
                 .string => |k| Value.initString(k),
             });
         } else if (val.isString()) {
-            try result.setByString(allocator, val.asString().data, switch (key) {
-                .int => |k| Value.initInt(k),
+            try result.set(allocator, .{ .string = val.asString() }, switch (key) {
+                .integer => |k| Value.initInt(k),
                 .string => |k| Value.initString(k),
             });
         }
@@ -4855,9 +4843,9 @@ pub fn php_array_key_exists(key: Value, arr: Value) !Value {
     const php_arr = arr.asArray();
 
     if (key.isInt()) {
-        return Value.initBool(php_arr.get(key.asInt()) != null);
+        return Value.initBool(php_arr.get(.{ .integer = key.asInt() }) != null);
     } else if (key.isString()) {
-        return Value.initBool(php_arr.getByString(key.asString().data) != null);
+        return Value.initBool(php_arr.get(.{ .string = key.asString() }) != null);
     }
 
     return Value.initBool(false);
@@ -4872,8 +4860,11 @@ pub fn php_array_key_first(arr: Value) !Value {
 
     if (it.next()) |entry| {
         return switch (entry.key_ptr.*) {
-            .int => |k| Value.initInt(k),
-            .string => |k| Value.initString(k),
+            .integer => |k| Value.initInt(k),
+            .string => |k| blk: {
+                k.retain();
+                break :blk Value.initString(k);
+            },
         };
     }
 
@@ -4885,7 +4876,7 @@ pub fn php_array_key_last(arr: Value) !Value {
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
-    var last_key: ?PHPArray.ArrayKey = null;
+    var last_key: ?ArrayKey = null;
 
     var it = php_arr.elements.iterator();
     while (it.next()) |entry| {
@@ -4894,8 +4885,11 @@ pub fn php_array_key_last(arr: Value) !Value {
 
     if (last_key) |key| {
         return switch (key) {
-            .int => |k| Value.initInt(k),
-            .string => |k| Value.initString(k),
+            .integer => |k| Value.initInt(k),
+            .string => |k| blk: {
+                k.retain();
+                break :blk Value.initString(k);
+            },
         };
     }
 
@@ -4911,7 +4905,7 @@ pub fn php_array_fill(start_index: Value, num: Value, value: Value, allocator: A
 
     var i: i64 = 0;
     while (i < count) : (i += 1) {
-        try result.set(allocator, start + i, value);
+        try result.set(allocator, .{ .integer = start + i }, value);
     }
 
     return Value.initArray(result);
@@ -4937,6 +4931,930 @@ pub fn php_range(start: Value, end: Value, allocator: Allocator) !Value {
     }
 
     return Value.initArray(result);
+}
+
+fn arrayGetByString(arr: *PHPArray, key_bytes: []const u8) ?Value {
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| {
+        if (entry.key_ptr.* == .string) {
+            const s = entry.key_ptr.*.string;
+            if (std.mem.eql(u8, s.data, key_bytes)) return entry.value_ptr.*;
+        }
+    }
+    return null;
+}
+
+fn arraySetByString(arr: *PHPArray, allocator: Allocator, key_bytes: []const u8, value: Value) !void {
+    const s = try PHPString.init(allocator, key_bytes);
+    defer s.release(allocator);
+    try arr.set(allocator, .{ .string = s }, value);
+}
+
+fn valueCompare(a: Value, b: Value, allocator: Allocator) !i64 {
+    if ((a.isInt() or a.isFloat() or a.isBool() or a.isNull()) and (b.isInt() or b.isFloat() or b.isBool() or b.isNull())) {
+        const af = a.toFloat();
+        const bf = b.toFloat();
+        if (af < bf) return -1;
+        if (af > bf) return 1;
+        return 0;
+    }
+
+    const as = try a.toString(allocator);
+    defer as.release(allocator);
+    const bs = try b.toString(allocator);
+    defer bs.release(allocator);
+
+    return switch (std.mem.order(u8, as.data, bs.data)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
+fn keyCompare(a: ArrayKey, b: ArrayKey) i64 {
+    return switch (a) {
+        .integer => |ai| switch (b) {
+            .integer => |bi| if (ai < bi) -1 else if (ai > bi) 1 else 0,
+            .string =>  -1,
+        },
+        .string => |as| switch (b) {
+            .integer => 1,
+            .string => |bs| switch (std.mem.order(u8, as.data, bs.data)) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            },
+        },
+    };
+}
+
+fn quickSortValues(values: []Value, allocator: Allocator, descending: bool) !void {
+    if (values.len < 2) return;
+
+    const pivot = values[values.len / 2];
+    var i: usize = 0;
+    var j: usize = values.len - 1;
+
+    while (i <= j) {
+        while (true) {
+            const cmp = try valueCompare(values[i], pivot, allocator);
+            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+                i += 1;
+                if (i >= values.len) break;
+                continue;
+            }
+            break;
+        }
+        while (true) {
+            const cmp = try valueCompare(values[j], pivot, allocator);
+            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+                if (j == 0) break;
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        if (i <= j) {
+            const tmp = values[i];
+            values[i] = values[j];
+            values[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+    }
+
+    if (j > 0) try quickSortValues(values[0 .. j + 1], allocator, descending);
+    if (i < values.len) try quickSortValues(values[i..], allocator, descending);
+}
+
+const KV = struct { key: ArrayKey, value: Value };
+
+fn collectEntries(arr: *PHPArray, allocator: Allocator) ![]KV {
+    const n = arr.count();
+    const items = try allocator.alloc(KV, n);
+    var it = arr.elements.iterator();
+    var idx: usize = 0;
+    while (it.next()) |entry| : (idx += 1) {
+        items[idx] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };
+    }
+    return items;
+}
+
+fn quickSortEntriesByValue(items: []KV, allocator: Allocator, descending: bool) !void {
+    if (items.len < 2) return;
+
+    const pivot = items[items.len / 2].value;
+    var i: usize = 0;
+    var j: usize = items.len - 1;
+
+    while (i <= j) {
+        while (true) {
+            const cmp = try valueCompare(items[i].value, pivot, allocator);
+            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+                i += 1;
+                if (i >= items.len) break;
+                continue;
+            }
+            break;
+        }
+        while (true) {
+            const cmp = try valueCompare(items[j].value, pivot, allocator);
+            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+                if (j == 0) break;
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        if (i <= j) {
+            const tmp = items[i];
+            items[i] = items[j];
+            items[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+    }
+
+    if (j > 0) try quickSortEntriesByValue(items[0 .. j + 1], allocator, descending);
+    if (i < items.len) try quickSortEntriesByValue(items[i..], allocator, descending);
+}
+
+fn quickSortEntriesByKey(items: []KV, descending: bool) void {
+    if (items.len < 2) return;
+
+    const pivot = items[items.len / 2].key;
+    var i: usize = 0;
+    var j: usize = items.len - 1;
+
+    while (i <= j) {
+        while (true) {
+            const cmp = keyCompare(items[i].key, pivot);
+            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+                i += 1;
+                if (i >= items.len) break;
+                continue;
+            }
+            break;
+        }
+        while (true) {
+            const cmp = keyCompare(items[j].key, pivot);
+            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+                if (j == 0) break;
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        if (i <= j) {
+            const tmp = items[i];
+            items[i] = items[j];
+            items[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+    }
+
+    if (j > 0) quickSortEntriesByKey(items[0 .. j + 1], descending);
+    if (i < items.len) quickSortEntriesByKey(items[i..], descending);
+}
+
+pub fn php_sizeof(val: Value) !Value {
+    return php_count(val);
+}
+
+pub fn php_array_combine(keys: Value, values: Value, allocator: Allocator) !Value {
+    if (!keys.isArray() or !values.isArray()) return Value.initBool(false);
+    const keys_arr = keys.asArray();
+    const values_arr = values.asArray();
+    if (keys_arr.count() != values_arr.count()) return Value.initBool(false);
+
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var key_it = keys_arr.elements.iterator();
+    var val_it = values_arr.elements.iterator();
+    while (key_it.next()) |k_entry| {
+        const v_entry = val_it.next().?;
+        const k = k_entry.value_ptr.*;
+        const v = v_entry.value_ptr.*;
+        if (k.isInt()) {
+            try result.set(allocator, .{ .integer = k.asInt() }, v);
+        } else if (k.isString()) {
+            try result.set(allocator, .{ .string = k.asString() }, v);
+        } else {
+            const ks = try k.toString(allocator);
+            defer ks.release(allocator);
+            try result.set(allocator, .{ .string = ks }, v);
+        }
+    }
+
+    return Value.initArray(result);
+}
+
+pub fn php_array_pad(arr: Value, pad_size: Value, pad_value: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+    const php_arr = arr.asArray();
+    const n = php_arr.count();
+    const target_i = pad_size.toInt();
+    const target: usize = @intCast(@abs(target_i));
+
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    if (target > n and target_i < 0) {
+        var i: usize = 0;
+        while (i < target - n) : (i += 1) {
+            try result.push(allocator, pad_value);
+        }
+    }
+
+    var it = php_arr.elements.iterator();
+    while (it.next()) |entry| {
+        try result.push(allocator, entry.value_ptr.*);
+    }
+
+    if (target > n and target_i > 0) {
+        var i: usize = 0;
+        while (i < target - n) : (i += 1) {
+            try result.push(allocator, pad_value);
+        }
+    }
+
+    return Value.initArray(result);
+}
+
+pub fn php_array_intersect(arrays: []const Value, allocator: Allocator) !Value {
+    if (arrays.len == 0 or !arrays[0].isArray()) return Value.initArray(try PHPArray.init(allocator));
+
+    const first = arrays[0].asArray();
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var it = first.elements.iterator();
+    while (it.next()) |entry| {
+        const v = entry.value_ptr.*;
+        var keep = true;
+        for (arrays[1..]) |other_val| {
+            if (!other_val.isArray()) {
+                keep = false;
+                break;
+            }
+            var found = false;
+            var oit = other_val.asArray().elements.iterator();
+            while (oit.next()) |oentry| {
+                const eq = try php_eq(v, oentry.value_ptr.*);
+                if (eq.asBool()) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                keep = false;
+                break;
+            }
+        }
+        if (keep) {
+            try result.set(allocator, entry.key_ptr.*, v);
+        }
+    }
+
+    return Value.initArray(result);
+}
+
+pub fn php_array_diff(arrays: []const Value, allocator: Allocator) !Value {
+    if (arrays.len == 0 or !arrays[0].isArray()) return Value.initArray(try PHPArray.init(allocator));
+
+    const first = arrays[0].asArray();
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var it = first.elements.iterator();
+    while (it.next()) |entry| {
+        const v = entry.value_ptr.*;
+        var keep = true;
+        for (arrays[1..]) |other_val| {
+            if (!other_val.isArray()) continue;
+            var oit = other_val.asArray().elements.iterator();
+            while (oit.next()) |oentry| {
+                const eq = try php_eq(v, oentry.value_ptr.*);
+                if (eq.asBool()) {
+                    keep = false;
+                    break;
+                }
+            }
+            if (!keep) break;
+        }
+        if (keep) {
+            try result.set(allocator, entry.key_ptr.*, v);
+        }
+    }
+
+    return Value.initArray(result);
+}
+
+pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+    const php_arr = arr.asArray();
+    const n = php_arr.count();
+
+    const off_i = offset.toInt();
+    const start_idx: usize = blk: {
+        if (off_i < 0) {
+            const abs_off = @as(usize, @intCast(@abs(off_i)));
+            break :blk if (abs_off > n) 0 else n - abs_off;
+        }
+        break :blk @intCast(@min(off_i, @as(i64, @intCast(n))));
+    };
+
+    const delete_count: usize = blk: {
+        if (length.isNull()) break :blk n - start_idx;
+        const len_i = length.toInt();
+        if (len_i >= 0) break :blk @min(@as(usize, @intCast(len_i)), n - start_idx);
+        const abs_len = @as(usize, @intCast(@abs(len_i)));
+        if (abs_len >= n - start_idx) break :blk 0;
+        break :blk (n - start_idx) - abs_len;
+    };
+
+    const removed = try PHPArray.init(allocator);
+    errdefer removed.release(allocator);
+
+    const items = try collectEntries(php_arr, allocator);
+    defer allocator.free(items);
+
+    var rep_values: ?[]Value = null;
+    if (!replacement.isNull()) {
+        if (replacement.isArray()) {
+            const rep_arr = replacement.asArray();
+            const rep_n = rep_arr.count();
+            const vals = try allocator.alloc(Value, rep_n);
+            var rep_it = rep_arr.elements.iterator();
+            var ridx: usize = 0;
+            while (rep_it.next()) |e| : (ridx += 1) vals[ridx] = e.value_ptr.*;
+            rep_values = vals;
+        } else {
+            const vals = try allocator.alloc(Value, 1);
+            vals[0] = replacement;
+            rep_values = vals;
+        }
+    }
+    defer if (rep_values) |vals| allocator.free(vals);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var next_int_key: i64 = 0;
+
+    var idx: usize = 0;
+    while (idx < items.len) : (idx += 1) {
+        if (idx == start_idx) {
+            var r: usize = 0;
+            while (r < delete_count) : (r += 1) {
+                try removed.push(allocator, items[idx + r].value);
+                items[idx + r].value.release(allocator);
+                if (items[idx + r].key == .string) {
+                    items[idx + r].key.string.release(allocator);
+                }
+            }
+
+            if (rep_values) |vals| {
+                for (vals) |v| {
+                    _ = v.retain();
+                    try new_elements.put(.{ .integer = next_int_key }, v);
+                    next_int_key += 1;
+                }
+            }
+
+            idx += delete_count;
+            if (idx >= items.len) break;
+        }
+
+        const kv = items[idx];
+        switch (kv.key) {
+            .string => {
+                try new_elements.put(kv.key, kv.value);
+            },
+            .integer => {
+                try new_elements.put(.{ .integer = next_int_key }, kv.value);
+                next_int_key += 1;
+            },
+        }
+    }
+
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    php_arr.next_index = next_int_key;
+
+    return Value.initArray(removed);
+}
+
+pub fn php_sort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const n = php_arr.count();
+    var values = try allocator.alloc(Value, n);
+    defer allocator.free(values);
+
+    var it = php_arr.elements.iterator();
+    var idx: usize = 0;
+    while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
+    try quickSortValues(values, allocator, false);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var i: usize = 0;
+    while (i < values.len) : (i += 1) {
+        try new_elements.put(.{ .integer = @intCast(i) }, values[i]);
+    }
+
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    php_arr.next_index = @intCast(values.len);
+    return Value.initBool(true);
+}
+
+pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const n = php_arr.count();
+    var values = try allocator.alloc(Value, n);
+    defer allocator.free(values);
+
+    var it = php_arr.elements.iterator();
+    var idx: usize = 0;
+    while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
+    try quickSortValues(values, allocator, true);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var i: usize = 0;
+    while (i < values.len) : (i += 1) {
+        try new_elements.put(.{ .integer = @intCast(i) }, values[i]);
+    }
+
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    php_arr.next_index = @intCast(values.len);
+    return Value.initBool(true);
+}
+
+pub fn php_asort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const items = try collectEntries(php_arr, allocator);
+    defer allocator.free(items);
+    try quickSortEntriesByValue(items, allocator, false);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    for (items) |kv| {
+        try new_elements.put(kv.key, kv.value);
+    }
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    return Value.initBool(true);
+}
+
+pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const items = try collectEntries(php_arr, allocator);
+    defer allocator.free(items);
+    try quickSortEntriesByValue(items, allocator, true);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    for (items) |kv| {
+        try new_elements.put(kv.key, kv.value);
+    }
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    return Value.initBool(true);
+}
+
+pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const items = try collectEntries(php_arr, allocator);
+    defer allocator.free(items);
+    quickSortEntriesByKey(items, false);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    for (items) |kv| {
+        try new_elements.put(kv.key, kv.value);
+    }
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    return Value.initBool(true);
+}
+
+pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const items = try collectEntries(php_arr, allocator);
+    defer allocator.free(items);
+    quickSortEntriesByKey(items, true);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    for (items) |kv| {
+        try new_elements.put(kv.key, kv.value);
+    }
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    return Value.initBool(true);
+}
+
+fn invokeUserCompare(callback: Value, a: Value, b: Value, allocator: Allocator) !i64 {
+    const args = [_]Value{ a, b };
+    const res = try php_invoke_callable(callback, &args, allocator);
+    const cmp = res.toInt();
+    res.release(allocator);
+    return cmp;
+}
+
+fn quickSortValuesWithCallback(values: []Value, callback: Value, allocator: Allocator, descending: bool) !void {
+    if (values.len < 2) return;
+
+    const pivot = values[values.len / 2];
+    var i: usize = 0;
+    var j: usize = values.len - 1;
+
+    while (i <= j) {
+        while (true) {
+            const cmp = try invokeUserCompare(callback, values[i], pivot, allocator);
+            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+                i += 1;
+                if (i >= values.len) break;
+                continue;
+            }
+            break;
+        }
+        while (true) {
+            const cmp = try invokeUserCompare(callback, values[j], pivot, allocator);
+            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+                if (j == 0) break;
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        if (i <= j) {
+            const tmp = values[i];
+            values[i] = values[j];
+            values[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+    }
+
+    if (j > 0) try quickSortValuesWithCallback(values[0 .. j + 1], callback, allocator, descending);
+    if (i < values.len) try quickSortValuesWithCallback(values[i..], callback, allocator, descending);
+}
+
+fn quickSortEntriesByValueWithCallback(items: []KV, callback: Value, allocator: Allocator, descending: bool) !void {
+    if (items.len < 2) return;
+
+    const pivot = items[items.len / 2].value;
+    var i: usize = 0;
+    var j: usize = items.len - 1;
+
+    while (i <= j) {
+        while (true) {
+            const cmp = try invokeUserCompare(callback, items[i].value, pivot, allocator);
+            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+                i += 1;
+                if (i >= items.len) break;
+                continue;
+            }
+            break;
+        }
+        while (true) {
+            const cmp = try invokeUserCompare(callback, items[j].value, pivot, allocator);
+            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+                if (j == 0) break;
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        if (i <= j) {
+            const tmp = items[i];
+            items[i] = items[j];
+            items[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+    }
+
+    if (j > 0) try quickSortEntriesByValueWithCallback(items[0 .. j + 1], callback, allocator, descending);
+    if (i < items.len) try quickSortEntriesByValueWithCallback(items[i..], callback, allocator, descending);
+}
+
+fn keyToValue(key: ArrayKey) Value {
+    return switch (key) {
+        .integer => |i| Value.initInt(i),
+        .string => |s| Value.initString(s),
+    };
+}
+
+fn quickSortEntriesByKeyWithCallback(items: []KV, callback: Value, allocator: Allocator, descending: bool) !void {
+    if (items.len < 2) return;
+
+    const pivot = items[items.len / 2].key;
+    var i: usize = 0;
+    var j: usize = items.len - 1;
+
+    while (i <= j) {
+        while (true) {
+            const cmp = try invokeUserCompare(callback, keyToValue(items[i].key), keyToValue(pivot), allocator);
+            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+                i += 1;
+                if (i >= items.len) break;
+                continue;
+            }
+            break;
+        }
+        while (true) {
+            const cmp = try invokeUserCompare(callback, keyToValue(items[j].key), keyToValue(pivot), allocator);
+            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+                if (j == 0) break;
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        if (i <= j) {
+            const tmp = items[i];
+            items[i] = items[j];
+            items[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+    }
+
+    if (j > 0) try quickSortEntriesByKeyWithCallback(items[0 .. j + 1], callback, allocator, descending);
+    if (i < items.len) try quickSortEntriesByKeyWithCallback(items[i..], callback, allocator, descending);
+}
+
+pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const n = php_arr.count();
+    var values = try allocator.alloc(Value, n);
+    defer allocator.free(values);
+
+    var it = php_arr.elements.iterator();
+    var idx: usize = 0;
+    while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
+
+    try quickSortValuesWithCallback(values, callback, allocator, false);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var i: usize = 0;
+    while (i < values.len) : (i += 1) {
+        try new_elements.put(.{ .integer = @intCast(i) }, values[i]);
+    }
+
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    php_arr.next_index = @intCast(values.len);
+    return Value.initBool(true);
+}
+
+pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const items = try collectEntries(php_arr, allocator);
+    defer allocator.free(items);
+
+    try quickSortEntriesByValueWithCallback(items, callback, allocator, false);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    for (items) |kv| {
+        try new_elements.put(kv.key, kv.value);
+    }
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    return Value.initBool(true);
+}
+
+pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const php_arr = arr.asArray();
+    const items = try collectEntries(php_arr, allocator);
+    defer allocator.free(items);
+
+    try quickSortEntriesByKeyWithCallback(items, callback, allocator, false);
+
+    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    for (items) |kv| {
+        try new_elements.put(kv.key, kv.value);
+    }
+    php_arr.elements.deinit();
+    php_arr.elements = new_elements;
+    return Value.initBool(true);
+}
+
+fn quickSortIndicesByValues(indices: []usize, values: []Value, allocator: Allocator, descending: bool) !void {
+    if (indices.len < 2) return;
+
+    const pivot_idx = indices[indices.len / 2];
+    const pivot = values[pivot_idx];
+    var i: usize = 0;
+    var j: usize = indices.len - 1;
+
+    while (i <= j) {
+        while (true) {
+            const cmp = try valueCompare(values[indices[i]], pivot, allocator);
+            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+                i += 1;
+                if (i >= indices.len) break;
+                continue;
+            }
+            break;
+        }
+        while (true) {
+            const cmp = try valueCompare(values[indices[j]], pivot, allocator);
+            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+                if (j == 0) break;
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+
+        if (i <= j) {
+            const tmp = indices[i];
+            indices[i] = indices[j];
+            indices[j] = tmp;
+            i += 1;
+            if (j == 0) break;
+            j -= 1;
+        }
+    }
+
+    if (j > 0) try quickSortIndicesByValues(indices[0 .. j + 1], values, allocator, descending);
+    if (i < indices.len) try quickSortIndicesByValues(indices[i..], values, allocator, descending);
+}
+
+pub fn php_array_multisort(arrays: []const Value, allocator: Allocator) !Value {
+    if (arrays.len == 0 or !arrays[0].isArray()) return Value.initBool(false);
+
+    const first_arr = arrays[0].asArray();
+    const n = first_arr.count();
+    var first_vals = try allocator.alloc(Value, n);
+    defer allocator.free(first_vals);
+    var it0 = first_arr.elements.iterator();
+    var idx0: usize = 0;
+    while (it0.next()) |entry| : (idx0 += 1) first_vals[idx0] = entry.value_ptr.*;
+
+    var indices = try allocator.alloc(usize, n);
+    defer allocator.free(indices);
+    for (0..n) |i| indices[i] = i;
+
+    try quickSortIndicesByValues(indices, first_vals, allocator, false);
+
+    for (arrays) |arr_val| {
+        if (!arr_val.isArray()) return Value.initBool(false);
+        const a = arr_val.asArray();
+        if (a.count() != n) return Value.initBool(false);
+
+        var vals = try allocator.alloc(Value, n);
+        defer allocator.free(vals);
+        var it = a.elements.iterator();
+        var i: usize = 0;
+        while (it.next()) |entry| : (i += 1) vals[i] = entry.value_ptr.*;
+
+        var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+        for (indices, 0..) |src, dst| {
+            try new_elements.put(.{ .integer = @intCast(dst) }, vals[src]);
+        }
+        a.elements.deinit();
+        a.elements = new_elements;
+        a.next_index = @intCast(n);
+    }
+
+    return Value.initBool(true);
+}
+
+fn arrayCursorGet(arr: *PHPArray) usize {
+    if (array_internal_pointers) |m| {
+        return m.get(arr) orelse 0;
+    }
+    return 0;
+}
+
+fn arrayCursorSet(arr: *PHPArray, idx: usize, allocator: Allocator) !void {
+    if (array_internal_pointers) |*m| {
+        try m.put(arr, idx);
+    } else {
+        _ = allocator;
+    }
+}
+
+fn arrayEntryAt(arr: *PHPArray, idx: usize) ?KV {
+    var it = arr.elements.iterator();
+    var i: usize = 0;
+    while (it.next()) |entry| : (i += 1) {
+        if (i == idx) return .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };
+    }
+    return null;
+}
+
+pub fn php_current(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const a = arr.asArray();
+    const idx = arrayCursorGet(a);
+    if (arrayEntryAt(a, idx)) |kv| {
+        _ = kv.value.retain();
+        _ = allocator;
+        return kv.value;
+    }
+    _ = allocator;
+    return Value.initBool(false);
+}
+
+pub fn php_key(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+    const a = arr.asArray();
+    const idx = arrayCursorGet(a);
+    if (arrayEntryAt(a, idx)) |kv| {
+        _ = allocator;
+        return switch (kv.key) {
+            .integer => |i| Value.initInt(i),
+            .string => |s| blk: {
+                s.retain();
+                break :blk Value.initString(s);
+            },
+        };
+    }
+    _ = allocator;
+    return Value.initNull();
+}
+
+pub fn php_reset(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const a = arr.asArray();
+    try arrayCursorSet(a, 0, allocator);
+    return php_current(arr, allocator);
+}
+
+pub fn php_end(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const a = arr.asArray();
+    const n = a.count();
+    if (n == 0) {
+        try arrayCursorSet(a, 0, allocator);
+        return Value.initBool(false);
+    }
+    try arrayCursorSet(a, n - 1, allocator);
+    return php_current(arr, allocator);
+}
+
+pub fn php_next(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const a = arr.asArray();
+    const idx = arrayCursorGet(a) + 1;
+    try arrayCursorSet(a, idx, allocator);
+    return php_current(arr, allocator);
+}
+
+pub fn php_prev(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const a = arr.asArray();
+    const cur = arrayCursorGet(a);
+    if (cur == 0) return Value.initBool(false);
+    try arrayCursorSet(a, cur - 1, allocator);
+    return php_current(arr, allocator);
+}
+
+pub fn php_each(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initBool(false);
+    const a = arr.asArray();
+    const idx = arrayCursorGet(a);
+    const kv = arrayEntryAt(a, idx) orelse return Value.initBool(false);
+
+    const key_val = switch (kv.key) {
+        .integer => |i| Value.initInt(i),
+        .string => |s| Value.initString(s),
+    };
+
+    const out = try PHPArray.init(allocator);
+    errdefer out.release(allocator);
+
+    try out.set(allocator, .{ .integer = 0 }, kv.value);
+    try out.set(allocator, .{ .integer = 1 }, key_val);
+    try arraySetByString(out, allocator, "key", key_val);
+    try arraySetByString(out, allocator, "value", kv.value);
+
+    try arrayCursorSet(a, idx + 1, allocator);
+
+    return Value.initArray(out);
 }
 
 // ============================================================================
@@ -5930,7 +6848,7 @@ pub fn php_array_column(arr: Value, column_key: Value, index_key: Value, allocat
         const col_value = if (column_key.isInt()) blk: {
             break :blk row_arr.get(.{ .integer = column_key.asInt() });
         } else if (column_key.isString()) blk: {
-            break :blk row_arr.getByString(column_key.asString().data);
+            break :blk arrayGetByString(row_arr, column_key.asString().data);
         } else blk: {
             break :blk null;
         };
@@ -5943,7 +6861,7 @@ pub fn php_array_column(arr: Value, column_key: Value, index_key: Value, allocat
                 const idx_value = if (index_key.isInt()) blk: {
                     break :blk row_arr.get(.{ .integer = index_key.asInt() });
                 } else if (index_key.isString()) blk: {
-                    break :blk row_arr.getByString(index_key.asString().data);
+                    break :blk arrayGetByString(row_arr, index_key.asString().data);
                 } else blk: {
                     break :blk null;
                 };
@@ -5952,7 +6870,7 @@ pub fn php_array_column(arr: Value, column_key: Value, index_key: Value, allocat
                     if (idx.isInt()) {
                         try result_arr.set(allocator, .{ .integer = idx.asInt() }, val);
                     } else if (idx.isString()) {
-                        try result_arr.setByString(allocator, idx.asString().data, val);
+                        try arraySetByString(result_arr, allocator, idx.asString().data, val);
                     } else {
                         try result_arr.push(allocator, val);
                     }

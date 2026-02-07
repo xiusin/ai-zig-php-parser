@@ -74,12 +74,6 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("jit", jit_mod);
     exe.root_module.addImport("extension", extension_mod);
     exe.linkLibC();
-    // 添加模块导入
-    exe.root_module.addImport("compiler", compiler_mod);
-    exe.root_module.addImport("runtime", runtime_mod);
-    exe.root_module.addImport("bytecode", bytecode_mod);
-    exe.root_module.addImport("jit", jit_mod);
-    exe.root_module.addImport("extension", extension_mod);
     // Detect platform for Homebrew PCRE2 paths
     const pcre2_prefix = if (builtin.target.cpu.arch == .aarch64) "/opt/homebrew/opt/pcre2" else "/usr/local/opt/pcre2";
     exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
@@ -129,6 +123,8 @@ pub fn build(b: *std.Build) void {
         "src/aot/test_control_flow_ir.zig",
         "src/aot/test_licm.zig",
         "src/aot/test_loop_unroll.zig",
+        "src/aot/test_runtime_arrays.zig",
+        "src/aot/test_runtime_comprehensive.zig",
         // Runtime tests
         // "src/runtime/coroutine_error_handling.zig",
         // "src/runtime/coroutine_debugging.zig",
@@ -148,13 +144,6 @@ pub fn build(b: *std.Build) void {
         test_exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
         test_exe.addLibraryPath(.{ .cwd_relative = pcre2_prefix ++ "/lib" });
         test_exe.linkSystemLibrary("pcre2-8");
-    // 添加模块导入
-    test_exe.root_module.addImport("compiler", compiler_mod);
-    test_exe.root_module.addImport("runtime", runtime_mod);
-    test_exe.root_module.addImport("bytecode", bytecode_mod);
-    test_exe.root_module.addImport("jit", jit_mod);
-    test_exe.root_module.addImport("extension", extension_mod);
-        
         // 添加模块导入
         test_exe.root_module.addImport("compiler", compiler_mod);
         test_exe.root_module.addImport("runtime", runtime_mod);

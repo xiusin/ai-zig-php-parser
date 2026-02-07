@@ -742,66 +742,7 @@ pub const NativeLinker = struct {
     /// 检查函数是否需要 allocator 参数
     fn functionNeedsAllocator(self: *const Self, func_name: []const u8) bool {
         _ = self;
-
-        const needs_allocator = [_][]const u8{
-            // 字符串函数
-            "strtoupper",  "strtolower",   "trim",       "ltrim",        "rtrim",
-            "str_replace", "str_repeat",   "str_pad",    "strrev",       "ucfirst",
-            "lcfirst",     "ucwords",      "explode",    "implode",      "str_split",
-            "join",
-            "strcasecmp",  "substr",       "strval",
-            "sprintf",     "printf",
-            "chunk_split", "wordwrap",     "nl2br",
-            "strip_tags",
-            "htmlspecialchars", "htmlentities", "htmlspecialchars_decode",
-            "number_format",
-            "bin2hex",     "hex2bin",
-            "base64_encode", "base64_decode",
-            "md5",         "sha1",
-            "uniqid",
-            "chr",
-
-            // 数组函数
-                "array_push",   "array_pop",
-            "array_slice", "array_merge",  "array_keys", "array_values",
-            "array_map",   "array_filter", "array_reduce", "array_chunk",
-
-            // 时间函数
-            "microtime",
-            "date",
-
-            // 文件函数
-            "file_get_contents", "file_put_contents",
-            "basename", "dirname",
-
-            // 随机数函数
-                   "random_bytes",
-
-            // 其他
-            "php_concat",
-            "php_array_iter_init",
-            "php_array_iter_key",
-            "php_array_iter_free",
-            "php_create_closure",
-            "php_args_append_spread",
-            "php_invoke_callable_args_array",
-            "php_define",
-            "define",
-            "php_constant_get",
-            "go",
-            "php_go_builtin",
-            "class_exists",
-            "get_class",
-            "serialize",
-            "unserialize",
-            "php_json_encode",
-            "json_encode",
-        };
-
-        for (needs_allocator) |name| {
-            if (std.mem.eql(u8, func_name, name)) return true;
-        }
-
+        if (builtinInfo(func_name)) |info| return info.needs_allocator;
         return false;
     }
 
@@ -811,80 +752,7 @@ pub const NativeLinker = struct {
 
         // 已经是php_前缀的是内置函数
         if (std.mem.startsWith(u8, func_name, "php_")) return true;
-
-        // 常见的PHP内置函数
-        const builtins = [_][]const u8{
-            // 输出函数
-            "echo",             "print",        "var_dump",     "print_r",         "var_export",
-
-            // 常量函数
-            "define",           "defined",
-
-            // 字符串函数
-            "strlen",           "substr",       "strpos",       "strtoupper",      "strtolower",
-            "trim",             "ltrim",        "rtrim",        "str_replace",     "str_repeat",
-            "str_pad",          "strrev",       "str_contains", "str_starts_with", "str_ends_with",
-            "ucfirst",          "lcfirst",      "ucwords",      "explode",         "implode",
-            "join",             "str_split",    "strcmp",       "strcasecmp",
-            "stripos",          "strrpos",      "strripos",
-            "sprintf",          "printf",
-            "chunk_split",      "wordwrap",     "nl2br",
-            "strip_tags",       "htmlspecialchars", "htmlentities", "htmlspecialchars_decode",
-            "number_format",
-            "bin2hex",          "hex2bin",
-            "base64_encode",    "base64_decode",
-            "md5",              "sha1",
-            "uniqid",
-            "ord",              "chr",
-
-            // 数组函数
-            "count",
-            "array_push",       "array_pop",    "array_shift",  "array_unshift",   "in_array",
-            "array_key_exists", "array_keys",   "array_values", "array_slice",     "array_merge",
-            "array_map",        "array_filter", "array_reduce", "array_chunk",     "array_sum",
-
-            // 数学函数
-            "abs",              "sqrt",         "round",        "floor",           "ceil",
-            "min",              "max",          "pow",          "sin",             "cos",
-            "tan",              "asin",         "acos",         "atan",            "atan2",
-            "log",              "log10",        "exp",          "fmod",            "hypot",
-            "deg2rad",          "rad2deg",      "pi",           "rand",            "mt_rand",
-
-            // 时间函数
-            "time",             "microtime",    "date",
-            "sleep",            "usleep",
-
-            // 随机数函数
-                    "srand",           "mt_srand",
-            "random_int",       "random_bytes",
-
-            // 类型检查函数
-            "is_null",      "is_bool",         "is_int",
-            "is_float",         "is_string",    "is_array",
-
-            // 类型转换函数
-            "intval",           "floatval",
-            "strval",           "boolval",
-
-            // 文件函数
-            "file_get_contents", "file_put_contents", "file_exists", "is_file", "is_dir",
-            "filesize", "unlink", "rename", "copy", "mkdir", "rmdir", "basename", "dirname",
-
-            // 其他
-            "isset",            "empty",            "unset",
-            "die",              "exit",
-            "go",
-            "class_exists",     "method_exists",    "property_exists",
-            "get_class",
-            "serialize",        "unserialize",
-            "json_encode",
-        };
-
-        for (builtins) |builtin| {
-            if (std.mem.eql(u8, func_name, builtin)) return true;
-        }
-
-        return false;
+        return builtinInfo(func_name) != null;
     }
 
     /// 映射PHP函数名到运行时函数名
@@ -895,163 +763,209 @@ pub const NativeLinker = struct {
         if (std.mem.startsWith(u8, func_name, "php_")) {
             return func_name;
         }
-
-        // 映射表
-        if (std.mem.eql(u8, func_name, "echo")) return "php_echo";
-        if (std.mem.eql(u8, func_name, "print")) return "php_print";
-        if (std.mem.eql(u8, func_name, "var_dump")) return "php_var_dump";
-
-        // 常量函数
-        if (std.mem.eql(u8, func_name, "define")) return "php_define";
-        if (std.mem.eql(u8, func_name, "defined")) return "php_defined";
-
-        // 反射/对象查询
-        if (std.mem.eql(u8, func_name, "class_exists")) return "php_class_exists";
-        if (std.mem.eql(u8, func_name, "method_exists")) return "php_method_exists";
-        if (std.mem.eql(u8, func_name, "property_exists")) return "php_property_exists";
-        if (std.mem.eql(u8, func_name, "get_class")) return "php_get_class";
-        if (std.mem.eql(u8, func_name, "serialize")) return "php_serialize";
-        if (std.mem.eql(u8, func_name, "unserialize")) return "php_unserialize";
-        if (std.mem.eql(u8, func_name, "json_encode")) return "php_json_encode";
-
-        // 字符串函数
-        if (std.mem.eql(u8, func_name, "strlen")) return "php_strlen";
-        if (std.mem.eql(u8, func_name, "substr")) return "php_substr";
-        if (std.mem.eql(u8, func_name, "strpos")) return "php_strpos";
-        if (std.mem.eql(u8, func_name, "strtoupper")) return "php_strtoupper";
-        if (std.mem.eql(u8, func_name, "strtolower")) return "php_strtolower";
-        if (std.mem.eql(u8, func_name, "trim")) return "php_trim";
-        if (std.mem.eql(u8, func_name, "ltrim")) return "php_ltrim";
-        if (std.mem.eql(u8, func_name, "rtrim")) return "php_rtrim";
-        if (std.mem.eql(u8, func_name, "str_replace")) return "php_str_replace";
-        if (std.mem.eql(u8, func_name, "str_repeat")) return "php_str_repeat";
-        if (std.mem.eql(u8, func_name, "str_pad")) return "php_str_pad";
-        if (std.mem.eql(u8, func_name, "strrev")) return "php_strrev";
-        if (std.mem.eql(u8, func_name, "str_contains")) return "php_str_contains";
-        if (std.mem.eql(u8, func_name, "str_starts_with")) return "php_str_starts_with";
-        if (std.mem.eql(u8, func_name, "str_ends_with")) return "php_str_ends_with";
-        if (std.mem.eql(u8, func_name, "ucfirst")) return "php_ucfirst";
-        if (std.mem.eql(u8, func_name, "lcfirst")) return "php_lcfirst";
-        if (std.mem.eql(u8, func_name, "ucwords")) return "php_ucwords";
-        if (std.mem.eql(u8, func_name, "explode")) return "php_explode";
-        if (std.mem.eql(u8, func_name, "implode")) return "php_implode";
-        if (std.mem.eql(u8, func_name, "join")) return "php_implode";
-        if (std.mem.eql(u8, func_name, "str_split")) return "php_str_split";
-        if (std.mem.eql(u8, func_name, "strcmp")) return "php_strcmp";
-        if (std.mem.eql(u8, func_name, "strcasecmp")) return "php_strcasecmp";
-        if (std.mem.eql(u8, func_name, "stripos")) return "php_stripos";
-        if (std.mem.eql(u8, func_name, "strrpos")) return "php_strrpos";
-        if (std.mem.eql(u8, func_name, "strripos")) return "php_strripos";
-        if (std.mem.eql(u8, func_name, "sprintf")) return "php_sprintf";
-        if (std.mem.eql(u8, func_name, "printf")) return "php_printf";
-        if (std.mem.eql(u8, func_name, "chunk_split")) return "php_chunk_split";
-        if (std.mem.eql(u8, func_name, "wordwrap")) return "php_wordwrap";
-        if (std.mem.eql(u8, func_name, "nl2br")) return "php_nl2br";
-        if (std.mem.eql(u8, func_name, "strip_tags")) return "php_strip_tags";
-        if (std.mem.eql(u8, func_name, "htmlspecialchars")) return "php_htmlspecialchars";
-        if (std.mem.eql(u8, func_name, "htmlentities")) return "php_htmlentities";
-        if (std.mem.eql(u8, func_name, "htmlspecialchars_decode")) return "php_htmlspecialchars_decode";
-        if (std.mem.eql(u8, func_name, "number_format")) return "php_number_format";
-        if (std.mem.eql(u8, func_name, "bin2hex")) return "php_bin2hex";
-        if (std.mem.eql(u8, func_name, "hex2bin")) return "php_hex2bin";
-        if (std.mem.eql(u8, func_name, "base64_encode")) return "php_base64_encode";
-        if (std.mem.eql(u8, func_name, "base64_decode")) return "php_base64_decode";
-        if (std.mem.eql(u8, func_name, "md5")) return "php_md5";
-        if (std.mem.eql(u8, func_name, "sha1")) return "php_sha1";
-        if (std.mem.eql(u8, func_name, "uniqid")) return "php_uniqid";
-        if (std.mem.eql(u8, func_name, "ord")) return "php_ord";
-        if (std.mem.eql(u8, func_name, "chr")) return "php_chr";
-
-        // 数组函数
-        if (std.mem.eql(u8, func_name, "array_sum")) return "php_array_sum";
-        if (std.mem.eql(u8, func_name, "count")) return "php_count";
-        if (std.mem.eql(u8, func_name, "array_push")) return "php_array_push";
-        if (std.mem.eql(u8, func_name, "array_pop")) return "php_array_pop";
-        if (std.mem.eql(u8, func_name, "in_array")) return "php_in_array";
-        if (std.mem.eql(u8, func_name, "array_keys")) return "php_array_keys";
-        if (std.mem.eql(u8, func_name, "array_values")) return "php_array_values";
-        if (std.mem.eql(u8, func_name, "array_slice")) return "php_array_slice";
-        if (std.mem.eql(u8, func_name, "array_merge")) return "php_array_merge";
-        if (std.mem.eql(u8, func_name, "array_map")) return "php_array_map";
-        if (std.mem.eql(u8, func_name, "array_filter")) return "php_array_filter";
-        if (std.mem.eql(u8, func_name, "array_reduce")) return "php_array_reduce";
-        if (std.mem.eql(u8, func_name, "array_chunk")) return "php_array_chunk";
-
-        // 数学函数
-        if (std.mem.eql(u8, func_name, "abs")) return "php_abs";
-        if (std.mem.eql(u8, func_name, "sqrt")) return "php_sqrt";
-        if (std.mem.eql(u8, func_name, "round")) return "php_round";
-        if (std.mem.eql(u8, func_name, "floor")) return "php_floor";
-        if (std.mem.eql(u8, func_name, "ceil")) return "php_ceil";
-        if (std.mem.eql(u8, func_name, "min")) return "php_min";
-        if (std.mem.eql(u8, func_name, "max")) return "php_max";
-        if (std.mem.eql(u8, func_name, "pow")) return "php_pow_func";
-        if (std.mem.eql(u8, func_name, "sin")) return "php_sin";
-        if (std.mem.eql(u8, func_name, "cos")) return "php_cos";
-        if (std.mem.eql(u8, func_name, "tan")) return "php_tan";
-        if (std.mem.eql(u8, func_name, "asin")) return "php_asin";
-        if (std.mem.eql(u8, func_name, "acos")) return "php_acos";
-        if (std.mem.eql(u8, func_name, "atan")) return "php_atan";
-        if (std.mem.eql(u8, func_name, "atan2")) return "php_atan2";
-        if (std.mem.eql(u8, func_name, "log")) return "php_log";
-        if (std.mem.eql(u8, func_name, "log10")) return "php_log10";
-        if (std.mem.eql(u8, func_name, "exp")) return "php_exp";
-        if (std.mem.eql(u8, func_name, "fmod")) return "php_fmod";
-        if (std.mem.eql(u8, func_name, "hypot")) return "php_hypot";
-        if (std.mem.eql(u8, func_name, "deg2rad")) return "php_deg2rad";
-        if (std.mem.eql(u8, func_name, "rad2deg")) return "php_rad2deg";
-        if (std.mem.eql(u8, func_name, "pi")) return "php_pi";
-        if (std.mem.eql(u8, func_name, "rand")) return "php_rand";
-        if (std.mem.eql(u8, func_name, "mt_rand")) return "php_mt_rand";
-
-        // 时间函数
-        if (std.mem.eql(u8, func_name, "time")) return "php_time";
-        if (std.mem.eql(u8, func_name, "microtime")) return "php_microtime";
-        if (std.mem.eql(u8, func_name, "date")) return "php_date";
-        if (std.mem.eql(u8, func_name, "sleep")) return "php_sleep";
-        if (std.mem.eql(u8, func_name, "usleep")) return "php_usleep";
-
-        // 随机数函数
-        if (std.mem.eql(u8, func_name, "srand")) return "php_srand";
-        if (std.mem.eql(u8, func_name, "mt_srand")) return "php_mt_srand";
-        if (std.mem.eql(u8, func_name, "random_int")) return "php_random_int";
-        if (std.mem.eql(u8, func_name, "random_bytes")) return "php_random_bytes";
-
-        // 类型检查函数
-        if (std.mem.eql(u8, func_name, "is_null")) return "php_is_null";
-        if (std.mem.eql(u8, func_name, "is_bool")) return "php_is_bool";
-        if (std.mem.eql(u8, func_name, "is_int")) return "php_is_int";
-        if (std.mem.eql(u8, func_name, "is_float")) return "php_is_float";
-        if (std.mem.eql(u8, func_name, "is_string")) return "php_is_string";
-        if (std.mem.eql(u8, func_name, "is_array")) return "php_is_array";
-
-        // 类型转换函数
-        if (std.mem.eql(u8, func_name, "intval")) return "php_intval";
-        if (std.mem.eql(u8, func_name, "floatval")) return "php_floatval";
-        if (std.mem.eql(u8, func_name, "strval")) return "php_strval";
-        if (std.mem.eql(u8, func_name, "boolval")) return "php_boolval";
-
-        // 文件函数
-        if (std.mem.eql(u8, func_name, "file_get_contents")) return "php_file_get_contents";
-        if (std.mem.eql(u8, func_name, "file_put_contents")) return "php_file_put_contents";
-        if (std.mem.eql(u8, func_name, "file_exists")) return "php_file_exists";
-        if (std.mem.eql(u8, func_name, "is_file")) return "php_is_file";
-        if (std.mem.eql(u8, func_name, "is_dir")) return "php_is_dir";
-        if (std.mem.eql(u8, func_name, "filesize")) return "php_filesize";
-        if (std.mem.eql(u8, func_name, "unlink")) return "php_unlink";
-        if (std.mem.eql(u8, func_name, "rename")) return "php_rename";
-        if (std.mem.eql(u8, func_name, "copy")) return "php_copy";
-        if (std.mem.eql(u8, func_name, "mkdir")) return "php_mkdir";
-        if (std.mem.eql(u8, func_name, "rmdir")) return "php_rmdir";
-        if (std.mem.eql(u8, func_name, "basename")) return "php_basename";
-        if (std.mem.eql(u8, func_name, "dirname")) return "php_dirname";
-
-        if (std.mem.eql(u8, func_name, "go")) return "php_go_builtin";
-
-        // 默认：添加php_前缀
-        // 注意：这里应该分配新的字符串，但为了简单起见，我们假设调用者会处理
+        if (builtinInfo(func_name)) |info| return info.runtime_name;
         return func_name;
     }
+
+    const BuiltinInfo = struct {
+        runtime_name: []const u8,
+        needs_allocator: bool,
+    };
+
+    fn builtinInfo(func_name: []const u8) ?BuiltinInfo {
+        return builtin_map.get(func_name);
+    }
+
+    const builtin_map = std.ComptimeStringMap(BuiltinInfo, .{
+        .{ "echo", .{ .runtime_name = "php_echo", .needs_allocator = false } },
+        .{ "print", .{ .runtime_name = "php_print", .needs_allocator = false } },
+        .{ "var_dump", .{ .runtime_name = "php_var_dump", .needs_allocator = false } },
+
+        .{ "define", .{ .runtime_name = "php_define", .needs_allocator = true } },
+        .{ "defined", .{ .runtime_name = "php_defined", .needs_allocator = false } },
+
+        .{ "class_exists", .{ .runtime_name = "php_class_exists", .needs_allocator = true } },
+        .{ "method_exists", .{ .runtime_name = "php_method_exists", .needs_allocator = false } },
+        .{ "property_exists", .{ .runtime_name = "php_property_exists", .needs_allocator = false } },
+        .{ "get_class", .{ .runtime_name = "php_get_class", .needs_allocator = true } },
+        .{ "serialize", .{ .runtime_name = "php_serialize", .needs_allocator = true } },
+        .{ "unserialize", .{ .runtime_name = "php_unserialize", .needs_allocator = true } },
+        .{ "json_encode", .{ .runtime_name = "php_json_encode", .needs_allocator = true } },
+
+        .{ "strlen", .{ .runtime_name = "php_strlen", .needs_allocator = false } },
+        .{ "substr", .{ .runtime_name = "php_substr", .needs_allocator = true } },
+        .{ "strpos", .{ .runtime_name = "php_strpos", .needs_allocator = false } },
+        .{ "strtoupper", .{ .runtime_name = "php_strtoupper", .needs_allocator = true } },
+        .{ "strtolower", .{ .runtime_name = "php_strtolower", .needs_allocator = true } },
+        .{ "trim", .{ .runtime_name = "php_trim", .needs_allocator = true } },
+        .{ "ltrim", .{ .runtime_name = "php_ltrim", .needs_allocator = true } },
+        .{ "rtrim", .{ .runtime_name = "php_rtrim", .needs_allocator = true } },
+        .{ "str_replace", .{ .runtime_name = "php_str_replace", .needs_allocator = true } },
+        .{ "str_repeat", .{ .runtime_name = "php_str_repeat", .needs_allocator = true } },
+        .{ "str_pad", .{ .runtime_name = "php_str_pad", .needs_allocator = true } },
+        .{ "strrev", .{ .runtime_name = "php_strrev", .needs_allocator = true } },
+        .{ "str_contains", .{ .runtime_name = "php_str_contains", .needs_allocator = false } },
+        .{ "str_starts_with", .{ .runtime_name = "php_str_starts_with", .needs_allocator = false } },
+        .{ "str_ends_with", .{ .runtime_name = "php_str_ends_with", .needs_allocator = false } },
+        .{ "ucfirst", .{ .runtime_name = "php_ucfirst", .needs_allocator = true } },
+        .{ "lcfirst", .{ .runtime_name = "php_lcfirst", .needs_allocator = true } },
+        .{ "ucwords", .{ .runtime_name = "php_ucwords", .needs_allocator = true } },
+        .{ "explode", .{ .runtime_name = "php_explode", .needs_allocator = true } },
+        .{ "implode", .{ .runtime_name = "php_implode", .needs_allocator = true } },
+        .{ "join", .{ .runtime_name = "php_implode", .needs_allocator = true } },
+        .{ "str_split", .{ .runtime_name = "php_str_split", .needs_allocator = true } },
+        .{ "strcmp", .{ .runtime_name = "php_strcmp", .needs_allocator = false } },
+        .{ "strcasecmp", .{ .runtime_name = "php_strcasecmp", .needs_allocator = true } },
+        .{ "stripos", .{ .runtime_name = "php_stripos", .needs_allocator = false } },
+        .{ "strrpos", .{ .runtime_name = "php_strrpos", .needs_allocator = false } },
+        .{ "strripos", .{ .runtime_name = "php_strripos", .needs_allocator = false } },
+        .{ "sprintf", .{ .runtime_name = "php_sprintf", .needs_allocator = true } },
+        .{ "printf", .{ .runtime_name = "php_printf", .needs_allocator = true } },
+        .{ "chunk_split", .{ .runtime_name = "php_chunk_split", .needs_allocator = true } },
+        .{ "wordwrap", .{ .runtime_name = "php_wordwrap", .needs_allocator = true } },
+        .{ "nl2br", .{ .runtime_name = "php_nl2br", .needs_allocator = true } },
+        .{ "strip_tags", .{ .runtime_name = "php_strip_tags", .needs_allocator = true } },
+        .{ "htmlspecialchars", .{ .runtime_name = "php_htmlspecialchars", .needs_allocator = true } },
+        .{ "htmlentities", .{ .runtime_name = "php_htmlentities", .needs_allocator = true } },
+        .{ "htmlspecialchars_decode", .{ .runtime_name = "php_htmlspecialchars_decode", .needs_allocator = true } },
+        .{ "number_format", .{ .runtime_name = "php_number_format", .needs_allocator = true } },
+        .{ "bin2hex", .{ .runtime_name = "php_bin2hex", .needs_allocator = true } },
+        .{ "hex2bin", .{ .runtime_name = "php_hex2bin", .needs_allocator = true } },
+        .{ "base64_encode", .{ .runtime_name = "php_base64_encode", .needs_allocator = true } },
+        .{ "base64_decode", .{ .runtime_name = "php_base64_decode", .needs_allocator = true } },
+        .{ "md5", .{ .runtime_name = "php_md5", .needs_allocator = true } },
+        .{ "sha1", .{ .runtime_name = "php_sha1", .needs_allocator = true } },
+        .{ "uniqid", .{ .runtime_name = "php_uniqid", .needs_allocator = true } },
+        .{ "ord", .{ .runtime_name = "php_ord", .needs_allocator = false } },
+        .{ "chr", .{ .runtime_name = "php_chr", .needs_allocator = true } },
+
+        .{ "count", .{ .runtime_name = "php_count", .needs_allocator = false } },
+        .{ "in_array", .{ .runtime_name = "php_in_array", .needs_allocator = false } },
+        .{ "array_key_exists", .{ .runtime_name = "php_array_key_exists", .needs_allocator = false } },
+        .{ "array_keys", .{ .runtime_name = "php_array_keys", .needs_allocator = true } },
+        .{ "array_values", .{ .runtime_name = "php_array_values", .needs_allocator = true } },
+        .{ "array_push", .{ .runtime_name = "php_array_push", .needs_allocator = true } },
+        .{ "array_pop", .{ .runtime_name = "php_array_pop", .needs_allocator = true } },
+        .{ "array_shift", .{ .runtime_name = "php_array_shift", .needs_allocator = true } },
+        .{ "array_unshift", .{ .runtime_name = "php_array_unshift", .needs_allocator = true } },
+        .{ "array_slice", .{ .runtime_name = "php_array_slice", .needs_allocator = true } },
+        .{ "array_merge", .{ .runtime_name = "php_array_merge", .needs_allocator = true } },
+        .{ "array_map", .{ .runtime_name = "php_array_map", .needs_allocator = true } },
+        .{ "array_filter", .{ .runtime_name = "php_array_filter", .needs_allocator = true } },
+        .{ "array_reduce", .{ .runtime_name = "php_array_reduce", .needs_allocator = true } },
+        .{ "array_chunk", .{ .runtime_name = "php_array_chunk", .needs_allocator = true } },
+        .{ "array_sum", .{ .runtime_name = "php_array_sum", .needs_allocator = false } },
+        .{ "array_product", .{ .runtime_name = "php_array_product", .needs_allocator = false } },
+        .{ "array_search", .{ .runtime_name = "php_array_search", .needs_allocator = false } },
+        .{ "array_reverse", .{ .runtime_name = "php_array_reverse", .needs_allocator = true } },
+        .{ "array_unique", .{ .runtime_name = "php_array_unique", .needs_allocator = true } },
+        .{ "array_flip", .{ .runtime_name = "php_array_flip", .needs_allocator = true } },
+        .{ "array_key_first", .{ .runtime_name = "php_array_key_first", .needs_allocator = false } },
+        .{ "array_key_last", .{ .runtime_name = "php_array_key_last", .needs_allocator = false } },
+        .{ "array_fill", .{ .runtime_name = "php_array_fill", .needs_allocator = true } },
+        .{ "array_column", .{ .runtime_name = "php_array_column", .needs_allocator = true } },
+        .{ "array_walk", .{ .runtime_name = "php_array_walk", .needs_allocator = true } },
+        .{ "array_splice", .{ .runtime_name = "php_array_splice", .needs_allocator = true } },
+        .{ "array_intersect", .{ .runtime_name = "php_array_intersect", .needs_allocator = true } },
+        .{ "array_diff", .{ .runtime_name = "php_array_diff", .needs_allocator = true } },
+        .{ "array_combine", .{ .runtime_name = "php_array_combine", .needs_allocator = true } },
+        .{ "array_pad", .{ .runtime_name = "php_array_pad", .needs_allocator = true } },
+        .{ "sizeof", .{ .runtime_name = "php_sizeof", .needs_allocator = false } },
+        .{ "sort", .{ .runtime_name = "php_sort", .needs_allocator = true } },
+        .{ "rsort", .{ .runtime_name = "php_rsort", .needs_allocator = true } },
+        .{ "asort", .{ .runtime_name = "php_asort", .needs_allocator = true } },
+        .{ "arsort", .{ .runtime_name = "php_arsort", .needs_allocator = true } },
+        .{ "ksort", .{ .runtime_name = "php_ksort", .needs_allocator = true } },
+        .{ "krsort", .{ .runtime_name = "php_krsort", .needs_allocator = true } },
+        .{ "usort", .{ .runtime_name = "php_usort", .needs_allocator = true } },
+        .{ "uasort", .{ .runtime_name = "php_uasort", .needs_allocator = true } },
+        .{ "uksort", .{ .runtime_name = "php_uksort", .needs_allocator = true } },
+        .{ "array_multisort", .{ .runtime_name = "php_array_multisort", .needs_allocator = true } },
+        .{ "range", .{ .runtime_name = "php_range", .needs_allocator = true } },
+        .{ "current", .{ .runtime_name = "php_current", .needs_allocator = true } },
+        .{ "next", .{ .runtime_name = "php_next", .needs_allocator = true } },
+        .{ "prev", .{ .runtime_name = "php_prev", .needs_allocator = true } },
+        .{ "reset", .{ .runtime_name = "php_reset", .needs_allocator = true } },
+        .{ "end", .{ .runtime_name = "php_end", .needs_allocator = true } },
+        .{ "key", .{ .runtime_name = "php_key", .needs_allocator = true } },
+        .{ "each", .{ .runtime_name = "php_each", .needs_allocator = true } },
+
+        .{ "abs", .{ .runtime_name = "php_abs", .needs_allocator = false } },
+        .{ "sqrt", .{ .runtime_name = "php_sqrt", .needs_allocator = false } },
+        .{ "round", .{ .runtime_name = "php_round", .needs_allocator = false } },
+        .{ "floor", .{ .runtime_name = "php_floor", .needs_allocator = false } },
+        .{ "ceil", .{ .runtime_name = "php_ceil", .needs_allocator = false } },
+        .{ "min", .{ .runtime_name = "php_min", .needs_allocator = false } },
+        .{ "max", .{ .runtime_name = "php_max", .needs_allocator = false } },
+        .{ "pow", .{ .runtime_name = "php_pow_func", .needs_allocator = false } },
+        .{ "sin", .{ .runtime_name = "php_sin", .needs_allocator = false } },
+        .{ "cos", .{ .runtime_name = "php_cos", .needs_allocator = false } },
+        .{ "tan", .{ .runtime_name = "php_tan", .needs_allocator = false } },
+        .{ "asin", .{ .runtime_name = "php_asin", .needs_allocator = false } },
+        .{ "acos", .{ .runtime_name = "php_acos", .needs_allocator = false } },
+        .{ "atan", .{ .runtime_name = "php_atan", .needs_allocator = false } },
+        .{ "atan2", .{ .runtime_name = "php_atan2", .needs_allocator = false } },
+        .{ "log", .{ .runtime_name = "php_log", .needs_allocator = false } },
+        .{ "log10", .{ .runtime_name = "php_log10", .needs_allocator = false } },
+        .{ "exp", .{ .runtime_name = "php_exp", .needs_allocator = false } },
+        .{ "fmod", .{ .runtime_name = "php_fmod", .needs_allocator = false } },
+        .{ "hypot", .{ .runtime_name = "php_hypot", .needs_allocator = false } },
+        .{ "deg2rad", .{ .runtime_name = "php_deg2rad", .needs_allocator = false } },
+        .{ "rad2deg", .{ .runtime_name = "php_rad2deg", .needs_allocator = false } },
+        .{ "pi", .{ .runtime_name = "php_pi", .needs_allocator = false } },
+        .{ "rand", .{ .runtime_name = "php_rand", .needs_allocator = false } },
+        .{ "mt_rand", .{ .runtime_name = "php_mt_rand", .needs_allocator = false } },
+
+        .{ "time", .{ .runtime_name = "php_time", .needs_allocator = false } },
+        .{ "microtime", .{ .runtime_name = "php_microtime", .needs_allocator = true } },
+        .{ "date", .{ .runtime_name = "php_date", .needs_allocator = true } },
+        .{ "sleep", .{ .runtime_name = "php_sleep", .needs_allocator = false } },
+        .{ "usleep", .{ .runtime_name = "php_usleep", .needs_allocator = false } },
+
+        .{ "srand", .{ .runtime_name = "php_srand", .needs_allocator = false } },
+        .{ "mt_srand", .{ .runtime_name = "php_mt_srand", .needs_allocator = false } },
+        .{ "random_int", .{ .runtime_name = "php_random_int", .needs_allocator = false } },
+        .{ "random_bytes", .{ .runtime_name = "php_random_bytes", .needs_allocator = true } },
+
+        .{ "is_null", .{ .runtime_name = "php_is_null", .needs_allocator = false } },
+        .{ "is_bool", .{ .runtime_name = "php_is_bool", .needs_allocator = false } },
+        .{ "is_int", .{ .runtime_name = "php_is_int", .needs_allocator = false } },
+        .{ "is_float", .{ .runtime_name = "php_is_float", .needs_allocator = false } },
+        .{ "is_string", .{ .runtime_name = "php_is_string", .needs_allocator = false } },
+        .{ "is_array", .{ .runtime_name = "php_is_array", .needs_allocator = false } },
+
+        .{ "intval", .{ .runtime_name = "php_intval", .needs_allocator = false } },
+        .{ "floatval", .{ .runtime_name = "php_floatval", .needs_allocator = false } },
+        .{ "strval", .{ .runtime_name = "php_strval", .needs_allocator = true } },
+        .{ "boolval", .{ .runtime_name = "php_boolval", .needs_allocator = false } },
+
+        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
+        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
+        .{ "file_exists", .{ .runtime_name = "php_file_exists", .needs_allocator = false } },
+        .{ "is_file", .{ .runtime_name = "php_is_file", .needs_allocator = false } },
+        .{ "is_dir", .{ .runtime_name = "php_is_dir", .needs_allocator = false } },
+        .{ "filesize", .{ .runtime_name = "php_filesize", .needs_allocator = false } },
+        .{ "unlink", .{ .runtime_name = "php_unlink", .needs_allocator = false } },
+        .{ "rename", .{ .runtime_name = "php_rename", .needs_allocator = false } },
+        .{ "copy", .{ .runtime_name = "php_copy", .needs_allocator = false } },
+        .{ "mkdir", .{ .runtime_name = "php_mkdir", .needs_allocator = false } },
+        .{ "rmdir", .{ .runtime_name = "php_rmdir", .needs_allocator = false } },
+        .{ "basename", .{ .runtime_name = "php_basename", .needs_allocator = true } },
+        .{ "dirname", .{ .runtime_name = "php_dirname", .needs_allocator = true } },
+
+        .{ "go", .{ .runtime_name = "php_go_builtin", .needs_allocator = true } },
+
+        .{ "php_concat", .{ .runtime_name = "php_concat", .needs_allocator = true } },
+        .{ "php_array_iter_init", .{ .runtime_name = "php_array_iter_init", .needs_allocator = true } },
+        .{ "php_array_iter_key", .{ .runtime_name = "php_array_iter_key", .needs_allocator = true } },
+        .{ "php_array_iter_free", .{ .runtime_name = "php_array_iter_free", .needs_allocator = true } },
+        .{ "php_create_closure", .{ .runtime_name = "php_create_closure", .needs_allocator = true } },
+        .{ "php_args_append_spread", .{ .runtime_name = "php_args_append_spread", .needs_allocator = true } },
+        .{ "php_invoke_callable_args_array", .{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true } },
+        .{ "php_constant_get", .{ .runtime_name = "php_constant_get", .needs_allocator = true } },
+        .{ "php_go_builtin", .{ .runtime_name = "php_go_builtin", .needs_allocator = true } },
+        .{ "php_json_encode", .{ .runtime_name = "php_json_encode", .needs_allocator = true } },
+    });
 
     /// 生成函数
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), func: *const IR.Function) !void {
@@ -3090,6 +3004,60 @@ pub const NativeLinker = struct {
 
                                     try writer.print("    reg_{d} = try runtime.{s}({s}, {s}, runtime.runtime_allocator);\n", .{ reg.id, runtime_name, fmt_buf.items, slice_expr });
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort")) {
+                                const slice_expr = if (op.args.len > 0)
+                                    try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{ {s} }}", .{args_buf.items})
+                                else
+                                    try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{}}", .{});
+                                defer self.allocator.free(slice_expr);
+                                try writer.print("    reg_{d} = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{ reg.id, runtime_name, slice_expr });
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
+                                if (op.args.len == 0) {
+                                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                } else {
+                                    var first_buf = std.ArrayList(u8){};
+                                    defer first_buf.deinit(self.allocator);
+                                    const first_writer = first_buf.writer(self.allocator);
+
+                                    const first_arg = op.args[0];
+                                    const first_type = @as(std.meta.Tag(IR.Type), first_arg.type_);
+                                    if (first_type == .i64) {
+                                        try first_writer.print("runtime.Value.initInt(reg_{d})", .{first_arg.id});
+                                    } else if (first_type == .f64) {
+                                        try first_writer.print("runtime.Value.initFloat(reg_{d})", .{first_arg.id});
+                                    } else if (first_type == .bool) {
+                                        try first_writer.print("runtime.Value.initBool(reg_{d})", .{first_arg.id});
+                                    } else {
+                                        try first_writer.print("reg_{d}", .{first_arg.id});
+                                    }
+
+                                    var rest_buf = std.ArrayList(u8){};
+                                    defer rest_buf.deinit(self.allocator);
+                                    const rest_writer = rest_buf.writer(self.allocator);
+                                    if (op.args.len > 1) {
+                                        for (op.args[1..], 0..) |arg, i| {
+                                            if (i > 0) try rest_writer.writeAll(", ");
+                                            const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                                            if (arg_type_tag == .i64) {
+                                                try rest_writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .f64) {
+                                                try rest_writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .bool) {
+                                                try rest_writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                            } else {
+                                                try rest_writer.print("reg_{d}", .{arg.id});
+                                            }
+                                        }
+                                    }
+
+                                    const slice_expr = if (op.args.len > 1)
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{ {s} }}", .{rest_buf.items})
+                                    else
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{}}", .{});
+                                    defer self.allocator.free(slice_expr);
+
+                                    try writer.print("    reg_{d} = try runtime.{s}({s}, {s}, runtime.runtime_allocator);\n", .{ reg.id, runtime_name, first_buf.items, slice_expr });
+                                }
                             } else if (args_buf.items.len > 0) {
                                 try writer.print("    reg_{d} = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{ reg.id, runtime_name, args_buf.items });
                             } else {
@@ -3175,6 +3143,60 @@ pub const NativeLinker = struct {
                                     defer self.allocator.free(slice_expr);
 
                                     try writer.print("    _ = try runtime.{s}({s}, {s}, runtime.runtime_allocator);\n", .{ runtime_name, fmt_buf.items, slice_expr });
+                                }
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort")) {
+                                const slice_expr = if (op.args.len > 0)
+                                    try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{ {s} }}", .{args_buf.items})
+                                else
+                                    try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{}}", .{});
+                                defer self.allocator.free(slice_expr);
+                                try writer.print("    _ = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{ runtime_name, slice_expr });
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
+                                if (op.args.len > 0) {
+                                    var first_buf = std.ArrayList(u8){};
+                                    defer first_buf.deinit(self.allocator);
+                                    const first_writer = first_buf.writer(self.allocator);
+
+                                    const first_arg = op.args[0];
+                                    const first_type = @as(std.meta.Tag(IR.Type), first_arg.type_);
+                                    if (first_type == .i64) {
+                                        try first_writer.print("runtime.Value.initInt(reg_{d})", .{first_arg.id});
+                                    } else if (first_type == .f64) {
+                                        try first_writer.print("runtime.Value.initFloat(reg_{d})", .{first_arg.id});
+                                    } else if (first_type == .bool) {
+                                        try first_writer.print("runtime.Value.initBool(reg_{d})", .{first_arg.id});
+                                    } else {
+                                        try first_writer.print("reg_{d}", .{first_arg.id});
+                                    }
+
+                                    var rest_buf = std.ArrayList(u8){};
+                                    defer rest_buf.deinit(self.allocator);
+                                    const rest_writer = rest_buf.writer(self.allocator);
+                                    if (op.args.len > 1) {
+                                        for (op.args[1..], 0..) |arg, i| {
+                                            if (i > 0) try rest_writer.writeAll(", ");
+                                            const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                                            if (arg_type_tag == .i64) {
+                                                try rest_writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .f64) {
+                                                try rest_writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .bool) {
+                                                try rest_writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                            } else {
+                                                try rest_writer.print("reg_{d}", .{arg.id});
+                                            }
+                                        }
+                                    }
+
+                                    const slice_expr = if (op.args.len > 1)
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{ {s} }}", .{rest_buf.items})
+                                    else
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{}}", .{});
+                                    defer self.allocator.free(slice_expr);
+
+                                    try writer.print("    _ = try runtime.{s}({s}, {s}, runtime.runtime_allocator);\n", .{ runtime_name, first_buf.items, slice_expr });
+                                } else {
+                                    try writer.writeAll("    _ = runtime.Value.initNull();\n");
                                 }
                             } else if (args_buf.items.len > 0) {
                                 try writer.print("    _ = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{ runtime_name, args_buf.items });
@@ -5631,6 +5653,24 @@ pub const NativeLinker = struct {
         const concurrency_file = try std.fs.cwd().createFile(concurrency_dest, .{});
         defer concurrency_file.close();
         try concurrency_file.writeAll(concurrency_content);
+
+        const array_ops_path = "src/aot/array_ops_shared.zig";
+        const array_ops_content = try std.fs.cwd().readFileAlloc(
+            self.allocator,
+            array_ops_path,
+            10 * 1024 * 1024,
+        );
+        defer self.allocator.free(array_ops_content);
+
+        const array_ops_dest = try std.fs.path.join(
+            self.allocator,
+            &[_][]const u8{ temp_dir, "array_ops_shared.zig" },
+        );
+        defer self.allocator.free(array_ops_dest);
+
+        const array_ops_file = try std.fs.cwd().createFile(array_ops_dest, .{});
+        defer array_ops_file.close();
+        try array_ops_file.writeAll(array_ops_content);
 
         if (self.config.verbose) {
             std.debug.print("  Copied runtime libraries to {s}\n", .{temp_dir});

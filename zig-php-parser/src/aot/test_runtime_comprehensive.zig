@@ -206,7 +206,7 @@ test "字符串 - trim" {
     defer str.release(allocator);
 
     const val = Value.initString(str);
-    const result = try runtime.php_trim(val, allocator);
+    const result = try runtime.php_trim(val, Value.initNull(), allocator);
     defer result.asString().release(allocator);
 
     try testing.expectEqualStrings("hello", result.asString().data);
@@ -561,15 +561,16 @@ test "高阶数组函数 - array_reduce sum" {
     const allocator = testing.allocator;
 
     const add_func = struct {
-        fn add(args: []const Value, alloc: std.mem.Allocator) !Value {
+        fn add(ctx: Value, args: []const Value, alloc: std.mem.Allocator) !Value {
+            _ = ctx;
             _ = alloc;
             if (args.len < 2) return error.InvalidArgumentCount;
             return runtime.php_add(args[0], args[1]);
         }
     }.add;
 
-    const php_func = try runtime.PHPFunction.init(allocator, add_func);
-    defer php_func.release();
+    const php_func = try runtime.PHPClosure.init(allocator, add_func, &.{});
+    defer php_func.release(allocator);
     const callback = Value.initFunction(php_func);
 
     const arr = try PHPArray.init(allocator);

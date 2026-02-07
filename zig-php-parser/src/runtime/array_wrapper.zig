@@ -3,6 +3,7 @@ const types = @import("types.zig");
 const Value = types.Value;
 const PHPArray = types.PHPArray;
 const ArrayKey = types.ArrayKey;
+const array_ops_shared = @import("../aot/array_ops_shared.zig");
 
 /// ArrayWrapper - 数组方法封装
 /// 提供完整的数组操作方法，通过 -> 语法调用
@@ -49,86 +50,20 @@ pub const ArrayWrapper = struct {
     }
 
     pub fn pop(self: *ArrayWrapper) ?Value {
-        const count = self.array.count();
-        if (count == 0) return null;
-
-        const last_key = ArrayKey{ .integer = @as(i64, @intCast(count - 1)) };
-        const value = self.array.get(last_key);
-        if (value != null) {
-            _ = self.array.getElements().orderedRemove(last_key);
-        }
-        return value;
+        const elements = self.array.getElements();
+        return array_ops_shared.pop(ArrayKey, Value, @TypeOf(elements.*), self.allocator, elements, &self.array.next_index);
     }
 
     pub fn unshift(self: *ArrayWrapper, value: Value) !*ArrayWrapper {
-        var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, false).initContext(self.allocator, .{});
-
-        try new_elements.put(ArrayKey{ .integer = 0 }, value);
-        _ = value.retain();
-
-        var iter = self.array.getElements().iterator();
-        var new_index: i64 = 1;
-        while (iter.next()) |entry| {
-            try new_elements.put(ArrayKey{ .integer = new_index }, entry.value_ptr.*);
-            new_index += 1;
-        }
-
-        self.array.getElements().deinit();
-        self.array.elements = new_elements;
-        self.array.next_index = new_index;
-
+        const elements = self.array.getElements();
+        const vals = [_]Value{value};
+        try array_ops_shared.unshift(ArrayKey, Value, @TypeOf(elements.*), self.allocator, elements, &self.array.next_index, vals[0..]);
         return self;
     }
 
     pub fn shift(self: *ArrayWrapper) ?Value {
-        if (self.array.count() == 0) return null;
-
-        // 找到最小的整数键
-        var min_key: ?i64 = null;
-        var iter = self.array.getElements().iterator();
-        while (iter.next()) |entry| {
-            if (entry.key_ptr.* == .integer) {
-                const key = entry.key_ptr.*.integer;
-                if (min_key == null or key < min_key.?) {
-                    min_key = key;
-                }
-            }
-        }
-
-        if (min_key == null) return null;
-
-        const first_key = ArrayKey{ .integer = min_key.? };
-        const value = self.array.get(first_key);
-
-        if (value != null) {
-            // 创建新的数组，所有键都向前移动一位
-            var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, false).initContext(self.allocator, .{});
-
-            iter = self.array.getElements().iterator();
-            while (iter.next()) |entry| {
-                if (entry.key_ptr.* == .integer) {
-                    const key = entry.key_ptr.*.integer;
-                    if (key > min_key.?) {
-                        // 键大于最小键时，向前移动一位
-                        const new_key = ArrayKey{ .integer = key - 1 };
-                        try new_elements.put(new_key, entry.value_ptr.*);
-                    }
-                    // 跳过最小键（被移除）
-                } else {
-                    // 字符串键保持不变
-                    try new_elements.put(entry.key_ptr.*, entry.value_ptr.*);
-                }
-            }
-
-            self.array.getElements().deinit();
-            self.array.elements = new_elements;
-            // 更新 next_index（如果是数字索引的数组）
-            if (min_key.? == 0) {
-                self.array.next_index = self.array.count();
-            }
-        }
-
-        return value;
+        const elements = self.array.getElements();
+        return array_ops_shared.shift(ArrayKey, Value, @TypeOf(elements.*), self.allocator, elements, &self.array.next_index);
     }
 
     pub fn merge(self: *ArrayWrapper, other: *PHPArray) !*ArrayWrapper {
@@ -160,8 +95,9 @@ pub const ArrayWrapper = struct {
             try new_elements.put(new_key, temp_values[element_count - 1 - i]);
         }
 
-        self.array.getElements().deinit();
-        self.array.elements = new_elements;
+        const elements = self.array.getElements();
+        elements.deinit();
+        elements.* = new_elements;
 
         return self;
     }
