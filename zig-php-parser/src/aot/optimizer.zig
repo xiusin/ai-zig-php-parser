@@ -351,6 +351,12 @@ pub const IROptimizer = struct {
                     changed = true;
                 }
             }
+
+            if (changed and self.config.dead_code_elimination and (self.config.licm or self.config.loop_unroll)) {
+                if (try self.runDeadCodeElimination(module)) {
+                    changed = true;
+                }
+            }
         }
     }
 
@@ -389,6 +395,12 @@ pub const IROptimizer = struct {
 
             if (self.config.licm) {
                 if (try self.runLICMInFunction(func)) {
+                    changed = true;
+                }
+            }
+
+            if (changed and self.config.dead_code_elimination and self.config.licm) {
+                if (try self.eliminateDeadCodeInFunction(func)) {
                     changed = true;
                 }
             }

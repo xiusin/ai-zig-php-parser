@@ -3225,6 +3225,7 @@ pub const NativeLinker = struct {
 
                     if (self.functionMayRaise(op.func_name)) {
                         try writer.writeAll("    if (runtime.hasException()) {\n");
+                        try writer.writeAll("        @branchHint(.unlikely);\n");
                         try self.generateCleanupCode(writer);
                         if (self.current_exception_handler) |handler_idx| {
                             try writer.print("        current_block = {d};\n", .{handler_idx});
@@ -3358,6 +3359,7 @@ pub const NativeLinker = struct {
 
                     if (self.functionMayRaise(op.func_name)) {
                         try writer.writeAll("    if (runtime.hasException()) {\n");
+                        try writer.writeAll("        @branchHint(.unlikely);\n");
                         try self.generateCleanupCode(writer);
                         if (self.current_exception_handler) |handler_idx| {
                             try writer.print("        current_block = {d};\n", .{handler_idx});
@@ -3570,9 +3572,11 @@ pub const NativeLinker = struct {
                     
                     // 检查异常
                     try writer.writeAll("    if (runtime.hasException()) {\n");
+                    try writer.writeAll("        @branchHint(.unlikely);\n");
                     try self.generateCleanupCode(writer);
                     if (self.current_exception_handler) |handler_idx| {
                         try writer.print("        current_block = {d};\n", .{handler_idx});
+                        try writer.print("        continue;\n", .{});
                         try writer.print("        continue;\n", .{});
                     } else {
                         try writer.writeAll("        return error.RuntimeError;\n");
@@ -3639,6 +3643,7 @@ pub const NativeLinker = struct {
 
                 // 检查异常
                 try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
                 try self.generateCleanupCode(writer);
                 if (self.current_exception_handler) |handler_idx| {
                     try writer.print("        current_block = {d};\n", .{handler_idx});
@@ -3686,6 +3691,7 @@ pub const NativeLinker = struct {
                 }
 
                 try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
                 try self.generateCleanupCode(writer);
                 if (self.current_exception_handler) |handler_idx| {
                     try writer.print("        current_block = {d};\n", .{handler_idx});
