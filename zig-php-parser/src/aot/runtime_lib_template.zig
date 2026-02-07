@@ -1361,41 +1361,30 @@ pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
     return Value.initRef(ptr);
 }
 
-const BuiltinFunctionEntry = struct {
-    name: []const u8,
-    func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value,
-};
+const BuiltinFn = *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value;
 
-fn lookupBuiltinFunction(name: []const u8) ?*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
-    const builtin_functions = comptime blk: {
-        @setEvalBranchQuota(10000);
-        break :blk [_]BuiltinFunctionEntry{
-            .{ .name = "strlen", .func = wrapBuiltin_strlen },
-            .{ .name = "strtoupper", .func = wrapBuiltin_strtoupper },
-            .{ .name = "strtolower", .func = wrapBuiltin_strtolower },
-            .{ .name = "trim", .func = wrapBuiltin_trim },
-            .{ .name = "count", .func = wrapBuiltin_count },
-            .{ .name = "sqrt", .func = wrapBuiltin_sqrt },
-            .{ .name = "strval", .func = wrapBuiltin_strval },
-            .{ .name = "array_map", .func = wrapBuiltin_array_map },
-            .{ .name = "array_filter", .func = wrapBuiltin_array_filter },
-            .{ .name = "array_reduce", .func = wrapBuiltin_array_reduce },
-            .{ .name = "select", .func = wrapBuiltin_select },
-            .{ .name = "get_class_methods", .func = wrapBuiltin_get_class_methods },
-            .{ .name = "get_class_vars", .func = wrapBuiltin_get_class_vars },
-            .{ .name = "get_object_vars", .func = wrapBuiltin_get_object_vars },
-            .{ .name = "get_called_class", .func = wrapBuiltin_get_called_class },
-            .{ .name = "forward_static_call", .func = wrapBuiltin_forward_static_call },
-            .{ .name = "forward_static_call_array", .func = wrapBuiltin_forward_static_call_array },
-        };
-    };
+const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
+    .{ "strlen", wrapBuiltin_strlen },
+    .{ "strtoupper", wrapBuiltin_strtoupper },
+    .{ "strtolower", wrapBuiltin_strtolower },
+    .{ "trim", wrapBuiltin_trim },
+    .{ "count", wrapBuiltin_count },
+    .{ "sqrt", wrapBuiltin_sqrt },
+    .{ "strval", wrapBuiltin_strval },
+    .{ "array_map", wrapBuiltin_array_map },
+    .{ "array_filter", wrapBuiltin_array_filter },
+    .{ "array_reduce", wrapBuiltin_array_reduce },
+    .{ "select", wrapBuiltin_select },
+    .{ "get_class_methods", wrapBuiltin_get_class_methods },
+    .{ "get_class_vars", wrapBuiltin_get_class_vars },
+    .{ "get_object_vars", wrapBuiltin_get_object_vars },
+    .{ "get_called_class", wrapBuiltin_get_called_class },
+    .{ "forward_static_call", wrapBuiltin_forward_static_call },
+    .{ "forward_static_call_array", wrapBuiltin_forward_static_call_array },
+});
 
-    for (builtin_functions) |entry| {
-        if (std.mem.eql(u8, entry.name, name)) {
-            return entry.func;
-        }
-    }
-    return null;
+fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
+    return builtin_function_map.get(name);
 }
 
 pub fn php_create_closure(name: Value, captures: Value, allocator: Allocator) !Value {
@@ -1422,10 +1411,14 @@ pub fn php_create_closure(name: Value, captures: Value, allocator: Allocator) !V
     }
 
     // Lookup function
-    var func_ptr: ?*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value = null;
+    var func_ptr: ?BuiltinFn = null;
     
     if (user_function_registry) |registry| {
         func_ptr = registry.get(func_name);
+    }
+
+    if (func_ptr == null) {
+        func_ptr = lookupBuiltinFunction(func_name);
     }
     
     if (func_ptr == null) return error.UnknownFunction;

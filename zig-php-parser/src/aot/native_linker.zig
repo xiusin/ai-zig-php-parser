@@ -776,7 +776,7 @@ pub const NativeLinker = struct {
         return builtin_map.get(func_name);
     }
 
-    const builtin_map = std.ComptimeStringMap(BuiltinInfo, .{
+    const builtin_map = std.StaticStringMap(BuiltinInfo).initComptime(.{
         .{ "echo", .{ .runtime_name = "php_echo", .needs_allocator = false } },
         .{ "print", .{ .runtime_name = "php_print", .needs_allocator = false } },
         .{ "var_dump", .{ .runtime_name = "php_var_dump", .needs_allocator = false } },
