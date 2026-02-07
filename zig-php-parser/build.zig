@@ -21,9 +21,14 @@ pub fn build(b: *std.Build) void {
     const runtime_mod = b.createModule(.{
         .root_source_file = b.path("src/runtime/mod.zig"),
     });
+
+    const nanbox_abi_mod = b.createModule(.{
+        .root_source_file = b.path("src/shared/nanbox_abi.zig"),
+    });
     
     // 模块相互依赖
     runtime_mod.addImport("compiler", compiler_mod);
+    runtime_mod.addImport("nanbox_abi", nanbox_abi_mod);
     compiler_mod.addImport("runtime", runtime_mod);
     
     // 字节码模块
@@ -124,6 +129,7 @@ pub fn build(b: *std.Build) void {
         "src/aot/test_licm.zig",
         "src/aot/test_loop_unroll.zig",
         "src/aot/test_runtime_arrays.zig",
+        "src/aot/test_runtime_cycle_gc.zig",
         "src/aot/test_runtime_comprehensive.zig",
         // Runtime tests
         // "src/runtime/coroutine_error_handling.zig",
@@ -405,12 +411,16 @@ pub fn build(b: *std.Build) void {
     perf_cli_exe.root_module.addImport("bytecode", bytecode_mod);
     perf_cli_exe.root_module.addImport("jit", jit_mod);
     perf_cli_exe.root_module.addImport("extension", extension_mod);
+    perf_cli_exe.root_module.addImport("aot_runtime", b.createModule(.{
+        .root_source_file = b.path("src/aot/runtime_lib_template.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    }));
     
     b.installArtifact(perf_cli_exe);
     
     const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
     perf_check_cmd.addArg("check");
-    perf_check_cmd.step.dependOn(bench_all_step);
     perf_check_step.dependOn(&perf_check_cmd.step);
 
     // Update performance baselines
@@ -418,7 +428,6 @@ pub fn build(b: *std.Build) void {
     
     const perf_update_cmd = b.addRunArtifact(perf_cli_exe);
     perf_update_cmd.addArg("update");
-    perf_update_cmd.step.dependOn(bench_all_step);
     perf_update_step.dependOn(&perf_update_cmd.step);
 
     // List performance baselines

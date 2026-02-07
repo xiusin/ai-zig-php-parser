@@ -5672,6 +5672,24 @@ pub const NativeLinker = struct {
         defer array_ops_file.close();
         try array_ops_file.writeAll(array_ops_content);
 
+        const nanbox_path = "src/shared/nanbox_abi.zig";
+        const nanbox_content = try std.fs.cwd().readFileAlloc(
+            self.allocator,
+            nanbox_path,
+            10 * 1024 * 1024,
+        );
+        defer self.allocator.free(nanbox_content);
+
+        const nanbox_dest = try std.fs.path.join(
+            self.allocator,
+            &[_][]const u8{ temp_dir, "nanbox_abi.zig" },
+        );
+        defer self.allocator.free(nanbox_dest);
+
+        const nanbox_file = try std.fs.cwd().createFile(nanbox_dest, .{});
+        defer nanbox_file.close();
+        try nanbox_file.writeAll(nanbox_content);
+
         if (self.config.verbose) {
             std.debug.print("  Copied runtime libraries to {s}\n", .{temp_dir});
         }

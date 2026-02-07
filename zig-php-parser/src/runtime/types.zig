@@ -1,5 +1,6 @@
 const std = @import("std");
 pub const gc = @import("gc.zig");
+const nanbox_abi = @import("nanbox_abi");
 
 // Import NumberWrapper from separate module
 pub const number_wrapper = @import("number_wrapper.zig");
@@ -2469,23 +2470,23 @@ pub const TypeInfo = struct {
 pub const Value = struct {
     val: u64,
 
-    pub const SIGN_BIT: u64 = 0x8000000000000000;
-    pub const QNAN: u64 = 0x7FFC000000000000;
+    pub const SIGN_BIT: u64 = nanbox_abi.SIGN_BIT;
+    pub const QNAN: u64 = nanbox_abi.QNAN;
 
     // 简单类型标签 (使用 QNAN 的低位)
     pub const TAG_NIL: u64 = 1; // 001
     pub const TAG_FALSE: u64 = 2; // 010
     pub const TAG_TRUE: u64 = 3; // 011
     // 整数使用特殊编码：QNAN | SIGN_BIT | (value & 0xFFFFFFFF)
-    pub const TAG_INT_MARKER: u64 = SIGN_BIT | QNAN;
+    pub const TAG_INT_MARKER: u64 = nanbox_abi.TAG_INT_MARKER;
 
     // 指针类型标记
     // QNAN uses bits 50-62, so we use bits 48-49 for type tags (4 types max)
     // For more types, we use a different encoding scheme
-    pub const TAG_PTR: u64 = QNAN; // 不使用 SIGN_BIT，与整数区分
+    pub const TAG_PTR: u64 = nanbox_abi.TAG_PTR; // 不使用 SIGN_BIT，与整数区分
 
     // Type tags use bits 47-49 (3 bits = 8 types)
-    pub const TYPE_MASK: u64 = 0x0003800000000000; // Bits 47-49
+    pub const TYPE_MASK: u64 = nanbox_abi.TYPE_MASK; // Bits 47-49
     pub const TYPE_STRING: u64 = 0x0000800000000000; // 001
     pub const TYPE_ARRAY: u64 = 0x0001000000000000; // 010
     pub const TYPE_OBJECT: u64 = 0x0001800000000000; // 011
@@ -2504,7 +2505,7 @@ pub const Value = struct {
     }
 
     // 48位整数常量 (与 FastValue 对齐)
-    pub const INT48_MASK: u64 = 0x0000FFFFFFFFFFFF; // 低48位掩码
+    pub const INT48_MASK: u64 = nanbox_abi.INT48_MASK; // 低48位掩码
     pub const INT48_SIGN_BIT: u64 = 0x0000800000000000; // 第47位为符号位
     pub const INT48_MAX: i64 = 0x00007FFFFFFFFFFF; // 140,737,488,355,327
     pub const INT48_MIN: i64 = -0x0000800000000000; // -140,737,488,355,328
@@ -2543,14 +2544,12 @@ pub const Value = struct {
     // --- 指针类型初始化 ---
     pub fn fromBox(box: anytype, type_tag: u64) Value {
         const addr = @intFromPtr(box);
-        // Mask lower 47 bits for address (bits 47-49 used for type)
-        return .{ .val = TAG_PTR | type_tag | (addr & 0x00007FFFFFFFFFFF) };
+        return .{ .val = nanbox_abi.encodePtr(addr, type_tag) };
     }
 
     fn initPtr(ptr: anytype, type_tag: u64) Value {
         const addr = @intFromPtr(ptr);
-        // Mask lower 47 bits for address (bits 47-49 used for type)
-        return .{ .val = TAG_PTR | type_tag | (addr & 0x00007FFFFFFFFFFF) };
+        return .{ .val = nanbox_abi.encodePtr(addr, type_tag) };
     }
 
     pub fn initString(allocator: std.mem.Allocator, str: []const u8) !Value {
@@ -2693,8 +2692,7 @@ pub const Value = struct {
     }
 
     pub fn asPtr(self: Value, comptime T: type) T {
-        // Extract lower 47 bits for address (bits 47-49 used for type)
-        return @ptrFromInt(self.val & 0x00007FFFFFFFFFFF);
+        return @ptrFromInt(nanbox_abi.decodePtr(self.val));
     }
 
     pub const Tag = enum { null, boolean, integer, float, string, array, object, struct_instance, resource, user_function, closure, arrow_function, native_function };

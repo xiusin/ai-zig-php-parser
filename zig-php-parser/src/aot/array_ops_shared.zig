@@ -20,11 +20,11 @@ pub fn unshift(
     next_index: *i64,
     values: []const Value,
 ) !void {
-    const old = elements.*;
-    var items = try allocator.alloc(KV(ArrayKey, Value), old.count());
+    const old_count = elements.count();
+    var items = try allocator.alloc(KV(ArrayKey, Value), old_count);
     defer allocator.free(items);
 
-    var it = old.iterator();
+    var it = elements.iterator();
     var idx: usize = 0;
     while (it.next()) |entry| : (idx += 1) {
         items[idx] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };
@@ -76,11 +76,11 @@ pub fn shift(
         first_key.string.release(allocator);
     }
 
-    const old = elements.*;
-    var items = allocator.alloc(KV(ArrayKey, Value), old.count()) catch return first_value;
+    const remaining_count = elements.count();
+    var items = allocator.alloc(KV(ArrayKey, Value), remaining_count) catch return first_value;
     defer allocator.free(items);
 
-    var it = old.iterator();
+    var it = elements.iterator();
     var idx: usize = 0;
     while (it.next()) |entry| : (idx += 1) {
         items[idx] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };

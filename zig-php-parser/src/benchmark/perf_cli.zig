@@ -5,6 +5,7 @@ const RegressionDetector = @import("regression_detector.zig").RegressionDetector
 const BenchmarkResult = @import("regression_detector.zig").BenchmarkResult;
 const CIRunner = @import("ci_integration.zig").CIRunner;
 const CIConfig = @import("ci_integration.zig").CIConfig;
+const microbench_suite = @import("microbench_suite.zig");
 
 const Command = enum {
     check,
@@ -96,28 +97,10 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("Baseline directory: {s}\n", .{config.baseline_dir});
     std.debug.print("Regression threshold: {d:.1}%\n\n", .{config.threshold_percent});
     
-    // 这里应该运行实际的基准测试
-    // 为了演示，我们创建一些模拟结果
-    const results = [_]BenchmarkResult{
-        .{
-            .benchmark_name = "string_operations",
-            .avg_time_ns = 1500,
-            .min_time_ns = 1400,
-            .max_time_ns = 1600,
-            .stddev_ns = 50.0,
-            .iterations = 1000,
-        },
-        .{
-            .benchmark_name = "array_operations",
-            .avg_time_ns = 2500,
-            .min_time_ns = 2300,
-            .max_time_ns = 2700,
-            .stddev_ns = 100.0,
-            .iterations = 1000,
-        },
-    };
-    
-    const success = try runner.runAndCheck(&results);
+    const results = try microbench_suite.runAll(allocator);
+    defer allocator.free(results);
+
+    const success = try runner.runAndCheck(results);
     
     if (!success) {
         std.process.exit(1);
@@ -146,19 +129,10 @@ fn runUpdate(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("Baseline directory: {s}\n", .{baseline_dir});
     std.debug.print("Git commit: {s}\n\n", .{git_commit});
     
-    // 这里应该运行实际的基准测试
-    const results = [_]BenchmarkResult{
-        .{
-            .benchmark_name = "string_operations",
-            .avg_time_ns = 1500,
-            .min_time_ns = 1400,
-            .max_time_ns = 1600,
-            .stddev_ns = 50.0,
-            .iterations = 1000,
-        },
-    };
-    
-    try detector.updateBaselines(&results, git_commit);
+    const results = try microbench_suite.runAll(allocator);
+    defer allocator.free(results);
+
+    try detector.updateBaselines(results, git_commit);
     
     std.debug.print("✅ Baselines updated successfully\n", .{});
 }

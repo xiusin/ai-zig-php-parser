@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const nanbox_abi = @import("nanbox_abi");
 
 // ============================================================================
 // 12.1 小整数缓存
@@ -58,13 +59,7 @@ pub const SmallIntCache = struct {
 
     /// 编码整数为 NaN boxing 格式
     fn encodeInt(i: i64) u64 {
-        const SIGN_BIT: u64 = 0x8000000000000000;
-        const QNAN: u64 = 0x7FFC000000000000;
-        const INT48_MASK: u64 = 0x0000FFFFFFFFFFFF;
-        const TAG_INT_MARKER: u64 = SIGN_BIT | QNAN;
-
-        const encoded: u64 = @as(u64, @bitCast(i)) & INT48_MASK;
-        return TAG_INT_MARKER | encoded;
+        return nanbox_abi.encodeInt(i);
     }
 };
 
