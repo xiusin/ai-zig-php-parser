@@ -901,7 +901,8 @@ fn wrapBuiltin_strtolower(ctx: Value, args: []const Value, allocator: Allocator)
 fn wrapBuiltin_trim(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
-    return php_trim(args[0], allocator);
+    const mask = if (args.len >= 2) args[1] else Value.initNull();
+    return php_trim(args[0], mask, allocator);
 }
 
 fn wrapBuiltin_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -1931,15 +1932,32 @@ pub fn php_substr(str: Value, start: Value, length: Value, allocator: Allocator)
 }
 
 /// strpos - 查找子字符串位置
-pub fn php_strpos(haystack: Value, needle: Value) !Value {
+pub fn php_strpos(haystack: Value, needle: Value, offset: Value) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
 
     const hay = haystack.asString();
     const need = needle.asString();
-    const pos = hay.indexOf(need);
 
-    if (pos < 0) return Value.initBool(false);
-    return Value.initInt(pos);
+    if (need.length == 0 or need.length > hay.length) return Value.initBool(false);
+
+    const off_i = offset.toInt();
+    const start_idx: usize = blk: {
+        if (off_i >= 0) {
+            break :blk @intCast(@min(off_i, @as(i64, @intCast(hay.length))));
+        }
+        const abs_off: usize = @intCast(@min(-off_i, @as(i64, @intCast(hay.length))));
+        break :blk hay.length - abs_off;
+    };
+
+    if (start_idx > hay.length or start_idx + need.length > hay.length) return Value.initBool(false);
+
+    var i: usize = start_idx;
+    while (i <= hay.length - need.length) : (i += 1) {
+        if (std.mem.eql(u8, hay.data[i .. i + need.length], need.data)) {
+            return Value.initInt(@intCast(i));
+        }
+    }
+    return Value.initBool(false);
 }
 
 /// strtoupper - 转换为大写
@@ -1975,40 +1993,44 @@ pub fn php_strtolower(str: Value, allocator: Allocator) !Value {
 }
 
 /// trim - 去除首尾空白
-pub fn php_trim(str: Value, allocator: Allocator) !Value {
+pub fn php_trim(str: Value, char_mask: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
 
     const php_str = str.asString();
-    const trimmed = std.mem.trim(u8, php_str.data, " \t\n\r");
+    const mask = if (char_mask.isString()) char_mask.asString().data else " \t\n\r";
+    const trimmed = std.mem.trim(u8, php_str.data, mask);
 
     const result = try PHPString.init(allocator, trimmed);
     return Value.initString(result);
 }
 
 /// ltrim - 去除左侧空白
-pub fn php_ltrim(str: Value, allocator: Allocator) !Value {
+pub fn php_ltrim(str: Value, char_mask: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
 
     const php_str = str.asString();
-    const trimmed = std.mem.trimLeft(u8, php_str.data, " \t\n\r");
+    const mask = if (char_mask.isString()) char_mask.asString().data else " \t\n\r";
+    const trimmed = std.mem.trimLeft(u8, php_str.data, mask);
 
     const result = try PHPString.init(allocator, trimmed);
     return Value.initString(result);
 }
 
 /// rtrim - 去除右侧空白
-pub fn php_rtrim(str: Value, allocator: Allocator) !Value {
+pub fn php_rtrim(str: Value, char_mask: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
 
     const php_str = str.asString();
-    const trimmed = std.mem.trimRight(u8, php_str.data, " \t\n\r");
+    const mask = if (char_mask.isString()) char_mask.asString().data else " \t\n\r";
+    const trimmed = std.mem.trimRight(u8, php_str.data, mask);
 
     const result = try PHPString.init(allocator, trimmed);
     return Value.initString(result);
 }
 
 /// str_replace - 字符串替换
-pub fn php_str_replace(search: Value, replace: Value, subject: Value, allocator: Allocator) !Value {
+pub fn php_str_replace(search: Value, replace: Value, subject: Value, count_out: Value, allocator: Allocator) !Value {
+    _ = count_out;
     if (!subject.isString()) return subject;
     if (!search.isString() or !replace.isString()) return subject;
 
@@ -2020,12 +2042,12 @@ pub fn php_str_replace(search: Value, replace: Value, subject: Value, allocator:
     if (search_str.length == 0) return subject;
 
     // 计算需要的缓冲区大小
-    var count: usize = 0;
+    var found_count: usize = 0;
     var pos: usize = 0;
     while (pos < subject_str.length) {
         if (pos + search_str.length <= subject_str.length) {
             if (std.mem.eql(u8, subject_str.data[pos .. pos + search_str.length], search_str.data)) {
-                count += 1;
+                found_count += 1;
                 pos += search_str.length;
                 continue;
             }
@@ -2034,10 +2056,10 @@ pub fn php_str_replace(search: Value, replace: Value, subject: Value, allocator:
     }
 
     // 如果没有找到，返回原字符串
-    if (count == 0) return subject;
+    if (found_count == 0) return subject;
 
     // 计算新字符串长度
-    const new_len = subject_str.length - (count * search_str.length) + (count * replace_str.length);
+    const new_len = subject_str.length - (found_count * search_str.length) + (found_count * replace_str.length);
     const buffer = try allocator.alloc(u8, new_len);
     errdefer allocator.free(buffer);
 
@@ -2090,7 +2112,7 @@ pub fn php_str_repeat(str: Value, times: Value, allocator: Allocator) !Value {
 }
 
 /// str_pad - 填充字符串到指定长度
-pub fn php_str_pad(str: Value, length: Value, pad_str: Value, allocator: Allocator) !Value {
+pub fn php_str_pad(str: Value, length: Value, pad_str: Value, pad_type: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
 
     const php_str = str.asString();
@@ -2098,22 +2120,42 @@ pub fn php_str_pad(str: Value, length: Value, pad_str: Value, allocator: Allocat
 
     if (target_len <= @as(i64, @intCast(php_str.length))) return str;
 
+    var created_pad = false;
     const pad_string = if (pad_str.isString()) pad_str.asString() else blk: {
+        created_pad = true;
         break :blk try PHPString.init(allocator, " ");
     };
+    defer if (created_pad) pad_string.release(allocator);
+
+    const mode = pad_type.toInt();
+    const pad_len: usize = @intCast(@as(i64, @intCast(target_len)) - @as(i64, @intCast(php_str.length)));
+    const left_pad: usize = if (mode == 0)
+        pad_len
+    else if (mode == 2)
+        pad_len / 2
+    else
+        0;
+    const right_pad: usize = pad_len - left_pad;
 
     const buffer = try allocator.alloc(u8, @intCast(target_len));
     errdefer allocator.free(buffer);
 
-    // 复制原字符串
-    @memcpy(buffer[0..php_str.length], php_str.data);
-
-    // 填充
-    var pos = php_str.length;
-    while (pos < buffer.len) {
-        const copy_len = @min(pad_string.length, buffer.len - pos);
+    var pos: usize = 0;
+    while (pos < left_pad) {
+        const copy_len = @min(pad_string.length, left_pad - pos);
         @memcpy(buffer[pos .. pos + copy_len], pad_string.data[0..copy_len]);
         pos += copy_len;
+    }
+
+    @memcpy(buffer[pos .. pos + php_str.length], php_str.data);
+    pos += php_str.length;
+
+    var rpos: usize = 0;
+    while (rpos < right_pad) {
+        const copy_len = @min(pad_string.length, right_pad - rpos);
+        @memcpy(buffer[pos .. pos + copy_len], pad_string.data[0..copy_len]);
+        pos += copy_len;
+        rpos += copy_len;
     }
 
     const result = try PHPString.init(allocator, buffer);
@@ -2223,7 +2265,7 @@ pub fn php_lcfirst(str: Value, allocator: Allocator) !Value {
 }
 
 /// ucwords - 每个单词首字母大写
-pub fn php_ucwords(str: Value, allocator: Allocator) !Value {
+pub fn php_ucwords(str: Value, delimiters: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
 
     const php_str = str.asString();
@@ -2234,9 +2276,10 @@ pub fn php_ucwords(str: Value, allocator: Allocator) !Value {
 
     @memcpy(buffer, php_str.data);
 
+    const delims = if (delimiters.isString()) delimiters.asString().data else " \t\n\r";
     var is_word_start = true;
     for (buffer, 0..) |c, i| {
-        if (std.ascii.isWhitespace(c)) {
+        if (std.mem.indexOfScalar(u8, delims, c) != null) {
             is_word_start = true;
         } else if (is_word_start) {
             buffer[i] = std.ascii.toUpper(c);
@@ -2250,7 +2293,7 @@ pub fn php_ucwords(str: Value, allocator: Allocator) !Value {
 }
 
 /// explode - 分割字符串为数组
-pub fn php_explode(delimiter: Value, str: Value, allocator: Allocator) !Value {
+pub fn php_explode(delimiter: Value, str: Value, limit: Value, allocator: Allocator) !Value {
     if (!delimiter.isString() or !str.isString()) {
         return Value.initArray(try PHPArray.init(allocator));
     }
@@ -2266,14 +2309,62 @@ pub fn php_explode(delimiter: Value, str: Value, allocator: Allocator) !Value {
         return Value.initArray(arr);
     }
 
+    var lim: ?i64 = null;
+    if (!limit.isNull()) {
+        lim = limit.toInt();
+        if (lim.? == 0) lim = 1;
+    }
+
+    if (lim != null and lim.? < 0) {
+        var start: usize = 0;
+        var pos: usize = 0;
+
+        while (pos <= php_str.length - delim.length) {
+            if (std.mem.eql(u8, php_str.data[pos .. pos + delim.length], delim.data)) {
+                const part = try PHPString.init(allocator, php_str.data[start..pos]);
+                try arr.push(allocator, Value.initString(part));
+                pos += delim.length;
+                start = pos;
+            } else {
+                pos += 1;
+            }
+        }
+
+        const last_part = try PHPString.init(allocator, php_str.data[start..]);
+        try arr.push(allocator, Value.initString(last_part));
+
+        const total = arr.count();
+        const drop: usize = @intCast(@min(-lim.?, @as(i64, @intCast(total))));
+        if (drop == 0) return Value.initArray(arr);
+
+        const keep = total - drop;
+        const out = try PHPArray.init(allocator);
+        var i: usize = 0;
+        while (i < keep) : (i += 1) {
+            const key = ArrayKey{ .integer = @intCast(i) };
+            if (arr.get(key)) |v| {
+                try out.push(allocator, v);
+            } else {
+                try out.push(allocator, Value.initNull());
+            }
+        }
+
+        arr.release(allocator);
+        return Value.initArray(out);
+    }
+
     var start: usize = 0;
     var pos: usize = 0;
+    var pushed: i64 = 0;
+    const max_parts: ?i64 = if (lim != null and lim.? > 0) lim.? else null;
 
     while (pos <= php_str.length - delim.length) {
+        if (max_parts != null and pushed >= max_parts.? - 1) break;
         if (std.mem.eql(u8, php_str.data[pos .. pos + delim.length], delim.data)) {
             // 找到分隔符
             const part = try PHPString.init(allocator, php_str.data[start..pos]);
             try arr.push(allocator, Value.initString(part));
+            pushed += 1;
             pos += delim.length;
             start = pos;
         } else {
@@ -2290,10 +2381,21 @@ pub fn php_explode(delimiter: Value, str: Value, allocator: Allocator) !Value {
 
 /// implode - 连接数组元素为字符串
 pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
-    if (!pieces.isArray()) return Value.initString(try PHPString.init(allocator, ""));
+    var glue_val = glue;
+    var pieces_val = pieces;
+    if (!pieces_val.isArray() and glue_val.isArray()) {
+        glue_val = pieces;
+        pieces_val = glue;
+    }
+    if (!pieces_val.isArray()) return Value.initString(try PHPString.init(allocator, ""));
 
-    const glue_str = if (glue.isString()) glue.asString() else try PHPString.init(allocator, "");
-    const arr = pieces.asArray();
+    var created_glue = false;
+    const glue_str = if (glue_val.isString()) glue_val.asString() else blk: {
+        created_glue = true;
+        break :blk try PHPString.init(allocator, "");
+    };
+    defer if (created_glue) glue_str.release(allocator);
+    const arr = pieces_val.asArray();
 
     if (arr.count() == 0) return Value.initString(try PHPString.init(allocator, ""));
 
@@ -3686,6 +3788,66 @@ pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !
 /// @param args 参数数组
 /// @return 方法返回值
 pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Value) !Value {
+    if (obj_val.isString()) {
+        if (std.mem.eql(u8, method_name, "toUpper")) return php_strtoupper(obj_val, runtime_allocator);
+        if (std.mem.eql(u8, method_name, "toLower")) return php_strtolower(obj_val, runtime_allocator);
+        if (std.mem.eql(u8, method_name, "trim")) return php_trim(obj_val, Value.initNull(), runtime_allocator);
+        if (std.mem.eql(u8, method_name, "length")) return php_strlen(obj_val);
+        if (std.mem.eql(u8, method_name, "replace")) {
+            if (args.len < 2) return error.MissingArgument;
+            return php_str_replace(args[0], args[1], obj_val, Value.initNull(), runtime_allocator);
+        }
+        if (std.mem.eql(u8, method_name, "substring")) {
+            if (args.len < 2) return error.MissingArgument;
+            return php_substr(obj_val, args[0], args[1], runtime_allocator);
+        }
+        if (std.mem.eql(u8, method_name, "indexOf")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_strpos(obj_val, args[0], Value.initInt(0));
+        }
+        if (std.mem.eql(u8, method_name, "lastIndexOf")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_strrpos(obj_val, args[0], Value.initInt(0));
+        }
+        if (std.mem.eql(u8, method_name, "contains")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_str_contains(obj_val, args[0]);
+        }
+        if (std.mem.eql(u8, method_name, "startsWith")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_str_starts_with(obj_val, args[0]);
+        }
+        if (std.mem.eql(u8, method_name, "endsWith")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_str_ends_with(obj_val, args[0]);
+        }
+        if (std.mem.eql(u8, method_name, "repeat")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_str_repeat(obj_val, args[0], runtime_allocator);
+        }
+        if (std.mem.eql(u8, method_name, "pad")) {
+            if (args.len < 1) return error.MissingArgument;
+            var created_pad_str = false;
+            const pad_str = if (args.len >= 2) args[1] else blk: {
+                created_pad_str = true;
+                break :blk Value.initString(try PHPString.init(runtime_allocator, " "));
+            };
+            defer if (created_pad_str) pad_str.release(runtime_allocator);
+            const pad_type = if (args.len >= 3) args[2] else Value.initInt(0);
+            return php_str_pad(obj_val, args[0], pad_str, pad_type, runtime_allocator);
+        }
+        if (std.mem.eql(u8, method_name, "reverse")) return php_strrev(obj_val, runtime_allocator);
+        if (std.mem.eql(u8, method_name, "split")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_explode(args[0], obj_val, Value.initNull(), runtime_allocator);
+        }
+        if (std.mem.eql(u8, method_name, "concat")) {
+            if (args.len < 1) return error.MissingArgument;
+            return php_concat(obj_val, args[0], runtime_allocator);
+        }
+        return error.UnknownMethod;
+    }
+
     if (!Value_isObject(obj_val)) {
         return error.NotAnObject;
     }
@@ -4800,7 +4962,7 @@ pub fn php_chr(code: Value, allocator: Allocator) !Value {
 }
 
 /// stripos - 不区分大小写查找子字符串位置
-pub fn php_stripos(haystack: Value, needle: Value) !Value {
+pub fn php_stripos(haystack: Value, needle: Value, offset: Value) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
 
     const hay = haystack.asString();
@@ -4808,7 +4970,18 @@ pub fn php_stripos(haystack: Value, needle: Value) !Value {
 
     if (need.length == 0 or need.length > hay.length) return Value.initBool(false);
 
-    var i: usize = 0;
+    const off_i = offset.toInt();
+    const start_idx: usize = blk: {
+        if (off_i >= 0) {
+            break :blk @intCast(@min(off_i, @as(i64, @intCast(hay.length))));
+        }
+        const abs_off: usize = @intCast(@min(-off_i, @as(i64, @intCast(hay.length))));
+        break :blk hay.length - abs_off;
+    };
+
+    if (start_idx > hay.length or start_idx + need.length > hay.length) return Value.initBool(false);
+
+    var i: usize = start_idx;
     while (i <= hay.length - need.length) : (i += 1) {
         var match = true;
         var j: usize = 0;
@@ -4825,7 +4998,7 @@ pub fn php_stripos(haystack: Value, needle: Value) !Value {
 }
 
 /// strrpos - 查找子字符串最后出现的位置
-pub fn php_strrpos(haystack: Value, needle: Value) !Value {
+pub fn php_strrpos(haystack: Value, needle: Value, offset: Value) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
 
     const hay = haystack.asString();
@@ -4834,7 +5007,18 @@ pub fn php_strrpos(haystack: Value, needle: Value) !Value {
     if (need.length == 0 or need.length > hay.length) return Value.initBool(false);
 
     var last_pos: ?usize = null;
-    var i: usize = 0;
+    const off_i = offset.toInt();
+    const start_idx: usize = blk: {
+        if (off_i >= 0) {
+            break :blk @intCast(@min(off_i, @as(i64, @intCast(hay.length))));
+        }
+        const abs_off: usize = @intCast(@min(-off_i, @as(i64, @intCast(hay.length))));
+        break :blk hay.length - abs_off;
+    };
+
+    if (start_idx > hay.length or start_idx + need.length > hay.length) return Value.initBool(false);
+
+    var i: usize = start_idx;
     while (i <= hay.length - need.length) : (i += 1) {
         if (std.mem.eql(u8, hay.data[i .. i + need.length], need.data)) {
             last_pos = i;
@@ -4847,24 +5031,107 @@ pub fn php_strrpos(haystack: Value, needle: Value) !Value {
     return Value.initBool(false);
 }
 
+pub fn php_strripos(haystack: Value, needle: Value, offset: Value) !Value {
+    if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
+
+    const hay = haystack.asString();
+    const need = needle.asString();
+
+    if (need.length == 0 or need.length > hay.length) return Value.initBool(false);
+
+    var last_pos: ?usize = null;
+    const off_i = offset.toInt();
+    const start_idx: usize = blk: {
+        if (off_i >= 0) {
+            break :blk @intCast(@min(off_i, @as(i64, @intCast(hay.length))));
+        }
+        const abs_off: usize = @intCast(@min(-off_i, @as(i64, @intCast(hay.length))));
+        break :blk hay.length - abs_off;
+    };
+
+    if (start_idx > hay.length or start_idx + need.length > hay.length) return Value.initBool(false);
+
+    var i: usize = start_idx;
+    while (i <= hay.length - need.length) : (i += 1) {
+        var match = true;
+        var j: usize = 0;
+        while (j < need.length) : (j += 1) {
+            if (std.ascii.toLower(hay.data[i + j]) != std.ascii.toLower(need.data[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            last_pos = i;
+        }
+    }
+
+    if (last_pos) |pos| {
+        return Value.initInt(@intCast(pos));
+    }
+    return Value.initBool(false);
+}
+
 /// number_format - 格式化数字
-pub fn php_number_format(number: Value, decimals: Value, allocator: Allocator) !Value {
+pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thousands_sep: Value, allocator: Allocator) !Value {
+    _ = dec_point;
+    _ = thousands_sep;
     const num = number.toFloat();
     const dec = @max(0, decimals.toInt());
 
-    // 简化实现：只支持基本格式
-    const formatted = try std.fmt.allocPrint(allocator, "{d:.{d}}", .{ num, @as(usize, @intCast(dec)) });
-    defer allocator.free(formatted);
+    const dec_u: usize = @intCast(dec);
+    var pow10: u64 = 1;
+    var i: usize = 0;
+    while (i < dec_u) : (i += 1) {
+        pow10 *= 10;
+    }
 
-    const result = try PHPString.init(allocator, formatted);
+    const scaled: f64 = num * @as(f64, @floatFromInt(pow10));
+    const rounded_i64: i64 = @intFromFloat(std.math.round(scaled));
+    const negative = rounded_i64 < 0;
+    const abs_rounded: u64 = @intCast(if (negative) -rounded_i64 else rounded_i64);
+
+    const int_part: u64 = abs_rounded / pow10;
+    const frac_part: u64 = abs_rounded % pow10;
+
+    const int_str = try std.fmt.allocPrint(allocator, "{d}", .{int_part});
+    defer allocator.free(int_str);
+
+    const total_len: usize = (if (negative) @as(usize, 1) else 0) + int_str.len + (if (dec_u > 0) 1 + dec_u else 0);
+    const out = try allocator.alloc(u8, total_len);
+    defer allocator.free(out);
+
+    var pos: usize = 0;
+    if (negative) {
+        out[pos] = '-';
+        pos += 1;
+    }
+
+    @memcpy(out[pos .. pos + int_str.len], int_str);
+    pos += int_str.len;
+
+    if (dec_u > 0) {
+        out[pos] = '.';
+        pos += 1;
+        var tmp = frac_part;
+        var j: usize = 0;
+        while (j < dec_u) : (j += 1) {
+            const digit: u8 = @intCast(tmp % 10);
+            out[total_len - 1 - j] = '0' + digit;
+            tmp /= 10;
+        }
+    }
+
+    const result = try PHPString.init(allocator, out);
     return Value.initString(result);
 }
 
 /// nl2br - 将换行符转换为HTML <br>标签
-pub fn php_nl2br(str: Value, allocator: Allocator) !Value {
+pub fn php_nl2br(str: Value, is_xhtml: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
 
     const php_str = str.asString();
+    const tag = if (is_xhtml.toBool()) "<br />" else "<br>";
 
     // 计算需要的空间
     var count: usize = 0;
@@ -4872,15 +5139,15 @@ pub fn php_nl2br(str: Value, allocator: Allocator) !Value {
         if (c == '\n') count += 1;
     }
 
-    const new_len = php_str.length + count * 5; // <br>\n = 6 bytes, minus original \n = 5
+    const new_len = php_str.length + count * tag.len;
     const buffer = try allocator.alloc(u8, new_len);
     errdefer allocator.free(buffer);
 
     var write_pos: usize = 0;
     for (php_str.data) |c| {
         if (c == '\n') {
-            @memcpy(buffer[write_pos .. write_pos + 4], "<br>");
-            write_pos += 4;
+            @memcpy(buffer[write_pos .. write_pos + tag.len], tag);
+            write_pos += tag.len;
         }
         buffer[write_pos] = c;
         write_pos += 1;
@@ -4891,8 +5158,34 @@ pub fn php_nl2br(str: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
+pub fn php_chunk_split(body: Value, chunklen: Value, end: Value, allocator: Allocator) !Value {
+    const body_str = if (body.isString()) body.asString().data else "";
+    const clen: usize = @intCast(@max(1, chunklen.toInt()));
+    const end_str = if (end.isString()) end.asString().data else "\r\n";
+
+    const num_chunks = (body_str.len + clen - 1) / clen;
+    const result_len = body_str.len + num_chunks * end_str.len;
+    const result = try allocator.alloc(u8, result_len);
+    defer allocator.free(result);
+
+    var src_i: usize = 0;
+    var dst_i: usize = 0;
+    while (src_i < body_str.len) {
+        const chunk_end = @min(src_i + clen, body_str.len);
+        @memcpy(result[dst_i .. dst_i + (chunk_end - src_i)], body_str[src_i..chunk_end]);
+        dst_i += chunk_end - src_i;
+        @memcpy(result[dst_i .. dst_i + end_str.len], end_str);
+        dst_i += end_str.len;
+        src_i = chunk_end;
+    }
+
+    const php_str = try PHPString.init(allocator, result[0..dst_i]);
+    return Value.initString(php_str);
+}
+
 /// strip_tags - 移除HTML和PHP标签
-pub fn php_strip_tags(str: Value, allocator: Allocator) !Value {
+pub fn php_strip_tags(str: Value, allowed_tags: Value, allocator: Allocator) !Value {
+    _ = allowed_tags;
     if (!str.isString()) return str;
 
     const php_str = str.asString();
@@ -5708,8 +6001,8 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
     if (!format.isString()) return error.InvalidArgument;
 
     const fmt = format.asString().data;
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer result.deinit(allocator);
 
     var arg_idx: usize = 0;
     var i: usize = 0;
@@ -5718,7 +6011,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
         if (fmt[i] == '%' and i + 1 < fmt.len) {
             i += 1;
             if (fmt[i] == '%') {
-                try result.append('%');
+                try result.append(allocator, '%');
                 i += 1;
                 continue;
             }
@@ -5753,50 +6046,50 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
             switch (specifier) {
                 's' => {
                     if (arg.isString()) {
-                        try result.appendSlice(arg.asString().data);
+                        try result.appendSlice(allocator, arg.asString().data);
                     } else {
                         const str = try arg.toString(allocator);
                         defer str.release(allocator);
-                        try result.appendSlice(str.data);
+                        try result.appendSlice(allocator, str.data);
                     }
                 },
                 'd', 'i' => {
                     const val = arg.toInt();
                     const str = try std.fmt.allocPrint(allocator, "{d}", .{val});
                     defer allocator.free(str);
-                    try result.appendSlice(str);
+                    try result.appendSlice(allocator, str);
                 },
                 'f' => {
                     const val = arg.toFloat();
                     const str = try std.fmt.allocPrint(allocator, "{d:.6}", .{val});
                     defer allocator.free(str);
-                    try result.appendSlice(str);
+                    try result.appendSlice(allocator, str);
                 },
                 'x' => {
                     const val = arg.toInt();
                     const str = try std.fmt.allocPrint(allocator, "{x}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
-                    try result.appendSlice(str);
+                    try result.appendSlice(allocator, str);
                 },
                 'X' => {
                     const val = arg.toInt();
                     const str = try std.fmt.allocPrint(allocator, "{X}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
-                    try result.appendSlice(str);
+                    try result.appendSlice(allocator, str);
                 },
                 'c' => {
                     const val = arg.toInt();
                     if (val >= 0 and val <= 255) {
-                        try result.append(@intCast(val));
+                        try result.append(allocator, @intCast(val));
                     }
                 },
                 else => {
-                    try result.append('%');
-                    try result.append(specifier);
+                    try result.append(allocator, '%');
+                    try result.append(allocator, specifier);
                 },
             }
         } else {
-            try result.append(fmt[i]);
+            try result.append(allocator, fmt[i]);
             i += 1;
         }
     }
@@ -5806,21 +6099,24 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
 }
 
 /// htmlspecialchars - 将特殊字符转换为HTML实体
-pub fn php_htmlspecialchars(str: Value, allocator: Allocator) !Value {
+pub fn php_htmlspecialchars(str: Value, flags: Value, encoding: Value, double_encode: Value, allocator: Allocator) !Value {
+    _ = flags;
+    _ = encoding;
+    _ = double_encode;
     if (!str.isString()) return error.InvalidArgument;
 
     const input = str.asString().data;
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer result.deinit(allocator);
 
     for (input) |c| {
         switch (c) {
-            '&' => try result.appendSlice("&amp;"),
-            '"' => try result.appendSlice("&quot;"),
-            '\'' => try result.appendSlice("&#039;"),
-            '<' => try result.appendSlice("&lt;"),
-            '>' => try result.appendSlice("&gt;"),
-            else => try result.append(c),
+            '&' => try result.appendSlice(allocator, "&amp;"),
+            '"' => try result.appendSlice(allocator, "&quot;"),
+            '\'' => try result.appendSlice(allocator, "&#039;"),
+            '<' => try result.appendSlice(allocator, "&lt;"),
+            '>' => try result.appendSlice(allocator, "&gt;"),
+            else => try result.append(allocator, c),
         }
     }
 
@@ -5829,42 +6125,43 @@ pub fn php_htmlspecialchars(str: Value, allocator: Allocator) !Value {
 }
 
 /// htmlentities - 将所有适用的字符转换为HTML实体
-pub fn php_htmlentities(str: Value, allocator: Allocator) !Value {
-    return php_htmlspecialchars(str, allocator);
+pub fn php_htmlentities(str: Value, flags: Value, encoding: Value, double_encode: Value, allocator: Allocator) !Value {
+    return php_htmlspecialchars(str, flags, encoding, double_encode, allocator);
 }
 
 /// htmlspecialchars_decode - 将HTML实体转换回字符
-pub fn php_htmlspecialchars_decode(str: Value, allocator: Allocator) !Value {
+pub fn php_htmlspecialchars_decode(str: Value, flags: Value, allocator: Allocator) !Value {
+    _ = flags;
     if (!str.isString()) return error.InvalidArgument;
 
     const input = str.asString().data;
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer result.deinit(allocator);
 
     var i: usize = 0;
     while (i < input.len) {
         if (input[i] == '&') {
             if (i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "&lt;")) {
-                try result.append('<');
+                try result.append(allocator, '<');
                 i += 4;
             } else if (i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "&gt;")) {
-                try result.append('>');
+                try result.append(allocator, '>');
                 i += 4;
             } else if (i + 5 <= input.len and std.mem.eql(u8, input[i .. i + 5], "&amp;")) {
-                try result.append('&');
+                try result.append(allocator, '&');
                 i += 5;
             } else if (i + 6 <= input.len and std.mem.eql(u8, input[i .. i + 6], "&quot;")) {
-                try result.append('"');
+                try result.append(allocator, '"');
                 i += 6;
             } else if (i + 6 <= input.len and std.mem.eql(u8, input[i .. i + 6], "&#039;")) {
-                try result.append('\'');
+                try result.append(allocator, '\'');
                 i += 6;
             } else {
-                try result.append(input[i]);
+                try result.append(allocator, input[i]);
                 i += 1;
             }
         } else {
-            try result.append(input[i]);
+            try result.append(allocator, input[i]);
             i += 1;
         }
     }
@@ -5882,8 +6179,8 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
     const break_chars = if (break_str.isString()) break_str.asString().data else "\n";
     const force_cut = cut.toBool();
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer result.deinit(allocator);
 
     var line_len: usize = 0;
     var word_start: usize = 0;
@@ -5895,22 +6192,22 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
             if (i > word_start) {
                 const word = input[word_start..i];
                 if (line_len + word.len > wrap_width and line_len > 0) {
-                    try result.appendSlice(break_chars);
+                    try result.appendSlice(allocator, break_chars);
                     line_len = 0;
                 }
-                try result.appendSlice(word);
+                try result.appendSlice(allocator, word);
                 line_len += word.len;
             }
             if (input[i] == '\n') {
-                try result.append('\n');
+                try result.append(allocator, '\n');
                 line_len = 0;
             } else {
-                try result.append(' ');
+                try result.append(allocator, ' ');
                 line_len += 1;
             }
             word_start = i + 1;
         } else if (force_cut and line_len >= wrap_width) {
-            try result.appendSlice(break_chars);
+            try result.appendSlice(allocator, break_chars);
             line_len = 0;
         }
         i += 1;
@@ -5920,12 +6217,63 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
     if (i > word_start) {
         const word = input[word_start..i];
         if (line_len + word.len > wrap_width and line_len > 0) {
-            try result.appendSlice(break_chars);
+            try result.appendSlice(allocator, break_chars);
         }
-        try result.appendSlice(word);
+        try result.appendSlice(allocator, word);
     }
 
     const php_str = try PHPString.init(allocator, result.items);
+    return Value.initString(php_str);
+}
+
+pub fn php_printf(format: Value, args: []const Value, allocator: Allocator) !Value {
+    const out = try php_sprintf(format, args, allocator);
+    defer out.release(allocator);
+    try php_echo(out);
+    if (out.isString()) return Value.initInt(@intCast(out.asString().length));
+    return Value.initInt(0);
+}
+
+pub fn php_bin2hex(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return error.InvalidArgument;
+    const input = str.asString().data;
+    const hex_len = input.len * 2;
+    const hex_str = try allocator.alloc(u8, hex_len);
+    defer allocator.free(hex_str);
+
+    const hex_chars = "0123456789abcdef";
+    for (input, 0..) |byte, i| {
+        hex_str[i * 2] = hex_chars[byte >> 4];
+        hex_str[i * 2 + 1] = hex_chars[byte & 0x0f];
+    }
+
+    const php_str = try PHPString.init(allocator, hex_str);
+    return Value.initString(php_str);
+}
+
+fn hexCharToInt(c: u8) ?u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+    return null;
+}
+
+pub fn php_hex2bin(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return error.InvalidArgument;
+    const input = str.asString().data;
+    if (input.len % 2 != 0) return Value.initBool(false);
+
+    const bin_len = input.len / 2;
+    const bin_str = try allocator.alloc(u8, bin_len);
+    defer allocator.free(bin_str);
+
+    for (0..bin_len) |i| {
+        const high = hexCharToInt(input[i * 2]) orelse return Value.initBool(false);
+        const low = hexCharToInt(input[i * 2 + 1]) orelse return Value.initBool(false);
+        bin_str[i] = (high << 4) | low;
+    }
+
+    const php_str = try PHPString.init(allocator, bin_str);
     return Value.initString(php_str);
 }
 
@@ -5934,12 +6282,17 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
 // ============================================================================
 
 /// md5 - 计算字符串的MD5哈希值
-pub fn php_md5(str: Value, allocator: Allocator) !Value {
+pub fn php_md5(str: Value, raw_output: Value, allocator: Allocator) !Value {
     if (!str.isString()) return error.InvalidArgument;
 
     const input = str.asString().data;
     var hash: [16]u8 = undefined;
     std.crypto.hash.Md5.hash(input, &hash, .{});
+
+    if (raw_output.toBool()) {
+        const php_str = try PHPString.init(allocator, &hash);
+        return Value.initString(php_str);
+    }
 
     // 转换为十六进制字符串
     var hex_str: [32]u8 = undefined;
@@ -5954,12 +6307,17 @@ pub fn php_md5(str: Value, allocator: Allocator) !Value {
 }
 
 /// sha1 - 计算字符串的SHA1哈希值
-pub fn php_sha1(str: Value, allocator: Allocator) !Value {
+pub fn php_sha1(str: Value, raw_output: Value, allocator: Allocator) !Value {
     if (!str.isString()) return error.InvalidArgument;
 
     const input = str.asString().data;
     var hash: [20]u8 = undefined;
     std.crypto.hash.Sha1.hash(input, &hash, .{});
+
+    if (raw_output.toBool()) {
+        const php_str = try PHPString.init(allocator, &hash);
+        return Value.initString(php_str);
+    }
 
     // 转换为十六进制字符串
     var hex_str: [40]u8 = undefined;
@@ -5970,6 +6328,27 @@ pub fn php_sha1(str: Value, allocator: Allocator) !Value {
     }
 
     const php_str = try PHPString.init(allocator, &hex_str);
+    return Value.initString(php_str);
+}
+
+pub fn php_uniqid(prefix: Value, more_entropy: Value, allocator: Allocator) !Value {
+    const prefix_str = if (prefix.isString()) prefix.asString().data else "";
+    const ent = more_entropy.toBool();
+
+    const timestamp = std.time.nanoTimestamp();
+    const now = @divTrunc(timestamp, 1000);
+    const seconds = @as(u64, @intCast(@divTrunc(now, 1_000_000)));
+    const microseconds = @as(u64, @intCast(@rem(now, 1_000_000)));
+
+    var result_buf: [64]u8 = undefined;
+    const formatted = if (ent) blk: {
+        var rand_bytes: [2]u8 = undefined;
+        std.crypto.random.bytes(&rand_bytes);
+        const rand_val = @as(u16, rand_bytes[0]) * 256 + rand_bytes[1];
+        break :blk try std.fmt.bufPrint(&result_buf, "{s}{x:0>13}{x:0>6}{x:0>4}", .{ prefix_str, seconds, microseconds, rand_val });
+    } else try std.fmt.bufPrint(&result_buf, "{s}{x:0>13}", .{ prefix_str, seconds });
+
+    const php_str = try PHPString.init(allocator, formatted);
     return Value.initString(php_str);
 }
 
@@ -6000,9 +6379,9 @@ pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
     const algo = algorithm.asString().data;
 
     if (std.mem.eql(u8, algo, "md5")) {
-        return php_md5(data, allocator);
+        return php_md5(data, Value.initBool(false), allocator);
     } else if (std.mem.eql(u8, algo, "sha1")) {
-        return php_sha1(data, allocator);
+        return php_sha1(data, Value.initBool(false), allocator);
     } else if (std.mem.eql(u8, algo, "sha256")) {
         return php_sha256(data, allocator);
     }
@@ -6018,6 +6397,7 @@ pub fn php_crc32(str: Value) !Value {
     const crc = std.hash.Crc32.hash(input);
     return Value.initInt(@intCast(crc));
 }
+
 
 /// base64_encode - 使用MIME base64编码数据
 pub fn php_base64_encode(str: Value, allocator: Allocator) !Value {
@@ -6036,7 +6416,8 @@ pub fn php_base64_encode(str: Value, allocator: Allocator) !Value {
 }
 
 /// base64_decode - 对使用MIME base64编码的数据进行解码
-pub fn php_base64_decode(str: Value, allocator: Allocator) !Value {
+pub fn php_base64_decode(str: Value, strict: Value, allocator: Allocator) !Value {
+    _ = strict;
     if (!str.isString()) return error.InvalidArgument;
 
     const input = str.asString().data;
@@ -6046,9 +6427,9 @@ pub fn php_base64_decode(str: Value, allocator: Allocator) !Value {
     const decoded = try allocator.alloc(u8, decoded_max_len);
     defer allocator.free(decoded);
 
-    const decoded_len = decoder.Decoder.decode(decoded, input) catch return Value.initBool(false);
+    decoder.Decoder.decode(decoded, input) catch return Value.initBool(false);
 
-    const php_str = try PHPString.init(allocator, decoded[0..decoded_len]);
+    const php_str = try PHPString.init(allocator, decoded[0..decoded_max_len]);
     return Value.initString(php_str);
 }
 

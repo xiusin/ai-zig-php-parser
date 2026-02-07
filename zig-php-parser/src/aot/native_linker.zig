@@ -748,7 +748,18 @@ pub const NativeLinker = struct {
             "strtoupper",  "strtolower",   "trim",       "ltrim",        "rtrim",
             "str_replace", "str_repeat",   "str_pad",    "strrev",       "ucfirst",
             "lcfirst",     "ucwords",      "explode",    "implode",      "str_split",
+            "join",
             "strcasecmp",  "substr",       "strval",
+            "sprintf",     "printf",
+            "chunk_split", "wordwrap",     "nl2br",
+            "strip_tags",
+            "htmlspecialchars", "htmlentities", "htmlspecialchars_decode",
+            "number_format",
+            "bin2hex",     "hex2bin",
+            "base64_encode", "base64_decode",
+            "md5",         "sha1",
+            "uniqid",
+            "chr",
 
             // 数组函数
                 "array_push",   "array_pop",
@@ -815,6 +826,16 @@ pub const NativeLinker = struct {
             "str_pad",          "strrev",       "str_contains", "str_starts_with", "str_ends_with",
             "ucfirst",          "lcfirst",      "ucwords",      "explode",         "implode",
             "join",             "str_split",    "strcmp",       "strcasecmp",
+            "stripos",          "strrpos",      "strripos",
+            "sprintf",          "printf",
+            "chunk_split",      "wordwrap",     "nl2br",
+            "strip_tags",       "htmlspecialchars", "htmlentities", "htmlspecialchars_decode",
+            "number_format",
+            "bin2hex",          "hex2bin",
+            "base64_encode",    "base64_decode",
+            "md5",              "sha1",
+            "uniqid",
+            "ord",              "chr",
 
             // 数组函数
             "count",
@@ -914,9 +935,32 @@ pub const NativeLinker = struct {
         if (std.mem.eql(u8, func_name, "ucwords")) return "php_ucwords";
         if (std.mem.eql(u8, func_name, "explode")) return "php_explode";
         if (std.mem.eql(u8, func_name, "implode")) return "php_implode";
+        if (std.mem.eql(u8, func_name, "join")) return "php_implode";
         if (std.mem.eql(u8, func_name, "str_split")) return "php_str_split";
         if (std.mem.eql(u8, func_name, "strcmp")) return "php_strcmp";
         if (std.mem.eql(u8, func_name, "strcasecmp")) return "php_strcasecmp";
+        if (std.mem.eql(u8, func_name, "stripos")) return "php_stripos";
+        if (std.mem.eql(u8, func_name, "strrpos")) return "php_strrpos";
+        if (std.mem.eql(u8, func_name, "strripos")) return "php_strripos";
+        if (std.mem.eql(u8, func_name, "sprintf")) return "php_sprintf";
+        if (std.mem.eql(u8, func_name, "printf")) return "php_printf";
+        if (std.mem.eql(u8, func_name, "chunk_split")) return "php_chunk_split";
+        if (std.mem.eql(u8, func_name, "wordwrap")) return "php_wordwrap";
+        if (std.mem.eql(u8, func_name, "nl2br")) return "php_nl2br";
+        if (std.mem.eql(u8, func_name, "strip_tags")) return "php_strip_tags";
+        if (std.mem.eql(u8, func_name, "htmlspecialchars")) return "php_htmlspecialchars";
+        if (std.mem.eql(u8, func_name, "htmlentities")) return "php_htmlentities";
+        if (std.mem.eql(u8, func_name, "htmlspecialchars_decode")) return "php_htmlspecialchars_decode";
+        if (std.mem.eql(u8, func_name, "number_format")) return "php_number_format";
+        if (std.mem.eql(u8, func_name, "bin2hex")) return "php_bin2hex";
+        if (std.mem.eql(u8, func_name, "hex2bin")) return "php_hex2bin";
+        if (std.mem.eql(u8, func_name, "base64_encode")) return "php_base64_encode";
+        if (std.mem.eql(u8, func_name, "base64_decode")) return "php_base64_decode";
+        if (std.mem.eql(u8, func_name, "md5")) return "php_md5";
+        if (std.mem.eql(u8, func_name, "sha1")) return "php_sha1";
+        if (std.mem.eql(u8, func_name, "uniqid")) return "php_uniqid";
+        if (std.mem.eql(u8, func_name, "ord")) return "php_ord";
+        if (std.mem.eql(u8, func_name, "chr")) return "php_chr";
 
         // 数组函数
         if (std.mem.eql(u8, func_name, "array_sum")) return "php_array_sum";
@@ -2998,7 +3042,55 @@ pub const NativeLinker = struct {
 
                         // 检查是否需要 allocator 参数
                         if (self.functionNeedsAllocator(op.func_name)) {
-                            if (args_buf.items.len > 0) {
+                            if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
+                                if (op.args.len == 0) {
+                                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{ reg.id });
+                                } else {
+                                    var fmt_buf = std.ArrayList(u8){};
+                                    defer fmt_buf.deinit(self.allocator);
+                                    const fmt_writer = fmt_buf.writer(self.allocator);
+
+                                    const fmt_arg = op.args[0];
+                                    const fmt_arg_type = @as(std.meta.Tag(IR.Type), fmt_arg.type_);
+                                    if (fmt_arg_type == .i64) {
+                                        try fmt_writer.print("runtime.Value.initInt(reg_{d})", .{fmt_arg.id});
+                                    } else if (fmt_arg_type == .f64) {
+                                        try fmt_writer.print("runtime.Value.initFloat(reg_{d})", .{fmt_arg.id});
+                                    } else if (fmt_arg_type == .bool) {
+                                        try fmt_writer.print("runtime.Value.initBool(reg_{d})", .{fmt_arg.id});
+                                    } else {
+                                        try fmt_writer.print("reg_{d}", .{fmt_arg.id});
+                                    }
+
+                                    var varargs_buf = std.ArrayList(u8){};
+                                    defer varargs_buf.deinit(self.allocator);
+                                    const varargs_writer = varargs_buf.writer(self.allocator);
+
+                                    if (op.args.len > 1) {
+                                        for (op.args[1..], 0..) |arg, i| {
+                                            if (i > 0) try varargs_writer.writeAll(", ");
+                                            const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                                            if (arg_type_tag == .i64) {
+                                                try varargs_writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .f64) {
+                                                try varargs_writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .bool) {
+                                                try varargs_writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                            } else {
+                                                try varargs_writer.print("reg_{d}", .{arg.id});
+                                            }
+                                        }
+                                    }
+
+                                    const slice_expr = if (op.args.len > 1)
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{ {s} }}", .{varargs_buf.items})
+                                    else
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{}}", .{});
+                                    defer self.allocator.free(slice_expr);
+
+                                    try writer.print("    reg_{d} = try runtime.{s}({s}, {s}, runtime.runtime_allocator);\n", .{ reg.id, runtime_name, fmt_buf.items, slice_expr });
+                                }
+                            } else if (args_buf.items.len > 0) {
                                 try writer.print("    reg_{d} = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{ reg.id, runtime_name, args_buf.items });
                             } else {
                                 try writer.print("    reg_{d} = try runtime.{s}(runtime.runtime_allocator);\n", .{ reg.id, runtime_name });
@@ -3036,7 +3128,55 @@ pub const NativeLinker = struct {
 
                         // 检查是否需要 allocator 参数
                         if (self.functionNeedsAllocator(op.func_name)) {
-                            if (args_buf.items.len > 0) {
+                            if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
+                                if (op.args.len == 0) {
+                                    try writer.writeAll("    _ = runtime.Value.initNull();\n");
+                                } else {
+                                    var fmt_buf = std.ArrayList(u8){};
+                                    defer fmt_buf.deinit(self.allocator);
+                                    const fmt_writer = fmt_buf.writer(self.allocator);
+
+                                    const fmt_arg = op.args[0];
+                                    const fmt_arg_type = @as(std.meta.Tag(IR.Type), fmt_arg.type_);
+                                    if (fmt_arg_type == .i64) {
+                                        try fmt_writer.print("runtime.Value.initInt(reg_{d})", .{fmt_arg.id});
+                                    } else if (fmt_arg_type == .f64) {
+                                        try fmt_writer.print("runtime.Value.initFloat(reg_{d})", .{fmt_arg.id});
+                                    } else if (fmt_arg_type == .bool) {
+                                        try fmt_writer.print("runtime.Value.initBool(reg_{d})", .{fmt_arg.id});
+                                    } else {
+                                        try fmt_writer.print("reg_{d}", .{fmt_arg.id});
+                                    }
+
+                                    var varargs_buf = std.ArrayList(u8){};
+                                    defer varargs_buf.deinit(self.allocator);
+                                    const varargs_writer = varargs_buf.writer(self.allocator);
+
+                                    if (op.args.len > 1) {
+                                        for (op.args[1..], 0..) |arg, i| {
+                                            if (i > 0) try varargs_writer.writeAll(", ");
+                                            const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                                            if (arg_type_tag == .i64) {
+                                                try varargs_writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .f64) {
+                                                try varargs_writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                            } else if (arg_type_tag == .bool) {
+                                                try varargs_writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                            } else {
+                                                try varargs_writer.print("reg_{d}", .{arg.id});
+                                            }
+                                        }
+                                    }
+
+                                    const slice_expr = if (op.args.len > 1)
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{ {s} }}", .{varargs_buf.items})
+                                    else
+                                        try std.fmt.allocPrint(self.allocator, "&[_]runtime.Value{{}}", .{});
+                                    defer self.allocator.free(slice_expr);
+
+                                    try writer.print("    _ = try runtime.{s}({s}, {s}, runtime.runtime_allocator);\n", .{ runtime_name, fmt_buf.items, slice_expr });
+                                }
+                            } else if (args_buf.items.len > 0) {
                                 try writer.print("    _ = try runtime.{s}({s}, runtime.runtime_allocator);\n", .{ runtime_name, args_buf.items });
                             } else {
                                 try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});

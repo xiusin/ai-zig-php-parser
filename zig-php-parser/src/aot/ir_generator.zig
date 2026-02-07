@@ -2571,6 +2571,157 @@ pub const IRGenerator = struct {
             }
         }
 
+        if (func_name.len != 0 and indirect_callee == null) {
+            if (std.mem.eql(u8, func_name, "strpos") or std.mem.eql(u8, func_name, "stripos") or std.mem.eql(u8, func_name, "strrpos") or std.mem.eql(u8, func_name, "strripos")) {
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "substr")) {
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "trim") or std.mem.eql(u8, func_name, "ltrim") or std.mem.eql(u8, func_name, "rtrim")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "explode")) {
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "str_replace")) {
+                if (args.len == 3) {
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = args[2];
+                    padded[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "ucwords")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "str_split")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "str_pad")) {
+                if (args.len == 2) {
+                    const sid_space = try self.module.?.internString(" ");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_string = sid_space }, .php_value);
+                    padded[3] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+                    args = padded;
+                } else if (args.len == 3) {
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = args[2];
+                    padded[3] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "chunk_split")) {
+                if (args.len < 3) {
+                    const sid_end = try self.module.?.internString("\r\n");
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 76 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_end }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "wordwrap")) {
+                if (args.len < 4) {
+                    const sid_break = try self.module.?.internString("\n");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 75 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_break }, .php_value);
+                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "nl2br")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_bool = true }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "strip_tags")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "htmlspecialchars") or std.mem.eql(u8, func_name, "htmlentities")) {
+                if (args.len < 4) {
+                    const sid_utf8 = try self.module.?.internString("UTF-8");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_utf8 }, .php_value);
+                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = true }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "htmlspecialchars_decode")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "number_format")) {
+                if (args.len < 4) {
+                    const sid_dot = try self.module.?.internString(".");
+                    const sid_comma = try self.module.?.internString(",");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_dot }, .php_value);
+                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_string = sid_comma }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "md5") or std.mem.eql(u8, func_name, "sha1") or std.mem.eql(u8, func_name, "base64_decode")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "uniqid")) {
+                if (args.len < 2) {
+                    const sid_empty = try self.module.?.internString("");
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = sid_empty }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            }
+        }
+
         if (indirect_callee) |callee_reg| {
             return self.emitWithResult(.{ .call_indirect = .{
                 .func_ptr = callee_reg,
