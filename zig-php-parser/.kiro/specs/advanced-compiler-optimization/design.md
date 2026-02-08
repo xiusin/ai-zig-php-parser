@@ -1,68 +1,109 @@
-# 设计文档：高级编译器优化
+# 设计文档：AOT 优先的深度性能优化
 
 ## 概述
 
-本设计文档描述了 zig-php 项目的深度性能优化方案。优化涵盖内存管理、编译器、运行时、JIT、AOT 等多个层面，目标是将解释器性能提升 2-3 倍，JIT 性能提升 5-10 倍，AOT 性能接近 C/Rust，同时减少 GC 停顿时间 50% 和内存占用 30%。
+本设计文档描述了 zig-php 项目的 **AOT 优先**深度性能优化方案。我们的核心战略是将 AOT（Ahead-Of-Time）编译作为主要优化方向，追求极致的编译时优化，目标是让 AOT 编译的 PHP 代码性能达到 C/Rust 的 95%+，相比原生 PHP 8.5 提升 10-20 倍。
+
+### 核心战略：AOT First
+
+**为什么 AOT 优先？**
+
+1. **编译时优化空间更大**：AOT 可以进行全程序分析、跨模块优化、配置文件引导优化
+2. **运行时开销更低**：无需 JIT 编译器、热点检测器等运行时组件
+3. **性能更可预测**：无 JIT 预热时间，无运行时编译开销
+4. **更适合生产环境**：启动快、内存占用低、性能稳定
+
+**优化优先级：**
+1. **AOT 编译器（P0）** - 全程序优化、LTO、PGO、高级编译器优化
+2. **运行时系统（P1）** - 支撑 AOT 代码的高效执行
+3. **内存管理（P2）** - 减少 GC 开销，提升 AOT 代码性能
+4. **JIT 编译器（P3）** - 作为 AOT 的补充，处理动态代码
+5. **解释器（P4）** - 开发和调试阶段使用
 
 ### 设计原则
 
-1. **性能优先**：所有优化以性能提升为首要目标
-2. **内存安全**：保持 Zig 的内存安全保证
-3. **语义兼容**：完全兼容 PHP 8.5 语义
-4. **可测量**：所有优化效果可通过基准测试验证
-5. **渐进式**：支持多级优化，可根据场景选择
+1. **AOT 优先**：所有优化首先考虑 AOT 场景
+2. **编译时优化**：尽可能在编译时完成优化，减少运行时开销
+3. **内存安全**：保持 Zig 的内存安全保证
+4. **语义兼容**：完全兼容 PHP 8.5 语义
+5. **可测量**：所有优化效果可通过基准测试验证
 6. **可维护**：代码清晰，避免过度优化导致的复杂性
 
 ## 架构
 
-### 整体架构
+### AOT 优先架构
 
 ```mermaid
 graph TB
-    Source[PHP 源码] --> Parser[解析器]
-    Parser --> AST[抽象语法树]
-    AST --> Optimizer[优化器]
-    Optimizer --> Bytecode[字节码]
+    subgraph "编译时（AOT 优先）"
+        Source[PHP 源码] --> Parser[解析器]
+        Parser --> AST[抽象语法树]
+        AST --> AOT[AOT 编译器]
+        
+        AOT --> WPO[全程序优化]
+        WPO --> IR[LLVM IR]
+        IR --> LTO[链接时优化]
+        LTO --> PGO[配置文件引导优化]
+        PGO --> Native[原生可执行文件]
+    end
     
-    Bytecode --> Interpreter[解释器]
-    Bytecode --> JIT[JIT 编译器]
-    Bytecode --> AOT[AOT 编译器]
+    subgraph "运行时（最小开销）"
+        Native --> Runtime[运行时系统]
+        Runtime --> GC[分代 GC]
+        Runtime --> Memory[内存管理]
+        Runtime --> SIMD[SIMD 加速]
+    end
     
-    Interpreter --> VM[虚拟机]
-    JIT --> NativeCode1[机器码]
-    AOT --> NativeCode2[机器码]
+    subgraph "备选路径（动态代码）"
+        AST --> Bytecode[字节码]
+        Bytecode --> JIT[JIT 编译器]
+        JIT --> Runtime
+    end
     
-    VM --> GC[垃圾回收器]
-    VM --> Runtime[运行时系统]
-    
-    NativeCode1 --> Runtime
-    NativeCode2 --> Runtime
-    
-    Runtime --> Memory[内存管理]
-    Runtime --> Builtin[内置函数]
+    style AOT fill:#f96,stroke:#333,stroke-width:4px
+    style WPO fill:#f96,stroke:#333,stroke-width:4px
+    style LTO fill:#f96,stroke:#333,stroke-width:4px
+    style PGO fill:#f96,stroke:#333,stroke-width:4px
 ```
 
-### 优化流水线
+### AOT 优化流水线
 
 ```mermaid
 graph LR
-    A[源码] --> B[解析]
-    B --> C[AST 优化]
-    C --> D[字节码生成]
-    D --> E[字节码优化]
-    E --> F{执行模式}
+    A[PHP 源码] --> B[解析 + 语义分析]
+    B --> C[全程序分析]
+    C --> D[调用图构建]
+    D --> E[数据流分析]
     
-    F -->|解释| G[解释执行]
-    F -->|JIT| H[JIT 编译]
-    F -->|AOT| I[AOT 编译]
+    E --> F[高级优化]
+    F --> G[常量传播]
+    F --> H[死代码消除]
+    F --> I[函数内联]
+    F --> J[循环优化]
     
-    G --> J[运行时优化]
-    H --> K[机器码优化]
-    I --> L[链接时优化]
+    G --> K[LLVM IR 生成]
+    H --> K
+    I --> K
+    J --> K
     
-    J --> M[性能监控]
-    K --> M
-    L --> M
+    K --> L[LLVM 优化 Pass]
+    L --> M[链接时优化 LTO]
+    M --> N{PGO 数据?}
+    
+    N -->|有| O[配置文件引导优化]
+    N -->|无| P[标准优化]
+    
+    O --> Q[代码生成]
+    P --> Q
+    
+    Q --> R[原生机器码]
+    R --> S[链接]
+    S --> T[可执行文件]
+    
+    style C fill:#f96
+    style F fill:#f96
+    style M fill:#f96
+    style O fill:#f96
 ```
 
 ## 组件和接口
@@ -1305,7 +1346,582 @@ pub fn SlabAllocator(comptime T: type) type {
 ```
 
 
-### 7. 性能监控子系统
+### 7. 反射系统（支撑 AOT 优化）
+
+#### 7.1 编译时反射
+
+```zig
+/// 编译时反射分析器
+pub const CompileTimeReflection = struct {
+    allocator: Allocator,
+    
+    /// 类元数据表
+    class_metadata: std.StringHashMap(ClassMetadata),
+    /// 方法元数据表
+    method_metadata: std.StringHashMap(MethodMetadata),
+    /// 属性元数据表
+    property_metadata: std.StringHashMap(PropertyMetadata),
+    
+    /// 类元数据
+    pub const ClassMetadata = struct {
+        name: []const u8,
+        parent: ?[]const u8,
+        interfaces: [][]const u8,
+        methods: []MethodInfo,
+        properties: []PropertyInfo,
+        is_final: bool,
+        is_abstract: bool,
+        
+        /// 方法信息
+        pub const MethodInfo = struct {
+            name: []const u8,
+            signature: MethodSignature,
+            is_static: bool,
+            is_final: bool,
+            is_abstract: bool,
+            visibility: Visibility,
+        };
+        
+        /// 属性信息
+        pub const PropertyInfo = struct {
+            name: []const u8,
+            type_: TypeInfo,
+            is_static: bool,
+            visibility: Visibility,
+            default_value: ?Value,
+        };
+    };
+    
+    /// 方法元数据
+    pub const MethodMetadata = struct {
+        class_name: []const u8,
+        method_name: []const u8,
+        signature: MethodSignature,
+        return_type: TypeInfo,
+        parameters: []ParameterInfo,
+        
+        /// 参数信息
+        pub const ParameterInfo = struct {
+            name: []const u8,
+            type_: TypeInfo,
+            is_optional: bool,
+            default_value: ?Value,
+        };
+    };
+    
+    /// 收集类元数据
+    /// @pre ast 必须有效
+    /// @post 返回类元数据
+    pub fn collectClassMetadata(self: *CompileTimeReflection, ast: *AST) !void {
+        for (ast.classes) |class_node| {
+            var metadata = ClassMetadata{
+                .name = class_node.name,
+                .parent = class_node.parent,
+                .interfaces = class_node.interfaces,
+                .methods = try self.collectMethods(class_node),
+                .properties = try self.collectProperties(class_node),
+                .is_final = class_node.is_final,
+                .is_abstract = class_node.is_abstract,
+            };
+            
+            try self.class_metadata.put(class_node.name, metadata);
+        }
+    }
+    
+    /// 分析类层次
+    /// @pre class_metadata 必须已收集
+    /// @post 返回类层次图
+    pub fn analyzeClassHierarchy(self: *CompileTimeReflection) !ClassHierarchy {
+        var hierarchy = ClassHierarchy.init(self.allocator);
+        
+        var it = self.class_metadata.iterator();
+        while (it.next()) |entry| {
+            const class_name = entry.key_ptr.*;
+            const metadata = entry.value_ptr.*;
+            
+            // 添加类节点
+            try hierarchy.addClass(class_name, metadata);
+            
+            // 添加继承关系
+            if (metadata.parent) |parent| {
+                try hierarchy.addInheritance(class_name, parent);
+            }
+            
+            // 添加接口实现关系
+            for (metadata.interfaces) |interface| {
+                try hierarchy.addImplementation(class_name, interface);
+            }
+        }
+        
+        return hierarchy;
+    }
+    
+    /// 优化虚方法调用（使用反射信息）
+    /// @pre hierarchy 必须已构建
+    /// @post 返回去虚化的调用
+    pub fn optimizeVirtualCalls(
+        self: *CompileTimeReflection,
+        hierarchy: *ClassHierarchy,
+        call_graph: *CallGraph,
+    ) !void {
+        for (call_graph.virtual_calls.items) |vcall| {
+            // 查找可能的调用目标
+            const targets = try hierarchy.findPossibleTargets(
+                vcall.receiver_type,
+                vcall.method_name,
+            );
+            
+            if (targets.len == 1) {
+                // 只有一个目标 - 去虚化
+                vcall.devirtualize(targets[0]);
+            } else if (targets.len <= 3) {
+                // 少量目标 - 生成类型检查 + 直接调用
+                vcall.generateTypeSwitch(targets);
+            }
+            // 否则保持虚调用
+        }
+    }
+};
+```
+
+#### 7.2 运行时反射
+
+```zig
+/// 运行时反射 API
+pub const RuntimeReflection = struct {
+    /// 反射缓存
+    cache: ReflectionCache,
+    /// 元数据表（编译时生成）
+    metadata_table: *const MetadataTable,
+    
+    /// 反射缓存
+    pub const ReflectionCache = struct {
+        class_cache: std.StringHashMap(*ReflectionClass),
+        method_cache: std.StringHashMap(*ReflectionMethod),
+        property_cache: std.StringHashMap(*ReflectionProperty),
+        
+        /// 缓存统计
+        hit_count: std.atomic.Atomic(u64),
+        miss_count: std.atomic.Atomic(u64),
+        
+        pub fn hitRate(self: *const ReflectionCache) f64 {
+            const hits = self.hit_count.load(.monotonic);
+            const misses = self.miss_count.load(.monotonic);
+            const total = hits + misses;
+            if (total == 0) return 0.0;
+            return @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total));
+        }
+    };
+    
+    /// ReflectionClass API
+    pub const ReflectionClass = struct {
+        name: []const u8,
+        metadata: *const ClassMetadata,
+        
+        /// 获取类名
+        pub fn getName(self: *const ReflectionClass) []const u8 {
+            return self.name;
+        }
+        
+        /// 获取父类
+        pub fn getParentClass(self: *const ReflectionClass) ?*ReflectionClass {
+            if (self.metadata.parent) |parent| {
+                return RuntimeReflection.getClass(parent);
+            }
+            return null;
+        }
+        
+        /// 获取所有方法
+        pub fn getMethods(self: *const ReflectionClass) []*ReflectionMethod {
+            var methods = std.ArrayList(*ReflectionMethod).init(allocator);
+            for (self.metadata.methods) |method_info| {
+                const method = RuntimeReflection.getMethod(self.name, method_info.name);
+                try methods.append(method);
+            }
+            return methods.toOwnedSlice();
+        }
+        
+        /// 获取所有属性
+        pub fn getProperties(self: *const ReflectionClass) []*ReflectionProperty {
+            var properties = std.ArrayList(*ReflectionProperty).init(allocator);
+            for (self.metadata.properties) |prop_info| {
+                const prop = RuntimeReflection.getProperty(self.name, prop_info.name);
+                try properties.append(prop);
+            }
+            return properties.toOwnedSlice();
+        }
+        
+        /// 创建实例
+        pub fn newInstance(self: *const ReflectionClass, args: []const Value) !*Object {
+            // 使用元数据创建对象
+            const obj = try Object.create(self.metadata);
+            
+            // 调用构造函数
+            if (self.hasMethod("__construct")) {
+                const constructor = try self.getMethod("__construct");
+                try constructor.invoke(obj, args);
+            }
+            
+            return obj;
+        }
+    };
+    
+    /// ReflectionMethod API
+    pub const ReflectionMethod = struct {
+        class_name: []const u8,
+        method_name: []const u8,
+        metadata: *const MethodMetadata,
+        
+        /// 获取方法名
+        pub fn getName(self: *const ReflectionMethod) []const u8 {
+            return self.method_name;
+        }
+        
+        /// 获取参数
+        pub fn getParameters(self: *const ReflectionMethod) []ParameterInfo {
+            return self.metadata.parameters;
+        }
+        
+        /// 调用方法
+        pub fn invoke(
+            self: *const ReflectionMethod,
+            object: *Object,
+            args: []const Value,
+        ) !Value {
+            // 验证参数
+            try self.validateArguments(args);
+            
+            // 调用方法（使用内联缓存优化）
+            return object.callMethod(self.method_name, args);
+        }
+        
+        /// 验证参数
+        fn validateArguments(self: *const ReflectionMethod, args: []const Value) !void {
+            if (args.len < self.metadata.parameters.len) {
+                return error.TooFewArguments;
+            }
+            
+            for (args, 0..) |arg, i| {
+                const param = self.metadata.parameters[i];
+                if (!arg.isCompatibleWith(param.type_)) {
+                    return error.TypeMismatch;
+                }
+            }
+        }
+    };
+    
+    /// 获取类反射对象（带缓存）
+    pub fn getClass(self: *RuntimeReflection, name: []const u8) !*ReflectionClass {
+        // 查找缓存
+        if (self.cache.class_cache.get(name)) |cached| {
+            _ = self.cache.hit_count.fetchAdd(1, .monotonic);
+            return cached;
+        }
+        
+        _ = self.cache.miss_count.fetchAdd(1, .monotonic);
+        
+        // 从元数据表创建
+        const metadata = self.metadata_table.getClassMetadata(name) orelse
+            return error.ClassNotFound;
+        
+        const reflection_class = try self.allocator.create(ReflectionClass);
+        reflection_class.* = .{
+            .name = name,
+            .metadata = metadata,
+        };
+        
+        // 缓存
+        try self.cache.class_cache.put(name, reflection_class);
+        
+        return reflection_class;
+    }
+};
+```
+
+### 8. 动态代码消除系统
+
+#### 8.1 动态代码分析器
+
+```zig
+/// 动态代码分析器
+pub const DynamicCodeAnalyzer = struct {
+    allocator: Allocator,
+    
+    /// 动态特性检测结果
+    dynamic_features: std.ArrayList(DynamicFeature),
+    /// 静态化统计
+    stats: StaticizationStats,
+    
+    /// 动态特性类型
+    pub const DynamicFeature = union(enum) {
+        eval: EvalInfo,
+        variable_variable: VariableVariableInfo,
+        dynamic_call: DynamicCallInfo,
+        dynamic_property: DynamicPropertyInfo,
+        
+        pub const EvalInfo = struct {
+            location: SourceLocation,
+            code: []const u8,
+            is_constant: bool,
+        };
+        
+        pub const VariableVariableInfo = struct {
+            location: SourceLocation,
+            var_name_expr: *Expr,
+            is_constant: bool,
+            constant_name: ?[]const u8,
+        };
+        
+        pub const DynamicCallInfo = struct {
+            location: SourceLocation,
+            method_name_expr: *Expr,
+            is_constant: bool,
+            constant_name: ?[]const u8,
+        };
+        
+        pub const DynamicPropertyInfo = struct {
+            location: SourceLocation,
+            property_name_expr: *Expr,
+            is_constant: bool,
+            constant_name: ?[]const u8,
+        };
+    };
+    
+    /// 静态化统计
+    pub const StaticizationStats = struct {
+        total_dynamic_features: usize = 0,
+        staticized_features: usize = 0,
+        remaining_dynamic: usize = 0,
+        
+        pub fn staticizationRate(self: StaticizationStats) f64 {
+            if (self.total_dynamic_features == 0) return 1.0;
+            return @as(f64, @floatFromInt(self.staticized_features)) /
+                   @as(f64, @floatFromInt(self.total_dynamic_features));
+        }
+    };
+    
+    /// 分析动态特性
+    /// @pre ast 必须有效
+    /// @post 返回动态特性列表
+    pub fn analyze(self: *DynamicCodeAnalyzer, ast: *AST) !void {
+        // 遍历 AST，查找动态特性
+        try self.findEvalCalls(ast);
+        try self.findVariableVariables(ast);
+        try self.findDynamicCalls(ast);
+        try self.findDynamicProperties(ast);
+        
+        // 更新统计
+        self.stats.total_dynamic_features = self.dynamic_features.items.len;
+    }
+    
+    /// 查找 eval 调用
+    fn findEvalCalls(self: *DynamicCodeAnalyzer, ast: *AST) !void {
+        for (ast.statements) |stmt| {
+            if (stmt.isEvalCall()) {
+                const code_expr = stmt.getEvalArgument();
+                const is_constant = code_expr.isConstant();
+                
+                try self.dynamic_features.append(.{
+                    .eval = .{
+                        .location = stmt.location,
+                        .code = if (is_constant) code_expr.getConstantValue() else "",
+                        .is_constant = is_constant,
+                    },
+                });
+            }
+        }
+    }
+    
+    /// 查找 variable variables（$$var）
+    fn findVariableVariables(self: *DynamicCodeAnalyzer, ast: *AST) !void {
+        for (ast.expressions) |expr| {
+            if (expr.isVariableVariable()) {
+                const var_name_expr = expr.getVariableNameExpr();
+                const is_constant = var_name_expr.isConstant();
+                
+                try self.dynamic_features.append(.{
+                    .variable_variable = .{
+                        .location = expr.location,
+                        .var_name_expr = var_name_expr,
+                        .is_constant = is_constant,
+                        .constant_name = if (is_constant) var_name_expr.getConstantValue() else null,
+                    },
+                });
+            }
+        }
+    }
+    
+    /// 查找动态方法调用（$obj->$method()）
+    fn findDynamicCalls(self: *DynamicCodeAnalyzer, ast: *AST) !void {
+        for (ast.expressions) |expr| {
+            if (expr.isDynamicCall()) {
+                const method_name_expr = expr.getMethodNameExpr();
+                const is_constant = method_name_expr.isConstant();
+                
+                try self.dynamic_features.append(.{
+                    .dynamic_call = .{
+                        .location = expr.location,
+                        .method_name_expr = method_name_expr,
+                        .is_constant = is_constant,
+                        .constant_name = if (is_constant) method_name_expr.getConstantValue() else null,
+                    },
+                });
+            }
+        }
+    }
+};
+```
+
+#### 8.2 动态代码静态化
+
+```zig
+/// 动态代码静态化器
+pub const DynamicCodeStaticizer = struct {
+    allocator: Allocator,
+    analyzer: *DynamicCodeAnalyzer,
+    
+    /// 静态化动态代码
+    /// @pre ast 必须已分析
+    /// @post 返回静态化后的 AST
+    pub fn staticize(self: *DynamicCodeStaticizer, ast: *AST) !*AST {
+        var new_ast = try ast.clone();
+        
+        for (self.analyzer.dynamic_features.items) |feature| {
+            switch (feature) {
+                .eval => |eval_info| {
+                    if (eval_info.is_constant) {
+                        // 编译时执行 eval
+                        try self.staticizeEval(new_ast, eval_info);
+                        self.analyzer.stats.staticized_features += 1;
+                    } else {
+                        // 标记为需要 JIT
+                        try self.markForJIT(new_ast, eval_info.location);
+                        self.analyzer.stats.remaining_dynamic += 1;
+                    }
+                },
+                
+                .variable_variable => |vv_info| {
+                    if (vv_info.is_constant) {
+                        // 转换为直接访问
+                        try self.staticizeVariableVariable(new_ast, vv_info);
+                        self.analyzer.stats.staticized_features += 1;
+                    } else {
+                        try self.markForJIT(new_ast, vv_info.location);
+                        self.analyzer.stats.remaining_dynamic += 1;
+                    }
+                },
+                
+                .dynamic_call => |dc_info| {
+                    if (dc_info.is_constant) {
+                        // 转换为静态调用
+                        try self.staticizeDynamicCall(new_ast, dc_info);
+                        self.analyzer.stats.staticized_features += 1;
+                    } else {
+                        try self.markForJIT(new_ast, dc_info.location);
+                        self.analyzer.stats.remaining_dynamic += 1;
+                    }
+                },
+                
+                .dynamic_property => |dp_info| {
+                    if (dp_info.is_constant) {
+                        // 转换为静态属性访问
+                        try self.staticizeDynamicProperty(new_ast, dp_info);
+                        self.analyzer.stats.staticized_features += 1;
+                    } else {
+                        try self.markForJIT(new_ast, dp_info.location);
+                        self.analyzer.stats.remaining_dynamic += 1;
+                    }
+                },
+            }
+        }
+        
+        return new_ast;
+    }
+    
+    /// 静态化 eval
+    fn staticizeEval(
+        self: *DynamicCodeStaticizer,
+        ast: *AST,
+        eval_info: DynamicCodeAnalyzer.DynamicFeature.EvalInfo,
+    ) !void {
+        // 编译时解析和执行 eval 代码
+        const eval_ast = try Parser.parse(eval_info.code);
+        
+        // 替换 eval 调用为解析后的 AST
+        try ast.replaceNode(eval_info.location, eval_ast);
+    }
+    
+    /// 静态化 variable variable
+    fn staticizeVariableVariable(
+        self: *DynamicCodeStaticizer,
+        ast: *AST,
+        vv_info: DynamicCodeAnalyzer.DynamicFeature.VariableVariableInfo,
+    ) !void {
+        const var_name = vv_info.constant_name.?;
+        
+        // 创建直接变量访问节点
+        const direct_access = try Expr.createVariableAccess(var_name);
+        
+        // 替换 variable variable 为直接访问
+        try ast.replaceNode(vv_info.location, direct_access);
+    }
+    
+    /// 静态化动态调用
+    fn staticizeDynamicCall(
+        self: *DynamicCodeStaticizer,
+        ast: *AST,
+        dc_info: DynamicCodeAnalyzer.DynamicFeature.DynamicCallInfo,
+    ) !void {
+        const method_name = dc_info.constant_name.?;
+        
+        // 创建静态方法调用节点
+        const static_call = try Expr.createStaticMethodCall(method_name);
+        
+        // 替换动态调用为静态调用
+        try ast.replaceNode(dc_info.location, static_call);
+    }
+    
+    /// 生成静态化报告
+    pub fn generateReport(self: *DynamicCodeStaticizer, writer: anytype) !void {
+        const stats = self.analyzer.stats;
+        
+        try writer.writeAll("=== Dynamic Code Staticization Report ===\n\n");
+        try writer.print("Total dynamic features: {d}\n", .{stats.total_dynamic_features});
+        try writer.print("Staticized features: {d}\n", .{stats.staticized_features});
+        try writer.print("Remaining dynamic: {d}\n", .{stats.remaining_dynamic});
+        try writer.print("Staticization rate: {d:.2}%\n\n", .{stats.staticizationRate() * 100});
+        
+        // 列出无法静态化的动态代码
+        try writer.writeAll("Remaining dynamic features:\n");
+        for (self.analyzer.dynamic_features.items) |feature| {
+            const is_static = switch (feature) {
+                .eval => |info| info.is_constant,
+                .variable_variable => |info| info.is_constant,
+                .dynamic_call => |info| info.is_constant,
+                .dynamic_property => |info| info.is_constant,
+            };
+            
+            if (!is_static) {
+                const location = switch (feature) {
+                    .eval => |info| info.location,
+                    .variable_variable => |info| info.location,
+                    .dynamic_call => |info| info.location,
+                    .dynamic_property => |info| info.location,
+                };
+                
+                try writer.print("  {s} at {s}:{d}:{d}\n", .{
+                    @tagName(feature),
+                    location.file,
+                    location.line,
+                    location.column,
+                });
+            }
+        }
+    }
+};
+```
+
+### 9. 性能监控子系统
 
 #### 7.1 性能分析器
 
@@ -1858,7 +2474,43 @@ pub const IR = struct {
 
 *对于任意*PHP 程序，优化后的代码应与未优化的代码产生完全相同的可观察行为（输出、副作用、异常）。
 
-**验证：需求 8.2**
+**验证：需求 9.2**
+
+### 属性 28：反射元数据完整性
+
+*对于任意*类定义，编译时收集的反射元数据应包含所有类、方法、属性信息，且与源代码定义一致。
+
+**验证：需求 10.1, 10.2**
+
+### 属性 29：反射 API 正确性
+
+*对于任意*类，通过反射 API 获取的信息应与直接访问获得的信息相同。
+
+**验证：需求 10.4, 10.5, 10.6**
+
+### 属性 30：反射缓存一致性
+
+*对于任意*反射查询，缓存的结果应与非缓存的结果相同，且缓存命中率应 > 95%。
+
+**验证：需求 10.7**
+
+### 属性 31：动态代码静态化正确性
+
+*对于任意*可静态化的动态代码（常量参数），静态化后的代码应与动态执行产生相同结果。
+
+**验证：需求 11.3, 11.4, 11.5, 11.6**
+
+### 属性 32：动态代码识别完整性
+
+*对于任意*PHP 程序，动态代码分析器应识别所有动态特性（eval、variable variables、dynamic calls）。
+
+**验证：需求 11.1, 11.2**
+
+### 属性 33：静态化率目标
+
+*对于任意*典型应用，动态代码静态化率应 > 80%，静态化后性能提升应 > 5 倍。
+
+**验证：需求 11.9, 11.10**
 
 ## 错误处理
 

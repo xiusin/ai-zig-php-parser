@@ -1,5 +1,15 @@
 # 需求文档：Zig-PHP 性能优化与完整实现
 
+> **⚠️ 本规范已弃用**
+> 
+> 本规范已合并到 `advanced-compiler-optimization` 规范中。
+> 
+> 新规范采用 **AOT First** 战略，明确以 AOT 编译为核心优化方向。
+> 
+> 请参考：`.kiro/specs/advanced-compiler-optimization/`
+
+---
+
 ## 引言
 
 本文档定义了 Zig-PHP 解释器达到并超越原生 PHP 8.5.0 性能的完整需求。当前项目存在 134 处简化实现、TODO 和打桩代码，与原生 PHP 存在 3-18 倍性能差距。本规格旨在系统性地消除所有简化实现，建立完整的字节码虚拟机、JIT 编译器、AOT 编译器和性能测试体系。
