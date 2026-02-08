@@ -58,7 +58,7 @@ fn computeStats(comptime N: usize, name: []const u8, stats: Stats(N)) BenchmarkR
     };
 }
 
-fn measure(comptime N: usize, iterations: u32, func: *const fn () void) Stats(N) {
+fn measure(comptime N: usize, iterations: u32, comptime func: anytype) Stats(N) {
     for (0..3) |_| func();
 
     var samples: [N]u64 = undefined;

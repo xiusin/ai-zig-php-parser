@@ -18,6 +18,9 @@ const Allocator = std.mem.Allocator;
 const concurrency = @import("concurrency_runtime.zig");
 const array_ops_shared = @import("array_ops_shared.zig");
 const nanbox_abi = @import("nanbox_abi.zig");
+pub const profiler = @import("profiler.zig");
+pub const flamegraph = @import("flamegraph.zig");
+pub const pprof = @import("pprof.zig");
 
 // ============================================================================
 // 全局运行时状态

@@ -430,6 +430,22 @@ pub fn build(b: *std.Build) void {
     }));
     
     b.installArtifact(perf_cli_exe);
+
+    const profile_cli_exe = b.addExecutable(.{
+        .name = "profile-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/profile_cli.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    profile_cli_exe.linkLibC();
+    profile_cli_exe.root_module.addImport("runtime", runtime_mod);
+    b.installArtifact(profile_cli_exe);
+
+    const install_profile_cli = b.addInstallArtifact(profile_cli_exe, .{});
+    const profile_cli_step = b.step("profile-cli", "Build profile-cli");
+    profile_cli_step.dependOn(&install_profile_cli.step);
     
     const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
     perf_check_cmd.addArg("check");

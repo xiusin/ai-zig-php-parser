@@ -184,6 +184,8 @@ test "Optimizer: Mem2Reg on If-Else" {
     // Run optimizer
     var config = PassConfig.releaseSafe();
     config.mem2reg = true;
+    config.constant_propagation = false;
+    config.cfg_cleanup = false;
     
     // Use ctx.allocator (Arena) so that we can mix new instructions with old ones
     // and destroy calls will be no-ops (safe for Arena)

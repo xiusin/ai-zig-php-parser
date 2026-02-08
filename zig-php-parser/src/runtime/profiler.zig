@@ -22,6 +22,31 @@ pub const ProfilerType = enum {
     custom,
 };
 
+var global_profiler_ptr = std.atomic.Value(usize).init(0);
+
+pub fn setGlobalProfiler(profiler: ?*Profiler) void {
+    const v: usize = if (profiler) |p| @intFromPtr(p) else 0;
+    global_profiler_ptr.store(v, .seq_cst);
+}
+
+pub fn getGlobalProfiler() ?*Profiler {
+    const v = global_profiler_ptr.load(.seq_cst);
+    if (v == 0) return null;
+    return @ptrFromInt(v);
+}
+
+pub fn enterGlobal(name: []const u8) void {
+    if (getGlobalProfiler()) |p| {
+        p.enterFunction(name) catch {};
+    }
+}
+
+pub fn exitGlobal(name: []const u8) void {
+    if (getGlobalProfiler()) |p| {
+        p.exitFunction(name) catch {};
+    }
+}
+
 /// 函数调用记录
 pub const FunctionCall = struct {
     /// 函数名
@@ -362,6 +387,17 @@ pub const Profiler = struct {
         }
         
         try writer.writeAll("]}");
+    }
+
+    pub fn snapshotCallStackNames(self: *const Profiler, allocator: std.mem.Allocator) ![]const []const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const stack = try allocator.alloc([]const u8, self.call_stack.items.len);
+        for (self.call_stack.items, 0..) |call, i| {
+            stack[i] = call.name;
+        }
+        return stack;
     }
     
     /// 重置所有统计

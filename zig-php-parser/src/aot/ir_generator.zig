@@ -82,6 +82,7 @@ pub const IRGenerator = struct {
         is_used: bool,
         location: SourceLocation,
     }),
+    entry_allocas: std.ArrayListUnmanaged(*Instruction),
     /// Block counter for unique labels
     block_counter: u32,
     /// Loop context stack for break/continue
@@ -127,6 +128,7 @@ pub const IRGenerator = struct {
             .current_location = .{},
             .var_registers = .{},
             .var_usage = .{},
+            .entry_allocas = .{},
             .block_counter = 0,
             .loop_stack = .{},
             .try_stack = .{},
@@ -137,8 +139,22 @@ pub const IRGenerator = struct {
     pub fn deinit(self: *Self) void {
         self.var_registers.deinit(self.allocator);
         self.var_usage.deinit(self.allocator);
+        self.entry_allocas.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
+    }
+
+    fn flushEntryAllocas(self: *Self, entry_block: *BasicBlock) !void {
+        if (self.entry_allocas.items.len == 0) return;
+
+        var new_insts: std.ArrayListUnmanaged(*Instruction) = .{};
+        try new_insts.appendSlice(self.allocator, self.entry_allocas.items);
+        try new_insts.appendSlice(self.allocator, entry_block.instructions.items);
+
+        entry_block.instructions.deinit(self.allocator);
+        entry_block.instructions = new_insts;
+
+        self.entry_allocas.clearRetainingCapacity();
     }
 
     /// Generate IR module from AST (assumes root node at index 0)
@@ -221,8 +237,17 @@ pub const IRGenerator = struct {
             try module.addFunction(func);
         }
 
-        // Set up context
+        const prev_function = self.current_function;
+        const prev_block = self.current_block;
+        const prev_var_registers = self.var_registers;
+        const prev_var_usage = self.var_usage;
+        const prev_entry_allocas = self.entry_allocas;
+
         self.current_function = func;
+        self.current_block = null;
+        self.var_registers = .{};
+        self.var_usage = .{};
+        self.entry_allocas = .{};
         self.block_counter = 0;
 
         // Create entry block
@@ -240,9 +265,17 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .ret = null });
         }
 
-        // Clear context
-        self.current_function = null;
-        self.current_block = null;
+        try self.flushEntryAllocas(entry);
+        try self.checkUnusedVariables();
+
+        self.var_registers.deinit(self.allocator);
+        self.var_usage.deinit(self.allocator);
+        self.entry_allocas.deinit(self.allocator);
+        self.var_registers = prev_var_registers;
+        self.var_usage = prev_var_usage;
+        self.entry_allocas = prev_entry_allocas;
+        self.current_function = prev_function;
+        self.current_block = prev_block;
     }
 
     // ========================================================================
@@ -362,8 +395,6 @@ pub const IRGenerator = struct {
         
         // Always create alloca in the entry block to ensure dominance
         const func = self.current_function orelse return error.NoCurrentFunction;
-        // Function always has at least one block (entry) created during init
-        const entry_block = if (func.blocks.items.len > 0) func.blocks.items[0] else return error.NoEntryBlock;
         
         const result = func.newRegister(ptr_type);
         const inst = try self.allocator.create(Instruction);
@@ -374,7 +405,7 @@ pub const IRGenerator = struct {
         };
         
         // Prepend to entry block to ensure it's before any potential use
-        try entry_block.instructions.insert(self.allocator, 0, inst);
+        try self.entry_allocas.append(self.allocator, inst);
 
         try self.var_registers.put(self.allocator, name, result);
         // Mark variable as defined but not used yet, store definition location
@@ -572,11 +603,13 @@ pub const IRGenerator = struct {
         const prev_function = self.current_function;
         const prev_block = self.current_block;
         const prev_var_registers = self.var_registers;
+        const prev_entry_allocas = self.entry_allocas;
 
         // Set up new context
         self.current_function = func;
         self.var_registers = .{};
         self.var_usage = .{}; // 初始化变量使用跟踪
+        self.entry_allocas = .{};
         self.block_counter = 0;
 
         // Create entry block
@@ -596,14 +629,18 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .ret = null });
         }
 
+        try self.flushEntryAllocas(entry);
+
         // Check for unused variables
         try self.checkUnusedVariables();
 
         // Restore previous context
         self.var_registers.deinit(self.allocator);
         self.var_usage.deinit(self.allocator);
+        self.entry_allocas.deinit(self.allocator);
         self.var_registers = prev_var_registers;
         self.var_usage = .{};
+        self.entry_allocas = prev_entry_allocas;
         self.current_function = prev_function;
         self.current_block = prev_block;
     }

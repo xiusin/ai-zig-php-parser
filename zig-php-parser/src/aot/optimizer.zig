@@ -227,6 +227,8 @@ pub const IROptimizer = struct {
     constant_values: std.AutoHashMap(u32, ConstantValue),
     /// Function call graph for inlining decisions
     call_graph: std.StringHashMap(FunctionInfo),
+    /// Scratch map for type specialization to avoid per-function allocations
+    type_known_types: std.AutoHashMap(u32, Type),
 
     const Self = @This();
 
@@ -265,6 +267,7 @@ pub const IROptimizer = struct {
             .used_registers = std.AutoHashMap(u32, void).init(allocator),
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
+            .type_known_types = std.AutoHashMap(u32, Type).init(allocator),
         };
     }
 
@@ -279,6 +282,7 @@ pub const IROptimizer = struct {
             .used_registers = std.AutoHashMap(u32, void).init(allocator),
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
+            .type_known_types = std.AutoHashMap(u32, Type).init(allocator),
         };
     }
 
@@ -287,6 +291,7 @@ pub const IROptimizer = struct {
         self.used_registers.deinit();
         self.constant_values.deinit();
         self.call_graph.deinit();
+        self.type_known_types.deinit();
     }
 
     /// Get optimization statistics
@@ -2846,6 +2851,75 @@ pub const IROptimizer = struct {
                      .return_type = call.return_type,
                  } };
              },
+            .call_indirect => |call| blk: {
+                const new_args = try self.allocator.alloc(Register, call.args.len);
+                for (call.args, 0..) |arg, i| {
+                    new_args[i] = remapRegister(arg, reg_map);
+                }
+                break :blk .{ .call_indirect = .{
+                    .func_ptr = remapRegister(call.func_ptr, reg_map),
+                    .args = new_args,
+                    .return_type = call.return_type,
+                } };
+            },
+            .interpolate => |interp| blk: {
+                const new_parts = try self.allocator.alloc(Register, interp.parts.len);
+                for (interp.parts, 0..) |part, i| {
+                    new_parts[i] = remapRegister(part, reg_map);
+                }
+                break :blk .{ .interpolate = .{ .parts = new_parts } };
+            },
+            .new_object => |op0| blk: {
+                const new_args = try self.allocator.alloc(Register, op0.args.len);
+                for (op0.args, 0..) |arg, i| {
+                    new_args[i] = remapRegister(arg, reg_map);
+                }
+                break :blk .{ .new_object = .{ .class_name = op0.class_name, .args = new_args } };
+            },
+            .method_call => |op0| blk: {
+                const new_args = try self.allocator.alloc(Register, op0.args.len);
+                for (op0.args, 0..) |arg, i| {
+                    new_args[i] = remapRegister(arg, reg_map);
+                }
+                break :blk .{ .method_call = .{
+                    .object = remapRegister(op0.object, reg_map),
+                    .method_name = op0.method_name,
+                    .args = new_args,
+                } };
+            },
+            .static_method_call => |op0| blk: {
+                const new_args = try self.allocator.alloc(Register, op0.args.len);
+                for (op0.args, 0..) |arg, i| {
+                    new_args[i] = remapRegister(arg, reg_map);
+                }
+                break :blk .{ .static_method_call = .{
+                    .class_name = op0.class_name,
+                    .method_name = op0.method_name,
+                    .args = new_args,
+                } };
+            },
+            .closure_new => |op0| blk: {
+                const new_caps = try self.allocator.alloc(Register, op0.captures.len);
+                for (op0.captures, 0..) |cap, i| {
+                    new_caps[i] = remapRegister(cap, reg_map);
+                }
+                break :blk .{ .closure_new = .{
+                    .func_ptr = remapRegister(op0.func_ptr, reg_map),
+                    .captures = new_caps,
+                    .param_count = op0.param_count,
+                } };
+            },
+            .parent_call => |op0| blk: {
+                const new_args = try self.allocator.alloc(Register, op0.args.len);
+                for (op0.args, 0..) |arg, i| {
+                    new_args[i] = remapRegister(arg, reg_map);
+                }
+                break :blk .{ .parent_call = .{
+                    .object = remapRegister(op0.object, reg_map),
+                    .method_name = op0.method_name,
+                    .args = new_args,
+                } };
+            },
             .phi => |phi| blk: {
                  const IncomingType = @TypeOf(phi.incoming[0]);
                  const new_incoming = try self.allocator.alloc(IncomingType, phi.incoming.len);
@@ -2863,7 +2937,6 @@ pub const IROptimizer = struct {
                 }
                 break :blk .{ .phi = .{ .incoming = new_incoming } };
             },
-            // For other operations, return as-is (simplified) - TODO: Handle other deep copies like call_indirect, etc.
             else => op,
         };
     }
@@ -2896,8 +2969,8 @@ pub const IROptimizer = struct {
         var changed = false;
 
         // Track known types for registers
-        var known_types = std.AutoHashMap(u32, Type).init(self.allocator);
-        defer known_types.deinit();
+        self.type_known_types.clearRetainingCapacity();
+        var known_types = &self.type_known_types;
 
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
@@ -2916,7 +2989,7 @@ pub const IROptimizer = struct {
                 }
 
                 // Try to specialize operations based on known types
-                if (try self.specializeInstruction(inst, &known_types)) {
+                if (try self.specializeInstruction(inst, known_types)) {
                     changed = true;
                     self.stats.type_specializations += 1;
                 }
