@@ -195,7 +195,7 @@ test "DirEntry - 多个条目" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var entries = std.ArrayList(filesystem.DirEntry).init(allocator);
+    var entries = std.ArrayList(filesystem.DirEntry){ .allocator = allocator };
     defer {
         for (entries.items) |*entry| {
             entry.deinit(allocator);
@@ -231,7 +231,7 @@ test "DirEntry - 升序排序" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var entries = std.ArrayList(filesystem.DirEntry).init(allocator);
+    var entries = std.ArrayList(filesystem.DirEntry){ .allocator = allocator };
     defer {
         for (entries.items) |*entry| {
             entry.deinit(allocator);
@@ -260,7 +260,7 @@ test "DirEntry - 降序排序" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var entries = std.ArrayList(filesystem.DirEntry).init(allocator);
+    var entries = std.ArrayList(filesystem.DirEntry){ .allocator = allocator };
     defer {
         for (entries.items) |*entry| {
             entry.deinit(allocator);

@@ -65,7 +65,7 @@ pub const DateTimeFunctions = struct {
         else
             std.time.timestamp();
 
-        var result = std.ArrayList(u8).init(vm.allocator);
+        var result = std.ArrayList(u8){ .allocator = vm.allocator };
         defer result.deinit();
 
         const epoch_seconds: u64 = @intCast(@max(0, timestamp));

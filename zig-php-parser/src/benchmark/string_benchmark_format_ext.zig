@@ -20,9 +20,9 @@ pub const StringFormatExtTests = struct {
             std.debug.print("\n=== 字符串格式化扩展性能测试 ===\n", .{});
         }
         
-        try results.append(try self.testPrintf());
-        try results.append(try self.testVsprintf());
-        try results.append(try self.testSscanf());
+        try results.append(self.allocator, try self.testPrintf());
+        try results.append(self.allocator, try self.testVsprintf());
+        try results.append(self.allocator, try self.testSscanf());
         
         return results.toOwnedSlice();
     }

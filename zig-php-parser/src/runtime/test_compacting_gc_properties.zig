@@ -280,7 +280,7 @@ fn coalesceFreeBlocks(blocks: []const FreeBlockSequence.FreeBlock, allocator: st
     }.lessThan);
 
     // 合并相邻块
-    var merged = std.ArrayList(FreeBlockSequence.FreeBlock).init(allocator);
+    var merged = std.ArrayList(FreeBlockSequence.FreeBlock){ .allocator = allocator };
     defer merged.deinit();
 
     var current = sorted[0];

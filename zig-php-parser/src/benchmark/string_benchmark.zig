@@ -120,34 +120,34 @@ pub const StringBenchmark = struct {
         
         // 合并搜索结果
         var all_search = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        try all_search.appendSlice(search_results);
-        try all_search.appendSlice(search_ext_results);
-        const merged_search = try all_search.toOwnedSlice();
+        try all_search.appendSlice(self.allocator, search_results);
+        try all_search.appendSlice(self.allocator, search_ext_results);
+        const merged_search = try all_search.toOwnedSlice(self.allocator);
         
         // 合并转换结果
         var all_transform = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        try all_transform.appendSlice(transform_results);
-        try all_transform.appendSlice(transform_ext_results);
-        const merged_transform = try all_transform.toOwnedSlice();
+        try all_transform.appendSlice(self.allocator, transform_results);
+        try all_transform.appendSlice(self.allocator, transform_ext_results);
+        const merged_transform = try all_transform.toOwnedSlice(self.allocator);
         
         // 合并编码结果
         var all_encode = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        try all_encode.appendSlice(encode_results);
-        try all_encode.appendSlice(encode_ext_results);
-        try all_encode.appendSlice(misc_ext_results);
-        const merged_encode = try all_encode.toOwnedSlice();
+        try all_encode.appendSlice(self.allocator, encode_results);
+        try all_encode.appendSlice(self.allocator, encode_ext_results);
+        try all_encode.appendSlice(self.allocator, misc_ext_results);
+        const merged_encode = try all_encode.toOwnedSlice(self.allocator);
         
         // 合并格式化结果
         var all_format = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        try all_format.appendSlice(format_results);
-        try all_format.appendSlice(format_ext_results);
-        const merged_format = try all_format.toOwnedSlice();
+        try all_format.appendSlice(self.allocator, format_results);
+        try all_format.appendSlice(self.allocator, format_ext_results);
+        const merged_format = try all_format.toOwnedSlice(self.allocator);
         
         // 合并解析结果
         var all_parse = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        try all_parse.appendSlice(parse_results);
-        try all_parse.appendSlice(parse_ext_results);
-        const merged_parse = try all_parse.toOwnedSlice();
+        try all_parse.appendSlice(self.allocator, parse_results);
+        try all_parse.appendSlice(self.allocator, parse_ext_results);
+        const merged_parse = try all_parse.toOwnedSlice(self.allocator);
         
         const end_time = std.time.nanoTimestamp();
         
@@ -177,8 +177,8 @@ pub const StringBenchmark = struct {
         
         var results = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
         
-        try results.append(try self.testStrlen());
-        try results.append(try self.testStrpos());
+        try results.append(self.allocator, try self.testStrlen());
+        try results.append(self.allocator, try self.testStrpos());
         try results.append(try self.testStrrpos());
         try results.append(try self.testStripos());
         try results.append(try self.testStrstr());

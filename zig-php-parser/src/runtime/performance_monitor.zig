@@ -514,7 +514,7 @@ pub const HotspotTracker = struct {
 
     /// 获取热点函数
     pub fn getHotspots(self: *HotspotTracker) !std.ArrayList([]const u8) {
-        var hotspots = std.ArrayList([]const u8).init(self.allocator);
+        var hotspots = std.ArrayList([]const u8){ .allocator = self.allocator };
 
         var iter = self.function_stats.iterator();
         while (iter.next()) |entry| {

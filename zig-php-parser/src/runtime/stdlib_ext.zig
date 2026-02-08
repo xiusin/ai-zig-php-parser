@@ -445,7 +445,7 @@ pub const JsonFunctions = struct {
 
         fn parseString(self: *JsonParser, vm: anytype) !Value {
             try self.expect('"');
-            var result = std.ArrayList(u8).init(self.allocator);
+            var result = std.ArrayList(u8){ .allocator = self.allocator };
             defer result.deinit();
 
             while (true) {
@@ -560,7 +560,7 @@ pub const JsonFunctions = struct {
             self.depth += 1;
             defer self.depth -= 1;
 
-            var elements = std.ArrayList(Value).init(self.allocator);
+            var elements = std.ArrayList(Value){ .allocator = self.allocator };
             defer elements.deinit();
 
             self.skipWhitespace();
@@ -658,7 +658,7 @@ pub const JsonFunctions = struct {
             }
         }
 
-        var result = std.ArrayList(u8).init(vm.allocator);
+        var result = std.ArrayList(u8){ .allocator = vm.allocator };
         defer result.deinit();
 
         try encodeValue(&result, args[0], options);

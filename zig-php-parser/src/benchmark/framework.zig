@@ -399,7 +399,7 @@ pub const BenchmarkFramework = struct {
         const result = ComparisonResult.compute(script_path, zigphp_stats, php_stats);
         
         // 保存结果
-        try self.results.append(result);
+        try self.results.append(self.allocator, result);
         
         if (self.config.verbose) {
             std.debug.print("\n加速比: {d:.2}x\n", .{result.speedup});

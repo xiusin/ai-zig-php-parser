@@ -1843,7 +1843,7 @@ pub const NativeLinker = struct {
                         else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
                     };
                     if (src_may_heap) {
-                        try writer.print(" reg_{d}.retain();", .{ result_reg.id });
+                        try writer.print(" _ = reg_{d}.retain();", .{ result_reg.id });
                     }
                 }
                 try writer.writeAll(" },\n");
@@ -2457,13 +2457,13 @@ pub const NativeLinker = struct {
                 } else if (value_type_tag == .php_value or value_type_tag == .php_string or value_type_tag == .php_array or value_type_tag == .php_object or value_type_tag == .php_callable) {
                     // 已经是Value类型，需要retain
                     if (self.regMayHeap(op.value.id)) {
-                        try writer.print("    reg_{d}.retain();\n", .{ op.value.id });
+                        try writer.print("    _ = reg_{d}.retain();\n", .{ op.value.id });
                     }
                     try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                 } else {
                     // Fallback for other types
                     if (self.regMayHeap(op.value.id)) {
-                        try writer.print("    reg_{d}.retain();\n", .{ op.value.id });
+                        try writer.print("    _ = reg_{d}.retain();\n", .{ op.value.id });
                     }
                     try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                 }
@@ -2496,7 +2496,7 @@ pub const NativeLinker = struct {
                     } else {
                         try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, ptr_prefix, op.ptr.id });
                         if (self.regMayHeap(reg.id)) {
-                            try writer.print("    reg_{d}.retain();\n", .{ reg.id });
+                            try writer.print("    _ = reg_{d}.retain();\n", .{ reg.id });
                         }
                     }
                 }
@@ -2702,10 +2702,10 @@ pub const NativeLinker = struct {
                         try writer.print("reg_{d}", .{op.cond.id});
                         try writer.writeAll(") {\n");
                         try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.then_value.id });
-                        try writer.print("        reg_{d}.retain();\n", .{ reg.id });
+                        try writer.print("        _ = reg_{d}.retain();\n", .{ reg.id });
                         try writer.writeAll("    } else {\n");
                         try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.else_value.id });
-                        try writer.print("        reg_{d}.retain();\n", .{ reg.id });
+                        try writer.print("        _ = reg_{d}.retain();\n", .{ reg.id });
                         try writer.writeAll("    }\n");
                     }
                 }

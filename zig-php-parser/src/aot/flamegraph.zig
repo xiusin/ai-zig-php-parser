@@ -112,7 +112,7 @@ pub const FlameGraphGenerator = struct {
     fn samplingThreadMain(self: *FlameGraphGenerator) void {
         while (self.sampling_running.load(.seq_cst)) {
             self.sampleFromProfilerCurrentStack(self.sampling_interval_ns) catch {};
-            std.time.sleep(self.sampling_interval_ns);
+            std.Thread.sleep(self.sampling_interval_ns);
         }
     }
 

@@ -3891,7 +3891,7 @@ pub const PatternMatcher = struct {
     pub fn init(allocator: std.mem.Allocator) PatternMatcher {
         return PatternMatcher{
             .allocator = allocator,
-            .patterns = std.ArrayList(Pattern).init(allocator),
+            .patterns = std.ArrayList(Pattern){ .allocator = allocator },
         };
     }
 
@@ -4079,7 +4079,7 @@ pub const Awaitable = struct {
             .state = .pending,
             .value = null,
             .error_value = null,
-            .callbacks = std.ArrayList(Callback).init(allocator),
+            .callbacks = std.ArrayList(Callback){ .allocator = allocator },
             .allocator = allocator,
         };
     }
@@ -4188,7 +4188,7 @@ pub const ComptimeInfo = struct {
             .inferred_type = null,
             .is_const_expr = false,
             .const_value = null,
-            .constraints = std.ArrayList(TypeConstraint).init(allocator),
+            .constraints = std.ArrayList(TypeConstraint){ .allocator = allocator },
             .allocator = allocator,
         };
     }

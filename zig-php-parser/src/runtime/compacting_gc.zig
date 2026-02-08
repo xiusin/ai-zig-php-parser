@@ -498,7 +498,7 @@ pub const CompactingGC = struct {
 
     /// 清理死对象
     fn cleanupDeadObjects(self: *CompactingGC) !void {
-        var new_objects = std.ArrayListUnmanaged(MemoryRegion.MemoryObject).init(self.allocator);
+        var new_objects = std.ArrayListUnmanaged(MemoryRegion.MemoryObject){};
 
         for (self.region.objects.items) |obj| {
             if (obj.alive) {
@@ -514,7 +514,7 @@ pub const CompactingGC = struct {
 
     /// 查找高碎片区域
     fn findHighFragmentationAreas(self: *CompactingGC) !std.ArrayList(Region) {
-        var areas = std.ArrayList(Region).init(self.allocator);
+        var areas = std.ArrayList(Region){ .allocator = self.allocator };
 
         // 简化实现：将内存分成多个区域，检查每个区域的碎片化
         const region_count = 10;

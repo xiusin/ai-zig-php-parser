@@ -418,7 +418,7 @@ pub const HotspotDetector = struct {
         defer self.mutex.unlock();
         
         // 收集所有函数及其计数
-        var functions = std.ArrayList(struct { name: []const u8, count: u32 }).init(self.allocator);
+        var functions = std.ArrayList(struct { name: []const u8, count: u32 }){ .allocator = self.allocator };
         defer functions.deinit();
         
         var iter = self.execution_counts.iterator();
@@ -460,7 +460,7 @@ pub const HotspotDetector = struct {
         defer self.mutex.unlock();
         
         // 收集所有循环及其计数
-        var loops = std.ArrayList(struct { id: []const u8, count: u32 }).init(self.allocator);
+        var loops = std.ArrayList(struct { id: []const u8, count: u32 }){ .allocator = self.allocator };
         defer loops.deinit();
         
         var iter = self.loop_backedge_counts.iterator();

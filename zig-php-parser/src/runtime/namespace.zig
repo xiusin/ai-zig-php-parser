@@ -57,7 +57,7 @@ pub const NamespaceManager = struct {
             .class_imports = std.StringHashMap([]const u8).init(allocator),
             .function_imports = std.StringHashMap([]const u8).init(allocator),
             .constant_imports = std.StringHashMap([]const u8).init(allocator),
-            .autoloaders = std.ArrayList(AutoloadCallback).init(allocator),
+            .autoloaders = std.ArrayList(AutoloadCallback){ .allocator = allocator },
             .loaded_files = std.StringHashMap(bool).init(allocator),
         };
     }
@@ -252,9 +252,9 @@ pub const NamespaceManager = struct {
         };
 
         if (prepend) {
-            try self.autoloaders.insert(0, autoloader);
+            try self.autoloaders.insert(self.allocator, 0, autoloader);
         } else {
-            try self.autoloaders.append(autoloader);
+            try self.autoloaders.append(self.allocator, autoloader);
         }
     }
 
@@ -342,9 +342,9 @@ pub const FileLoader = struct {
         return FileLoader{
             .allocator = allocator,
             .namespace_manager = namespace_manager,
-            .include_paths = std.ArrayList([]const u8).init(allocator),
+            .include_paths = std.ArrayList([]const u8){ .allocator = allocator },
             .current_file = "",
-            .file_stack = std.ArrayList([]const u8).init(allocator),
+            .file_stack = std.ArrayList([]const u8){ .allocator = allocator },
         };
     }
 
@@ -356,7 +356,7 @@ pub const FileLoader = struct {
     /// 添加include路径
     pub fn addIncludePath(self: *FileLoader, path: []const u8) !void {
         const path_copy = try self.allocator.dupe(u8, path);
-        try self.include_paths.append(path_copy);
+        try self.include_paths.append(self.allocator, path_copy);
     }
 
     /// 解析文件路径
@@ -477,7 +477,7 @@ pub const FileLoader = struct {
 
     fn pushFile(self: *FileLoader, filepath: []const u8) !void {
         if (self.current_file.len > 0) {
-            try self.file_stack.append(self.current_file);
+            try self.file_stack.append(self.allocator, self.current_file);
         }
         self.current_file = filepath;
     }

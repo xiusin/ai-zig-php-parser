@@ -181,7 +181,7 @@ pub const Profiler = struct {
         return list.toOwnedSlice(allocator);
     }
 
-    pub fn snapshotCallStackNames(self: *const Profiler, allocator: std.mem.Allocator) ![]const []const u8 {
+    pub fn snapshotCallStackNames(self: *Profiler, allocator: std.mem.Allocator) ![]const []const u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
 

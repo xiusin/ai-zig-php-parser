@@ -56,7 +56,7 @@ pub const StringWrapper = struct {
     }
 
     pub fn replace(self: *StringWrapper, search: []const u8, replacement: []const u8) !*PHPString {
-        var result = std.ArrayList(u8).init(self.allocator);
+        var result = std.ArrayList(u8){ .allocator = self.allocator };
         defer result.deinit();
 
         var i: usize = 0;

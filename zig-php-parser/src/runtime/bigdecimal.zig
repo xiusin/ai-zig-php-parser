@@ -291,21 +291,21 @@ pub const BigDecimal = struct {
 
     /// Convert to string representation
     pub fn toString(self: *const BigDecimal) ![]u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        defer result.deinit();
+        var result = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+        defer result.deinit(self.allocator);
 
         // Add sign
         if (!self.sign) {
-            try result.append('-');
+            try result.append(self.allocator, '-');
         }
 
         // Handle zero case
         if (self.isZero()) {
-            try result.append('0');
+            try result.append(self.allocator, '0');
             if (self.scale > 0) {
-                try result.append('.');
+                try result.append(self.allocator, '.');
                 for (0..self.scale) |_| {
-                    try result.append('0');
+                    try result.append(self.allocator, '0');
                 }
             }
             return try result.toOwnedSlice();
@@ -315,28 +315,28 @@ pub const BigDecimal = struct {
         const integer_digits = if (self.digits.len > self.scale) self.digits.len - self.scale else 0;
         
         if (integer_digits == 0) {
-            try result.append('0');
+            try result.append(self.allocator, '0');
         } else {
             for (self.digits[0..integer_digits]) |digit| {
-                try result.append('0' + digit);
+                try result.append(self.allocator, '0' + digit);
             }
         }
 
         // Add decimal part
         if (self.scale > 0) {
-            try result.append('.');
+            try result.append(self.allocator, '.');
             
             // Add leading zeros if needed
             if (integer_digits == 0 and self.digits.len < self.scale) {
                 for (0..self.scale - self.digits.len) |_| {
-                    try result.append('0');
+                    try result.append(self.allocator, '0');
                 }
             }
             
             // Add fractional digits
             const fractional_start = if (integer_digits > 0) integer_digits else 0;
             for (self.digits[fractional_start..]) |digit| {
-                try result.append('0' + digit);
+                try result.append(self.allocator, '0' + digit);
             }
         }
 
@@ -518,8 +518,8 @@ pub const BigDecimal = struct {
         defer divisor.release();
 
         const result_sign = self.sign == other.sign;
-        var quotient_digits = std.ArrayList(u8).init(self.allocator);
-        defer quotient_digits.deinit();
+        var quotient_digits = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+        defer quotient_digits.deinit(self.allocator);
 
         // Perform long division
         var remainder = try dividend.clone();
@@ -538,7 +538,7 @@ pub const BigDecimal = struct {
                 digit += 1;
                 if (digit >= 10) break;
             }
-            try quotient_digits.append(digit);
+            try quotient_digits.append(self.allocator, digit);
 
             // Multiply remainder by 10 for next iteration
             if (!remainder.isZero()) {
@@ -551,7 +551,7 @@ pub const BigDecimal = struct {
         }
 
         if (quotient_digits.items.len == 0) {
-            try quotient_digits.append(0);
+            try quotient_digits.append(self.allocator, 0);
         }
 
         const result = try self.allocator.create(BigDecimal);

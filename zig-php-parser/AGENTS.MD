@@ -7,6 +7,11 @@
 - 100 % 通过基础安全检查（无恶意代码、无敏感数据泄露）  
 - 100 % 遵循编程规范与工程原则（SOLID、KISS、DRY、YAGNI）
 - 禁止使用cat做命令输出；
+- ArrayList API最新为：// ✅ 新 API (Zig 0.15.2)
+    var list = try std.ArrayList(T).initCapacity(allocator, 0);
+    defer list.deinit(allocator);  // 需要 allocator
+    try list.append(allocator, item);  // 需要 allocator
+    
 ## 2. 子代理路由表（强制自动触发）
 | 触发条件                       | 子代理              | 额外指令                               |
 | ------------------------------ | ------------------- | -------------------------------------- |

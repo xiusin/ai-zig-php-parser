@@ -4127,7 +4127,7 @@ pub const ClassMeta = struct {
                     _ = args;
                     const this = Value_asObject(ctx);
                     if (this.getProperty("message")) |val| {
-                        val.retain();
+                        _ = val.retain();
                         return val;
                     }
                     return Value.initString(try PHPString.init(runtime_alloc, ""));

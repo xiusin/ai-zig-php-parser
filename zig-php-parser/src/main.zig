@@ -203,8 +203,8 @@ pub fn main() !void {
     var aot_options = aot.CompileOptions{
         .input_file = "",
     };
-    var aot_zig_flags = std.ArrayList([]const u8).init(allocator);
-    defer aot_zig_flags.deinit();
+    var aot_zig_flags = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+    defer aot_zig_flags.deinit(allocator);
 
     // First pass: parse CLI arguments to find config file and overrides
     var i: usize = 1;
@@ -225,7 +225,7 @@ pub fn main() !void {
         } else if (std.mem.startsWith(u8, arg, "--output=")) {
             aot_options.output_file = arg[9..];
         } else if (std.mem.startsWith(u8, arg, "--zig-flag=")) {
-            try aot_zig_flags.append(arg["--zig-flag=".len..]);
+            try aot_zig_flags.append(allocator, arg["--zig-flag=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--target=")) {
             const target_str = arg[9..];
             aot_options.target = aot.Target.fromString(target_str) catch {
@@ -395,7 +395,7 @@ pub fn main() !void {
         if (php_file) |filename| {
             aot_options.input_file = filename;
             if (aot_zig_flags.items.len > 0) {
-                aot_options.extra_zig_flags = try aot_zig_flags.toOwnedSlice();
+                aot_options.extra_zig_flags = try aot_zig_flags.toOwnedSlice(allocator);
             }
             // Convert compiler SyntaxMode to AOT SyntaxMode
             aot_options.syntax_mode = switch (syntax_mode) {

@@ -161,8 +161,8 @@ pub const DependencyInfo = struct {
 
     /// 序列化
     pub fn serialize(self: *const DependencyInfo, allocator: Allocator) ![]const u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
+        var buffer = try std.ArrayList(u8).initCapacity(allocator, 0);
+        defer buffer.deinit(allocator);
 
         // 文件路径
         try buffer.writer().print("{}\n", .{std.fmt.fmtSliceHexLower(self.file_path)});
@@ -587,7 +587,7 @@ pub const IncrementalCompiler = struct {
 
     /// 检测受影响的文件
     pub fn detectAffectedFiles(self: *IncrementalCompiler, changed_file: []const u8) !std.ArrayList([]const u8) {
-        var affected = std.ArrayList([]const u8).init(self.allocator);
+        var affected = std.ArrayList([]const u8){ .allocator = self.allocator };
 
         // 获取所有依赖该文件的文件
         const dependents = try self.dependency_graph.getDependents(changed_file);
@@ -714,7 +714,7 @@ pub const DependencyGraph = struct {
 
     /// 获取被依赖的文件
     pub fn getDependents(self: *DependencyGraph, file_path: []const u8) !std.ArrayList([]const u8) {
-        var dependents = std.ArrayList([]const u8).init(self.allocator);
+        var dependents = std.ArrayList([]const u8){ .allocator = self.allocator };
 
         if (self.nodes.get(file_path)) |node| {
             var iter = node.dependents.iterator();
@@ -728,7 +728,7 @@ pub const DependencyGraph = struct {
 
     /// 检测循环依赖
     pub fn detectCycles(self: *DependencyGraph) !std.ArrayList([]const u8) {
-        var cycles = std.ArrayList([]const u8).init(self.allocator);
+        var cycles = std.ArrayList([]const u8){ .allocator = self.allocator };
 
         // 使用DFS检测循环
         var visited = std.StringHashMap(bool).init(self.allocator);

@@ -681,8 +681,8 @@ pub const MultiFileCompiler = struct {
     /// @pre merged_module 必须已初始化
     /// @post 返回完整的 LLVM IR 字符串，包含真实的函数实现
     fn generateLLVMIR(self: *Self) ![]const u8 {
-        var ir = std.ArrayList(u8).init(self.allocator);
-        errdefer ir.deinit();
+        var ir = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+        errdefer ir.deinit(self.allocator);
         
         const writer = ir.writer();
         
@@ -1040,24 +1040,24 @@ pub const MultiFileCompiler = struct {
         };
         
         // 构建链接器参数
-        var argv = std.ArrayList([]const u8).init(self.allocator);
-        defer argv.deinit();
+        var argv = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+        defer argv.deinit(self.allocator);
         
-        try argv.append(linker);
+        try argv.append(self.allocator, linker);
         
         if (@import("builtin").os.tag == .windows) {
             // Windows 链接器参数
-            try argv.append("/OUT:");
-            try argv.append(output_path);
-            try argv.append(obj_file);
+            try argv.append(self.allocator, "/OUT:");
+            try argv.append(self.allocator, output_path);
+            try argv.append(self.allocator, obj_file);
         } else {
             // Unix 链接器参数
-            try argv.append("-o");
-            try argv.append(output_path);
-            try argv.append(obj_file);
+            try argv.append(self.allocator, "-o");
+            try argv.append(self.allocator, output_path);
+            try argv.append(self.allocator, obj_file);
             
             // 添加运行时库（如果存在）
-            // try argv.append("-lzigphp_runtime");
+            // try argv.append(self.allocator, "-lzigphp_runtime");
         }
         
         const result = std.ChildProcess.exec(.{

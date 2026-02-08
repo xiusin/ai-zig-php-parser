@@ -1615,8 +1615,8 @@ pub fn php_string_str_replace(search: *PHPValue, replace: *PHPValue, subject: *P
     const allocator = getGlobalAllocator();
 
     // Simple implementation: find and replace all occurrences
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer result.deinit(allocator);
 
     const subj_data = subj_str.data[0..subj_str.length];
     const search_data = search_str.data[0..search_str.length];
@@ -1627,10 +1627,10 @@ pub fn php_string_str_replace(search: *PHPValue, replace: *PHPValue, subject: *P
         if (i + search_str.length <= subj_str.length and
             std.mem.eql(u8, subj_data[i .. i + search_str.length], search_data))
         {
-            result.appendSlice(replace_data) catch return php_value_clone(subject);
+            result.appendSlice(allocator, replace_data) catch return php_value_clone(subject);
             i += search_str.length;
         } else {
-            result.append(subj_data[i]) catch return php_value_clone(subject);
+            result.append(allocator, subj_data[i]) catch return php_value_clone(subject);
             i += 1;
         }
     }
@@ -1686,15 +1686,15 @@ pub fn php_string_implode(glue: *PHPValue, pieces: *PHPValue) *PHPValue {
     const glue_str = glue_val.data.string_ptr;
 
     const allocator = getGlobalAllocator();
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer result.deinit(allocator);
 
     var first = true;
     var entry = arr.first;
     while (entry) |e| {
         if (!first) {
             if (glue_str) |gs| {
-                result.appendSlice(gs.data[0..gs.length]) catch {};
+                result.appendSlice(allocator, gs.data[0..gs.length]) catch {};
             }
         }
         first = false;
@@ -1702,7 +1702,7 @@ pub fn php_string_implode(glue: *PHPValue, pieces: *PHPValue) *PHPValue {
         const str_val = php_value_to_string(e.value);
         defer php_gc_release(str_val);
         if (str_val.data.string_ptr) |s| {
-            result.appendSlice(s.data[0..s.length]) catch {};
+            result.appendSlice(allocator, s.data[0..s.length]) catch {};
         }
 
         entry = e.next_order;
@@ -1779,8 +1779,8 @@ pub fn php_builtin_count(val: *PHPValue) *PHPValue {
 pub fn php_builtin_var_dump(val: *PHPValue) void {
     // 使用 ArrayList 作为缓冲区
     const allocator = getGlobalAllocator();
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return;
+    defer buffer.deinit(allocator);
     
     dumpValue(buffer.writer(), val, 0) catch {};
     std.debug.print("{s}", .{buffer.items});
@@ -1789,8 +1789,8 @@ pub fn php_builtin_var_dump(val: *PHPValue) void {
 /// print_r - Print human-readable representation
 pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
     const allocator = getGlobalAllocator();
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return php_value_create_bool(false);
+    defer buffer.deinit(allocator);
 
     printValue(buffer.writer(), val, 0) catch {};
     
@@ -1805,8 +1805,8 @@ pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
 /// var_export - Output or return a parsable string representation
 pub fn php_builtin_var_export(val: *PHPValue, return_output: bool) *PHPValue {
     const allocator = getGlobalAllocator();
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return php_value_create_null();
+    defer buffer.deinit(allocator);
 
     exportValue(buffer.writer(), val) catch {};
     

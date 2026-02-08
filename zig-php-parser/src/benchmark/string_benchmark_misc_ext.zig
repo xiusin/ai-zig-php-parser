@@ -20,9 +20,9 @@ pub const StringMiscExtTests = struct {
             std.debug.print("\n=== 字符串其他扩展性能测试 ===\n", .{});
         }
         
-        try results.append(try self.testQuotedPrintableEncode());
-        try results.append(try self.testQuotedPrintableDecode());
-        try results.append(try self.testConvertCyrString());
+        try results.append(self.allocator, try self.testQuotedPrintableEncode());
+        try results.append(self.allocator, try self.testQuotedPrintableDecode());
+        try results.append(self.allocator, try self.testConvertCyrString());
         
         return results.toOwnedSlice();
     }
@@ -52,18 +52,18 @@ pub const StringMiscExtTests = struct {
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
-            defer result.deinit();
+            defer result.deinit(self.allocator);
             
             // 简化的 QP 编码实现
             for (test_string) |c| {
                 if (c > 126 or c < 32 or c == '=') {
                     // 编码为 =XX 格式
-                    try result.append('=');
+                    try result.append(self.allocator, '=');
                     const hex = "0123456789ABCDEF";
-                    try result.append(hex[c >> 4]);
-                    try result.append(hex[c & 0x0F]);
+                    try result.append(self.allocator, hex[c >> 4]);
+                    try result.append(self.allocator, hex[c & 0x0F]);
                 } else {
-                    try result.append(c);
+                    try result.append(self.allocator, c);
                 }
             }
             total_len += result.items.len;
@@ -115,7 +115,7 @@ pub const StringMiscExtTests = struct {
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
-            defer result.deinit();
+            defer result.deinit(self.allocator);
             
             // 简化的 QP 解码实现
             var idx: usize = 0;
@@ -127,10 +127,10 @@ pub const StringMiscExtTests = struct {
                     const v1 = if (h1 >= '0' and h1 <= '9') h1 - '0' else if (h1 >= 'A' and h1 <= 'F') h1 - 'A' + 10 else 0;
                     const v2 = if (h2 >= '0' and h2 <= '9') h2 - '0' else if (h2 >= 'A' and h2 <= 'F') h2 - 'A' + 10 else 0;
                     
-                    try result.append((v1 << 4) | v2);
+                    try result.append(self.allocator, (v1 << 4) | v2);
                     idx += 2;
                 } else {
-                    try result.append(test_string[idx]);
+                    try result.append(self.allocator, test_string[idx]);
                 }
             }
             total_len += result.items.len;

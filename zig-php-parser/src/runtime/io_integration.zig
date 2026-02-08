@@ -147,7 +147,7 @@ pub const IOIntegration = struct {
     /// Poll for completed I/O operations
     /// Requirement 6.9 - efficiently wake waiting coroutines
     pub fn pollCompletedOperations(self: *IOIntegration) ![]u64 {
-        var completed_coroutines = std.ArrayList(u64).init(self.allocator);
+        var completed_coroutines = std.ArrayList(u64){ .allocator = self.allocator };
         defer completed_coroutines.deinit();
         
         // Poll network operations
@@ -338,7 +338,7 @@ pub const FileIOManager = struct {
             .allocator = allocator,
             .thread_pool = thread_pool,
             .pending_operations = std.HashMap(u64, FileOperation, std.hash_map.DefaultContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
-            .completed_operations = std.ArrayList(FileOperationResult).init(allocator),
+            .completed_operations = std.ArrayList(FileOperationResult){ .allocator = allocator },
             .next_operation_id = std.atomic.Value(u64).init(1),
             .mutex = .{},
         };
@@ -425,7 +425,7 @@ pub const FileIOManager = struct {
         defer self.mutex.unlock();
         
         const completed = try self.completed_operations.toOwnedSlice();
-        self.completed_operations = std.ArrayList(FileOperationResult).init(self.allocator);
+        self.completed_operations = std.ArrayList(FileOperationResult){ .allocator = self.allocator };
         
         return completed;
     }

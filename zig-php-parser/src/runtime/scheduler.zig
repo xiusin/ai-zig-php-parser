@@ -338,7 +338,7 @@ pub const Scheduler = struct {
             defer self.mutex.unlock();
             
             // Enhanced I/O polling with timeout-based readiness simulation
-            var ready_list = std.ArrayList(u64).init(self.allocator);
+            var ready_list = std.ArrayList(u64){ .allocator = self.allocator };
             defer ready_list.deinit();
             
             const current_time = std.time.nanoTimestamp();

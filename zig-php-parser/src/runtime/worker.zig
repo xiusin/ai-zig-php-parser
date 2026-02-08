@@ -393,7 +393,7 @@ pub const WorkerPool = struct {
 
     /// Get idle workers
     pub fn getIdleWorkers(self: *WorkerPool) []u32 {
-        var idle_workers = std.ArrayList(u32).init(self.allocator);
+        var idle_workers = std.ArrayList(u32){ .allocator = self.allocator };
         defer idle_workers.deinit();
 
         for (self.workers, 0..) |*worker, i| {

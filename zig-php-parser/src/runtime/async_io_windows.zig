@@ -86,7 +86,7 @@ pub const IOCPMultiplexer = struct {
     /// @pre self 必须已初始化
     /// @post 返回已完成的 I/O 事件列表
     pub fn poll(self: *IOCPMultiplexer, timeout_ms: i32) ![]IOEvent {
-        var events = std.ArrayList(IOEvent).init(self.allocator);
+        var events = std.ArrayList(IOEvent){ .allocator = self.allocator };
         errdefer events.deinit();
         
         // 转换超时时间

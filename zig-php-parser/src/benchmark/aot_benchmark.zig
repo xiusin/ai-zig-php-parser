@@ -637,7 +637,7 @@ pub const AOTBenchmarkFramework = struct {
         );
         
         // 保存结果
-        try self.results.append(result);
+        try self.results.append(self.allocator, result);
         
         if (self.config.verbose) {
             std.debug.print("\n=== 测试完成 ===\n", .{});

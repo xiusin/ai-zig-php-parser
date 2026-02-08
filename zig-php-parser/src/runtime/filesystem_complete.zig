@@ -207,7 +207,7 @@ pub fn scandirComplete(vm: *VM, args: []const Value) !Value {
     defer dir.close();
     
     // 收集所有目录条目
-    var entries = std.ArrayList(DirEntry).init(vm.allocator);
+    var entries = std.ArrayList(DirEntry){ .allocator = vm.allocator };
     defer {
         for (entries.items) |*entry| {
             entry.deinit(vm.allocator);
@@ -401,7 +401,7 @@ pub fn globFn(vm: *VM, args: []const Value) !Value {
     defer dir.close();
     
     // 收集匹配的条目
-    var matches = std.ArrayList([]const u8).init(vm.allocator);
+    var matches = std.ArrayList([]const u8){ .allocator = vm.allocator };
     defer {
         for (matches.items) |match| {
             vm.allocator.free(match);

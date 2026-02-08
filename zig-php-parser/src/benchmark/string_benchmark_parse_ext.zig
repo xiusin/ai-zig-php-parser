@@ -20,8 +20,8 @@ pub const StringParseExtTests = struct {
             std.debug.print("\n=== 字符串解析扩展性能测试 ===\n", .{});
         }
         
-        try results.append(try self.testParseStr());
-        try results.append(try self.testStrGetcsv());
+        try results.append(self.allocator, try self.testParseStr());
+        try results.append(self.allocator, try self.testStrGetcsv());
         
         return results.toOwnedSlice();
     }
