@@ -126,6 +126,7 @@ pub fn build(b: *std.Build) void {
         // "src/aot/diagnostics.zig",
         // "src/aot/ir_generator.zig",
         "src/aot/test_control_flow_ir.zig",
+        "src/aot/test_optimizer_metrics.zig",
         "src/aot/test_licm.zig",
         "src/aot/test_loop_unroll.zig",
         "src/aot/test_runtime_arrays.zig",

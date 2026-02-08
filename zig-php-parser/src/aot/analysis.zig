@@ -280,20 +280,26 @@ pub fn rebuildCFG(func: *Function) !void {
         block.successors.clearRetainingCapacity();
     }
 
+    var block_set = std.AutoHashMap(*BasicBlock, void).init(func.allocator);
+    defer block_set.deinit();
+    for (func.blocks.items) |block| {
+        try block_set.put(block, {});
+    }
+
     // Build edges
     for (func.blocks.items) |block| {
         if (block.terminator) |term| {
             switch (term) {
-                .br => |target| try addEdge(block, target),
+                .br => |target| if (block_set.contains(target)) try addEdge(block, target),
                 .cond_br => |cb| {
-                    try addEdge(block, cb.then_block);
-                    try addEdge(block, cb.else_block);
+                    if (block_set.contains(cb.then_block)) try addEdge(block, cb.then_block);
+                    if (block_set.contains(cb.else_block)) try addEdge(block, cb.else_block);
                 },
                 .switch_ => |sw| {
                     for (sw.cases) |case| {
-                        try addEdge(block, case.block);
+                        if (block_set.contains(case.block)) try addEdge(block, case.block);
                     }
-                    try addEdge(block, sw.default);
+                    if (block_set.contains(sw.default)) try addEdge(block, sw.default);
                 },
                 else => {},
             }
@@ -496,4 +502,3 @@ fn addLoopBlocks(allocator: Allocator, loop: *Loop, back_edge_source: *BasicBloc
         }
     }
 }
-

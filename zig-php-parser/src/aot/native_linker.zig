@@ -3405,7 +3405,49 @@ pub const NativeLinker = struct {
                 try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
                 try writer.writeAll(");\n");
             },
-            .method_call => |op| {
+            .method_call => |op| blk: {
+                const obj_tag = @as(std.meta.Tag(IR.Type), op.object.type_);
+                if (obj_tag == .php_object) {
+                    const direct_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ op.object.type_.php_object, op.method_name });
+                    defer self.allocator.free(direct_name);
+
+                    if (self.func_return_types.contains(direct_name)) {
+                        const escaped_direct = try self.escapeString(direct_name);
+                        defer self.allocator.free(escaped_direct);
+                        const has_return = self.func_return_types.get(direct_name) orelse false;
+
+                        if (inst.result) |reg| {
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                            if (has_return) {
+                                try writer.print("    reg_{d} = try @\"{s}\"(reg_{d}, ", .{ reg.id, escaped_direct, op.object.id });
+                                try self.writeValueArgsArray(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else {
+                                try writer.print("    _ = try @\"{s}\"(reg_{d}, ", .{ escaped_direct, op.object.id });
+                                try self.writeValueArgsArray(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                            }
+                        } else {
+                            try writer.print("    _ = try @\"{s}\"(reg_{d}, ", .{ escaped_direct, op.object.id });
+                            try self.writeValueArgsArray(writer, op.args);
+                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                        }
+
+                        try writer.writeAll("    if (runtime.hasException()) {\n");
+                        try writer.writeAll("        @branchHint(.unlikely);\n");
+                        try self.generateCleanupCode(writer);
+                        if (self.current_exception_handler) |handler_idx| {
+                            try writer.print("        current_block = {d};\n", .{handler_idx});
+                            try writer.print("        continue;\n", .{});
+                        } else {
+                            try writer.writeAll("        return error.RuntimeError;\n");
+                        }
+                        try writer.writeAll("    }\n");
+                        break :blk;
+                    }
+                }
+
                 const escaped_method = try self.escapeString(op.method_name);
                 defer self.allocator.free(escaped_method);
 
@@ -3420,7 +3462,6 @@ pub const NativeLinker = struct {
                     try writer.writeAll(");\n");
                 }
 
-                // 检查异常
                 try writer.writeAll("    if (runtime.hasException()) {\n");
                 try writer.writeAll("        @branchHint(.unlikely);\n");
                 try self.generateCleanupCode(writer);
@@ -3432,11 +3473,50 @@ pub const NativeLinker = struct {
                 }
                 try writer.writeAll("    }\n");
             },
-            .static_method_call => |op| {
+            .static_method_call => |op| blk: {
                 const escaped_class = try self.escapeString(op.class_name);
                 defer self.allocator.free(escaped_class);
                 const escaped_method = try self.escapeString(op.method_name);
                 defer self.allocator.free(escaped_method);
+
+                const direct_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ op.class_name, op.method_name });
+                defer self.allocator.free(direct_name);
+
+                if (self.func_return_types.contains(direct_name)) {
+                    const escaped_direct = try self.escapeString(direct_name);
+                    defer self.allocator.free(escaped_direct);
+                    const has_return = self.func_return_types.get(direct_name) orelse false;
+
+                    if (inst.result) |reg| {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                        if (has_return) {
+                            try writer.print("    reg_{d} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, escaped_direct });
+                            try self.writeValueArgsArray(writer, op.args);
+                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                        } else {
+                            try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{ escaped_direct });
+                            try self.writeValueArgsArray(writer, op.args);
+                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                            try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                        }
+                    } else {
+                        try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{ escaped_direct });
+                        try self.writeValueArgsArray(writer, op.args);
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
+
+                    try writer.writeAll("    if (runtime.hasException()) {\n");
+                    try writer.writeAll("        @branchHint(.unlikely);\n");
+                    try self.generateCleanupCode(writer);
+                    if (self.current_exception_handler) |handler_idx| {
+                        try writer.print("        current_block = {d};\n", .{handler_idx});
+                        try writer.print("        continue;\n", .{});
+                    } else {
+                        try writer.writeAll("        return error.RuntimeError;\n");
+                    }
+                    try writer.writeAll("    }\n");
+                    break :blk;
+                }
 
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });

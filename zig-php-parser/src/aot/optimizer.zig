@@ -63,6 +63,7 @@ pub const PassConfig = struct {
     dead_code_elimination: bool = true,
     /// Enable constant propagation
     constant_propagation: bool = true,
+    sccp: bool = false,
     /// Enable box/unbox elimination
     box_unbox_elim: bool = true,
     /// Enable function inlining
@@ -83,6 +84,7 @@ pub const PassConfig = struct {
     loop_unroll: bool = false,
     /// Enable CFG cleanup (block merge, trivial branch simplification, phi cleanup)
     cfg_cleanup: bool = true,
+    rc_elision: bool = true,
     /// Loop unroll factor (number of copies)
     unroll_factor: u32 = 4,
     /// Maximum optimization iterations
@@ -93,6 +95,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = false,
             .constant_propagation = false,
+            .sccp = false,
             .box_unbox_elim = false,
             .function_inlining = false,
             .inline_threshold = 0,
@@ -103,6 +106,7 @@ pub const PassConfig = struct {
             .mem2reg = false,
             .loop_unroll = true,
             .cfg_cleanup = false,
+            .rc_elision = false,
             .max_iterations = 1,
         };
     }
@@ -112,6 +116,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = true,
             .constant_propagation = true,
+            .sccp = true,
             .box_unbox_elim = true,
             .function_inlining = false,
             .inline_threshold = 10,
@@ -122,6 +127,7 @@ pub const PassConfig = struct {
             .mem2reg = true,
             .loop_unroll = true,
             .cfg_cleanup = true,
+            .rc_elision = true,
             .max_iterations = 2,
         };
     }
@@ -131,6 +137,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = true,
             .constant_propagation = true,
+            .sccp = true,
             .box_unbox_elim = true,
             .function_inlining = true,
             .inline_threshold = 50,
@@ -141,6 +148,7 @@ pub const PassConfig = struct {
             .mem2reg = true,
             .loop_unroll = true,
             .cfg_cleanup = true,
+            .rc_elision = true,
             .max_iterations = 5,
         };
     }
@@ -150,6 +158,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = true,
             .constant_propagation = true,
+            .sccp = true,
             .box_unbox_elim = true,
             .function_inlining = false, // Inlining increases size
             .inline_threshold = 5,
@@ -160,6 +169,7 @@ pub const PassConfig = struct {
             .mem2reg = true,
             .loop_unroll = false, // Unrolling increases size
             .cfg_cleanup = true,
+            .rc_elision = true,
             .max_iterations = 2,
         };
     }
@@ -189,6 +199,10 @@ pub const OptimizationStats = struct {
     loops_unrolled: u32 = 0,
     /// Number of optimization passes run
     passes_run: u32 = 0,
+    rc_instructions_removed: u32 = 0,
+    rc_pairs_elided: u32 = 0,
+    sccp_constants_folded: u32 = 0,
+    sccp_branches_simplified: u32 = 0,
 
     /// Reset all statistics
     pub fn reset(self: *OptimizationStats) void {
@@ -205,6 +219,10 @@ pub const OptimizationStats = struct {
         try writer.print("  Type specializations: {d}\n", .{self.type_specializations});
         try writer.print("  CSE eliminations: {d}\n", .{self.cse_eliminations});
         try writer.print("  Loops unrolled: {d}\n", .{self.loops_unrolled});
+        try writer.print("  RC instructions removed: {d}\n", .{self.rc_instructions_removed});
+        try writer.print("  RC pairs elided: {d}\n", .{self.rc_pairs_elided});
+        try writer.print("  SCCP constants folded: {d}\n", .{self.sccp_constants_folded});
+        try writer.print("  SCCP branches simplified: {d}\n", .{self.sccp_branches_simplified});
         try writer.print("  Passes run: {d}\n", .{self.passes_run});
     }
 };
@@ -337,8 +355,22 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyModule(module);
             }
 
+            if (self.config.sccp) {
+                if (try self.runSCCP(module)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyModule(module);
+            }
+
             if (self.config.box_unbox_elim) {
                 if (try self.runBoxUnboxElimination(module)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyModule(module);
+            }
+
+            if (self.config.rc_elision) {
+                if (try self.runRCEllision(module)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
@@ -432,8 +464,22 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyFunction(func);
             }
 
+            if (self.config.sccp) {
+                if (try self.runSCCPInFunction(func)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyFunction(func);
+            }
+
             if (self.config.box_unbox_elim) {
                 if (try self.eliminateBoxUnboxInFunction(func)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyFunction(func);
+            }
+
+            if (self.config.rc_elision) {
+                if (try self.eliminateRCEllisionInFunction(func)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyFunction(func);
@@ -1625,6 +1671,77 @@ pub const IROptimizer = struct {
         return changed;
     }
 
+    fn runRCEllision(self: *Self, module: *Module) !bool {
+        var changed = false;
+        for (module.functions.items) |func| {
+            if (try self.eliminateRCEllisionInFunction(func)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    fn eliminateRCEllisionInFunction(self: *Self, func: *Function) !bool {
+        var changed = false;
+
+        for (func.blocks.items) |block| {
+            var i: usize = 0;
+            while (i < block.instructions.items.len) {
+                const inst = block.instructions.items[i];
+                switch (inst.op) {
+                    .retain => |op| {
+                        const operand_tag = @as(std.meta.Tag(Type), op.operand.type_);
+                        if (operand_tag != .php_value and operand_tag != .php_string and operand_tag != .php_array and operand_tag != .php_object and operand_tag != .php_resource and operand_tag != .php_callable) {
+                            _ = block.instructions.orderedRemove(i);
+                            inst.deinit(self.allocator);
+                            self.allocator.destroy(inst);
+                            self.stats.dead_instructions_removed += 1;
+                            self.stats.rc_instructions_removed += 1;
+                            changed = true;
+                            continue;
+                        }
+
+                        if (i + 1 < block.instructions.items.len) {
+                            const next_inst = block.instructions.items[i + 1];
+                            if (next_inst.op == .release and next_inst.op.release.operand.id == op.operand.id) {
+                                _ = block.instructions.orderedRemove(i + 1);
+                                next_inst.deinit(self.allocator);
+                                self.allocator.destroy(next_inst);
+
+                                _ = block.instructions.orderedRemove(i);
+                                inst.deinit(self.allocator);
+                                self.allocator.destroy(inst);
+
+                                self.stats.dead_instructions_removed += 2;
+                                self.stats.rc_instructions_removed += 2;
+                                self.stats.rc_pairs_elided += 1;
+                                changed = true;
+                                continue;
+                            }
+                        }
+                    },
+                    .release => |op| {
+                        const operand_tag = @as(std.meta.Tag(Type), op.operand.type_);
+                        if (operand_tag != .php_value and operand_tag != .php_string and operand_tag != .php_array and operand_tag != .php_object and operand_tag != .php_resource and operand_tag != .php_callable) {
+                            _ = block.instructions.orderedRemove(i);
+                            inst.deinit(self.allocator);
+                            self.allocator.destroy(inst);
+                            self.stats.dead_instructions_removed += 1;
+                            self.stats.rc_instructions_removed += 1;
+                            changed = true;
+                            continue;
+                        }
+                    },
+                    else => {},
+                }
+
+                i += 1;
+            }
+        }
+
+        return changed;
+    }
+
     /// Mark all registers that are used
     fn markUsedRegisters(self: *Self, func: *const Function) !void {
         for (func.blocks.items) |block| {
@@ -1910,6 +2027,34 @@ pub const IROptimizer = struct {
             try self.markReachableBlocks(entry, &reachable);
         }
 
+        for (func.blocks.items) |block| {
+            if (!reachable.contains(block)) continue;
+            for (block.instructions.items) |inst| {
+                if (inst.op != .phi) continue;
+                const old_incoming = inst.op.phi.incoming;
+                if (old_incoming.len == 0) continue;
+
+                var keep_count: usize = 0;
+                for (old_incoming) |inc| {
+                    if (reachable.contains(inc.block)) keep_count += 1;
+                }
+                if (keep_count == old_incoming.len) continue;
+
+                const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, keep_count);
+                var j: usize = 0;
+                for (old_incoming) |inc| {
+                    if (reachable.contains(inc.block)) {
+                        new_incoming[j] = inc;
+                        j += 1;
+                    }
+                }
+
+                self.allocator.free(@constCast(old_incoming));
+                inst.op.phi.incoming = new_incoming;
+                changed = true;
+            }
+        }
+
         // Remove unreachable blocks
         var i: usize = 0;
         while (i < func.blocks.items.len) {
@@ -1957,6 +2102,401 @@ pub const IROptimizer = struct {
                 .ret, .unreachable_, .throw => {},
             }
         }
+    }
+
+    const SCCPLattice = union(enum) {
+        unknown,
+        overdefined,
+        constant: ConstantValue,
+    };
+
+    fn meetSCCP(a: SCCPLattice, b: SCCPLattice) SCCPLattice {
+        switch (a) {
+            .overdefined => return .overdefined,
+            .unknown => return b,
+            .constant => |c1| switch (b) {
+                .unknown => return a,
+                .overdefined => return .overdefined,
+                .constant => |c2| {
+                    if (std.meta.eql(c1, c2)) return a;
+                    return .overdefined;
+                },
+            },
+        }
+    }
+
+    fn runSCCP(self: *Self, module: *Module) !bool {
+        var changed = false;
+        for (module.functions.items) |func| {
+            if (try self.runSCCPInFunction(func)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    fn runSCCPInFunction(self: *Self, func: *Function) !bool {
+        if (func.blocks.items.len == 0) return false;
+        try Analysis.rebuildCFG(func);
+
+        const reg_count: usize = @intCast(func.getNextRegisterId());
+        var lattice = try self.allocator.alloc(SCCPLattice, reg_count);
+        defer self.allocator.free(lattice);
+        for (lattice) |*x| x.* = .unknown;
+
+        var block_ids = std.AutoHashMap(*BasicBlock, usize).init(self.allocator);
+        defer block_ids.deinit();
+        for (func.blocks.items, 0..) |b, idx| {
+            try block_ids.put(b, idx);
+        }
+
+        var executable = try self.allocator.alloc(bool, func.blocks.items.len);
+        defer self.allocator.free(executable);
+        @memset(executable, false);
+        executable[0] = true;
+
+        var changed_analysis = true;
+        while (changed_analysis) {
+            changed_analysis = false;
+
+            for (func.blocks.items, 0..) |block, bid| {
+                if (!executable[bid]) continue;
+
+                for (block.instructions.items) |inst| {
+                    const res = inst.result orelse continue;
+                    if (@as(usize, res.id) >= lattice.len) continue;
+
+                    const new_val = self.evalSCCPInstruction(inst, lattice, &block_ids, executable) orelse continue;
+                    const merged = meetSCCP(lattice[res.id], new_val);
+                    if (!std.meta.eql(merged, lattice[res.id])) {
+                        lattice[res.id] = merged;
+                        changed_analysis = true;
+                    }
+                }
+
+                if (block.terminator) |term| {
+                    switch (term) {
+                        .br => |target| {
+                            if (block_ids.get(target)) |tid| {
+                                if (!executable[tid]) {
+                                    executable[tid] = true;
+                                    changed_analysis = true;
+                                }
+                            }
+                        },
+                        .cond_br => |cb| {
+                            const cond_lat = if (@as(usize, cb.cond.id) < lattice.len) lattice[cb.cond.id] else .overdefined;
+                            if (cond_lat == .constant and cond_lat.constant == .bool_val) {
+                                const target = if (cond_lat.constant.bool_val) cb.then_block else cb.else_block;
+                                if (block_ids.get(target)) |tid| {
+                                    if (!executable[tid]) {
+                                        executable[tid] = true;
+                                        changed_analysis = true;
+                                    }
+                                }
+                            } else {
+                                if (block_ids.get(cb.then_block)) |tid| {
+                                    if (!executable[tid]) {
+                                        executable[tid] = true;
+                                        changed_analysis = true;
+                                    }
+                                }
+                                if (block_ids.get(cb.else_block)) |tid| {
+                                    if (!executable[tid]) {
+                                        executable[tid] = true;
+                                        changed_analysis = true;
+                                    }
+                                }
+                            }
+                        },
+                        .switch_ => |sw| {
+                            const val_lat = if (@as(usize, sw.value.id) < lattice.len) lattice[sw.value.id] else .overdefined;
+                            if (val_lat == .constant and (val_lat.constant == .int or val_lat.constant == .bool_val)) {
+                                const v: i64 = if (val_lat.constant == .int) val_lat.constant.int else @intFromBool(val_lat.constant.bool_val);
+                                var found: ?*BasicBlock = null;
+                                for (sw.cases) |case| {
+                                    if (case.value == v) {
+                                        found = case.block;
+                                        break;
+                                    }
+                                }
+                                const target = found orelse sw.default;
+                                if (block_ids.get(target)) |tid| {
+                                    if (!executable[tid]) {
+                                        executable[tid] = true;
+                                        changed_analysis = true;
+                                    }
+                                }
+                            } else {
+                                for (sw.cases) |case| {
+                                    if (block_ids.get(case.block)) |tid| {
+                                        if (!executable[tid]) {
+                                            executable[tid] = true;
+                                            changed_analysis = true;
+                                        }
+                                    }
+                                }
+                                if (block_ids.get(sw.default)) |tid| {
+                                    if (!executable[tid]) {
+                                        executable[tid] = true;
+                                        changed_analysis = true;
+                                    }
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        var changed = false;
+
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                const res = inst.result orelse continue;
+                if (@as(usize, res.id) >= lattice.len) continue;
+                if (lattice[res.id] != .constant) continue;
+
+                switch (lattice[res.id].constant) {
+                    .int => |v| {
+                        if (inst.op != .const_int or inst.op.const_int != v) {
+                            inst.op = .{ .const_int = v };
+                            self.stats.sccp_constants_folded += 1;
+                            changed = true;
+                        }
+                    },
+                    .float => |v| {
+                        if (inst.op != .const_float or inst.op.const_float != v) {
+                            inst.op = .{ .const_float = v };
+                            self.stats.sccp_constants_folded += 1;
+                            changed = true;
+                        }
+                    },
+                    .bool_val => |v| {
+                        if (inst.op != .const_bool or inst.op.const_bool != v) {
+                            inst.op = .{ .const_bool = v };
+                            self.stats.sccp_constants_folded += 1;
+                            changed = true;
+                        }
+                    },
+                    .null_val => {
+                        if (inst.op != .const_null) {
+                            inst.op = .{ .const_null = {} };
+                            self.stats.sccp_constants_folded += 1;
+                            changed = true;
+                        }
+                    },
+                    .missing_val => {
+                        if (inst.op != .const_missing) {
+                            inst.op = .{ .const_missing = {} };
+                            self.stats.sccp_constants_folded += 1;
+                            changed = true;
+                        }
+                    },
+                    .string_id => |id| {
+                        if (inst.op != .const_string or inst.op.const_string != id) {
+                            inst.op = .{ .const_string = id };
+                            self.stats.sccp_constants_folded += 1;
+                            changed = true;
+                        }
+                    },
+                }
+            }
+        }
+
+        for (func.blocks.items) |block| {
+            if (block.terminator) |*term| {
+                switch (term.*) {
+                    .cond_br => |cb| {
+                        if (@as(usize, cb.cond.id) < lattice.len and lattice[cb.cond.id] == .constant and lattice[cb.cond.id].constant == .bool_val) {
+                            term.* = .{ .br = if (lattice[cb.cond.id].constant.bool_val) cb.then_block else cb.else_block };
+                            self.stats.sccp_branches_simplified += 1;
+                            changed = true;
+                        }
+                    },
+                    .switch_ => |sw| {
+                        if (@as(usize, sw.value.id) < lattice.len and lattice[sw.value.id] == .constant and (lattice[sw.value.id].constant == .int or lattice[sw.value.id].constant == .bool_val)) {
+                            const v: i64 = if (lattice[sw.value.id].constant == .int) lattice[sw.value.id].constant.int else @intFromBool(lattice[sw.value.id].constant.bool_val);
+                            var found: ?*BasicBlock = null;
+                            for (sw.cases) |case| {
+                                if (case.value == v) {
+                                    found = case.block;
+                                    break;
+                                }
+                            }
+                            term.* = .{ .br = found orelse sw.default };
+                            self.stats.sccp_branches_simplified += 1;
+                            changed = true;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        if (changed) {
+            if (try self.removeUnreachableBlocks(func)) {
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    fn evalSCCPInstruction(
+        self: *Self,
+        inst: *const Instruction,
+        lattice: []const SCCPLattice,
+        block_ids: *const std.AutoHashMap(*BasicBlock, usize),
+        executable: []const bool,
+    ) ?SCCPLattice {
+        _ = self;
+
+        const get = struct {
+            fn reg(l: []const SCCPLattice, r: Register) SCCPLattice {
+                if (@as(usize, r.id) >= l.len) return .overdefined;
+                return l[r.id];
+            }
+        }.reg;
+
+        return switch (inst.op) {
+            .const_int => |v| .{ .constant = .{ .int = v } },
+            .const_float => |v| .{ .constant = .{ .float = v } },
+            .const_bool => |v| .{ .constant = .{ .bool_val = v } },
+            .const_null => .{ .constant = .{ .null_val = {} } },
+            .const_missing => .{ .constant = .{ .missing_val = {} } },
+            .const_string => |id| .{ .constant = .{ .string_id = id } },
+            .phi => |phi| blk: {
+                var acc: SCCPLattice = .unknown;
+                for (phi.incoming) |inc| {
+                    if (block_ids.get(inc.block)) |bid| {
+                        if (!executable[bid]) continue;
+                    } else continue;
+
+                    const v = get(lattice, inc.value);
+                    acc = meetSCCP(acc, v);
+                    if (acc == .overdefined) break;
+                }
+                break :blk acc;
+            },
+            .select => |sel| blk: {
+                const c = get(lattice, sel.cond);
+                if (c == .constant and c.constant == .bool_val) {
+                    break :blk get(lattice, if (c.constant.bool_val) sel.then_value else sel.else_value);
+                }
+                const t = get(lattice, sel.then_value);
+                const e = get(lattice, sel.else_value);
+                if (t == .constant and e == .constant and std.meta.eql(t.constant, e.constant)) break :blk t;
+                if (t == .unknown and e == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .add => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .int = a.constant.int + b.constant.int } };
+                }
+                if (a == .constant and b == .constant and a.constant == .float and b.constant == .float) {
+                    break :blk .{ .constant = .{ .float = a.constant.float + b.constant.float } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .sub => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .int = a.constant.int - b.constant.int } };
+                }
+                if (a == .constant and b == .constant and a.constant == .float and b.constant == .float) {
+                    break :blk .{ .constant = .{ .float = a.constant.float - b.constant.float } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .mul => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .int = a.constant.int * b.constant.int } };
+                }
+                if (a == .constant and b == .constant and a.constant == .float and b.constant == .float) {
+                    break :blk .{ .constant = .{ .float = a.constant.float * b.constant.float } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .eq => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.int == b.constant.int } };
+                }
+                if (a == .constant and b == .constant and a.constant == .bool_val and b.constant == .bool_val) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.bool_val == b.constant.bool_val } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .ne => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.int != b.constant.int } };
+                }
+                if (a == .constant and b == .constant and a.constant == .bool_val and b.constant == .bool_val) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.bool_val != b.constant.bool_val } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .lt => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.int < b.constant.int } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .le => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.int <= b.constant.int } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .gt => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.int > b.constant.int } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .ge => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
+                    break :blk .{ .constant = .{ .bool_val = a.constant.int >= b.constant.int } };
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .not => |op| blk: {
+                const v = get(lattice, op.operand);
+                if (v == .constant and v.constant == .bool_val) {
+                    break :blk .{ .constant = .{ .bool_val = !v.constant.bool_val } };
+                }
+                if (v == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            else => null,
+        };
     }
 
     // ========================================================================
@@ -3522,11 +4062,6 @@ pub const IROptimizer = struct {
             .get_type => |op| {
                 hasher.update("get_type");
                 hasher.update(std.mem.asBytes(&op.operand.id));
-            },
-            // Load operations (pure if pointer is the same)
-            .load => |op| {
-                hasher.update("load");
-                hasher.update(std.mem.asBytes(&op.ptr.id));
             },
             // Box/unbox operations
             .box => |op| {

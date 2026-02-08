@@ -249,6 +249,7 @@ test "IROptimizer.cse - dominance check" {
     // Enable CSE, disable Constant Propagation to test CSE logic specifically
     optimizer.config = Optimizer.PassConfig.releaseSafe();
     optimizer.config.constant_propagation = false;
+    optimizer.config.sccp = false;
     optimizer.config.cse = true;
     
     _ = try optimizer.optimize(&module);
