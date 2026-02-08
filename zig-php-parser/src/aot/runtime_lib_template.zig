@@ -78,6 +78,126 @@ const StaticStringEntry = struct {
 
 var static_string_pool: ?std.StringHashMap(*StaticStringEntry) = null;
 var static_string_entries: std.ArrayListUnmanaged(*StaticStringEntry) = .{};
+var php_string_pool: ?std.heap.MemoryPool(PHPString) = null;
+var php_array_pool: ?std.heap.MemoryPool(PHPArray) = null;
+var php_closure_pool: ?std.heap.MemoryPool(PHPClosure) = null;
+const AllocCounters = struct {
+    total_alloc_bytes: u64 = 0,
+    total_free_bytes: u64 = 0,
+    alloc_calls: u64 = 0,
+    free_calls: u64 = 0,
+
+    live_bytes: u64 = 0,
+    peak_live_bytes: u64 = 0,
+    live_allocs: u64 = 0,
+    peak_live_allocs: u64 = 0,
+
+    php_string_objects: u64 = 0,
+    php_string_bytes: u64 = 0,
+    php_array_objects: u64 = 0,
+
+    php_string_live_objects: u64 = 0,
+    php_string_peak_live_objects: u64 = 0,
+    php_string_live_bytes: u64 = 0,
+    php_string_peak_live_bytes: u64 = 0,
+
+    php_array_live_objects: u64 = 0,
+    php_array_peak_live_objects: u64 = 0,
+
+    php_object_objects: u64 = 0,
+    php_object_live_objects: u64 = 0,
+    php_object_peak_live_objects: u64 = 0,
+
+    php_closure_objects: u64 = 0,
+    php_closure_live_objects: u64 = 0,
+    php_closure_peak_live_objects: u64 = 0,
+};
+
+pub const AllocStats = struct {
+    alloc_bytes: u64 = 0,
+    alloc_count: u64 = 0,
+    free_bytes: u64 = 0,
+    free_count: u64 = 0,
+
+    live_bytes: u64 = 0,
+    peak_live_bytes: u64 = 0,
+    live_allocs: u64 = 0,
+    peak_live_allocs: u64 = 0,
+
+    php_string_objects: u64 = 0,
+    php_string_bytes: u64 = 0,
+    php_array_objects: u64 = 0,
+    php_object_objects: u64 = 0,
+
+    php_string_live_objects: u64 = 0,
+    php_string_peak_live_objects: u64 = 0,
+    php_string_live_bytes: u64 = 0,
+    php_string_peak_live_bytes: u64 = 0,
+
+    php_array_live_objects: u64 = 0,
+    php_array_peak_live_objects: u64 = 0,
+
+    php_object_live_objects: u64 = 0,
+    php_object_peak_live_objects: u64 = 0,
+
+    php_closure_objects: u64 = 0,
+    php_closure_live_objects: u64 = 0,
+    php_closure_peak_live_objects: u64 = 0,
+};
+
+var alloc_counters: AllocCounters = .{};
+var alloc_baseline: AllocCounters = .{};
+
+const StatsAllocator = struct {
+    child: Allocator,
+
+    pub fn init(child: Allocator) StatsAllocator {
+        return .{ .child = child };
+    }
+
+    pub fn allocator(self: *StatsAllocator) Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &vtable,
+        };
+    }
+
+    const vtable = Allocator.VTable{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *StatsAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.child.vtable.alloc(self.child.ptr, len, alignment, ra);
+        if (ptr != null) recordAlloc(len);
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *StatsAllocator = @ptrCast(@alignCast(ctx));
+        const ok = self.child.vtable.resize(self.child.ptr, buf, alignment, new_len, ra);
+        if (ok) recordResize(buf.len, new_len);
+        return ok;
+    }
+
+    fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *StatsAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.child.vtable.remap(self.child.ptr, buf, alignment, new_len, ra);
+        if (ptr != null) recordResize(buf.len, new_len);
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *StatsAllocator = @ptrCast(@alignCast(ctx));
+        self.child.vtable.free(self.child.ptr, buf, alignment, ra);
+        recordFree(buf.len);
+    }
+};
+
+var stats_allocator: StatsAllocator = undefined;
 const GCColor = enum(u2) { white = 0, gray = 1, black = 2, purple = 3 };
 const GCInfo = packed struct { color: GCColor = .white, buffered: bool = false };
 const CycleRoot = union(enum) { array: *PHPArray, object: *PHPObject, closure: *PHPClosure };
@@ -91,22 +211,176 @@ const GC_ROOT_THRESHOLD: usize = 256;
 threadlocal var current_exception: Value = undefined;
 threadlocal var has_exception: bool = false;
 
+fn allocPHPString(allocator: Allocator) !*PHPString {
+    if (php_string_pool) |*p| return p.create();
+    return try allocator.create(PHPString);
+}
+
+fn destroyPHPString(str: *PHPString, allocator: Allocator) void {
+    if (php_string_pool) |*p| {
+        p.destroy(str);
+        return;
+    }
+    allocator.destroy(str);
+}
+
+fn allocPHPArray(allocator: Allocator) !*PHPArray {
+    if (php_array_pool) |*p| return p.create();
+    return try allocator.create(PHPArray);
+}
+
+fn destroyPHPArray(arr: *PHPArray, allocator: Allocator) void {
+    if (php_array_pool) |*p| {
+        p.destroy(arr);
+        return;
+    }
+    allocator.destroy(arr);
+}
+
+fn allocPHPClosure(allocator: Allocator) !*PHPClosure {
+    if (php_closure_pool) |*p| return p.create();
+    return try allocator.create(PHPClosure);
+}
+
+fn destroyPHPClosure(c: *PHPClosure, allocator: Allocator) void {
+    if (php_closure_pool) |*p| {
+        p.destroy(c);
+        return;
+    }
+    allocator.destroy(c);
+}
+
+fn recordAlloc(len: usize) void {
+    alloc_counters.alloc_calls += 1;
+    alloc_counters.total_alloc_bytes += len;
+    alloc_counters.live_allocs += 1;
+    alloc_counters.live_bytes += len;
+    alloc_counters.peak_live_allocs = @max(alloc_counters.peak_live_allocs, alloc_counters.live_allocs);
+    alloc_counters.peak_live_bytes = @max(alloc_counters.peak_live_bytes, alloc_counters.live_bytes);
+}
+
+fn recordFree(len: usize) void {
+    alloc_counters.free_calls += 1;
+    alloc_counters.total_free_bytes += len;
+    if (alloc_counters.live_allocs > 0) alloc_counters.live_allocs -= 1;
+    if (alloc_counters.live_bytes >= len) {
+        alloc_counters.live_bytes -= len;
+    } else {
+        alloc_counters.live_bytes = 0;
+    }
+}
+
+fn recordResize(old_len: usize, new_len: usize) void {
+    if (new_len == old_len) return;
+    if (new_len > old_len) {
+        const diff = new_len - old_len;
+        alloc_counters.total_alloc_bytes += diff;
+        alloc_counters.live_bytes += diff;
+        alloc_counters.peak_live_bytes = @max(alloc_counters.peak_live_bytes, alloc_counters.live_bytes);
+    } else {
+        const diff = old_len - new_len;
+        alloc_counters.total_free_bytes += diff;
+        if (alloc_counters.live_bytes >= diff) {
+            alloc_counters.live_bytes -= diff;
+        } else {
+            alloc_counters.live_bytes = 0;
+        }
+    }
+}
+
+fn deltaU64(current: u64, base: u64) u64 {
+    return if (current >= base) current - base else 0;
+}
+
 /// 初始化运行时
 pub fn initRuntime(allocator: Allocator) void {
-    runtime_allocator = allocator;
-    initClassRegistry(allocator);
-    registerZigChannel(allocator) catch {};
-    registerZigSelect(allocator) catch {};
-    user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(allocator);
-    constants = std.StringHashMap(Value).init(allocator);
-    array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(allocator);
-    static_string_pool = std.StringHashMap(*StaticStringEntry).init(allocator);
+    alloc_counters = .{};
+    alloc_baseline = .{};
+    stats_allocator = StatsAllocator.init(allocator);
+    runtime_allocator = stats_allocator.allocator();
+
+    initClassRegistry(runtime_allocator);
+    registerZigChannel(runtime_allocator) catch {};
+    registerZigSelect(runtime_allocator) catch {};
+    user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
+    constants = std.StringHashMap(Value).init(runtime_allocator);
+    array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(runtime_allocator);
+    static_string_pool = std.StringHashMap(*StaticStringEntry).init(runtime_allocator);
     static_string_entries = .{};
     cycle_roots = .{};
     gc_in_progress = false;
     gc_release_events = 0;
     current_exception = Value.initNull();
     has_exception = false;
+    php_string_pool = std.heap.MemoryPool(PHPString).init(runtime_allocator);
+    php_array_pool = std.heap.MemoryPool(PHPArray).init(runtime_allocator);
+    php_closure_pool = std.heap.MemoryPool(PHPClosure).init(runtime_allocator);
+    resetAllocStats();
+}
+
+pub fn resetAllocStats() void {
+    alloc_baseline.total_alloc_bytes = alloc_counters.total_alloc_bytes;
+    alloc_baseline.total_free_bytes = alloc_counters.total_free_bytes;
+    alloc_baseline.alloc_calls = alloc_counters.alloc_calls;
+    alloc_baseline.free_calls = alloc_counters.free_calls;
+    alloc_baseline.live_bytes = alloc_counters.live_bytes;
+    alloc_baseline.live_allocs = alloc_counters.live_allocs;
+
+    alloc_baseline.php_string_objects = alloc_counters.php_string_objects;
+    alloc_baseline.php_string_bytes = alloc_counters.php_string_bytes;
+    alloc_baseline.php_array_objects = alloc_counters.php_array_objects;
+
+    alloc_baseline.php_string_live_objects = alloc_counters.php_string_live_objects;
+    alloc_baseline.php_string_live_bytes = alloc_counters.php_string_live_bytes;
+    alloc_baseline.php_array_live_objects = alloc_counters.php_array_live_objects;
+
+    alloc_baseline.php_object_objects = alloc_counters.php_object_objects;
+    alloc_baseline.php_object_live_objects = alloc_counters.php_object_live_objects;
+
+    alloc_baseline.php_closure_objects = alloc_counters.php_closure_objects;
+    alloc_baseline.php_closure_live_objects = alloc_counters.php_closure_live_objects;
+
+    alloc_counters.peak_live_bytes = alloc_counters.live_bytes;
+    alloc_counters.peak_live_allocs = alloc_counters.live_allocs;
+    alloc_counters.php_string_peak_live_objects = alloc_counters.php_string_live_objects;
+    alloc_counters.php_string_peak_live_bytes = alloc_counters.php_string_live_bytes;
+    alloc_counters.php_array_peak_live_objects = alloc_counters.php_array_live_objects;
+    alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
+    alloc_counters.php_closure_peak_live_objects = alloc_counters.php_closure_live_objects;
+}
+
+pub fn getAllocStats() AllocStats {
+    return .{
+        .alloc_bytes = deltaU64(alloc_counters.total_alloc_bytes, alloc_baseline.total_alloc_bytes),
+        .alloc_count = deltaU64(alloc_counters.alloc_calls, alloc_baseline.alloc_calls),
+        .free_bytes = deltaU64(alloc_counters.total_free_bytes, alloc_baseline.total_free_bytes),
+        .free_count = deltaU64(alloc_counters.free_calls, alloc_baseline.free_calls),
+
+        .live_bytes = deltaU64(alloc_counters.live_bytes, alloc_baseline.live_bytes),
+        .peak_live_bytes = deltaU64(alloc_counters.peak_live_bytes, alloc_baseline.live_bytes),
+        .live_allocs = deltaU64(alloc_counters.live_allocs, alloc_baseline.live_allocs),
+        .peak_live_allocs = deltaU64(alloc_counters.peak_live_allocs, alloc_baseline.live_allocs),
+
+        .php_string_objects = deltaU64(alloc_counters.php_string_objects, alloc_baseline.php_string_objects),
+        .php_string_bytes = deltaU64(alloc_counters.php_string_bytes, alloc_baseline.php_string_bytes),
+        .php_array_objects = deltaU64(alloc_counters.php_array_objects, alloc_baseline.php_array_objects),
+        .php_object_objects = deltaU64(alloc_counters.php_object_objects, alloc_baseline.php_object_objects),
+
+        .php_string_live_objects = deltaU64(alloc_counters.php_string_live_objects, alloc_baseline.php_string_live_objects),
+        .php_string_peak_live_objects = deltaU64(alloc_counters.php_string_peak_live_objects, alloc_baseline.php_string_live_objects),
+        .php_string_live_bytes = deltaU64(alloc_counters.php_string_live_bytes, alloc_baseline.php_string_live_bytes),
+        .php_string_peak_live_bytes = deltaU64(alloc_counters.php_string_peak_live_bytes, alloc_baseline.php_string_live_bytes),
+
+        .php_array_live_objects = deltaU64(alloc_counters.php_array_live_objects, alloc_baseline.php_array_live_objects),
+        .php_array_peak_live_objects = deltaU64(alloc_counters.php_array_peak_live_objects, alloc_baseline.php_array_live_objects),
+
+        .php_object_live_objects = deltaU64(alloc_counters.php_object_live_objects, alloc_baseline.php_object_live_objects),
+        .php_object_peak_live_objects = deltaU64(alloc_counters.php_object_peak_live_objects, alloc_baseline.php_object_live_objects),
+
+        .php_closure_objects = deltaU64(alloc_counters.php_closure_objects, alloc_baseline.php_closure_objects),
+        .php_closure_live_objects = deltaU64(alloc_counters.php_closure_live_objects, alloc_baseline.php_closure_live_objects),
+        .php_closure_peak_live_objects = deltaU64(alloc_counters.php_closure_peak_live_objects, alloc_baseline.php_closure_live_objects),
+    };
 }
 
 /// 设置异常
@@ -114,7 +388,7 @@ pub fn setException(ex: Value) void {
     if (has_exception) {
         current_exception.release(runtime_allocator);
     }
-    ex.retain();
+    _ = ex.retain();
     current_exception = ex;
     has_exception = true;
 }
@@ -166,6 +440,18 @@ pub fn deinitRuntime() void {
     if (array_internal_pointers) |*m| {
         m.deinit();
         array_internal_pointers = null;
+    }
+    if (php_string_pool) |*p| {
+        p.deinit();
+        php_string_pool = null;
+    }
+    if (php_array_pool) |*p| {
+        p.deinit();
+        php_array_pool = null;
+    }
+    if (php_closure_pool) |*p| {
+        p.deinit();
+        php_closure_pool = null;
     }
 }
 
@@ -484,7 +770,7 @@ fn gcDestroyArray(a: *PHPArray) void {
         }
     }
     a.elements.deinit();
-    runtime_allocator.destroy(a);
+    destroyPHPArray(a, runtime_allocator);
 }
 
 fn gcDestroyObject(o: *PHPObject) void {
@@ -528,8 +814,8 @@ pub const PHPString = struct {
             return error.StringTooLarge;
         }
 
-        const php_string = try allocator.create(PHPString);
-        errdefer allocator.destroy(php_string);
+        const php_string = try allocPHPString(allocator);
+        errdefer destroyPHPString(php_string, allocator);
 
         // 安全的内存分配和复制
         const new_data = try allocator.alloc(u8, str.len);
@@ -538,6 +824,19 @@ pub const PHPString = struct {
         if (str.len > 0) {
             @memcpy(new_data, str);
         }
+
+        alloc_counters.php_string_objects += 1;
+        alloc_counters.php_string_bytes += str.len;
+        alloc_counters.php_string_live_objects += 1;
+        alloc_counters.php_string_live_bytes += str.len;
+        alloc_counters.php_string_peak_live_objects = @max(
+            alloc_counters.php_string_peak_live_objects,
+            alloc_counters.php_string_live_objects,
+        );
+        alloc_counters.php_string_peak_live_bytes = @max(
+            alloc_counters.php_string_peak_live_bytes,
+            alloc_counters.php_string_live_bytes,
+        );
 
         php_string.data = new_data;
         php_string.length = str.len;
@@ -566,6 +865,19 @@ pub const PHPString = struct {
             runtime_allocator.destroy(entry);
             return &Holder.empty;
         };
+
+        alloc_counters.php_string_objects += 1;
+        alloc_counters.php_string_bytes += str.len;
+        alloc_counters.php_string_live_objects += 1;
+        alloc_counters.php_string_live_bytes += str.len;
+        alloc_counters.php_string_peak_live_objects = @max(
+            alloc_counters.php_string_peak_live_objects,
+            alloc_counters.php_string_live_objects,
+        );
+        alloc_counters.php_string_peak_live_bytes = @max(
+            alloc_counters.php_string_peak_live_bytes,
+            alloc_counters.php_string_live_bytes,
+        );
 
         if (static_string_pool) |*pool| {
             pool.put(entry.php.data, entry) catch {};
@@ -597,8 +909,16 @@ pub const PHPString = struct {
     /// 释放字符串
     fn deinit(self: *PHPString, allocator: Allocator) void {
         if (!self.is_static) {
+            if (alloc_counters.php_string_live_objects > 0) {
+                alloc_counters.php_string_live_objects -= 1;
+            }
+            if (alloc_counters.php_string_live_bytes >= self.length) {
+                alloc_counters.php_string_live_bytes -= self.length;
+            } else {
+                alloc_counters.php_string_live_bytes = 0;
+            }
             allocator.free(self.data);
-            allocator.destroy(self);
+            destroyPHPString(self, allocator);
         }
     }
 
@@ -623,8 +943,21 @@ pub const PHPString = struct {
             @memcpy(new_data[self.length..new_length], other.data[0..other.length]);
         }
 
-        const result = try allocator.create(PHPString);
-        errdefer allocator.destroy(result);
+        const result = try allocPHPString(allocator);
+        errdefer destroyPHPString(result, allocator);
+
+        alloc_counters.php_string_objects += 1;
+        alloc_counters.php_string_bytes += new_length;
+        alloc_counters.php_string_live_objects += 1;
+        alloc_counters.php_string_live_bytes += new_length;
+        alloc_counters.php_string_peak_live_objects = @max(
+            alloc_counters.php_string_peak_live_objects,
+            alloc_counters.php_string_live_objects,
+        );
+        alloc_counters.php_string_peak_live_bytes = @max(
+            alloc_counters.php_string_peak_live_bytes,
+            alloc_counters.php_string_live_bytes,
+        );
 
         result.data = new_data;
         result.length = new_length;
@@ -858,11 +1191,17 @@ pub const PHPArray = struct {
 
     /// 创建新数组
     pub fn init(allocator: Allocator) !*PHPArray {
-        const array = try allocator.create(PHPArray);
+        const array = try allocPHPArray(allocator);
         array.elements = Elements.init(allocator);
         array.next_index = 0;
         array.ref_count = 1;
         array.gc_info = .{};
+        alloc_counters.php_array_objects += 1;
+        alloc_counters.php_array_live_objects += 1;
+        alloc_counters.php_array_peak_live_objects = @max(
+            alloc_counters.php_array_peak_live_objects,
+            alloc_counters.php_array_live_objects,
+        );
         return array;
     }
 
@@ -896,12 +1235,19 @@ pub const PHPArray = struct {
             }
         }
         self.elements.deinit();
-        allocator.destroy(self);
+        if (alloc_counters.php_array_live_objects > 0) {
+            alloc_counters.php_array_live_objects -= 1;
+        }
+        destroyPHPArray(self, allocator);
     }
 
     /// 获取元素
     pub fn get(self: *PHPArray, key: ArrayKey) ?Value {
-        return self.elements.get(key);
+        if (self.elements.get(key)) |v| {
+            _ = v.retain();
+            return v;
+        }
+        return null;
     }
 
     /// 获取元素（通过Value键）
@@ -1293,8 +1639,8 @@ pub const PHPClosure = struct {
         func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value,
         captures: []const Value,
     ) !*PHPClosure {
-        const f = try allocator.create(PHPClosure);
-        errdefer allocator.destroy(f);
+        const f = try allocPHPClosure(allocator);
+        errdefer destroyPHPClosure(f, allocator);
 
         const caps = try allocator.alloc(Value, captures.len);
         errdefer allocator.free(caps);
@@ -1304,6 +1650,13 @@ pub const PHPClosure = struct {
         for (caps) |c| {
             _ = c.retain();
         }
+
+        alloc_counters.php_closure_objects += 1;
+        alloc_counters.php_closure_live_objects += 1;
+        alloc_counters.php_closure_peak_live_objects = @max(
+            alloc_counters.php_closure_peak_live_objects,
+            alloc_counters.php_closure_live_objects,
+        );
 
         f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator };
         return f;
@@ -1321,7 +1674,10 @@ pub const PHPClosure = struct {
                 c.release(allocator);
             }
             allocator.free(self.captures);
-            allocator.destroy(self);
+            if (alloc_counters.php_closure_live_objects > 0) {
+                alloc_counters.php_closure_live_objects -= 1;
+            }
+            destroyPHPClosure(self, allocator);
         } else if (!gc_in_progress) {
             gcBufferClosure(self);
         }
@@ -3982,6 +4338,13 @@ pub const PHPObject = struct {
         obj.gc_info = .{};
         obj.allocator = allocator;
         obj.class_meta = findClass(class_name);
+
+        alloc_counters.php_object_objects += 1;
+        alloc_counters.php_object_live_objects += 1;
+        if (alloc_counters.php_object_live_objects > alloc_counters.php_object_peak_live_objects) {
+            alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
+        }
+
         return obj;
     }
 
@@ -3998,6 +4361,12 @@ pub const PHPObject = struct {
         obj.gc_info = .{};
         obj.allocator = allocator;
         obj.class_meta = meta;
+
+        alloc_counters.php_object_objects += 1;
+        alloc_counters.php_object_live_objects += 1;
+        if (alloc_counters.php_object_live_objects > alloc_counters.php_object_peak_live_objects) {
+            alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
+        }
 
         // 初始化默认属性值
         var prop_iter = meta.properties.iterator();
@@ -4030,6 +4399,10 @@ pub const PHPObject = struct {
 
     /// 释放对象
     fn deinit(self: *PHPObject) void {
+        if (alloc_counters.php_object_live_objects > 0) {
+            alloc_counters.php_object_live_objects -= 1;
+        }
+
         // 调用 __destruct 魔法函数
         if (self.class_meta) |meta| {
             if (meta.findMethodLookup("__destruct")) |lookup| {
@@ -4068,6 +4441,7 @@ pub const PHPObject = struct {
     /// 获取属性（支持 __get 魔法函数）
     pub fn getProperty(self: *PHPObject, name: []const u8) ?Value {
         if (self.properties.get(name)) |val| {
+            _ = val.retain();
             return val;
         }
         // 调用 __get 魔法函数

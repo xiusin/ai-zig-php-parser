@@ -71,6 +71,7 @@ pub const AOTCompiler = CompilerMod.AOTCompiler;
 pub const CompileResult = CompilerMod.CompileResult;
 pub const CompileError = CompilerMod.CompileError;
 pub const CompileOptions = CompilerMod.CompileOptions;
+pub const PassOverrides = CompilerMod.PassOverrides;
 pub const OptimizeLevel = CompilerMod.OptimizeLevel;
 pub const Target = CompilerMod.Target;
 pub const LoweringPolicy = CompilerMod.LoweringPolicy;

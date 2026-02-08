@@ -37,8 +37,28 @@ fn printUsage() void {
         \\  --optimize=<level>     Optimization level: debug, release-safe,
         \\                         release-fast, release-small (default: debug)
         \\  --static               Generate fully static linked executable
+        \\  --no-static            Disable static linking
+        \\  --no-debug-info        Disable debug info (implies strip in non-Debug)
+        \\  --no-link              Skip final link step (emits Zig code)
         \\  --dump-ir              Dump generated IR for debugging
+        \\  --emit-ir[=<file>]     Emit optimized IR to file
         \\  --dump-ast             Dump parsed AST for debugging
+        \\  --dump-zig             Dump generated Zig code
+        \\  --dump-zig-path=<file> Path for dumped Zig code
+        \\  --emit-asm[=<file>]    Emit assembly (.s) from Zig compilation
+        \\  --emit-llvm-ir[=<file>] Emit LLVM IR (.ll) from Zig compilation
+        \\  --emit-llvm-bc[=<file>] Emit LLVM bitcode (.bc) from Zig compilation
+        \\  --mcpu=<cpu>           Pass -mcpu=<cpu> to Zig (e.g. native)
+        \\  --zig-flag=<flag>      Extra flag passed to zig build-exe (repeatable)
+        \\  --timing               Print per-stage AOT compilation timings
+        \\  --timing-json=<file>   Write per-stage AOT timings as JSON
+        \\  --verify-ir            Verify IR after each optimization pass
+        \\  --no-opt-fallback      Disable conservative fallback on opt failure
+        \\  --aot-disable-pass=<p> Disable specific IR pass
+        \\  --aot-enable-pass=<p>  Enable specific IR pass
+        \\  --aot-inline-threshold=<n> Override inlining threshold
+        \\  --aot-unroll-factor=<n>    Override loop unroll factor
+        \\  --aot-max-iterations=<n>   Override max optimization iterations
         \\  --verbose              Verbose output during compilation
         \\  --lowering-policy=<p>  Lowering policy for unsupported IR ops: warn, error (default: error)
         \\  --list-targets         List all supported target platforms
@@ -101,6 +121,54 @@ fn parseExecutionMode(mode_str: []const u8) ?ExecutionMode {
     return null;
 }
 
+fn applyPassToggle(overrides: *aot.PassOverrides, name: []const u8, enabled: bool) !void {
+    if (std.mem.eql(u8, name, "dce") or std.mem.eql(u8, name, "dead-code-elimination")) {
+        overrides.dead_code_elimination = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "constprop") or std.mem.eql(u8, name, "constant-propagation")) {
+        overrides.constant_propagation = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "box-unbox") or std.mem.eql(u8, name, "box-unbox-elim")) {
+        overrides.box_unbox_elim = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "inline") or std.mem.eql(u8, name, "function-inlining")) {
+        overrides.function_inlining = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "typespec") or std.mem.eql(u8, name, "type-specialization")) {
+        overrides.type_specialization = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "cse")) {
+        overrides.cse = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "licm")) {
+        overrides.licm = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "strength") or std.mem.eql(u8, name, "strength-reduction")) {
+        overrides.strength_reduction = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "mem2reg")) {
+        overrides.mem2reg = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "unroll") or std.mem.eql(u8, name, "loop-unroll")) {
+        overrides.loop_unroll = enabled;
+        return;
+    }
+    if (std.mem.eql(u8, name, "cfg-cleanup") or std.mem.eql(u8, name, "cfg")) {
+        overrides.cfg_cleanup = enabled;
+        return;
+    }
+    return error.UnknownPass;
+}
+
 pub fn main() !void {
     // Use GPA with safety=false to avoid internal allocation leak warnings.
     // These warnings from safety=true are false positives from Zig's runtime
@@ -135,6 +203,8 @@ pub fn main() !void {
     var aot_options = aot.CompileOptions{
         .input_file = "",
     };
+    var aot_zig_flags = std.ArrayList([]const u8).init(allocator);
+    defer aot_zig_flags.deinit();
 
     // First pass: parse CLI arguments to find config file and overrides
     var i: usize = 1;
@@ -154,6 +224,8 @@ pub fn main() !void {
             compile_mode = true;
         } else if (std.mem.startsWith(u8, arg, "--output=")) {
             aot_options.output_file = arg[9..];
+        } else if (std.mem.startsWith(u8, arg, "--zig-flag=")) {
+            try aot_zig_flags.append(arg["--zig-flag=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--target=")) {
             const target_str = arg[9..];
             aot_options.target = aot.Target.fromString(target_str) catch {
@@ -172,14 +244,83 @@ pub fn main() !void {
             }
         } else if (std.mem.eql(u8, arg, "--static")) {
             aot_options.static_link = true;
+        } else if (std.mem.eql(u8, arg, "--no-static")) {
+            aot_options.static_link = false;
+        } else if (std.mem.eql(u8, arg, "--no-debug-info")) {
+            aot_options.debug_info = false;
+        } else if (std.mem.eql(u8, arg, "--no-link")) {
+            aot_options.link_executable = false;
+            if (!aot_options.dump_zig and aot_options.dump_zig_path == null) {
+                aot_options.dump_zig = true;
+            }
         } else if (std.mem.eql(u8, arg, "--dump-ir")) {
             aot_options.dump_ir = true;
+        } else if (std.mem.eql(u8, arg, "--emit-ir")) {
+            aot_options.emit_ir_path = "";
+        } else if (std.mem.startsWith(u8, arg, "--emit-ir=")) {
+            aot_options.emit_ir_path = arg["--emit-ir=".len..];
         } else if (std.mem.eql(u8, arg, "--dump-ast")) {
             aot_options.dump_ast = true;
         } else if (std.mem.eql(u8, arg, "--dump-zig")) {
             aot_options.dump_zig = true;
+        } else if (std.mem.startsWith(u8, arg, "--dump-zig-path=")) {
+            aot_options.dump_zig = true;
+            aot_options.dump_zig_path = arg["--dump-zig-path=".len..];
+        } else if (std.mem.eql(u8, arg, "--emit-asm")) {
+            aot_options.emit_asm_path = "";
+        } else if (std.mem.startsWith(u8, arg, "--emit-asm=")) {
+            aot_options.emit_asm_path = arg["--emit-asm=".len..];
+        } else if (std.mem.eql(u8, arg, "--emit-llvm-ir")) {
+            aot_options.emit_llvm_ir_path = "";
+        } else if (std.mem.startsWith(u8, arg, "--emit-llvm-ir=")) {
+            aot_options.emit_llvm_ir_path = arg["--emit-llvm-ir=".len..];
+        } else if (std.mem.eql(u8, arg, "--emit-llvm-bc")) {
+            aot_options.emit_llvm_bc_path = "";
+        } else if (std.mem.startsWith(u8, arg, "--emit-llvm-bc=")) {
+            aot_options.emit_llvm_bc_path = arg["--emit-llvm-bc=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--mcpu=")) {
+            aot_options.mcpu = arg["--mcpu=".len..];
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             aot_options.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--timing")) {
+            aot_options.timing = true;
+        } else if (std.mem.startsWith(u8, arg, "--timing-json=")) {
+            aot_options.timing = true;
+            aot_options.timing_json_path = arg["--timing-json=".len..];
+        } else if (std.mem.eql(u8, arg, "--verify-ir")) {
+            aot_options.verify_ir = true;
+        } else if (std.mem.eql(u8, arg, "--no-opt-fallback")) {
+            aot_options.fallback_on_opt_fail = false;
+        } else if (std.mem.startsWith(u8, arg, "--aot-disable-pass=")) {
+            const name = arg["--aot-disable-pass=".len..];
+            applyPassToggle(&aot_options.pass_overrides, name, false) catch {
+                std.debug.print("Error: Unknown AOT pass '{s}'\n", .{name});
+                return;
+            };
+        } else if (std.mem.startsWith(u8, arg, "--aot-enable-pass=")) {
+            const name = arg["--aot-enable-pass=".len..];
+            applyPassToggle(&aot_options.pass_overrides, name, true) catch {
+                std.debug.print("Error: Unknown AOT pass '{s}'\n", .{name});
+                return;
+            };
+        } else if (std.mem.startsWith(u8, arg, "--aot-inline-threshold=")) {
+            const v = std.fmt.parseInt(u32, arg["--aot-inline-threshold=".len..], 10) catch {
+                std.debug.print("Error: Invalid --aot-inline-threshold\n", .{});
+                return;
+            };
+            aot_options.pass_overrides.inline_threshold = v;
+        } else if (std.mem.startsWith(u8, arg, "--aot-unroll-factor=")) {
+            const v = std.fmt.parseInt(u32, arg["--aot-unroll-factor=".len..], 10) catch {
+                std.debug.print("Error: Invalid --aot-unroll-factor\n", .{});
+                return;
+            };
+            aot_options.pass_overrides.unroll_factor = v;
+        } else if (std.mem.startsWith(u8, arg, "--aot-max-iterations=")) {
+            const v = std.fmt.parseInt(u32, arg["--aot-max-iterations=".len..], 10) catch {
+                std.debug.print("Error: Invalid --aot-max-iterations\n", .{});
+                return;
+            };
+            aot_options.pass_overrides.max_iterations = v;
         } else if (std.mem.startsWith(u8, arg, "--lowering-policy=")) {
             const policy_str = arg["--lowering-policy=".len..];
             if (aot.LoweringPolicy.fromString(policy_str)) |policy| {
@@ -253,6 +394,9 @@ pub fn main() !void {
     if (compile_mode) {
         if (php_file) |filename| {
             aot_options.input_file = filename;
+            if (aot_zig_flags.items.len > 0) {
+                aot_options.extra_zig_flags = try aot_zig_flags.toOwnedSlice();
+            }
             // Convert compiler SyntaxMode to AOT SyntaxMode
             aot_options.syntax_mode = switch (syntax_mode) {
                 .php => .php,
@@ -477,7 +621,12 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     // 检查编译结果
     if (result.success) {
         if (result.output_path) |output| {
-            std.debug.print("Success: Compiled to {s}\n", .{output});
+            defer allocator.free(output);
+            if (options.link_executable) {
+                std.debug.print("Success: Compiled to {s}\n", .{output});
+            } else {
+                std.debug.print("Success: Generated Zig code to {s}\n", .{output});
+            }
             if (options.verbose) {
                 std.debug.print("  Errors: {d}\n", .{result.error_count});
                 std.debug.print("  Warnings: {d}\n", .{result.warning_count});

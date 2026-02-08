@@ -63,6 +63,8 @@ pub const PassConfig = struct {
     dead_code_elimination: bool = true,
     /// Enable constant propagation
     constant_propagation: bool = true,
+    /// Enable box/unbox elimination
+    box_unbox_elim: bool = true,
     /// Enable function inlining
     function_inlining: bool = false,
     /// Maximum function size (in instructions) for inlining
@@ -79,6 +81,8 @@ pub const PassConfig = struct {
     mem2reg: bool = false,
     /// Enable loop unrolling
     loop_unroll: bool = false,
+    /// Enable CFG cleanup (block merge, trivial branch simplification, phi cleanup)
+    cfg_cleanup: bool = true,
     /// Loop unroll factor (number of copies)
     unroll_factor: u32 = 4,
     /// Maximum optimization iterations
@@ -89,6 +93,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = false,
             .constant_propagation = false,
+            .box_unbox_elim = false,
             .function_inlining = false,
             .inline_threshold = 0,
             .type_specialization = false,
@@ -97,6 +102,7 @@ pub const PassConfig = struct {
             .strength_reduction = false,
             .mem2reg = false,
             .loop_unroll = true,
+            .cfg_cleanup = false,
             .max_iterations = 1,
         };
     }
@@ -106,6 +112,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = true,
             .constant_propagation = true,
+            .box_unbox_elim = true,
             .function_inlining = false,
             .inline_threshold = 10,
             .type_specialization = false,
@@ -114,6 +121,7 @@ pub const PassConfig = struct {
             .strength_reduction = false,
             .mem2reg = true,
             .loop_unroll = true,
+            .cfg_cleanup = true,
             .max_iterations = 2,
         };
     }
@@ -123,6 +131,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = true,
             .constant_propagation = true,
+            .box_unbox_elim = true,
             .function_inlining = true,
             .inline_threshold = 50,
             .type_specialization = true,
@@ -131,6 +140,7 @@ pub const PassConfig = struct {
             .strength_reduction = true,
             .mem2reg = true,
             .loop_unroll = true,
+            .cfg_cleanup = true,
             .max_iterations = 5,
         };
     }
@@ -140,6 +150,7 @@ pub const PassConfig = struct {
         return .{
             .dead_code_elimination = true,
             .constant_propagation = true,
+            .box_unbox_elim = true,
             .function_inlining = false, // Inlining increases size
             .inline_threshold = 5,
             .type_specialization = false,
@@ -148,6 +159,7 @@ pub const PassConfig = struct {
             .strength_reduction = true,
             .mem2reg = true,
             .loop_unroll = false, // Unrolling increases size
+            .cfg_cleanup = true,
             .max_iterations = 2,
         };
     }
@@ -207,6 +219,7 @@ pub const IROptimizer = struct {
     config: PassConfig,
     stats: OptimizationStats,
     diagnostics: ?*DiagnosticEngine,
+    verify_ir: bool = false,
 
     /// Set of used registers (for dead code elimination)
     used_registers: std.AutoHashMap(u32, void),
@@ -231,6 +244,11 @@ pub const IROptimizer = struct {
     pub const FunctionInfo = struct {
         instruction_count: u32,
         call_count: u32,
+        block_count: u32,
+        branch_count: u32,
+        alloc_count: u32,
+        may_throw: bool,
+        estimated_cost: u32,
         has_side_effects: bool,
         is_recursive: bool,
         can_inline: bool,
@@ -243,6 +261,7 @@ pub const IROptimizer = struct {
             .config = level.getPassConfig(),
             .stats = .{},
             .diagnostics = diagnostics,
+            .verify_ir = false,
             .used_registers = std.AutoHashMap(u32, void).init(allocator),
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
@@ -256,6 +275,7 @@ pub const IROptimizer = struct {
             .config = config,
             .stats = .{},
             .diagnostics = diagnostics,
+            .verify_ir = false,
             .used_registers = std.AutoHashMap(u32, void).init(allocator),
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
@@ -302,60 +322,84 @@ pub const IROptimizer = struct {
                 if (try self.runMem2Reg(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.constant_propagation) {
                 if (try self.runConstantPropagation(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
+            }
+
+            if (self.config.box_unbox_elim) {
+                if (try self.runBoxUnboxElimination(module)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.dead_code_elimination) {
                 if (try self.runDeadCodeElimination(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.function_inlining) {
                 if (try self.runFunctionInlining(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.type_specialization) {
                 if (try self.runTypeSpecialization(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.cse) {
                 if (try self.runCSE(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.strength_reduction) {
                 if (try self.runStrengthReduction(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.licm) {
                 if (try self.runLICM(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.loop_unroll) {
                 if (try self.runLoopUnroll(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (changed and self.config.dead_code_elimination and (self.config.licm or self.config.loop_unroll)) {
                 if (try self.runDeadCodeElimination(module)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyModule(module);
+            }
+
+            if (self.config.cfg_cleanup) {
+                if (try self.runCFGCleanup(module)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyModule(module);
             }
         }
     }
@@ -373,35 +417,105 @@ pub const IROptimizer = struct {
                 if (try self.promoteMemoryToRegisters(func)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyFunction(func);
             }
 
             if (self.config.constant_propagation) {
                 if (try self.propagateConstantsInFunction(func)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyFunction(func);
+            }
+
+            if (self.config.box_unbox_elim) {
+                if (try self.eliminateBoxUnboxInFunction(func)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyFunction(func);
             }
 
             if (self.config.dead_code_elimination) {
                 if (try self.eliminateDeadCodeInFunction(func)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyFunction(func);
             }
 
             if (self.config.cse) {
                 if (try self.eliminateCSEInFunction(func)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyFunction(func);
             }
 
             if (self.config.licm) {
                 if (try self.runLICMInFunction(func)) {
                     changed = true;
                 }
+                if (self.verify_ir) try self.verifyFunction(func);
             }
 
             if (changed and self.config.dead_code_elimination and self.config.licm) {
                 if (try self.eliminateDeadCodeInFunction(func)) {
                     changed = true;
+                }
+                if (self.verify_ir) try self.verifyFunction(func);
+            }
+
+            if (self.config.cfg_cleanup) {
+                if (try self.cleanupCFGInFunction(func)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyFunction(func);
+            }
+        }
+    }
+
+    fn verifyModule(self: *Self, module: *Module) !void {
+        for (module.functions.items) |func| {
+            try self.verifyFunction(func);
+        }
+    }
+
+    fn verifyFunction(self: *Self, func: *Function) !void {
+        var block_set = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
+        defer block_set.deinit();
+
+        for (func.blocks.items) |b| {
+            try block_set.put(b, {});
+        }
+
+        for (func.blocks.items) |b| {
+            if (b.exception_handler) |h| {
+                if (!block_set.contains(h)) return error.InvalidIR;
+            }
+
+            for (b.predecessors.items) |p| {
+                if (!block_set.contains(p)) return error.InvalidIR;
+            }
+
+            for (b.successors.items) |s| {
+                if (!block_set.contains(s)) return error.InvalidIR;
+            }
+
+            if (b.terminator) |t| {
+                switch (t) {
+                    .ret => {},
+                    .unreachable_ => {},
+                    .br => |dst| {
+                        if (!block_set.contains(dst)) return error.InvalidIR;
+                    },
+                    .cond_br => |cb| {
+                        if (!block_set.contains(cb.then_block)) return error.InvalidIR;
+                        if (!block_set.contains(cb.else_block)) return error.InvalidIR;
+                    },
+                    .switch_ => |sw| {
+                        if (!block_set.contains(sw.default)) return error.InvalidIR;
+                        for (sw.cases) |c| {
+                            if (!block_set.contains(c.block)) return error.InvalidIR;
+                        }
+                    },
+                    else => {},
                 }
             }
         }
@@ -1486,6 +1600,7 @@ pub const IROptimizer = struct {
                         if (!self.hasSideEffects(inst)) {
                             // Remove dead instruction
                             _ = block.instructions.orderedRemove(i);
+                            inst.deinit(self.allocator);
                             self.allocator.destroy(inst);
                             self.stats.dead_instructions_removed += 1;
                             changed = true;
@@ -1757,6 +1872,26 @@ pub const IROptimizer = struct {
         };
     }
 
+    fn isAllocationLike(self: *const Self, inst: *const Instruction) bool {
+        _ = self;
+        return switch (inst.op) {
+            .array_new, .new_object, .concat, .interpolate, .closure_new => true,
+            else => false,
+        };
+    }
+
+    fn mayRaiseException(self: *const Self, inst: *const Instruction) bool {
+        _ = self;
+        return switch (inst.op) {
+            .call, .call_indirect, .method_call, .static_method_call, .new_object, .parent_call => true,
+            .array_get, .array_set, .array_push, .array_unset, .array_key_exists => true,
+            .property_get, .property_set, .static_property_get, .static_property_set => true,
+            .concat, .interpolate, .closure_new, .closure_bind => true,
+            .cast, .type_check, .unbox => true,
+            else => false,
+        };
+    }
+
     /// Remove unreachable basic blocks
     fn removeUnreachableBlocks(self: *Self, func: *Function) !bool {
         if (func.blocks.items.len <= 1) return false;
@@ -1784,6 +1919,10 @@ pub const IROptimizer = struct {
             } else {
                 i += 1;
             }
+        }
+
+        if (changed) {
+            try Analysis.rebuildCFG(func);
         }
 
         return changed;
@@ -2049,6 +2188,314 @@ pub const IROptimizer = struct {
         return false;
     }
 
+    fn runBoxUnboxElimination(self: *Self, module: *Module) !bool {
+        var changed = false;
+        for (module.functions.items) |func| {
+            if (try self.eliminateBoxUnboxInFunction(func)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    fn eliminateBoxUnboxInFunction(self: *Self, func: *Function) !bool {
+        var changed = false;
+        var defs = std.AutoHashMap(u32, *Instruction).init(self.allocator);
+        defer defs.deinit();
+
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |r| {
+                    try defs.put(r.id, inst);
+                }
+            }
+        }
+
+        for (func.blocks.items) |block| {
+            var i: usize = 0;
+            while (i < block.instructions.items.len) {
+                const inst = block.instructions.items[i];
+                if (inst.op == .unbox and inst.result != null) {
+                    const op = inst.op.unbox;
+                    if (defs.get(op.value.id)) |def_inst| {
+                        if (def_inst.op == .box and def_inst.result != null and def_inst.result.?.id == op.value.id) {
+                            const b = def_inst.op.box;
+                            if (b.from_type.eql(op.to_type)) {
+                                self.replaceRegisterUsage(func, inst.result.?, b.value);
+                                _ = block.instructions.orderedRemove(i);
+                                inst.deinit(self.allocator);
+                                self.allocator.destroy(inst);
+                                changed = true;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        return changed;
+    }
+
+    fn runCFGCleanup(self: *Self, module: *Module) !bool {
+        var changed = false;
+        for (module.functions.items) |func| {
+            if (try self.cleanupCFGInFunction(func)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    fn cleanupCFGInFunction(self: *Self, func: *Function) !bool {
+        if (func.blocks.items.len == 0) return false;
+        try Analysis.rebuildCFG(func);
+
+        var changed = false;
+        var i: usize = 0;
+        while (i < func.blocks.items.len) {
+            const block = func.blocks.items[i];
+            const is_entry = (i == 0);
+            if (!is_entry) {
+                if (try self.tryRemoveTrampolineBlock(func, block, &i)) {
+                    changed = true;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        try Analysis.rebuildCFG(func);
+
+        i = 0;
+        while (i < func.blocks.items.len) {
+            const block = func.blocks.items[i];
+            if (try self.tryMergeBlockWithSingleSuccessor(func, block)) {
+                changed = true;
+                try Analysis.rebuildCFG(func);
+                i = 0;
+                continue;
+            }
+            i += 1;
+        }
+
+        if (try self.simplifyTrivialConditionalBranches(func)) {
+            changed = true;
+            try Analysis.rebuildCFG(func);
+        }
+
+        return changed;
+    }
+
+    fn simplifyTrivialConditionalBranches(self: *Self, func: *Function) !bool {
+        var changed = false;
+
+        var bool_consts = std.AutoHashMap(u32, bool).init(self.allocator);
+        defer bool_consts.deinit();
+
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |r| {
+                    if (inst.op == .const_bool) {
+                        try bool_consts.put(r.id, inst.op.const_bool);
+                    }
+                }
+            }
+        }
+
+        for (func.blocks.items) |block| {
+            if (block.terminator) |*term| {
+                switch (term.*) {
+                    .cond_br => |cb| {
+                        if (cb.then_block == cb.else_block) {
+                            term.* = .{ .br = cb.then_block };
+                            changed = true;
+                            continue;
+                        }
+                        if (bool_consts.get(cb.cond.id)) |v| {
+                            term.* = .{ .br = if (v) cb.then_block else cb.else_block };
+                            changed = true;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        return changed;
+    }
+
+    fn tryRemoveTrampolineBlock(self: *Self, func: *Function, block: *BasicBlock, i: *usize) !bool {
+        if (block.instructions.items.len != 0) return false;
+        if (block.exception_handler != null) return false;
+
+        const term = block.terminator orelse return false;
+        if (term != .br) return false;
+
+        const target = term.br;
+
+        for (block.predecessors.items) |pred| {
+            if (pred.terminator) |*pt| {
+                self.replaceBlockInTerminator(pt, block, target);
+            }
+        }
+
+        try self.expandPhiIncomingForRemovedBlock(target, block, block.predecessors.items);
+
+        _ = func.blocks.orderedRemove(i.*);
+        block.deinit();
+        self.allocator.destroy(block);
+        return true;
+    }
+
+    fn tryMergeBlockWithSingleSuccessor(self: *Self, func: *Function, block: *BasicBlock) !bool {
+        const term = block.terminator orelse return false;
+        if (term != .br) return false;
+
+        const succ = term.br;
+        if (succ == block) return false;
+
+        if (succ.predecessors.items.len != 1 or succ.predecessors.items[0] != block) return false;
+
+        if (try self.simplifySinglePredecessorPhiNodes(func, succ)) {}
+
+        for (succ.instructions.items) |inst| {
+            try block.instructions.append(self.allocator, inst);
+        }
+        succ.instructions.shrinkRetainingCapacity(0);
+
+        block.terminator = succ.terminator;
+        succ.terminator = null;
+
+        self.rewritePhiBlockRefInSuccessors(succ, block);
+
+        for (func.blocks.items, 0..) |b, idx| {
+            if (b == succ) {
+                _ = func.blocks.orderedRemove(idx);
+                succ.deinit();
+                self.allocator.destroy(succ);
+                break;
+            }
+        }
+
+        return true;
+    }
+
+    fn simplifySinglePredecessorPhiNodes(self: *Self, func: *Function, block: *BasicBlock) !bool {
+        var changed = false;
+        var i: usize = 0;
+        while (i < block.instructions.items.len) {
+            const inst = block.instructions.items[i];
+            if (inst.op == .phi and inst.result != null) {
+                const inc = inst.op.phi.incoming;
+                if (inc.len == 1) {
+                    self.replaceRegisterUsage(func, inst.result.?, inc[0].value);
+                    _ = block.instructions.orderedRemove(i);
+                    inst.deinit(self.allocator);
+                    self.allocator.destroy(inst);
+                    changed = true;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        return changed;
+    }
+
+    fn expandPhiIncomingForRemovedBlock(
+        self: *Self,
+        target: *BasicBlock,
+        removed_block: *BasicBlock,
+        preds: []const *BasicBlock,
+    ) !void {
+        for (target.instructions.items) |inst| {
+            switch (inst.op) {
+                .phi => |*op| {
+                    const old = op.incoming;
+                    var new_len: usize = 0;
+                    for (old) |inc| {
+                        if (inc.block == removed_block) {
+                            new_len += preds.len;
+                        } else {
+                            new_len += 1;
+                        }
+                    }
+
+                    if (new_len == old.len) continue;
+
+                    const new_incoming = try self.allocator.alloc(Instruction.PhiIncoming, new_len);
+                    var j: usize = 0;
+                    for (old) |inc| {
+                        if (inc.block == removed_block) {
+                            for (preds) |p| {
+                                new_incoming[j] = .{ .value = inc.value, .block = p };
+                                j += 1;
+                            }
+                        } else {
+                            new_incoming[j] = inc;
+                            j += 1;
+                        }
+                    }
+
+                    self.allocator.free(old);
+                    op.incoming = new_incoming;
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn rewritePhiBlockRefInSuccessors(self: *Self, old_block: *BasicBlock, new_block: *BasicBlock) void {
+        if (old_block.terminator) |term| {
+            switch (term) {
+                .br => |b| self.rewritePhiBlockRefInBlock(b, old_block, new_block),
+                .cond_br => |cb| {
+                    self.rewritePhiBlockRefInBlock(cb.then_block, old_block, new_block);
+                    self.rewritePhiBlockRefInBlock(cb.else_block, old_block, new_block);
+                },
+                .switch_ => |sw| {
+                    for (sw.cases) |c| self.rewritePhiBlockRefInBlock(c.block, old_block, new_block);
+                    self.rewritePhiBlockRefInBlock(sw.default, old_block, new_block);
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn rewritePhiBlockRefInBlock(self: *Self, block: *BasicBlock, old_block: *BasicBlock, new_block: *BasicBlock) void {
+        _ = self;
+        for (block.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                const inc_ptr = @constCast(inst.op.phi.incoming.ptr);
+                for (0..inst.op.phi.incoming.len) |idx| {
+                    if (inc_ptr[idx].block == old_block) inc_ptr[idx].block = new_block;
+                }
+            }
+        }
+    }
+
+    fn replaceBlockInTerminator(self: *Self, term: *Terminator, old_block: *BasicBlock, new_block: *BasicBlock) void {
+        _ = self;
+        switch (term.*) {
+            .br => |*b| {
+                if (b.* == old_block) b.* = new_block;
+            },
+            .cond_br => |*cb| {
+                if (cb.then_block == old_block) cb.then_block = new_block;
+                if (cb.else_block == old_block) cb.else_block = new_block;
+            },
+            .switch_ => |*sw| {
+                const cases_ptr = @constCast(sw.cases.ptr);
+                for (0..sw.cases.len) |idx| {
+                    if (cases_ptr[idx].block == old_block) cases_ptr[idx].block = new_block;
+                }
+                if (sw.default == old_block) sw.default = new_block;
+            },
+            else => {},
+        }
+    }
+
     // ========================================================================
     // Function Inlining
     // ========================================================================
@@ -2061,6 +2508,11 @@ pub const IROptimizer = struct {
             var info = FunctionInfo{
                 .instruction_count = 0,
                 .call_count = 0,
+                .block_count = @intCast(func.blocks.items.len),
+                .branch_count = 0,
+                .alloc_count = 0,
+                .may_throw = false,
+                .estimated_cost = 0,
                 .has_side_effects = false,
                 .is_recursive = false,
                 .can_inline = true,
@@ -2076,6 +2528,14 @@ pub const IROptimizer = struct {
                         info.has_side_effects = true;
                     }
 
+                    if (self.mayRaiseException(inst)) {
+                        info.may_throw = true;
+                    }
+
+                    if (self.isAllocationLike(inst)) {
+                        info.alloc_count += 1;
+                    }
+
                     // Check for recursive calls
                     switch (inst.op) {
                         .call => |op| {
@@ -2086,12 +2546,25 @@ pub const IROptimizer = struct {
                         else => {},
                     }
                 }
+
+                if (block.terminator) |term| {
+                    switch (term) {
+                        .cond_br, .switch_ => info.branch_count += 1,
+                        else => {},
+                    }
+                }
             }
+
+            const base_cost: u32 = info.instruction_count;
+            const branch_cost: u32 = info.branch_count * 3;
+            const alloc_cost: u32 = info.alloc_count * 10;
+            const throw_cost: u32 = if (info.may_throw) 20 else 0;
+            info.estimated_cost = base_cost + branch_cost + alloc_cost + throw_cost;
 
             // Determine if function can be inlined
             info.can_inline = !info.is_recursive and
-                info.instruction_count <= self.config.inline_threshold and
-                func.blocks.items.len <= 3; // Simple control flow
+                info.estimated_cost <= self.config.inline_threshold and
+                info.block_count <= 6;
 
             try self.call_graph.put(func.name, info);
         }
@@ -2162,7 +2635,10 @@ pub const IROptimizer = struct {
     /// Check if a function should be inlined
     fn shouldInline(self: *const Self, func_name: []const u8) bool {
         if (self.call_graph.get(func_name)) |info| {
-            return info.can_inline and info.call_count <= 3;
+            if (!info.can_inline) return false;
+            const very_small = info.estimated_cost * 4 <= self.config.inline_threshold;
+            const max_calls: u32 = if (very_small) 10 else 3;
+            return info.call_count <= max_calls;
         }
         return false;
     }
@@ -3702,6 +4178,11 @@ test "FunctionInfo struct" {
     const info = IROptimizer.FunctionInfo{
         .instruction_count = 15,
         .call_count = 3,
+        .block_count = 2,
+        .branch_count = 1,
+        .alloc_count = 0,
+        .may_throw = true,
+        .estimated_cost = 45,
         .has_side_effects = true,
         .is_recursive = false,
         .can_inline = true,
@@ -3765,6 +4246,11 @@ test "IROptimizer.shouldInline" {
     try optimizer.call_graph.put("small_func", .{
         .instruction_count = 5,
         .call_count = 2,
+        .block_count = 1,
+        .branch_count = 0,
+        .alloc_count = 0,
+        .may_throw = false,
+        .estimated_cost = 5,
         .has_side_effects = false,
         .is_recursive = false,
         .can_inline = true,
@@ -3774,6 +4260,11 @@ test "IROptimizer.shouldInline" {
     try optimizer.call_graph.put("hot_func", .{
         .instruction_count = 5,
         .call_count = 10,
+        .block_count = 1,
+        .branch_count = 0,
+        .alloc_count = 0,
+        .may_throw = false,
+        .estimated_cost = 20,
         .has_side_effects = false,
         .is_recursive = false,
         .can_inline = true,
@@ -3783,6 +4274,11 @@ test "IROptimizer.shouldInline" {
     try optimizer.call_graph.put("recursive_func", .{
         .instruction_count = 5,
         .call_count = 1,
+        .block_count = 1,
+        .branch_count = 0,
+        .alloc_count = 0,
+        .may_throw = false,
+        .estimated_cost = 5,
         .has_side_effects = false,
         .is_recursive = true,
         .can_inline = false,

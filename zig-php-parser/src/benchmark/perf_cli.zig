@@ -61,12 +61,13 @@ fn printHelp() !void {
         \\
         \\Options:
         \\  --baseline-dir <dir>    - Baseline directory (default: .perf_baselines)
-        \\  --threshold <percent>   - Regression threshold (default: 5.0)
+        \\  --threshold <percent>   - Time regression threshold (default: 5.0)
+        \\  --mem-threshold <percent> - Memory regression threshold (default: 1.0)
         \\  --commit <sha>          - Git commit SHA
         \\  --fail-on-regression    - Exit with error on regression
         \\
         \\Examples:
-        \\  perf-cli check --threshold 10.0
+        \\  perf-cli check --threshold 10.0 --mem-threshold 2.0
         \\  perf-cli update --commit abc123
         \\  perf-cli list
         \\  perf-cli compare baseline1.json baseline2.json
@@ -86,6 +87,9 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, args[i], "--threshold") and i + 1 < args.len) {
             config.threshold_percent = try std.fmt.parseFloat(f64, args[i + 1]);
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--mem-threshold") and i + 1 < args.len) {
+            config.mem_threshold_percent = try std.fmt.parseFloat(f64, args[i + 1]);
+            i += 1;
         } else if (std.mem.eql(u8, args[i], "--fail-on-regression")) {
             config.fail_on_regression = true;
         }
@@ -95,7 +99,8 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
     
     std.debug.print("Running performance regression check...\n", .{});
     std.debug.print("Baseline directory: {s}\n", .{config.baseline_dir});
-    std.debug.print("Regression threshold: {d:.1}%\n\n", .{config.threshold_percent});
+    std.debug.print("Time threshold: {d:.1}%\n", .{config.threshold_percent});
+    std.debug.print("Memory threshold: {d:.1}%\n\n", .{config.mem_threshold_percent});
     
     const results = try microbench_suite.runAll(allocator);
     defer allocator.free(results);
@@ -123,7 +128,7 @@ fn runUpdate(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
     
-    var detector = try RegressionDetector.init(allocator, baseline_dir, 5.0);
+    var detector = try RegressionDetector.init(allocator, baseline_dir, 5.0, 1.0);
     
     std.debug.print("Updating performance baselines...\n", .{});
     std.debug.print("Baseline directory: {s}\n", .{baseline_dir});

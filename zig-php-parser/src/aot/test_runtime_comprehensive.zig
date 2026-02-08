@@ -535,6 +535,7 @@ test "高阶数组函数 - array_map with strtoupper" {
     try testing.expectEqual(@as(usize, 2), result.asArray().count());
 
     const first = result.asArray().get(.{ .integer = 0 }).?;
+    defer first.release(allocator);
     try testing.expect(first.isString());
     try testing.expectEqualStrings("HELLO", first.asString().data);
 }

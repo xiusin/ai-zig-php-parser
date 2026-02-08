@@ -411,6 +411,18 @@ pub fn build(b: *std.Build) void {
     perf_cli_exe.root_module.addImport("bytecode", bytecode_mod);
     perf_cli_exe.root_module.addImport("jit", jit_mod);
     perf_cli_exe.root_module.addImport("extension", extension_mod);
+    perf_cli_exe.root_module.addImport("aot", b.createModule(.{
+        .root_source_file = b.path("src/aot/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "compiler", .module = compiler_mod },
+            .{ .name = "runtime", .module = runtime_mod },
+            .{ .name = "bytecode", .module = bytecode_mod },
+            .{ .name = "jit", .module = jit_mod },
+            .{ .name = "extension", .module = extension_mod },
+        },
+    }));
     perf_cli_exe.root_module.addImport("aot_runtime", b.createModule(.{
         .root_source_file = b.path("src/aot/runtime_lib_template.zig"),
         .target = target,
@@ -421,6 +433,9 @@ pub fn build(b: *std.Build) void {
     
     const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
     perf_check_cmd.addArg("check");
+    if (b.args) |args| {
+        perf_check_cmd.addArgs(args);
+    }
     perf_check_step.dependOn(&perf_check_cmd.step);
 
     // Update performance baselines

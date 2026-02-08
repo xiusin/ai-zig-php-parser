@@ -37,12 +37,19 @@ pub const NativeLinkerConfig = struct {
     debug_info: bool = true,
     /// 是否剥离符号
     strip_symbols: bool = false,
+    /// CPU model/features passed to Zig as -mcpu=<value> (e.g. \"native\")
+    mcpu: ?[]const u8 = null,
+    /// Extra flags appended to `zig build-exe` invocation
+    extra_zig_flags: []const []const u8 = &.{},
     /// 详细输出
     verbose: bool = false,
     /// Dump generated Zig code
     dump_zig: bool = false,
     /// Path to dump Zig code (optional)
     dump_zig_path: ?[]const u8 = null,
+    emit_asm_path: ?[]const u8 = null,
+    emit_llvm_ir_path: ?[]const u8 = null,
+    emit_llvm_bc_path: ?[]const u8 = null,
     lowering_policy: LoweringPolicy = LoweringPolicy.@"error",
 };
 
@@ -785,121 +792,121 @@ pub const NativeLinker = struct {
         return builtin_map.get(func_name);
     }
 
-    const builtin_map = std.StaticStringMap(BuiltinInfo).initComptime(.{
-        .{ "echo", .{ .runtime_name = "php_echo", .needs_allocator = false } },
-        .{ "print", .{ .runtime_name = "php_print", .needs_allocator = false } },
-        .{ "var_dump", .{ .runtime_name = "php_var_dump", .needs_allocator = false } },
+    const builtin_map = std.StaticStringMap(BuiltinInfo).initComptime(@as([]const struct { []const u8, BuiltinInfo }, &.{
+        .{ "echo", bi(.{ .runtime_name = "php_echo", .needs_allocator = false }) },
+        .{ "print", bi(.{ .runtime_name = "php_print", .needs_allocator = false }) },
+        .{ "var_dump", bi(.{ .runtime_name = "php_var_dump", .needs_allocator = false }) },
 
-        .{ "define", .{ .runtime_name = "php_define", .needs_allocator = true } },
-        .{ "defined", .{ .runtime_name = "php_defined", .needs_allocator = false } },
+        .{ "define", bi(.{ .runtime_name = "php_define", .needs_allocator = true }) },
+        .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
 
-        .{ "class_exists", .{ .runtime_name = "php_class_exists", .needs_allocator = true } },
-        .{ "method_exists", .{ .runtime_name = "php_method_exists", .needs_allocator = false } },
-        .{ "property_exists", .{ .runtime_name = "php_property_exists", .needs_allocator = false } },
-        .{ "get_class", .{ .runtime_name = "php_get_class", .needs_allocator = true } },
-        .{ "serialize", .{ .runtime_name = "php_serialize", .needs_allocator = true } },
-        .{ "unserialize", .{ .runtime_name = "php_unserialize", .needs_allocator = true } },
-        .{ "json_encode", .{ .runtime_name = "php_json_encode", .needs_allocator = true } },
+        .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },
+        .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
+        .{ "property_exists", bi(.{ .runtime_name = "php_property_exists", .needs_allocator = false }) },
+        .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
+        .{ "serialize", bi(.{ .runtime_name = "php_serialize", .needs_allocator = true }) },
+        .{ "unserialize", bi(.{ .runtime_name = "php_unserialize", .needs_allocator = true }) },
+        .{ "json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
 
-        .{ "strlen", .{ .runtime_name = "php_strlen", .needs_allocator = false } },
-        .{ "substr", .{ .runtime_name = "php_substr", .needs_allocator = true } },
-        .{ "strpos", .{ .runtime_name = "php_strpos", .needs_allocator = false } },
-        .{ "strtoupper", .{ .runtime_name = "php_strtoupper", .needs_allocator = true } },
-        .{ "strtolower", .{ .runtime_name = "php_strtolower", .needs_allocator = true } },
-        .{ "trim", .{ .runtime_name = "php_trim", .needs_allocator = true } },
-        .{ "ltrim", .{ .runtime_name = "php_ltrim", .needs_allocator = true } },
-        .{ "rtrim", .{ .runtime_name = "php_rtrim", .needs_allocator = true } },
-        .{ "str_replace", .{ .runtime_name = "php_str_replace", .needs_allocator = true } },
-        .{ "str_repeat", .{ .runtime_name = "php_str_repeat", .needs_allocator = true } },
-        .{ "str_pad", .{ .runtime_name = "php_str_pad", .needs_allocator = true } },
-        .{ "strrev", .{ .runtime_name = "php_strrev", .needs_allocator = true } },
-        .{ "str_contains", .{ .runtime_name = "php_str_contains", .needs_allocator = false } },
-        .{ "str_starts_with", .{ .runtime_name = "php_str_starts_with", .needs_allocator = false } },
-        .{ "str_ends_with", .{ .runtime_name = "php_str_ends_with", .needs_allocator = false } },
-        .{ "ucfirst", .{ .runtime_name = "php_ucfirst", .needs_allocator = true } },
-        .{ "lcfirst", .{ .runtime_name = "php_lcfirst", .needs_allocator = true } },
-        .{ "ucwords", .{ .runtime_name = "php_ucwords", .needs_allocator = true } },
-        .{ "explode", .{ .runtime_name = "php_explode", .needs_allocator = true } },
-        .{ "implode", .{ .runtime_name = "php_implode", .needs_allocator = true } },
-        .{ "join", .{ .runtime_name = "php_implode", .needs_allocator = true } },
-        .{ "str_split", .{ .runtime_name = "php_str_split", .needs_allocator = true } },
-        .{ "strcmp", .{ .runtime_name = "php_strcmp", .needs_allocator = false } },
-        .{ "strcasecmp", .{ .runtime_name = "php_strcasecmp", .needs_allocator = true } },
-        .{ "stripos", .{ .runtime_name = "php_stripos", .needs_allocator = false } },
-        .{ "strrpos", .{ .runtime_name = "php_strrpos", .needs_allocator = false } },
-        .{ "strripos", .{ .runtime_name = "php_strripos", .needs_allocator = false } },
-        .{ "sprintf", .{ .runtime_name = "php_sprintf", .needs_allocator = true } },
-        .{ "printf", .{ .runtime_name = "php_printf", .needs_allocator = true } },
-        .{ "chunk_split", .{ .runtime_name = "php_chunk_split", .needs_allocator = true } },
-        .{ "wordwrap", .{ .runtime_name = "php_wordwrap", .needs_allocator = true } },
-        .{ "nl2br", .{ .runtime_name = "php_nl2br", .needs_allocator = true } },
-        .{ "strip_tags", .{ .runtime_name = "php_strip_tags", .needs_allocator = true } },
-        .{ "htmlspecialchars", .{ .runtime_name = "php_htmlspecialchars", .needs_allocator = true } },
-        .{ "htmlentities", .{ .runtime_name = "php_htmlentities", .needs_allocator = true } },
-        .{ "htmlspecialchars_decode", .{ .runtime_name = "php_htmlspecialchars_decode", .needs_allocator = true } },
-        .{ "number_format", .{ .runtime_name = "php_number_format", .needs_allocator = true } },
-        .{ "bin2hex", .{ .runtime_name = "php_bin2hex", .needs_allocator = true } },
-        .{ "hex2bin", .{ .runtime_name = "php_hex2bin", .needs_allocator = true } },
-        .{ "base64_encode", .{ .runtime_name = "php_base64_encode", .needs_allocator = true } },
-        .{ "base64_decode", .{ .runtime_name = "php_base64_decode", .needs_allocator = true } },
-        .{ "md5", .{ .runtime_name = "php_md5", .needs_allocator = true } },
-        .{ "sha1", .{ .runtime_name = "php_sha1", .needs_allocator = true } },
-        .{ "uniqid", .{ .runtime_name = "php_uniqid", .needs_allocator = true } },
-        .{ "ord", .{ .runtime_name = "php_ord", .needs_allocator = false } },
-        .{ "chr", .{ .runtime_name = "php_chr", .needs_allocator = true } },
+        .{ "strlen", bi(.{ .runtime_name = "php_strlen", .needs_allocator = false }) },
+        .{ "substr", bi(.{ .runtime_name = "php_substr", .needs_allocator = true }) },
+        .{ "strpos", bi(.{ .runtime_name = "php_strpos", .needs_allocator = false }) },
+        .{ "strtoupper", bi(.{ .runtime_name = "php_strtoupper", .needs_allocator = true }) },
+        .{ "strtolower", bi(.{ .runtime_name = "php_strtolower", .needs_allocator = true }) },
+        .{ "trim", bi(.{ .runtime_name = "php_trim", .needs_allocator = true }) },
+        .{ "ltrim", bi(.{ .runtime_name = "php_ltrim", .needs_allocator = true }) },
+        .{ "rtrim", bi(.{ .runtime_name = "php_rtrim", .needs_allocator = true }) },
+        .{ "str_replace", bi(.{ .runtime_name = "php_str_replace", .needs_allocator = true }) },
+        .{ "str_repeat", bi(.{ .runtime_name = "php_str_repeat", .needs_allocator = true }) },
+        .{ "str_pad", bi(.{ .runtime_name = "php_str_pad", .needs_allocator = true }) },
+        .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
+        .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
+        .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
+        .{ "str_ends_with", bi(.{ .runtime_name = "php_str_ends_with", .needs_allocator = false }) },
+        .{ "ucfirst", bi(.{ .runtime_name = "php_ucfirst", .needs_allocator = true }) },
+        .{ "lcfirst", bi(.{ .runtime_name = "php_lcfirst", .needs_allocator = true }) },
+        .{ "ucwords", bi(.{ .runtime_name = "php_ucwords", .needs_allocator = true }) },
+        .{ "explode", bi(.{ .runtime_name = "php_explode", .needs_allocator = true }) },
+        .{ "implode", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
+        .{ "join", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
+        .{ "str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
+        .{ "strcmp", bi(.{ .runtime_name = "php_strcmp", .needs_allocator = false }) },
+        .{ "strcasecmp", bi(.{ .runtime_name = "php_strcasecmp", .needs_allocator = true }) },
+        .{ "stripos", bi(.{ .runtime_name = "php_stripos", .needs_allocator = false }) },
+        .{ "strrpos", bi(.{ .runtime_name = "php_strrpos", .needs_allocator = false }) },
+        .{ "strripos", bi(.{ .runtime_name = "php_strripos", .needs_allocator = false }) },
+        .{ "sprintf", bi(.{ .runtime_name = "php_sprintf", .needs_allocator = true }) },
+        .{ "printf", bi(.{ .runtime_name = "php_printf", .needs_allocator = true }) },
+        .{ "chunk_split", bi(.{ .runtime_name = "php_chunk_split", .needs_allocator = true }) },
+        .{ "wordwrap", bi(.{ .runtime_name = "php_wordwrap", .needs_allocator = true }) },
+        .{ "nl2br", bi(.{ .runtime_name = "php_nl2br", .needs_allocator = true }) },
+        .{ "strip_tags", bi(.{ .runtime_name = "php_strip_tags", .needs_allocator = true }) },
+        .{ "htmlspecialchars", bi(.{ .runtime_name = "php_htmlspecialchars", .needs_allocator = true }) },
+        .{ "htmlentities", bi(.{ .runtime_name = "php_htmlentities", .needs_allocator = true }) },
+        .{ "htmlspecialchars_decode", bi(.{ .runtime_name = "php_htmlspecialchars_decode", .needs_allocator = true }) },
+        .{ "number_format", bi(.{ .runtime_name = "php_number_format", .needs_allocator = true }) },
+        .{ "bin2hex", bi(.{ .runtime_name = "php_bin2hex", .needs_allocator = true }) },
+        .{ "hex2bin", bi(.{ .runtime_name = "php_hex2bin", .needs_allocator = true }) },
+        .{ "base64_encode", bi(.{ .runtime_name = "php_base64_encode", .needs_allocator = true }) },
+        .{ "base64_decode", bi(.{ .runtime_name = "php_base64_decode", .needs_allocator = true }) },
+        .{ "md5", bi(.{ .runtime_name = "php_md5", .needs_allocator = true }) },
+        .{ "sha1", bi(.{ .runtime_name = "php_sha1", .needs_allocator = true }) },
+        .{ "uniqid", bi(.{ .runtime_name = "php_uniqid", .needs_allocator = true }) },
+        .{ "ord", bi(.{ .runtime_name = "php_ord", .needs_allocator = false }) },
+        .{ "chr", bi(.{ .runtime_name = "php_chr", .needs_allocator = true }) },
 
-        .{ "count", .{ .runtime_name = "php_count", .needs_allocator = false } },
-        .{ "in_array", .{ .runtime_name = "php_in_array", .needs_allocator = false } },
-        .{ "array_key_exists", .{ .runtime_name = "php_array_key_exists", .needs_allocator = false } },
-        .{ "array_keys", .{ .runtime_name = "php_array_keys", .needs_allocator = true } },
-        .{ "array_values", .{ .runtime_name = "php_array_values", .needs_allocator = true } },
-        .{ "array_push", .{ .runtime_name = "php_array_push", .needs_allocator = true } },
-        .{ "array_pop", .{ .runtime_name = "php_array_pop", .needs_allocator = true } },
-        .{ "array_shift", .{ .runtime_name = "php_array_shift", .needs_allocator = true } },
-        .{ "array_unshift", .{ .runtime_name = "php_array_unshift", .needs_allocator = true } },
-        .{ "array_slice", .{ .runtime_name = "php_array_slice", .needs_allocator = true } },
-        .{ "array_merge", .{ .runtime_name = "php_array_merge", .needs_allocator = true } },
-        .{ "array_map", .{ .runtime_name = "php_array_map", .needs_allocator = true } },
-        .{ "array_filter", .{ .runtime_name = "php_array_filter", .needs_allocator = true } },
-        .{ "array_reduce", .{ .runtime_name = "php_array_reduce", .needs_allocator = true } },
-        .{ "array_chunk", .{ .runtime_name = "php_array_chunk", .needs_allocator = true } },
-        .{ "array_sum", .{ .runtime_name = "php_array_sum", .needs_allocator = false } },
-        .{ "array_product", .{ .runtime_name = "php_array_product", .needs_allocator = false } },
-        .{ "array_search", .{ .runtime_name = "php_array_search", .needs_allocator = false } },
-        .{ "array_reverse", .{ .runtime_name = "php_array_reverse", .needs_allocator = true } },
-        .{ "array_unique", .{ .runtime_name = "php_array_unique", .needs_allocator = true } },
-        .{ "array_flip", .{ .runtime_name = "php_array_flip", .needs_allocator = true } },
-        .{ "array_key_first", .{ .runtime_name = "php_array_key_first", .needs_allocator = false } },
-        .{ "array_key_last", .{ .runtime_name = "php_array_key_last", .needs_allocator = false } },
-        .{ "array_fill", .{ .runtime_name = "php_array_fill", .needs_allocator = true } },
-        .{ "array_column", .{ .runtime_name = "php_array_column", .needs_allocator = true } },
-        .{ "array_walk", .{ .runtime_name = "php_array_walk", .needs_allocator = true } },
-        .{ "array_splice", .{ .runtime_name = "php_array_splice", .needs_allocator = true } },
-        .{ "array_intersect", .{ .runtime_name = "php_array_intersect", .needs_allocator = true } },
-        .{ "array_diff", .{ .runtime_name = "php_array_diff", .needs_allocator = true } },
-        .{ "array_combine", .{ .runtime_name = "php_array_combine", .needs_allocator = true } },
-        .{ "array_pad", .{ .runtime_name = "php_array_pad", .needs_allocator = true } },
-        .{ "sizeof", .{ .runtime_name = "php_sizeof", .needs_allocator = false } },
-        .{ "sort", .{ .runtime_name = "php_sort", .needs_allocator = true } },
-        .{ "rsort", .{ .runtime_name = "php_rsort", .needs_allocator = true } },
-        .{ "asort", .{ .runtime_name = "php_asort", .needs_allocator = true } },
-        .{ "arsort", .{ .runtime_name = "php_arsort", .needs_allocator = true } },
-        .{ "ksort", .{ .runtime_name = "php_ksort", .needs_allocator = true } },
-        .{ "krsort", .{ .runtime_name = "php_krsort", .needs_allocator = true } },
-        .{ "usort", .{ .runtime_name = "php_usort", .needs_allocator = true } },
-        .{ "uasort", .{ .runtime_name = "php_uasort", .needs_allocator = true } },
-        .{ "uksort", .{ .runtime_name = "php_uksort", .needs_allocator = true } },
-        .{ "array_multisort", .{ .runtime_name = "php_array_multisort", .needs_allocator = true } },
-        .{ "range", .{ .runtime_name = "php_range", .needs_allocator = true } },
-        .{ "current", .{ .runtime_name = "php_current", .needs_allocator = true } },
-        .{ "next", .{ .runtime_name = "php_next", .needs_allocator = true } },
-        .{ "prev", .{ .runtime_name = "php_prev", .needs_allocator = true } },
-        .{ "reset", .{ .runtime_name = "php_reset", .needs_allocator = true } },
-        .{ "end", .{ .runtime_name = "php_end", .needs_allocator = true } },
-        .{ "key", .{ .runtime_name = "php_key", .needs_allocator = true } },
-        .{ "each", .{ .runtime_name = "php_each", .needs_allocator = true } },
+        .{ "count", bi(.{ .runtime_name = "php_count", .needs_allocator = false }) },
+        .{ "in_array", bi(.{ .runtime_name = "php_in_array", .needs_allocator = false }) },
+        .{ "array_key_exists", bi(.{ .runtime_name = "php_array_key_exists", .needs_allocator = false }) },
+        .{ "array_keys", bi(.{ .runtime_name = "php_array_keys", .needs_allocator = true }) },
+        .{ "array_values", bi(.{ .runtime_name = "php_array_values", .needs_allocator = true }) },
+        .{ "array_push", bi(.{ .runtime_name = "php_array_push", .needs_allocator = true }) },
+        .{ "array_pop", bi(.{ .runtime_name = "php_array_pop", .needs_allocator = true }) },
+        .{ "array_shift", bi(.{ .runtime_name = "php_array_shift", .needs_allocator = true }) },
+        .{ "array_unshift", bi(.{ .runtime_name = "php_array_unshift", .needs_allocator = true }) },
+        .{ "array_slice", bi(.{ .runtime_name = "php_array_slice", .needs_allocator = true }) },
+        .{ "array_merge", bi(.{ .runtime_name = "php_array_merge", .needs_allocator = true }) },
+        .{ "array_map", bi(.{ .runtime_name = "php_array_map", .needs_allocator = true }) },
+        .{ "array_filter", bi(.{ .runtime_name = "php_array_filter", .needs_allocator = true }) },
+        .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true }) },
+        .{ "array_chunk", bi(.{ .runtime_name = "php_array_chunk", .needs_allocator = true }) },
+        .{ "array_sum", bi(.{ .runtime_name = "php_array_sum", .needs_allocator = false }) },
+        .{ "array_product", bi(.{ .runtime_name = "php_array_product", .needs_allocator = false }) },
+        .{ "array_search", bi(.{ .runtime_name = "php_array_search", .needs_allocator = false }) },
+        .{ "array_reverse", bi(.{ .runtime_name = "php_array_reverse", .needs_allocator = true }) },
+        .{ "array_unique", bi(.{ .runtime_name = "php_array_unique", .needs_allocator = true }) },
+        .{ "array_flip", bi(.{ .runtime_name = "php_array_flip", .needs_allocator = true }) },
+        .{ "array_key_first", bi(.{ .runtime_name = "php_array_key_first", .needs_allocator = false }) },
+        .{ "array_key_last", bi(.{ .runtime_name = "php_array_key_last", .needs_allocator = false }) },
+        .{ "array_fill", bi(.{ .runtime_name = "php_array_fill", .needs_allocator = true }) },
+        .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
+        .{ "array_walk", bi(.{ .runtime_name = "php_array_walk", .needs_allocator = true }) },
+        .{ "array_splice", bi(.{ .runtime_name = "php_array_splice", .needs_allocator = true }) },
+        .{ "array_intersect", bi(.{ .runtime_name = "php_array_intersect", .needs_allocator = true }) },
+        .{ "array_diff", bi(.{ .runtime_name = "php_array_diff", .needs_allocator = true }) },
+        .{ "array_combine", bi(.{ .runtime_name = "php_array_combine", .needs_allocator = true }) },
+        .{ "array_pad", bi(.{ .runtime_name = "php_array_pad", .needs_allocator = true }) },
+        .{ "sizeof", bi(.{ .runtime_name = "php_sizeof", .needs_allocator = false }) },
+        .{ "sort", bi(.{ .runtime_name = "php_sort", .needs_allocator = true }) },
+        .{ "rsort", bi(.{ .runtime_name = "php_rsort", .needs_allocator = true }) },
+        .{ "asort", bi(.{ .runtime_name = "php_asort", .needs_allocator = true }) },
+        .{ "arsort", bi(.{ .runtime_name = "php_arsort", .needs_allocator = true }) },
+        .{ "ksort", bi(.{ .runtime_name = "php_ksort", .needs_allocator = true }) },
+        .{ "krsort", bi(.{ .runtime_name = "php_krsort", .needs_allocator = true }) },
+        .{ "usort", bi(.{ .runtime_name = "php_usort", .needs_allocator = true }) },
+        .{ "uasort", bi(.{ .runtime_name = "php_uasort", .needs_allocator = true }) },
+        .{ "uksort", bi(.{ .runtime_name = "php_uksort", .needs_allocator = true }) },
+        .{ "array_multisort", bi(.{ .runtime_name = "php_array_multisort", .needs_allocator = true }) },
+        .{ "range", bi(.{ .runtime_name = "php_range", .needs_allocator = true }) },
+        .{ "current", bi(.{ .runtime_name = "php_current", .needs_allocator = true }) },
+        .{ "next", bi(.{ .runtime_name = "php_next", .needs_allocator = true }) },
+        .{ "prev", bi(.{ .runtime_name = "php_prev", .needs_allocator = true }) },
+        .{ "reset", bi(.{ .runtime_name = "php_reset", .needs_allocator = true }) },
+        .{ "end", bi(.{ .runtime_name = "php_end", .needs_allocator = true }) },
+        .{ "key", bi(.{ .runtime_name = "php_key", .needs_allocator = true }) },
+        .{ "each", bi(.{ .runtime_name = "php_each", .needs_allocator = true }) },
 
-        .{ "abs", .{ .runtime_name = "php_abs", .needs_allocator = false } },
+        .{ "abs", bi(.{ .runtime_name = "php_abs", .needs_allocator = false }) },
         .{ "sqrt", .{ .runtime_name = "php_sqrt", .needs_allocator = false } },
         .{ "round", .{ .runtime_name = "php_round", .needs_allocator = false } },
         .{ "floor", .{ .runtime_name = "php_floor", .needs_allocator = false } },
@@ -925,11 +932,11 @@ pub const NativeLinker = struct {
         .{ "rand", .{ .runtime_name = "php_rand", .needs_allocator = false } },
         .{ "mt_rand", .{ .runtime_name = "php_mt_rand", .needs_allocator = false } },
 
-        .{ "time", .{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false } },
-        .{ "microtime", .{ .runtime_name = "php_microtime", .needs_allocator = true } },
-        .{ "date", .{ .runtime_name = "php_date", .needs_allocator = true } },
-        .{ "sleep", .{ .runtime_name = "php_sleep", .needs_allocator = false } },
-        .{ "usleep", .{ .runtime_name = "php_usleep", .needs_allocator = false } },
+        .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
+        .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
+        .{ "date", bi(.{ .runtime_name = "php_date", .needs_allocator = true }) },
+        .{ "sleep", bi(.{ .runtime_name = "php_sleep", .needs_allocator = false }) },
+        .{ "usleep", bi(.{ .runtime_name = "php_usleep", .needs_allocator = false }) },
 
         .{ "srand", .{ .runtime_name = "php_srand", .needs_allocator = false } },
         .{ "mt_srand", .{ .runtime_name = "php_mt_srand", .needs_allocator = false } },
@@ -962,19 +969,23 @@ pub const NativeLinker = struct {
         .{ "basename", .{ .runtime_name = "php_basename", .needs_allocator = true } },
         .{ "dirname", .{ .runtime_name = "php_dirname", .needs_allocator = true } },
 
-        .{ "go", .{ .runtime_name = "php_go_builtin", .needs_allocator = true } },
+        .{ "go", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
 
-        .{ "php_concat", .{ .runtime_name = "php_concat", .needs_allocator = true } },
-        .{ "php_array_iter_init", .{ .runtime_name = "php_array_iter_init", .needs_allocator = true } },
-        .{ "php_array_iter_key", .{ .runtime_name = "php_array_iter_key", .needs_allocator = true } },
-        .{ "php_array_iter_free", .{ .runtime_name = "php_array_iter_free", .needs_allocator = true } },
-        .{ "php_create_closure", .{ .runtime_name = "php_create_closure", .needs_allocator = true } },
-        .{ "php_args_append_spread", .{ .runtime_name = "php_args_append_spread", .needs_allocator = true } },
-        .{ "php_invoke_callable_args_array", .{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true } },
-        .{ "php_constant_get", .{ .runtime_name = "php_constant_get", .needs_allocator = true } },
-        .{ "php_go_builtin", .{ .runtime_name = "php_go_builtin", .needs_allocator = true } },
-        .{ "php_json_encode", .{ .runtime_name = "php_json_encode", .needs_allocator = true } },
-    });
+        .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
+        .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
+        .{ "php_array_iter_key", bi(.{ .runtime_name = "php_array_iter_key", .needs_allocator = true }) },
+        .{ "php_array_iter_free", bi(.{ .runtime_name = "php_array_iter_free", .needs_allocator = true }) },
+        .{ "php_create_closure", bi(.{ .runtime_name = "php_create_closure", .needs_allocator = true }) },
+        .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
+        .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
+        .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
+        .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
+        .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
+    }));
+
+    fn bi(info: BuiltinInfo) BuiltinInfo {
+        return info;
+    }
 
     /// 生成函数
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), func: *const IR.Function) !void {
@@ -2189,11 +2200,11 @@ pub const NativeLinker = struct {
         if (cond_br.cond.type_ == .bool) {
             try code.appendSlice(self.allocator, "        if (!");
             try code.appendSlice(self.allocator, cond_str_for);
-            try code.appendSlice(self.allocator, ") break;\n");
+            try code.appendSlice(self.allocator, ") { @branchHint(.unlikely); break; }\n");
         } else {
             try code.appendSlice(self.allocator, "        if (!");
             try code.appendSlice(self.allocator, cond_str_for);
-            try code.appendSlice(self.allocator, ".toBool()) break;\n");
+            try code.appendSlice(self.allocator, ".toBool()) { @branchHint(.unlikely); break; }\n");
         }
 
         // 生成body块的指令
@@ -2325,7 +2336,7 @@ pub const NativeLinker = struct {
                     if (self.regMayHeap(reg.id)) {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
                     }
-                    try writer.print("    reg_{d} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]));\n", .{ reg.id, string_id });
+                    try writer.print("    reg_{d} = runtime.Value.initString(runtime.PHPString.initStatic(string_table[{d}]));\n", .{ reg.id, string_id });
                 }
             },
             .alloca => {
@@ -3576,7 +3587,6 @@ pub const NativeLinker = struct {
                     try self.generateCleanupCode(writer);
                     if (self.current_exception_handler) |handler_idx| {
                         try writer.print("        current_block = {d};\n", .{handler_idx});
-                        try writer.print("        continue;\n", .{});
                         try writer.print("        continue;\n", .{});
                     } else {
                         try writer.writeAll("        return error.RuntimeError;\n");
@@ -5743,11 +5753,12 @@ pub const NativeLinker = struct {
         );
         defer self.allocator.free(zig_file_path);
         
-        // Debug: Write to local file for inspection
-        const debug_path = "debug_aot.zig";
-        const debug_file = try std.fs.cwd().createFile(debug_path, .{});
-        try debug_file.writeAll(zig_code);
-        debug_file.close();
+        if (self.config.dump_zig) {
+            const debug_path = self.config.dump_zig_path orelse "debug_aot.zig";
+            const debug_file = try std.fs.cwd().createFile(debug_path, .{});
+            defer debug_file.close();
+            try debug_file.writeAll(zig_code);
+        }
 
         {
             const file = try std.fs.cwd().createFile(zig_file_path, .{});
@@ -5891,14 +5902,68 @@ pub const NativeLinker = struct {
         try args.append(self.allocator, "-target");
         try args.append(self.allocator, target_str);
 
+        if (self.config.mcpu) |cpu| {
+            if (cpu.len > 0) {
+                const mcpu_arg = try std.fmt.allocPrint(self.allocator, "-mcpu={s}", .{cpu});
+                defer self.allocator.free(mcpu_arg);
+                try args.append(self.allocator, mcpu_arg);
+            }
+        }
+
+        for (self.config.extra_zig_flags) |flag| {
+            try args.append(self.allocator, flag);
+        }
+
         // 静态链接（macOS 不支持）
         if (self.config.static_link and self.config.target.os != .macos) {
             try args.append(self.allocator, "-static");
         }
 
-        // 剥离符号
-        if (self.config.strip_symbols) {
+        const want_strip = self.config.strip_symbols or (!self.config.debug_info and self.config.optimize_level != .debug);
+        if (want_strip) {
             try args.append(self.allocator, "-fstrip");
+        }
+
+        if (self.config.emit_asm_path) |p| {
+            if (p.len == 0) {
+                const derived = try std.fmt.allocPrint(self.allocator, "{s}.s", .{output_path});
+                defer self.allocator.free(derived);
+                const emit = try std.fmt.allocPrint(self.allocator, "-femit-asm={s}", .{derived});
+                defer self.allocator.free(emit);
+                try args.append(self.allocator, emit);
+            } else {
+                const emit = try std.fmt.allocPrint(self.allocator, "-femit-asm={s}", .{p});
+                defer self.allocator.free(emit);
+                try args.append(self.allocator, emit);
+            }
+        }
+
+        if (self.config.emit_llvm_ir_path) |p| {
+            if (p.len == 0) {
+                const derived = try std.fmt.allocPrint(self.allocator, "{s}.ll", .{output_path});
+                defer self.allocator.free(derived);
+                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-ir={s}", .{derived});
+                defer self.allocator.free(emit);
+                try args.append(self.allocator, emit);
+            } else {
+                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-ir={s}", .{p});
+                defer self.allocator.free(emit);
+                try args.append(self.allocator, emit);
+            }
+        }
+
+        if (self.config.emit_llvm_bc_path) |p| {
+            if (p.len == 0) {
+                const derived = try std.fmt.allocPrint(self.allocator, "{s}.bc", .{output_path});
+                defer self.allocator.free(derived);
+                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-bc={s}", .{derived});
+                defer self.allocator.free(emit);
+                try args.append(self.allocator, emit);
+            } else {
+                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-bc={s}", .{p});
+                defer self.allocator.free(emit);
+                try args.append(self.allocator, emit);
+            }
         }
 
         if (self.config.verbose) {
