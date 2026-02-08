@@ -208,8 +208,7 @@ pub const Parser = struct {
                 self.nextToken();
                 continue;
             }
-            const stmt = self.parseStatement() catch |err| {
-                std.debug.print("DEBUG: parseStatement failed with error: {any} at token: {any} ({s})\n", .{ err, self.curr.tag, self.lexer.buffer[self.curr.loc.start..self.curr.loc.end] });
+            const stmt = self.parseStatement() catch {
                 self.synchronize();
                 continue;
             };
@@ -286,7 +285,10 @@ pub const Parser = struct {
             .k_throw => self.parseThrow(),
             .k_echo => self.parseEcho(),
             .k_global => self.parseGlobal(),
-            .k_static => self.parseStatic(),
+            .k_static => {
+                if (self.peek.tag == .double_colon) return self.parseExpressionStatement();
+                return self.parseStatic();
+            },
             .k_const => self.parseConst(),
             .k_go => self.parseGo(),
             .k_lock => self.parseLock(),
@@ -1489,6 +1491,7 @@ pub const Parser = struct {
                     .variable => left_node.data.variable.name,
                     .self_expr => left_node.data.variable.name,
                     .parent_expr => left_node.data.variable.name,
+                    .static_expr => left_node.data.variable.name,
                     else => {
                         self.reportError("Invalid static access target");
                         return error.InvalidStaticAccess;
@@ -1753,6 +1756,11 @@ pub const Parser = struct {
                 const t = try self.eat(.k_parent);
                 const name_id = try self.context.intern("parent");
                 return self.createNode(.{ .tag = .parent_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
+            },
+            .k_static => {
+                const t = try self.eat(.k_static);
+                const name_id = try self.context.intern("static");
+                return self.createNode(.{ .tag = .static_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
             },
             .k_true => {
                 const t = try self.eat(.k_true);

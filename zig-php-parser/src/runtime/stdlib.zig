@@ -23,6 +23,7 @@ const SimdString = simd_ops.SimdString;
 
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
+const builtin_dispatch = @import("builtin_dispatch.zig");
 
 // Helper function to create string return value (inline for performance)
 inline fn createStringReturn(allocator: std.mem.Allocator, str: *PHPString) !Value {
@@ -104,6 +105,51 @@ pub const StandardLibrary = struct {
 
     pub fn getFunction(self: *StandardLibrary, name: []const u8) ?*const BuiltinFunction {
         return self.functions.get(name);
+    }
+
+    pub fn callBuiltinFast(vm: *VM, name: []const u8, args: []const Value) anyerror!?Value {
+        const id = builtin_dispatch.lookup(name) orelse return null;
+
+        const b_strlen: BuiltinFunction = .{ .name = "strlen", .min_args = 1, .max_args = 1, .handler = strlenFn };
+        const b_count: BuiltinFunction = .{ .name = "count", .min_args = 1, .max_args = 2, .handler = countFn };
+        const b_sizeof: BuiltinFunction = .{ .name = "sizeof", .min_args = 1, .max_args = 2, .handler = countFn };
+        const b_strpos: BuiltinFunction = .{ .name = "strpos", .min_args = 2, .max_args = 3, .handler = strposFn };
+        const b_stripos: BuiltinFunction = .{ .name = "stripos", .min_args = 2, .max_args = 3, .handler = striposFn };
+        const b_substr: BuiltinFunction = .{ .name = "substr", .min_args = 2, .max_args = 3, .handler = substrFn };
+        const b_strtolower: BuiltinFunction = .{ .name = "strtolower", .min_args = 1, .max_args = 1, .handler = strtolowerFn };
+        const b_strtoupper: BuiltinFunction = .{ .name = "strtoupper", .min_args = 1, .max_args = 1, .handler = strtoupperFn };
+        const b_trim: BuiltinFunction = .{ .name = "trim", .min_args = 1, .max_args = 2, .handler = trimFn };
+        const b_ltrim: BuiltinFunction = .{ .name = "ltrim", .min_args = 1, .max_args = 2, .handler = ltrimFn };
+        const b_rtrim: BuiltinFunction = .{ .name = "rtrim", .min_args = 1, .max_args = 2, .handler = rtrimFn };
+        const b_array_map: BuiltinFunction = .{ .name = "array_map", .min_args = 2, .max_args = 255, .handler = arrayMapFn };
+        const b_array_filter: BuiltinFunction = .{ .name = "array_filter", .min_args = 1, .max_args = 3, .handler = arrayFilterFn };
+        const b_array_reduce: BuiltinFunction = .{ .name = "array_reduce", .min_args = 2, .max_args = 3, .handler = arrayReduceFn };
+        const b_json_encode: BuiltinFunction = .{ .name = "json_encode", .min_args = 1, .max_args = 3, .handler = jsonEncodeFn };
+        const b_json_decode: BuiltinFunction = .{ .name = "json_decode", .min_args = 1, .max_args = 4, .handler = jsonDecodeFn };
+        const b_echo: BuiltinFunction = .{ .name = "echo", .min_args = 1, .max_args = 255, .handler = echoFn };
+
+        const result = switch (id) {
+            .strlen => try b_strlen.call(vm, args),
+            .count => try b_count.call(vm, args),
+            .sizeof => try b_sizeof.call(vm, args),
+            .strpos => try b_strpos.call(vm, args),
+            .stripos => try b_stripos.call(vm, args),
+            .substr => try b_substr.call(vm, args),
+            .strtolower => try b_strtolower.call(vm, args),
+            .strtoupper => try b_strtoupper.call(vm, args),
+            .trim => try b_trim.call(vm, args),
+            .ltrim => try b_ltrim.call(vm, args),
+            .rtrim => try b_rtrim.call(vm, args),
+            .array_map => try b_array_map.call(vm, args),
+            .array_filter => try b_array_filter.call(vm, args),
+            .array_reduce => try b_array_reduce.call(vm, args),
+            .json_encode => try b_json_encode.call(vm, args),
+            .json_decode => try b_json_decode.call(vm, args),
+            .echo => try b_echo.call(vm, args),
+            else => return null,
+        };
+
+        return result;
     }
 
     // Array Functions
@@ -4011,21 +4057,84 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
         .object => {
             const obj = value.getAsObject().data;
             const class_name = obj.class.name.data;
-            const props_count = obj.shape.property_count;
+            if (obj.class.hasMethod("__serialize")) {
+                const data_val = try vm.callObjectMethod(value, "__serialize", &.{});
+                defer data_val.release(vm.allocator);
 
+                if (data_val.getTag() == .array) {
+                    const arr = data_val.getAsArray().data;
+                    const count = arr.count();
+                    try buffer.writer(vm.allocator).print("O:{d}:\"{s}\":{d}:{{", .{ class_name.len, class_name, count });
+
+                    var it = arr.getElements().iterator();
+                    while (it.next()) |entry| {
+                        const key = entry.key_ptr.*;
+                        const val = entry.value_ptr.*;
+
+                        switch (key) {
+                            .integer => |i| try buffer.writer(vm.allocator).print("i:{d};", .{i}),
+                            .string => |s| try buffer.writer(vm.allocator).print("s:{d}:\"{s}\";", .{ s.data.len, s.data }),
+                        }
+
+                        try serializeValue(vm, buffer, val);
+                    }
+
+                    try buffer.appendSlice(vm.allocator, "}");
+                    return;
+                }
+            }
+
+            var allow_list: ?*PHPArray = null;
+            var allow_val: Value = Value.initNull();
+            defer if (allow_val.getTag() != .null) allow_val.release(vm.allocator);
+
+            if (obj.class.hasMethod("__sleep")) {
+                allow_val = try vm.callObjectMethod(value, "__sleep", &.{});
+                if (allow_val.getTag() == .array) {
+                    allow_list = allow_val.getAsArray().data;
+                }
+            }
+
+            const props_count: usize = if (allow_list) |list| list.count() else obj.shape.property_count;
             try buffer.writer(vm.allocator).print("O:{d}:\"{s}\":{d}:{{", .{ class_name.len, class_name, props_count });
 
-            var iterator = obj.shape.property_map.iterator();
-            while (iterator.next()) |entry| {
-                const key = entry.key_ptr.*;
-                const offset = entry.value_ptr.*;
-                const val = obj.property_values.items[offset];
+            if (allow_list) |list| {
+                var it_allow = list.getElements().iterator();
+                while (it_allow.next()) |entry| {
+                    const name_val = entry.value_ptr.*;
+                    if (name_val.getTag() != .string) continue;
+                    const prop_name = name_val.getAsString().data.data;
 
-                // Serialize property name (as private property)
-                try buffer.writer(vm.allocator).print("s:{d}:\"\\0{s}\\0{s}\";", .{ key.len + 2, class_name, key });
+                    const val = if (obj.shape.property_map.get(prop_name)) |offset|
+                        obj.property_values.items[offset]
+                    else
+                        Value.initNull();
 
-                // Serialize value
-                try serializeValue(vm, buffer, val);
+                    const full_len = class_name.len + prop_name.len + 2;
+                    try buffer.writer(vm.allocator).print("s:{d}:\"", .{full_len});
+                    try buffer.appendSlice(vm.allocator, &[_]u8{0});
+                    try buffer.appendSlice(vm.allocator, class_name);
+                    try buffer.appendSlice(vm.allocator, &[_]u8{0});
+                    try buffer.appendSlice(vm.allocator, prop_name);
+                    try buffer.appendSlice(vm.allocator, "\";");
+                    try serializeValue(vm, buffer, val);
+                }
+            } else {
+                var iterator = obj.shape.property_map.iterator();
+                while (iterator.next()) |entry| {
+                    const prop_name = entry.key_ptr.*;
+                    const offset = entry.value_ptr.*;
+                    const val = obj.property_values.items[offset];
+
+                    const full_len = class_name.len + prop_name.len + 2;
+                    try buffer.writer(vm.allocator).print("s:{d}:\"", .{full_len});
+                    try buffer.appendSlice(vm.allocator, &[_]u8{0});
+                    try buffer.appendSlice(vm.allocator, class_name);
+                    try buffer.appendSlice(vm.allocator, &[_]u8{0});
+                    try buffer.appendSlice(vm.allocator, prop_name);
+                    try buffer.appendSlice(vm.allocator, "\";");
+                    try serializeValue(vm, buffer, val);
+                }
             }
 
             try buffer.appendSlice(vm.allocator, "}");
@@ -4146,6 +4255,71 @@ fn unserializeValue(vm: *VM, data: []const u8, pos: *usize) !Value {
             };
 
             break :blk Value.fromBox(box, Value.TYPE_ARRAY);
+        },
+        'O' => blk: {
+            pos.* += 1; // Skip ':'
+            const colon1 = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const name_len_str = data[pos.*..colon1];
+            pos.* = colon1 + 1;
+            const name_len = std.fmt.parseInt(usize, name_len_str, 10) catch 0;
+            pos.* += 1; // Skip '"'
+            const class_name = data[pos.* .. pos.* + name_len];
+            pos.* += name_len + 2; // Skip class and '":'
+
+            const colon2 = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const count_str = data[pos.*..colon2];
+            pos.* = colon2 + 1;
+            const count = std.fmt.parseInt(usize, count_str, 10) catch 0;
+            pos.* += 1; // Skip '{'
+
+            const obj_val = try vm.createObject(class_name);
+            const obj = obj_val.getAsObject().data;
+
+            const data_arr_val = try Value.initArrayWithManager(&vm.memory_manager);
+            const data_arr = data_arr_val.getAsArray().data;
+            defer data_arr_val.release(vm.allocator);
+
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const key_val = try unserializeValue(vm, data, pos);
+                const val = try unserializeValue(vm, data, pos);
+                defer key_val.release(vm.allocator);
+                defer val.release(vm.allocator);
+
+                if (key_val.getTag() != .string) continue;
+                const raw_key = key_val.getAsString().data.data;
+                var prop_name: []const u8 = raw_key;
+                if (raw_key.len > 0 and raw_key[0] == 0) {
+                    if (std.mem.indexOfScalarPos(u8, raw_key, 1, 0)) |nul2| {
+                        if (nul2 + 1 <= raw_key.len) prop_name = raw_key[nul2 + 1 ..];
+                    }
+                }
+
+                const key_str = try PHPString.init(vm.allocator, prop_name);
+                defer key_str.release(vm.allocator);
+                try data_arr.set(vm.allocator, ArrayKey{ .string = key_str }, val);
+            }
+
+            pos.* += 1; // Skip '}'
+
+            if (obj.class.hasMethod("__unserialize")) {
+                const args = [_]Value{data_arr_val};
+                _ = try vm.callObjectMethod(obj_val, "__unserialize", &args);
+                break :blk obj_val;
+            }
+
+            var it = data_arr.getElements().iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (key != .string) continue;
+                try obj.setProperty(vm.allocator, key.string.data, entry.value_ptr.*);
+            }
+
+            if (obj.class.hasMethod("__wakeup")) {
+                _ = vm.callObjectMethod(obj_val, "__wakeup", &.{}) catch {};
+            }
+
+            break :blk obj_val;
         },
         else => Value.initNull(),
     };

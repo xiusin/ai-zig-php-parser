@@ -140,33 +140,20 @@ pub const SourceLocation = struct {
     ) !void {
         _ = fmt;
         _ = options;
-
-        // 获取相对路径（从当前目录开始）
-        const rel_path = if (std.mem.startsWith(u8, self.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
-            self.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
-        else
-            self.file;
-
         if (self.line > 0) {
-            try writer.print("{s}:{d}:{d}", .{ rel_path, self.line, self.column });
+            try writer.print("{s}:{d}:{d}", .{ self.file, self.line, self.column });
         } else {
-            try writer.print("{s}", .{rel_path});
+            try writer.print("{s}", .{self.file});
         }
     }
 
     /// Convert to string for display
     pub fn toString(self: SourceLocation, allocator: std.mem.Allocator) ![]const u8 {
-        // 获取相对路径（从当前目录开始）
-        const rel_path = if (std.mem.startsWith(u8, self.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
-            self.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
-        else
-            self.file;
-
         if (self.line > 0) {
-            return std.fmt.allocPrint(allocator, "{s}:{d}:{d}", .{ rel_path, self.line, self.column });
-        } else {
-            return std.fmt.allocPrint(allocator, "{s}", .{rel_path});
+            return std.fmt.allocPrint(allocator, "{s}:{d}:{d}", .{ self.file, self.line, self.column });
         }
+
+        return std.fmt.allocPrint(allocator, "{s}", .{self.file});
     }
 };
 
@@ -203,6 +190,9 @@ pub const DiagnosticEngine = struct {
     use_colors: bool = true,
     /// Source code lines for context display (optional)
     source_lines: ?[]const []const u8 = null,
+    /// Line start offsets for location calculation
+    line_offsets: std.ArrayListUnmanaged(usize) = .{},
+    path_base: ?[]const u8 = null,
 
     const Self = @This();
 
@@ -216,6 +206,10 @@ pub const DiagnosticEngine = struct {
 
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
+        if (self.path_base) |base| {
+            self.allocator.free(base);
+            self.path_base = null;
+        }
         // Free allocated messages
         for (self.diagnostics.items) |diag| {
             self.allocator.free(diag.message);
@@ -226,6 +220,7 @@ pub const DiagnosticEngine = struct {
         if (self.source_lines) |lines| {
             self.allocator.free(lines);
         }
+        self.line_offsets.deinit(self.allocator);
     }
 
     /// Set source code for context display
@@ -233,12 +228,72 @@ pub const DiagnosticEngine = struct {
         var lines = std.ArrayListUnmanaged([]const u8){};
         errdefer lines.deinit(self.allocator);
 
+        // Build line offsets
+        self.line_offsets.clearRetainingCapacity();
+        try self.line_offsets.append(self.allocator, 0);
+
+        var offset: usize = 0;
         var it = std.mem.splitScalar(u8, source, '\n');
         while (it.next()) |line| {
             try lines.append(self.allocator, line);
+            offset += line.len + 1; // +1 for newline
+            if (offset < source.len) {
+                try self.line_offsets.append(self.allocator, offset);
+            }
         }
 
         self.source_lines = try lines.toOwnedSlice(self.allocator);
+    }
+
+    pub fn setPathBase(self: *Self, base_dir: []const u8) !void {
+        if (self.path_base) |old| {
+            self.allocator.free(old);
+            self.path_base = null;
+        }
+
+        const has_sep = base_dir.len > 0 and (base_dir[base_dir.len - 1] == std.fs.path.sep);
+        const normalized = if (has_sep)
+            try self.allocator.dupe(u8, base_dir)
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}{c}", .{ base_dir, std.fs.path.sep });
+        self.path_base = normalized;
+    }
+
+    /// Get line and column for a byte offset
+    pub fn getLocation(self: *const Self, offset: usize) struct { line: u32, column: u32 } {
+        if (self.line_offsets.items.len == 0) return .{ .line = 1, .column = 1 };
+
+        // Binary search for line
+        // Find largest line_start <= offset
+        var left: usize = 0;
+        var right: usize = self.line_offsets.items.len;
+
+        while (left < right) {
+            const mid = left + (right - left) / 2;
+            if (self.line_offsets.items[mid] > offset) {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+
+        // left is now the index of the first line start > offset
+        // so the line index is left - 1
+        const line_idx = if (left > 0) left - 1 else 0;
+        const line_start = self.line_offsets.items[line_idx];
+
+        return .{
+            .line = @intCast(line_idx + 1),
+            .column = @intCast(offset - line_start + 1),
+        };
+    }
+
+    pub fn relativizePath(self: *const Self, path: []const u8) []const u8 {
+        const base = self.path_base orelse return path;
+        if (std.mem.startsWith(u8, path, base)) {
+            return path[base.len..];
+        }
+        return path;
     }
 
     /// Report an error
@@ -423,11 +478,7 @@ pub const DiagnosticEngine = struct {
         // Print location and severity
         try writer.print("{s}", .{bold});
 
-        // 获取相对路径（从当前目录开始）
-        const rel_path = if (std.mem.startsWith(u8, diag.location.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
-            diag.location.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
-        else
-            diag.location.file;
+        const rel_path = self.relativizePath(diag.location.file);
 
         if (diag.location.line > 0) {
             try writer.print("{s}:{d}:{d}", .{ rel_path, diag.location.line, diag.location.column });
@@ -502,7 +553,15 @@ pub const DiagnosticEngine = struct {
         // Print related notes
         for (diag.notes) |note| {
             if (note.location) |loc| {
-                try writer.print("    {s}note{s}: {any}: {s}\n", .{ color, reset, loc, note.message });
+                const note_path = self.relativizePath(loc.file);
+                if (loc.line > 0) {
+                    try writer.print(
+                        "    {s}note{s}: {s}:{d}:{d}: {s}\n",
+                        .{ color, reset, note_path, loc.line, loc.column, note.message },
+                    );
+                } else {
+                    try writer.print("    {s}note{s}: {s}: {s}\n", .{ color, reset, note_path, note.message });
+                }
             } else {
                 try writer.print("    {s}note{s}: {s}\n", .{ color, reset, note.message });
             }
@@ -546,12 +605,7 @@ pub const DiagnosticEngine = struct {
         const bold = if (self.use_colors) "\x1b[1m" else "";
         const color = if (self.use_colors) diag.severity.toColor() else "";
 
-        // Print location and severity
-        // 获取相对路径（从当前目录开始）
-        const rel_path = if (std.mem.startsWith(u8, diag.location.file, "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/"))
-            diag.location.file["/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/".len..]
-        else
-            diag.location.file;
+        const rel_path = self.relativizePath(diag.location.file);
 
         if (diag.location.line > 0) {
             std.debug.print("{s}{s}:{d}:{d}{s}: {s}{s}{s}: {s}", .{
@@ -637,10 +691,11 @@ pub const DiagnosticEngine = struct {
         // Print related notes
         for (diag.notes) |note| {
             if (note.location) |loc| {
+                const note_path = self.relativizePath(loc.file);
                 if (loc.line > 0) {
-                    std.debug.print("    {s}note{s}: {s}:{d}:{d}: {s}\n", .{ color, reset, loc.file, loc.line, loc.column, note.message });
+                    std.debug.print("    {s}note{s}: {s}:{d}:{d}: {s}\n", .{ color, reset, note_path, loc.line, loc.column, note.message });
                 } else {
-                    std.debug.print("    {s}note{s}: {s}: {s}\n", .{ color, reset, loc.file, note.message });
+                    std.debug.print("    {s}note{s}: {s}: {s}\n", .{ color, reset, note_path, note.message });
                 }
             } else {
                 std.debug.print("    {s}note{s}: {s}\n", .{ color, reset, note.message });
@@ -944,4 +999,56 @@ test "DiagnosticEngine render with CWE and fixes" {
     try std.testing.expect(std.mem.indexOf(u8, output, "CWE-476") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Add null check") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "https://cwe.mitre.org") != null);
+}
+
+test "DiagnosticEngine path base relativize" {
+    const allocator = std.testing.allocator;
+    var engine = DiagnosticEngine.init(allocator);
+    defer engine.deinit();
+    engine.use_colors = false;
+
+    try engine.setPathBase("/repo/project");
+    engine.reportError(.{ .file = "/repo/project/examples/tests/basic/test.php", .line = 3, .column = 2 }, "msg", .{});
+
+    var buf: [512]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try engine.render(fbs.writer());
+
+    const output = fbs.getWritten();
+    try std.testing.expect(std.mem.startsWith(u8, output, "examples/tests/basic/test.php:3:2"));
+}
+
+test "DiagnosticEngine getLocation" {
+    const allocator = std.testing.allocator;
+    var engine = DiagnosticEngine.init(allocator);
+    defer engine.deinit();
+
+    const source = 
+        \\line 1
+        \\line 2
+        \\line 3
+    ;
+    try engine.setSource(source);
+
+    // Line 1: "line 1" (len 6)
+    // Offset 0 -> 1:1
+    const loc1 = engine.getLocation(0);
+    try std.testing.expectEqual(@as(u32, 1), loc1.line);
+    try std.testing.expectEqual(@as(u32, 1), loc1.column);
+
+    // Offset 6 -> 1:7 (newline is at offset 6)
+    const loc2 = engine.getLocation(6);
+    try std.testing.expectEqual(@as(u32, 1), loc2.line);
+    try std.testing.expectEqual(@as(u32, 7), loc2.column);
+
+    // Line 2: starts at offset 7
+    // Offset 7 -> 2:1
+    const loc3 = engine.getLocation(7);
+    try std.testing.expectEqual(@as(u32, 2), loc3.line);
+    try std.testing.expectEqual(@as(u32, 1), loc3.column);
+
+    // Offset 10 -> 2:4 ("l" is 7, "i" is 8, "n" is 9, "e" is 10)
+    const loc4 = engine.getLocation(10);
+    try std.testing.expectEqual(@as(u32, 2), loc4.line);
+    try std.testing.expectEqual(@as(u32, 4), loc4.column);
 }

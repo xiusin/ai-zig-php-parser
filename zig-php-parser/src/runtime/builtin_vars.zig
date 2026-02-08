@@ -201,7 +201,6 @@ fn executeCallback(vm: *VM, callback: Value, args: []const Value) !Value {
         },
         .user_function => try vm.callUserFunction(callback.getAsUserFunc().data, args),
         .closure => try vm.callClosure(callback.getAsClosure().data, args),
-        .arrow_function => try vm.callArrowFunction(callback.getAsArrowFunc().data, args),
         .string => {
             // Callback is a function name string
             const func_name = callback.getAsString().data.data;

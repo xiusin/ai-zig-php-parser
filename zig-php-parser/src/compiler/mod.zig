@@ -8,6 +8,7 @@ pub const token = @import("token.zig");
 pub const lexer = @import("lexer.zig");
 pub const syntax_mode = @import("syntax_mode.zig");
 pub const escape_analysis = @import("escape_analysis.zig");
+pub const root = @import("root.zig");
 
 // 导出常用类型
 pub const Node = ast.Node;

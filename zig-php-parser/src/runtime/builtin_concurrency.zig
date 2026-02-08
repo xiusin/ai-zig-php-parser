@@ -10,6 +10,8 @@ pub fn registerConcurrencyClasses(vm: anytype) !void {
     try registerRWLockClass(vm);
     try registerSharedDataClass(vm);
     try registerChannelClass(vm);
+    try vm.defineBuiltin("select", selectFn);
+    try vm.defineBuiltin("go_join", goJoinFn);
 }
 
 /// 注册 Mutex 类
@@ -309,16 +311,17 @@ fn registerChannelClass(vm: anytype) !void {
 }
 
 fn channelDestructor(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    _ = allocator;
     const channel = @as(*concurrency.PHPChannel, @ptrCast(@alignCast(ptr)));
     channel.deinit();
-    allocator.destroy(channel);
 }
 
 pub fn channelConstructor(vm: anytype, args: []Value) !Value {
-    const capacity: usize = if (args.len > 0 and args[0].getTag() == .integer)
+    const requested: usize = if (args.len > 0 and args[0].getTag() == .integer)
         @intCast(@max(0, args[0].asInt()))
     else
-        0;
+        1;
+    const capacity: usize = if (requested == 0) 1 else requested;
 
     const channel = try concurrency.PHPChannel.init(vm.allocator, capacity);
 
@@ -368,4 +371,74 @@ pub fn callChannelMethod(vm: anytype, obj: *types.PHPObject, method_name: []cons
 
     _ = vm;
     return error.MethodNotFound;
+}
+
+pub fn selectFn(vm: anytype, args: []const Value) !Value {
+    if (args.len < 1) return error.InvalidArgument;
+    const cases_arg = args[0];
+    if (cases_arg.getTag() != .array) return error.InvalidArgument;
+
+    var timeout_ms: ?u64 = null;
+    if (args.len > 1 and args[1].getTag() != .null) {
+        timeout_ms = @intCast(@max(0, args[1].asInt()));
+    }
+
+    const cases_arr = cases_arg.getAsArray().data;
+    const start_ms: u64 = @intCast(std.time.milliTimestamp());
+
+    while (true) {
+        const n = cases_arr.count();
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const case_val = cases_arr.get(.{ .integer = @intCast(i) }) orelse continue;
+            if (case_val.getTag() != .array) continue;
+            const case_arr = case_val.getAsArray().data;
+
+            const ch_val = case_arr.get(.{ .integer = 0 }) orelse continue;
+            const op_val = case_arr.get(.{ .integer = 1 }) orelse continue;
+            if (ch_val.getTag() != .object) continue;
+            if (op_val.getTag() != .integer) continue;
+
+            const obj = ch_val.getAsObject().data;
+            if (obj.native_data == null) continue;
+            const ch = @as(*concurrency.PHPChannel, @ptrCast(@alignCast(obj.native_data.?)));
+
+            const op = op_val.asInt();
+            if (op == 0) {
+                if (ch.tryRecv()) |v| {
+                    const res = try Value.initArrayWithManager(&vm.memory_manager);
+                    const out = res.getAsArray().data;
+                    try out.push(vm.allocator, Value.initInt(@intCast(i)));
+                    try out.push(vm.allocator, v);
+                    return res;
+                }
+            } else if (op == 1) {
+                const send_val = case_arr.get(.{ .integer = 2 }) orelse Value.initNull();
+                _ = send_val.retain();
+                const ok = ch.trySend(send_val);
+                if (ok) {
+                    return Value.initInt(@intCast(i));
+                }
+                send_val.release(vm.allocator);
+            }
+        }
+
+        if (timeout_ms) |t| {
+            const now: u64 = @intCast(std.time.milliTimestamp());
+            if (now - start_ms >= t) return Value.initNull();
+        }
+        std.Thread.yield() catch {};
+    }
+}
+
+fn goJoinFn(vm: anytype, args: []const Value) !Value {
+    const cm = try vm.getCoroutineManager();
+    if (args.len == 0 or args[0].isNull()) {
+        try cm.drain(@as(*anyopaque, @ptrCast(vm)));
+        return Value.initNull();
+    }
+
+    const id: u64 = @intCast(@max(0, args[0].toInt()));
+    try cm.join(@as(*anyopaque, @ptrCast(vm)), id);
+    return Value.initNull();
 }

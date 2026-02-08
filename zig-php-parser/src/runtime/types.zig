@@ -1,5 +1,6 @@
 const std = @import("std");
 pub const gc = @import("gc.zig");
+const nanbox_abi = @import("nanbox_abi");
 
 // Import NumberWrapper from separate module
 pub const number_wrapper = @import("number_wrapper.zig");
@@ -1261,6 +1262,29 @@ pub const PHPClass = struct {
         return false;
     }
 
+    pub const MethodLookup = struct {
+        owner: *PHPClass,
+        method: *Method,
+    };
+
+    pub fn getMethodLookup(self: *PHPClass, name: []const u8) ?MethodLookup {
+        if (self.methods.getPtr(name)) |method| {
+            return .{ .owner = self, .method = method };
+        }
+
+        if (self.parent) |parent| {
+            if (parent.getMethodLookup(name)) |lookup| return lookup;
+        }
+
+        for (self.traits) |trait| {
+            if (trait.methods.getPtr(name)) |method| {
+                return .{ .owner = self, .method = method };
+            }
+        }
+
+        return null;
+    }
+
     pub fn getMethod(self: *PHPClass, name: []const u8) ?*Method {
         // Check own methods first
         if (self.methods.getPtr(name)) |method| return method;
@@ -2115,8 +2139,8 @@ pub const PHPObject = struct {
         const class_name = self.class.name.data;
         const name = method_name;
 
-        const method = self.class.getMethod(name);
-        if (method == null) {
+        const lookup = self.class.getMethodLookup(name);
+        if (lookup == null) {
             // Method doesn't exist in class - check if it's a built-in class method
             // For Mutex builtin methods
             if (std.mem.eql(u8, class_name, "Mutex")) {
@@ -2155,8 +2179,10 @@ pub const PHPObject = struct {
             return error.UndefinedMethod;
         }
 
+        const method = lookup.?.method;
+
         // Special handling for built-in classes with null method bodies
-        if (method.?.body == null) {
+        if (method.body == null) {
             // For Exception classes, handle __construct specially
             if (std.mem.eql(u8, name, "__construct")) {
                 // For Exception/Error classes, set properties from arguments
@@ -2218,7 +2244,7 @@ pub const PHPObject = struct {
         try vm_instance.setVariable("$this", object_value);
 
         // Inject arguments
-        for (method.?.parameters, 0..) |param, i| {
+        for (method.parameters, 0..) |param, i| {
             if (i < args.len) {
                 try vm_instance.setVariable(param.name.data, args[i]);
             } else if (param.default_value) |default| {
@@ -2227,12 +2253,17 @@ pub const PHPObject = struct {
         }
 
         // Set current class for 'self' resolution
-        const old_class = vm_instance.current_class;
-        vm_instance.current_class = self.class;
-        defer vm_instance.current_class = old_class;
+        const old_scope_class = vm_instance.current_class;
+        const old_called_class = vm_instance.current_called_class;
+        vm_instance.current_called_class = self.class;
+        vm_instance.current_class = lookup.?.owner;
+        defer {
+            vm_instance.current_class = old_scope_class;
+            vm_instance.current_called_class = old_called_class;
+        }
 
         // Check if this is a generator function (contains yield)
-        if (method.?.body) |body_ptr| {
+        if (method.body) |body_ptr| {
             const compiler = @import("compiler");
             const ast = compiler.ast;
             const body_node = @as(ast.Node.Index, @truncate(@intFromPtr(body_ptr)));
@@ -2439,23 +2470,23 @@ pub const TypeInfo = struct {
 pub const Value = struct {
     val: u64,
 
-    pub const SIGN_BIT: u64 = 0x8000000000000000;
-    pub const QNAN: u64 = 0x7FFC000000000000;
+    pub const SIGN_BIT: u64 = nanbox_abi.SIGN_BIT;
+    pub const QNAN: u64 = nanbox_abi.QNAN;
 
     // 简单类型标签 (使用 QNAN 的低位)
     pub const TAG_NIL: u64 = 1; // 001
     pub const TAG_FALSE: u64 = 2; // 010
     pub const TAG_TRUE: u64 = 3; // 011
     // 整数使用特殊编码：QNAN | SIGN_BIT | (value & 0xFFFFFFFF)
-    pub const TAG_INT_MARKER: u64 = SIGN_BIT | QNAN;
+    pub const TAG_INT_MARKER: u64 = nanbox_abi.TAG_INT_MARKER;
 
     // 指针类型标记
     // QNAN uses bits 50-62, so we use bits 48-49 for type tags (4 types max)
     // For more types, we use a different encoding scheme
-    pub const TAG_PTR: u64 = QNAN; // 不使用 SIGN_BIT，与整数区分
+    pub const TAG_PTR: u64 = nanbox_abi.TAG_PTR; // 不使用 SIGN_BIT，与整数区分
 
     // Type tags use bits 47-49 (3 bits = 8 types)
-    pub const TYPE_MASK: u64 = 0x0003800000000000; // Bits 47-49
+    pub const TYPE_MASK: u64 = nanbox_abi.TYPE_MASK; // Bits 47-49
     pub const TYPE_STRING: u64 = 0x0000800000000000; // 001
     pub const TYPE_ARRAY: u64 = 0x0001000000000000; // 010
     pub const TYPE_OBJECT: u64 = 0x0001800000000000; // 011
@@ -2474,7 +2505,7 @@ pub const Value = struct {
     }
 
     // 48位整数常量 (与 FastValue 对齐)
-    pub const INT48_MASK: u64 = 0x0000FFFFFFFFFFFF; // 低48位掩码
+    pub const INT48_MASK: u64 = nanbox_abi.INT48_MASK; // 低48位掩码
     pub const INT48_SIGN_BIT: u64 = 0x0000800000000000; // 第47位为符号位
     pub const INT48_MAX: i64 = 0x00007FFFFFFFFFFF; // 140,737,488,355,327
     pub const INT48_MIN: i64 = -0x0000800000000000; // -140,737,488,355,328
@@ -2513,14 +2544,12 @@ pub const Value = struct {
     // --- 指针类型初始化 ---
     pub fn fromBox(box: anytype, type_tag: u64) Value {
         const addr = @intFromPtr(box);
-        // Mask lower 47 bits for address (bits 47-49 used for type)
-        return .{ .val = TAG_PTR | type_tag | (addr & 0x00007FFFFFFFFFFF) };
+        return .{ .val = nanbox_abi.encodePtr(addr, type_tag) };
     }
 
     fn initPtr(ptr: anytype, type_tag: u64) Value {
         const addr = @intFromPtr(ptr);
-        // Mask lower 47 bits for address (bits 47-49 used for type)
-        return .{ .val = TAG_PTR | type_tag | (addr & 0x00007FFFFFFFFFFF) };
+        return .{ .val = nanbox_abi.encodePtr(addr, type_tag) };
     }
 
     pub fn initString(allocator: std.mem.Allocator, str: []const u8) !Value {
@@ -2663,8 +2692,7 @@ pub const Value = struct {
     }
 
     pub fn asPtr(self: Value, comptime T: type) T {
-        // Extract lower 47 bits for address (bits 47-49 used for type)
-        return @ptrFromInt(self.val & 0x00007FFFFFFFFFFF);
+        return @ptrFromInt(nanbox_abi.decodePtr(self.val));
     }
 
     pub const Tag = enum { null, boolean, integer, float, string, array, object, struct_instance, resource, user_function, closure, arrow_function, native_function };

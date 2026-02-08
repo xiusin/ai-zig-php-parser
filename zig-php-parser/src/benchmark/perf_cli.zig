@@ -5,6 +5,7 @@ const RegressionDetector = @import("regression_detector.zig").RegressionDetector
 const BenchmarkResult = @import("regression_detector.zig").BenchmarkResult;
 const CIRunner = @import("ci_integration.zig").CIRunner;
 const CIConfig = @import("ci_integration.zig").CIConfig;
+const microbench_suite = @import("microbench_suite.zig");
 
 const Command = enum {
     check,
@@ -60,12 +61,13 @@ fn printHelp() !void {
         \\
         \\Options:
         \\  --baseline-dir <dir>    - Baseline directory (default: .perf_baselines)
-        \\  --threshold <percent>   - Regression threshold (default: 5.0)
+        \\  --threshold <percent>   - Time regression threshold (default: 5.0)
+        \\  --mem-threshold <percent> - Memory regression threshold (default: 1.0)
         \\  --commit <sha>          - Git commit SHA
         \\  --fail-on-regression    - Exit with error on regression
         \\
         \\Examples:
-        \\  perf-cli check --threshold 10.0
+        \\  perf-cli check --threshold 10.0 --mem-threshold 2.0
         \\  perf-cli update --commit abc123
         \\  perf-cli list
         \\  perf-cli compare baseline1.json baseline2.json
@@ -85,6 +87,9 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, args[i], "--threshold") and i + 1 < args.len) {
             config.threshold_percent = try std.fmt.parseFloat(f64, args[i + 1]);
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--mem-threshold") and i + 1 < args.len) {
+            config.mem_threshold_percent = try std.fmt.parseFloat(f64, args[i + 1]);
+            i += 1;
         } else if (std.mem.eql(u8, args[i], "--fail-on-regression")) {
             config.fail_on_regression = true;
         }
@@ -94,30 +99,13 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
     
     std.debug.print("Running performance regression check...\n", .{});
     std.debug.print("Baseline directory: {s}\n", .{config.baseline_dir});
-    std.debug.print("Regression threshold: {d:.1}%\n\n", .{config.threshold_percent});
+    std.debug.print("Time threshold: {d:.1}%\n", .{config.threshold_percent});
+    std.debug.print("Memory threshold: {d:.1}%\n\n", .{config.mem_threshold_percent});
     
-    // 这里应该运行实际的基准测试
-    // 为了演示，我们创建一些模拟结果
-    const results = [_]BenchmarkResult{
-        .{
-            .benchmark_name = "string_operations",
-            .avg_time_ns = 1500,
-            .min_time_ns = 1400,
-            .max_time_ns = 1600,
-            .stddev_ns = 50.0,
-            .iterations = 1000,
-        },
-        .{
-            .benchmark_name = "array_operations",
-            .avg_time_ns = 2500,
-            .min_time_ns = 2300,
-            .max_time_ns = 2700,
-            .stddev_ns = 100.0,
-            .iterations = 1000,
-        },
-    };
-    
-    const success = try runner.runAndCheck(&results);
+    const results = try microbench_suite.runAll(allocator);
+    defer allocator.free(results);
+
+    const success = try runner.runAndCheck(results);
     
     if (!success) {
         std.process.exit(1);
@@ -140,25 +128,16 @@ fn runUpdate(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
     
-    var detector = try RegressionDetector.init(allocator, baseline_dir, 5.0);
+    var detector = try RegressionDetector.init(allocator, baseline_dir, 5.0, 1.0);
     
     std.debug.print("Updating performance baselines...\n", .{});
     std.debug.print("Baseline directory: {s}\n", .{baseline_dir});
     std.debug.print("Git commit: {s}\n\n", .{git_commit});
     
-    // 这里应该运行实际的基准测试
-    const results = [_]BenchmarkResult{
-        .{
-            .benchmark_name = "string_operations",
-            .avg_time_ns = 1500,
-            .min_time_ns = 1400,
-            .max_time_ns = 1600,
-            .stddev_ns = 50.0,
-            .iterations = 1000,
-        },
-    };
-    
-    try detector.updateBaselines(&results, git_commit);
+    const results = try microbench_suite.runAll(allocator);
+    defer allocator.free(results);
+
+    try detector.updateBaselines(results, git_commit);
     
     std.debug.print("✅ Baselines updated successfully\n", .{});
 }

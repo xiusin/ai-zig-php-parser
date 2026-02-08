@@ -35,6 +35,7 @@ pub const profiler = @import("profiler.zig");
 pub const leak_detector = @import("leak_detector.zig");
 pub const crash_handler = @import("crash_handler.zig");
 pub const flamegraph = @import("flamegraph.zig");
+pub const pprof = @import("pprof.zig");
 
 // 内置函数
 pub const builtin_dispatch = @import("builtin_dispatch.zig");

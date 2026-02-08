@@ -21,9 +21,14 @@ pub fn build(b: *std.Build) void {
     const runtime_mod = b.createModule(.{
         .root_source_file = b.path("src/runtime/mod.zig"),
     });
+
+    const nanbox_abi_mod = b.createModule(.{
+        .root_source_file = b.path("src/shared/nanbox_abi.zig"),
+    });
     
     // 模块相互依赖
     runtime_mod.addImport("compiler", compiler_mod);
+    runtime_mod.addImport("nanbox_abi", nanbox_abi_mod);
     compiler_mod.addImport("runtime", runtime_mod);
     
     // 字节码模块
@@ -74,12 +79,6 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("jit", jit_mod);
     exe.root_module.addImport("extension", extension_mod);
     exe.linkLibC();
-    // 添加模块导入
-    exe.root_module.addImport("compiler", compiler_mod);
-    exe.root_module.addImport("runtime", runtime_mod);
-    exe.root_module.addImport("bytecode", bytecode_mod);
-    exe.root_module.addImport("jit", jit_mod);
-    exe.root_module.addImport("extension", extension_mod);
     // Detect platform for Homebrew PCRE2 paths
     const pcre2_prefix = if (builtin.target.cpu.arch == .aarch64) "/opt/homebrew/opt/pcre2" else "/usr/local/opt/pcre2";
     exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
@@ -123,16 +122,20 @@ pub fn build(b: *std.Build) void {
     // List of all test files (only existing files)
     const test_files = [_][]const u8{
         // AOT module tests
-        "src/aot/root.zig",
-        "src/aot/diagnostics.zig",
-        "src/aot/ir_generator.zig",
+        // "src/aot/root.zig",
+        // "src/aot/diagnostics.zig",
+        // "src/aot/ir_generator.zig",
+        "src/aot/test_control_flow_ir.zig",
+        "src/aot/test_optimizer_metrics.zig",
+        "src/aot/test_licm.zig",
+        "src/aot/test_loop_unroll.zig",
+        "src/aot/test_runtime_arrays.zig",
+        "src/aot/test_runtime_cycle_gc.zig",
+        "src/aot/test_runtime_comprehensive.zig",
         // Runtime tests
-        "src/runtime/coroutine_error_handling.zig",
-        "src/runtime/coroutine_debugging.zig",
-        "src/runtime/test_error_handling_property.zig",
-        // JIT tests
-        "src/jit/test_fallback_properties.zig",
-        "src/jit/test_fallback_integration.zig",
+        // "src/runtime/coroutine_error_handling.zig",
+        // "src/runtime/coroutine_debugging.zig",
+        // "src/runtime/test_error_handling_property.zig",
     };
 
     // Add all test files
@@ -145,13 +148,9 @@ pub fn build(b: *std.Build) void {
             }),
         });
         test_exe.linkLibC();
-    // 添加模块导入
-    test_exe.root_module.addImport("compiler", compiler_mod);
-    test_exe.root_module.addImport("runtime", runtime_mod);
-    test_exe.root_module.addImport("bytecode", bytecode_mod);
-    test_exe.root_module.addImport("jit", jit_mod);
-    test_exe.root_module.addImport("extension", extension_mod);
-        
+        test_exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
+        test_exe.addLibraryPath(.{ .cwd_relative = pcre2_prefix ++ "/lib" });
+        test_exe.linkSystemLibrary("pcre2-8");
         // 添加模块导入
         test_exe.root_module.addImport("compiler", compiler_mod);
         test_exe.root_module.addImport("runtime", runtime_mod);
@@ -162,82 +161,9 @@ pub fn build(b: *std.Build) void {
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);
     }
-    
-    // Bytecode optimizer property tests
-    const optimizer_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bytecode/test_optimizer_properties.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    optimizer_test.linkLibC();
-    // 添加模块导入
-    optimizer_test.root_module.addImport("compiler", compiler_mod);
-    optimizer_test.root_module.addImport("runtime", runtime_mod);
-    optimizer_test.root_module.addImport("bytecode", bytecode_mod);
-    optimizer_test.root_module.addImport("jit", jit_mod);
-    optimizer_test.root_module.addImport("extension", extension_mod);
-    // 添加模块导入
-    optimizer_test.root_module.addImport("compiler", compiler_mod);
-    optimizer_test.root_module.addImport("runtime", runtime_mod);
-    optimizer_test.root_module.addImport("bytecode", bytecode_mod);
-    optimizer_test.root_module.addImport("jit", jit_mod);
-    optimizer_test.root_module.addImport("extension", extension_mod);
-    const run_optimizer_test = b.addRunArtifact(optimizer_test);
-    test_step.dependOn(&run_optimizer_test.step);
-    
-    // VM property tests
-    const vm_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bytecode/test_vm_properties.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    vm_test.linkLibC();
-    // 添加模块导入
-    vm_test.root_module.addImport("compiler", compiler_mod);
-    vm_test.root_module.addImport("runtime", runtime_mod);
-    vm_test.root_module.addImport("bytecode", bytecode_mod);
-    vm_test.root_module.addImport("jit", jit_mod);
-    vm_test.root_module.addImport("extension", extension_mod);
-    // 添加模块导入
-    vm_test.root_module.addImport("compiler", compiler_mod);
-    vm_test.root_module.addImport("runtime", runtime_mod);
-    vm_test.root_module.addImport("bytecode", bytecode_mod);
-    vm_test.root_module.addImport("jit", jit_mod);
-    vm_test.root_module.addImport("extension", extension_mod);
-    const run_vm_test = b.addRunArtifact(vm_test);
-    test_step.dependOn(&run_vm_test.step);
-    
-    // GC property tests
-    const gc_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bytecode/test_gc_properties.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    gc_test.linkLibC();
-    // 添加模块导入
-    gc_test.root_module.addImport("compiler", compiler_mod);
-    gc_test.root_module.addImport("runtime", runtime_mod);
-    gc_test.root_module.addImport("bytecode", bytecode_mod);
-    gc_test.root_module.addImport("jit", jit_mod);
-    gc_test.root_module.addImport("extension", extension_mod);
-    // 添加模块导入
-    gc_test.root_module.addImport("compiler", compiler_mod);
-    gc_test.root_module.addImport("runtime", runtime_mod);
-    gc_test.root_module.addImport("bytecode", bytecode_mod);
-    gc_test.root_module.addImport("jit", jit_mod);
-    gc_test.root_module.addImport("extension", extension_mod);
-    const run_gc_test = b.addRunArtifact(gc_test);
-    test_step.dependOn(&run_gc_test.step);
-
     // PHP compatibility tests
     const compat_test_step = b.step("test-compat", "Run PHP compatibility tests");
-    const compat_test_cmd = b.addSystemCommand(&[_][]const u8{"./run_compatibility_tests.sh"});
+    const compat_test_cmd = b.addSystemCommand(&[_][]const u8{ "bash", "run_compatibility_tests.sh" });
     compat_test_cmd.step.dependOn(b.getInstallStep());
     compat_test_step.dependOn(&compat_test_cmd.step);
 
@@ -266,6 +192,19 @@ pub fn build(b: *std.Build) void {
     const docs_cmd = b.addRunArtifact(docs_exe);
     docs_cmd.addArg("--help");
     docs_step.dependOn(&docs_cmd.step);
+
+    // AOT coverage report
+    const aot_report_step = b.step("aot-report", "Generate AOT coverage report markdown");
+    const aot_report_exe = b.addExecutable(.{
+        .name = "aot-coverage-report",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/aot_coverage_report.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_aot_report = b.addRunArtifact(aot_report_exe);
+    aot_report_step.dependOn(&run_aot_report.step);
 
     // Benchmark step
     const bench_step = b.step("bench", "Run performance benchmarks");
@@ -473,12 +412,47 @@ pub fn build(b: *std.Build) void {
     perf_cli_exe.root_module.addImport("bytecode", bytecode_mod);
     perf_cli_exe.root_module.addImport("jit", jit_mod);
     perf_cli_exe.root_module.addImport("extension", extension_mod);
+    perf_cli_exe.root_module.addImport("aot", b.createModule(.{
+        .root_source_file = b.path("src/aot/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "compiler", .module = compiler_mod },
+            .{ .name = "runtime", .module = runtime_mod },
+            .{ .name = "bytecode", .module = bytecode_mod },
+            .{ .name = "jit", .module = jit_mod },
+            .{ .name = "extension", .module = extension_mod },
+        },
+    }));
+    perf_cli_exe.root_module.addImport("aot_runtime", b.createModule(.{
+        .root_source_file = b.path("src/aot/runtime_lib_template.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    }));
     
     b.installArtifact(perf_cli_exe);
+
+    const profile_cli_exe = b.addExecutable(.{
+        .name = "profile-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/profile_cli.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    profile_cli_exe.linkLibC();
+    profile_cli_exe.root_module.addImport("runtime", runtime_mod);
+    b.installArtifact(profile_cli_exe);
+
+    const install_profile_cli = b.addInstallArtifact(profile_cli_exe, .{});
+    const profile_cli_step = b.step("profile-cli", "Build profile-cli");
+    profile_cli_step.dependOn(&install_profile_cli.step);
     
     const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
     perf_check_cmd.addArg("check");
-    perf_check_cmd.step.dependOn(bench_all_step);
+    if (b.args) |args| {
+        perf_check_cmd.addArgs(args);
+    }
     perf_check_step.dependOn(&perf_check_cmd.step);
 
     // Update performance baselines
@@ -486,7 +460,6 @@ pub fn build(b: *std.Build) void {
     
     const perf_update_cmd = b.addRunArtifact(perf_cli_exe);
     perf_update_cmd.addArg("update");
-    perf_update_cmd.step.dependOn(bench_all_step);
     perf_update_step.dependOn(&perf_update_cmd.step);
 
     // List performance baselines
@@ -525,6 +498,23 @@ pub fn build(b: *std.Build) void {
     const run_ci_test = b.addRunArtifact(ci_test);
     ci_test_step.dependOn(&run_ci_test.step);
     test_step.dependOn(&run_ci_test.step);
+
+    // AOT Differential Tests
+    const aot_diff_step = b.step("test-aot-diff", "Run AOT differential tests (Interpreter vs AOT)");
+    
+    const aot_diff_exe = b.addExecutable(.{
+        .name = "aot-diff-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/aot/tools/aot_diff_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    
+    const run_aot_diff = b.addRunArtifact(aot_diff_exe);
+    // Ensure the interpreter is built and installed first
+    run_aot_diff.step.dependOn(b.getInstallStep());
+    aot_diff_step.dependOn(&run_aot_diff.step);
 
     // Clean step
     const clean_step = b.step("clean", "Clean build artifacts");

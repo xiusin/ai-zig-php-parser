@@ -10,6 +10,7 @@ pub const CIConfig = struct {
     baseline_dir: []const u8 = ".perf_baselines",
     report_dir: []const u8 = ".perf_reports",
     threshold_percent: f64 = 5.0,
+    mem_threshold_percent: f64 = 1.0,
     fail_on_regression: bool = true,
     update_baseline_on_main: bool = true,
     
@@ -24,6 +25,11 @@ pub const CIConfig = struct {
         if (std.process.getEnvVarOwned(allocator, "PERF_THRESHOLD")) |threshold_str| {
             defer allocator.free(threshold_str);
             config.threshold_percent = try std.fmt.parseFloat(f64, threshold_str);
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(allocator, "PERF_MEM_THRESHOLD")) |threshold_str| {
+            defer allocator.free(threshold_str);
+            config.mem_threshold_percent = try std.fmt.parseFloat(f64, threshold_str);
         } else |_| {}
         
         if (std.process.getEnvVarOwned(allocator, "PERF_FAIL_ON_REGRESSION")) |fail_str| {
@@ -46,6 +52,7 @@ pub const CIRunner = struct {
             allocator,
             config.baseline_dir,
             config.threshold_percent,
+            config.mem_threshold_percent,
         );
         
         // 确保报告目录存在
@@ -251,6 +258,7 @@ test "CIRunner - basic functionality" {
         .baseline_dir = "test_ci_baselines",
         .report_dir = "test_ci_reports",
         .threshold_percent = 5.0,
+        .mem_threshold_percent = 1.0,
         .fail_on_regression = true,
         .update_baseline_on_main = false,
     };

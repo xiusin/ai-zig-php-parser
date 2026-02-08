@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- ✅ **调用栈采样**：收集函数调用栈信息
+- ✅ **调用栈采样**：基于 `Profiler` 的当前调用栈进行定时采样
 - ✅ **火焰图树构建**：从采样数据构建层次化的火焰图树
 - ✅ **折叠格式生成**：生成 FlameGraph 工具兼容的折叠格式
 - ✅ **SVG 火焰图**：直接生成 SVG 格式的火焰图
@@ -113,15 +113,17 @@ pub fn main() !void {
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
     
-    // 2. 执行应用程序（Profiler 会自动收集数据）
-    try runApplication(&profiler);
-    
-    // 3. 初始化火焰图生成器
+    // 2. 启动采样（会定时读取 Profiler 的当前调用栈）
     var generator = try FlameGraphGenerator.init(allocator, &profiler);
     defer generator.deinit();
-    
-    // 4. 从 Profiler 收集数据
-    try generator.collectFromProfiler();
+    generator.setMinDisplayTime(0);
+    try generator.startSampling();
+
+    // 3. 执行应用程序（需要在关键路径插入 enterFunction/exitFunction）
+    try runApplication(&profiler);
+
+    // 4. 停止采样并生成输出
+    generator.stopSampling();
     
     // 5. 生成火焰图
     try generator.saveFoldedFormat("flamegraph.txt");
@@ -131,6 +133,20 @@ pub fn main() !void {
     try generator.printHotspotReport(10);
 }
 ```
+
+### 从折叠格式导入（离线转换）
+
+```zig
+const folded = try std.fs.cwd().readFileAlloc(allocator, "flamegraph.txt", 64 * 1024 * 1024);
+defer allocator.free(folded);
+
+try generator.buildFromFoldedFormat(folded, .microseconds);
+try generator.saveSVG("flamegraph.svg", 1200, 800);
+```
+
+### 说明：collectFromProfiler
+
+`collectFromProfiler()` 当前生成的是“平铺统计树”（root 下直接挂每个函数），适合快速看 Top 函数总耗时；真正的调用栈火焰图建议使用 `startSampling()/stopSampling()` 或 `buildFromFoldedFormat()`。
 
 ### 手动采样
 
@@ -259,9 +275,36 @@ git clone https://github.com/brendangregg/FlameGraph.git
 ./FlameGraph/flamegraph.pl flamegraph.txt > flamegraph.svg
 ```
 
+## profile-cli（工具）
+
+仓库提供 `profile-cli` 用于离线转换：
+
+```bash
+./zig-out/bin/profile-cli folded_to_svg flamegraph.txt flamegraph.svg --unit us --width 1600 --height 900
+./zig-out/bin/profile-cli folded_to_pprof flamegraph.txt profile.pb --unit us --period-ns 1000000
+```
+
 4. 在浏览器中查看：
 ```bash
 firefox flamegraph.svg
+```
+
+## AOT 集成
+
+AOT 编译产物已在每个生成函数的入口/退出处插入 `Profiler` 钩子，并可选启动采样生成输出文件。
+
+- 启用：设置环境变量 `ZIGPHP_PROFILE`（值任意即可）
+- 采样间隔：可选 `ZIGPHP_PROFILE_INTERVAL_NS`（纳秒，默认 1_000_000）
+- 输出文件（运行结束后写入当前目录）：
+  - `flamegraph.txt`（folded stacks，单位 us）
+  - `profile.pb`（pprof protobuf，CPU/nanoseconds）
+
+示例：
+
+```bash
+ZIGPHP_PROFILE=1 ZIGPHP_PROFILE_INTERVAL_NS=1000000 ./your_aot_binary
+./zig-out/bin/profile-cli folded_to_svg flamegraph.txt flamegraph.svg --unit us
+go tool pprof -http=:0 profile.pb
 ```
 
 ## 性能开销

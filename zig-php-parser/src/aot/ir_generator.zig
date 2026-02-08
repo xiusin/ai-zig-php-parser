@@ -42,283 +42,17 @@ const InferredType = SymbolTableMod.InferredType;
 const ConcreteType = SymbolTableMod.ConcreteType;
 const TypeInferenceMod = @import("type_inference.zig");
 const TypeInferencer = TypeInferenceMod.TypeInferencer;
-// AST types are defined locally to avoid cross-module import issues
-// These mirror the types from src/compiler/ast.zig and src/compiler/token.zig
+const compiler = @import("compiler");
+const ast = compiler.ast;
+pub const Node = ast.Node;
+pub const Token = compiler.token.Token;
+pub const TokenTag = compiler.token.Token.Tag;
+const QuoteType = ast.QuoteType;
+const MagicConstantKind = ast.MagicConstantKind;
+// CastType in ast.zig is Token.Tag, so we alias it here for compatibility,
+// but we will need to update usages to use Token.Tag values.
+const CastType = TokenTag;
 
-/// Quote type for string literals
-pub const QuoteType = enum {
-    single,
-    double,
-    backtick,
-};
-
-pub const MagicConstantKind = enum {
-    dir,
-    file,
-    line,
-    function,
-    class,
-    method,
-    namespace,
-};
-
-pub const CastType = enum {
-    array,
-    object,
-    unknown,
-};
-
-/// Token tag enum (subset needed for IR generation)
-pub const TokenTag = enum(u8) {
-    // Literals
-    integer_literal,
-    float_literal,
-    string_literal,
-    // Keywords
-    keyword_true,
-    keyword_false,
-    keyword_null,
-    keyword_and,
-    keyword_or,
-    // Operators
-    plus,
-    minus,
-    star,
-    slash,
-    percent,
-    star_star,
-    dot,
-    ampersand,
-    pipe,
-    caret,
-    tilde,
-    less_less,
-    greater_greater,
-    equal_equal,
-    bang_equal,
-    equal_equal_equal,
-    bang_equal_equal,
-    less_than,
-    less_equal,
-    greater_than,
-    greater_equal,
-    spaceship,
-    ampersand_ampersand,
-    pipe_pipe,
-    bang,
-    question_question,
-    plus_plus,
-    minus_minus,
-    // Compound assignment operators
-    plus_equal,
-    minus_equal,
-    asterisk_equal,
-    slash_equal,
-    percent_equal,
-    dot_equal,
-    // Other
-    eof,
-    _,
-};
-
-/// Simplified Token structure
-pub const Token = struct {
-    tag: TokenTag,
-    start: u32,
-    end: u32,
-    line: u32,
-    column: u32,
-};
-
-/// AST Node structure (mirrors src/compiler/ast.zig)
-pub const Node = struct {
-    tag: Tag,
-    main_token: Token,
-    data: Data,
-
-    pub const Index = u32;
-    pub const StringId = u32;
-
-    pub const Tag = enum {
-        root,
-        attribute,
-        class_decl,
-        interface_decl,
-        trait_decl,
-        enum_decl,
-        struct_decl,
-        property_decl,
-        property_hook,
-        method_decl,
-        parameter,
-        const_decl,
-        global_stmt,
-        static_stmt,
-        go_stmt,
-        lock_stmt,
-        closure,
-        arrow_function,
-        anonymous_class,
-        list_assignment,
-        list_empty,
-        if_stmt,
-        while_stmt,
-        for_stmt,
-        for_range_stmt,
-        foreach_stmt,
-        switch_stmt,
-        case,
-        default,
-        match_expr,
-        match_arm,
-        try_stmt,
-        catch_clause,
-        finally_clause,
-        throw_stmt,
-        yield_expr,
-        method_call,
-        property_access,
-        safe_property_access,
-        variable_property_access,
-        array_access,
-        function_call,
-        function_decl,
-        static_method_call,
-        static_property_access,
-        use_stmt,
-        namespace_stmt,
-        include_stmt,
-        require_stmt,
-        block,
-        expression_stmt,
-        assignment,
-        compound_assignment,
-        echo_stmt,
-        return_stmt,
-        break_stmt,
-        continue_stmt,
-        variable,
-        literal_int,
-        literal_float,
-        literal_string,
-        literal_bool,
-        literal_null,
-        magic_constant,
-        array_init,
-        array_pair,
-        named_arg,
-        binary_expr,
-        unary_expr,
-        postfix_expr,
-        ternary_expr,
-        unpacking_expr,
-        pipe_expr,
-        clone_with_expr,
-        struct_instantiation,
-        object_instantiation,
-        trait_use,
-        named_type,
-        nullable_type,
-        union_type,
-        intersection_type,
-        cast_expr,
-        class_constant_access,
-        self_expr,
-        parent_expr,
-        static_expr,
-    };
-
-    pub const Modifier = packed struct {
-        is_public: bool = false,
-        is_protected: bool = false,
-        is_private: bool = false,
-        is_static: bool = false,
-        is_final: bool = false,
-        is_abstract: bool = false,
-        is_readonly: bool = false,
-    };
-
-    pub const Data = union {
-        attribute: struct { name: StringId, args: []const Index },
-        container_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, extends: ?Index, implements: []const Index, members: []const Index },
-        method_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, params: []const Index, return_type: ?Index, body: ?Index },
-        property_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, type: ?Index, default_value: ?Index, hooks: []const Index },
-        property_hook: struct { name: StringId, body: Index },
-        parameter: struct { attributes: []const Index, name: StringId, type: ?Index, default_value: ?Index, is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool },
-        const_decl: struct { name: StringId, value: Index },
-        global_stmt: struct { vars: []const Index },
-        static_stmt: struct { vars: []const Index },
-        go_stmt: struct { call: Index },
-        lock_stmt: struct { body: Index },
-        closure: struct { attributes: []const Index, params: []const Index, captures: []const Index, return_type: ?Index, body: Index, is_static: bool },
-        arrow_function: struct { attributes: []const Index, params: []const Index, return_type: ?Index, body: Index, is_static: bool },
-        anonymous_class: struct { attributes: []const Index, extends: ?Index, implements: []const Index, members: []const Index, args: []const Index },
-        list_assignment: struct { targets: []const Index, value: Index },
-        if_stmt: struct { condition: Index, then_branch: Index, else_branch: ?Index },
-        while_stmt: struct { condition: Index, body: Index },
-        for_stmt: struct { init: ?Index, condition: ?Index, loop: ?Index, body: Index },
-        for_range_stmt: struct { count: Index, variable: ?Index, body: Index },
-        foreach_stmt: struct { iterable: Index, key: ?Index, value: Index, body: Index },
-        switch_stmt: struct { expression: Index, cases: []const Index, default: ?Index },
-        case: struct { condition: Index, body: []const Index },
-        default: struct { body: []const Index },
-        try_stmt: struct { body: Index, catch_clauses: []const Index, finally_clause: ?Index },
-        catch_clause: struct { exception_type: ?Index, variable: ?Index, body: Index },
-        finally_clause: struct { body: Index },
-        throw_stmt: struct { expression: Index },
-        match_expr: struct { expression: Index, arms: []const Index, default: ?Index },
-        match_arm: struct { conditions: []const Index, body: Index },
-        yield_expr: struct { key: ?Index, value: ?Index },
-        method_call: struct { target: Index, method_name: StringId, args: []const Index },
-        property_access: struct { target: Index, property_name: StringId },
-        array_access: struct { target: Index, index: ?Index },
-        static_method_call: struct { class_name: StringId, method_name: StringId, args: []const Index },
-        static_property_access: struct { class_name: StringId, property_name: StringId },
-        class_constant_access: struct { class_name: StringId, constant_name: StringId },
-        use_stmt: struct { namespace: StringId, alias: ?StringId, use_type: u8 },
-        namespace_stmt: struct { name: StringId },
-        include_stmt: struct { path: Index, is_once: bool, is_require: bool },
-        function_call: struct { name: Index, args: []const Index },
-        array_init: struct { elements: []const Index },
-        array_pair: struct { key: Index, value: Index },
-        named_arg: struct { name: StringId, value: Index },
-        literal_string: struct { value: StringId, quote_type: QuoteType },
-        literal_bool: struct { value: bool },
-        literal_null: void,
-        magic_constant: struct { kind: MagicConstantKind },
-        root: struct { stmts: []const Index },
-        echo_stmt: struct { exprs: []const Index },
-        return_stmt: struct { expr: ?Index },
-        break_stmt: struct { level: ?Index },
-        continue_stmt: struct { level: ?Index },
-        assignment: struct { target: Index, value: Index },
-        compound_assignment: struct { target: Index, op: TokenTag, value: Index },
-        binary_expr: struct { lhs: Index, op: TokenTag, rhs: Index },
-        unary_expr: struct { op: TokenTag, expr: Index },
-        postfix_expr: struct { op: TokenTag, expr: Index },
-        ternary_expr: struct { cond: Index, then_expr: ?Index, else_expr: Index },
-        unpacking_expr: struct { expr: Index },
-        pipe_expr: struct { left: Index, right: Index },
-        clone_with_expr: struct { object: Index, properties: Index },
-        struct_instantiation: struct { struct_type: Index, args: []const Index },
-        object_instantiation: struct { class_name: Index, args: []const Index },
-        function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index },
-        block: struct { stmts: []const Index },
-        expression_stmt: struct { expr: Index },
-        variable: struct { name: StringId },
-        literal_int: struct { value: i64 },
-        literal_float: struct { value: f64 },
-        trait_use: struct { traits: []const Index },
-        named_type: struct { name: StringId },
-        nullable_type: struct { inner: Index },
-        union_type: struct { types: []const Index },
-        intersection_type: struct { types: []const Index },
-        cast_expr: struct { cast_type: CastType, expr: Index },
-        safe_property_access: struct { target: Index, property_name: StringId },
-        variable_property_access: struct { target: Index, prop_variable: Index },
-        none: void,
-    };
-};
 
 /// IR Generator - converts AST to SSA-form IR
 pub const IRGenerator = struct {
@@ -348,6 +82,7 @@ pub const IRGenerator = struct {
         is_used: bool,
         location: SourceLocation,
     }),
+    entry_allocas: std.ArrayListUnmanaged(*Instruction),
     /// Block counter for unique labels
     block_counter: u32,
     /// Loop context stack for break/continue
@@ -393,6 +128,7 @@ pub const IRGenerator = struct {
             .current_location = .{},
             .var_registers = .{},
             .var_usage = .{},
+            .entry_allocas = .{},
             .block_counter = 0,
             .loop_stack = .{},
             .try_stack = .{},
@@ -403,8 +139,22 @@ pub const IRGenerator = struct {
     pub fn deinit(self: *Self) void {
         self.var_registers.deinit(self.allocator);
         self.var_usage.deinit(self.allocator);
+        self.entry_allocas.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
+    }
+
+    fn flushEntryAllocas(self: *Self, entry_block: *BasicBlock) !void {
+        if (self.entry_allocas.items.len == 0) return;
+
+        var new_insts: std.ArrayListUnmanaged(*Instruction) = .{};
+        try new_insts.appendSlice(self.allocator, self.entry_allocas.items);
+        try new_insts.appendSlice(self.allocator, entry_block.instructions.items);
+
+        entry_block.instructions.deinit(self.allocator);
+        entry_block.instructions = new_insts;
+
+        self.entry_allocas.clearRetainingCapacity();
     }
 
     /// Generate IR module from AST (assumes root node at index 0)
@@ -435,14 +185,15 @@ pub const IRGenerator = struct {
         module.* = Module.init(self.allocator, module_name, source_file);
         self.module = module;
 
-        // Debug: Print root node info
-        std.debug.print("[IR Generator] Processing root node at index {d}\n", .{root_index});
-        std.debug.print("[IR Generator] Total nodes: {d}\n", .{nodes.len});
+        // Copy string table from Parser to Module
+        // This ensures that StringId from AST nodes matches StringId in IR Module
+        for (string_table) |str| {
+            try module.string_table.append(self.allocator, str);
+        }
 
         // Process root node at the specified index
         if (root_index < nodes.len and nodes[root_index].tag == .root) {
             const root_data = nodes[root_index].data.root;
-            std.debug.print("[IR Generator] Root has {d} statements\n", .{root_data.stmts.len});
 
             // Separate function declarations from top-level statements
             var top_level_stmts = std.ArrayListUnmanaged(Node.Index){};
@@ -450,7 +201,6 @@ pub const IRGenerator = struct {
 
             for (root_data.stmts) |stmt_idx| {
                 const stmt_node = self.getNode(stmt_idx) orelse continue;
-                std.debug.print("[IR Generator] Statement {d}: tag = {s}\n", .{ stmt_idx, @tagName(stmt_node.tag) });
 
                 if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
                     stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl)
@@ -463,14 +213,12 @@ pub const IRGenerator = struct {
                 }
             }
 
-            std.debug.print("[IR Generator] Top-level statements: {d}\n", .{top_level_stmts.items.len});
-
             // Create __main__ function for top-level statements if any
             if (top_level_stmts.items.len > 0) {
                 try self.generateMainFunction(top_level_stmts.items);
             }
         } else {
-            std.debug.print("[IR Generator] ERROR: Root node not found or invalid tag\n", .{});
+            // Root node not found or invalid tag
         }
 
         return module;
@@ -489,8 +237,17 @@ pub const IRGenerator = struct {
             try module.addFunction(func);
         }
 
-        // Set up context
+        const prev_function = self.current_function;
+        const prev_block = self.current_block;
+        const prev_var_registers = self.var_registers;
+        const prev_var_usage = self.var_usage;
+        const prev_entry_allocas = self.entry_allocas;
+
         self.current_function = func;
+        self.current_block = null;
+        self.var_registers = .{};
+        self.var_usage = .{};
+        self.entry_allocas = .{};
         self.block_counter = 0;
 
         // Create entry block
@@ -508,9 +265,17 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .ret = null });
         }
 
-        // Clear context
-        self.current_function = null;
-        self.current_block = null;
+        try self.flushEntryAllocas(entry);
+        try self.checkUnusedVariables();
+
+        self.var_registers.deinit(self.allocator);
+        self.var_usage.deinit(self.allocator);
+        self.entry_allocas.deinit(self.allocator);
+        self.var_registers = prev_var_registers;
+        self.var_usage = prev_var_usage;
+        self.entry_allocas = prev_entry_allocas;
+        self.current_function = prev_function;
+        self.current_block = prev_block;
     }
 
     // ========================================================================
@@ -544,7 +309,15 @@ pub const IRGenerator = struct {
         const label = std.fmt.bufPrint(&buf, "{s}_{d}", .{ prefix, self.block_counter }) catch prefix;
         self.block_counter += 1;
 
-        return func.createBlock(label);
+        const block = try func.createBlock(label);
+
+        // 设置异常处理器
+        if (self.try_stack.items.len > 0) {
+            const context = self.try_stack.items[self.try_stack.items.len - 1];
+            block.exception_handler = context.catch_block;
+        }
+
+        return block;
     }
 
     /// Set the current block
@@ -600,10 +373,11 @@ pub const IRGenerator = struct {
 
     /// Update source location from a token
     fn updateLocation(self: *Self, token: Token) void {
+        const loc = self.diagnostics.getLocation(token.loc.start);
         self.current_location = .{
             .file = if (self.module) |m| m.source_file else "<unknown>",
-            .line = token.line,
-            .column = token.column,
+            .line = loc.line,
+            .column = loc.column,
         };
     }
 
@@ -618,15 +392,28 @@ pub const IRGenerator = struct {
         const type_ptr = try self.allocator.create(Type);
         type_ptr.* = type_;
         const ptr_type = Type{ .ptr = type_ptr };
-        const alloca_reg = try self.emitWithResult(.{ .alloca = .{ .type_ = type_, .count = 1 } }, ptr_type);
+        
+        // Always create alloca in the entry block to ensure dominance
+        const func = self.current_function orelse return error.NoCurrentFunction;
+        
+        const result = func.newRegister(ptr_type);
+        const inst = try self.allocator.create(Instruction);
+        inst.* = .{
+            .result = result,
+            .op = .{ .alloca = .{ .type_ = type_, .count = 1 } },
+            .location = self.current_location,
+        };
+        
+        // Prepend to entry block to ensure it's before any potential use
+        try self.entry_allocas.append(self.allocator, inst);
 
-        try self.var_registers.put(self.allocator, name, alloca_reg);
+        try self.var_registers.put(self.allocator, name, result);
         // Mark variable as defined but not used yet, store definition location
         try self.var_usage.put(self.allocator, name, .{
             .is_used = false,
             .location = self.current_location,
         });
-        return alloca_reg;
+        return result;
     }
 
     /// Look up a variable's register
@@ -657,8 +444,31 @@ pub const IRGenerator = struct {
             return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = pointed_type } }, pointed_type);
         }
 
-        // Variable not found - create a null value
-        return self.emitWithResult(.const_null, .php_value);
+        // Variable not found
+        
+        // Check if it's a variable (starts with $)
+        if (var_name.len > 0 and var_name[0] == '$') {
+            // Undefined variable - create a null value
+            // TODO: Emit warning
+            return self.emitWithResult(.const_null, .php_value);
+        } else {
+            // It's a constant (identifier)
+            // Generate call to php_constant_get(name)
+            
+            // Create string literal for name
+            const name_id = node.data.variable.name;
+            const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_value);
+            
+            // Emit call
+            const args = try self.allocator.alloc(Register, 1);
+            args[0] = name_reg;
+            
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_constant_get",
+                .args = args,
+                .return_type = .php_value,
+            } }, .php_value);
+        }
     }
 
     /// Check for unused variables and report errors
@@ -672,9 +482,9 @@ pub const IRGenerator = struct {
                 // 根据当前模式确定变量前缀
                 const var_prefix = if (self.isGoMode()) "" else "$";
 
-                // 报告未使用变量错误，使用变量定义时的位置信息
+                // PHP 解释执行通常不会因为未使用变量而报错；这里降级为 warning 以便 AOT 与解释器行为更一致
                 self.diagnostics.report(
-                    .@"error",
+                    .warning,
                     usage_info.location,
                     "未使用的变量: {s}{s}",
                     .{ var_prefix, var_name },
@@ -756,6 +566,28 @@ pub const IRGenerator = struct {
         const func_data = node.data.function_decl;
         const func_name = self.getString(func_data.name);
 
+        const params_info = try self.allocator.alloc(SymbolTableMod.Symbol.ParameterInfo, func_data.params.len);
+        for (func_data.params, 0..) |param_idx, i| {
+            params_info[i] = .{
+                .name = "",
+                .type_ = .dynamic,
+                .has_default = false,
+                .is_reference = false,
+            };
+            if (self.getNode(param_idx)) |pnode| {
+                if (pnode.tag == .parameter) {
+                    const pdata = pnode.data.parameter;
+                    params_info[i] = .{
+                        .name = self.getString(pdata.name),
+                        .type_ = .dynamic,
+                        .has_default = pdata.default_value != null,
+                        .is_reference = pdata.is_reference,
+                    };
+                }
+            }
+        }
+        try self.symbol_table.defineFunction(func_name, params_info, .dynamic, self.current_location);
+
         // Create function
         const func = try self.allocator.create(Function);
         func.* = Function.init(self.allocator, func_name);
@@ -771,11 +603,13 @@ pub const IRGenerator = struct {
         const prev_function = self.current_function;
         const prev_block = self.current_block;
         const prev_var_registers = self.var_registers;
+        const prev_entry_allocas = self.entry_allocas;
 
         // Set up new context
         self.current_function = func;
         self.var_registers = .{};
         self.var_usage = .{}; // 初始化变量使用跟踪
+        self.entry_allocas = .{};
         self.block_counter = 0;
 
         // Create entry block
@@ -795,14 +629,18 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .ret = null });
         }
 
+        try self.flushEntryAllocas(entry);
+
         // Check for unused variables
         try self.checkUnusedVariables();
 
         // Restore previous context
         self.var_registers.deinit(self.allocator);
         self.var_usage.deinit(self.allocator);
+        self.entry_allocas.deinit(self.allocator);
         self.var_registers = prev_var_registers;
         self.var_usage = .{};
+        self.entry_allocas = prev_entry_allocas;
         self.current_function = prev_function;
         self.current_block = prev_block;
     }
@@ -822,7 +660,9 @@ pub const IRGenerator = struct {
         }
 
         // Add parameter to function
+        var param_idx: u32 = 0;
         if (self.current_function) |func| {
+            param_idx = @intCast(func.params.items.len);
             try func.addParam(.{
                 .name = param_name,
                 .type_ = param_type,
@@ -832,8 +672,49 @@ pub const IRGenerator = struct {
             });
         }
 
-        // Create register for parameter
-        _ = try self.getOrCreateVarRegister(param_name, param_type);
+        // Create register for parameter (alloca)
+        const alloca_reg = try self.getOrCreateVarRegister(param_name, param_type);
+
+        if (param_data.default_value) |default_expr_idx| {
+            // Has default value - generate conditional logic
+            const func = self.current_function.?;
+            
+            const cond_reg = try self.emitWithResult(.{
+                .has_arg = .{ .index = param_idx },
+            }, .bool);
+
+            // 3. Create blocks
+            const present_block = try func.createBlock("param_present");
+            const missing_block = try func.createBlock("param_missing");
+            const merge_block = try func.createBlock("param_merge");
+
+            // 4. Branch
+            self.current_block.?.setTerminator(.{ .cond_br = .{ 
+                .cond = cond_reg, 
+                .then_block = present_block, 
+                .else_block = missing_block 
+            } });
+
+            // 5. Present Block
+            self.current_block = present_block;
+            const param_val = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
+            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_val } }, null);
+            self.current_block.?.setTerminator(.{ .br = merge_block });
+
+            // 6. Missing Block
+            self.current_block = missing_block;
+            const default_val = try self.generateExpression(default_expr_idx);
+            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = default_val } }, null);
+            self.current_block.?.setTerminator(.{ .br = merge_block });
+
+            // 7. Merge Block
+            self.current_block = merge_block;
+        } else {
+            // Emit param instruction
+            const param_reg = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
+            // Store param value to alloca
+            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_reg } }, null);
+        }
     }
 
     /// Resolve a type node to IR Type
@@ -871,7 +752,7 @@ pub const IRGenerator = struct {
             .literal_int => inst.op = .{ .const_int = expr_node.data.literal_int.value },
             .literal_float => inst.op = .{ .const_float = expr_node.data.literal_float.value },
             .literal_null => inst.op = .const_null,
-            .literal_bool => inst.op = .{ .const_bool = expr_node.main_token.tag == .keyword_true },
+            .literal_bool => inst.op = .{ .const_bool = expr_node.main_token.tag == .k_true },
             .literal_string => {
                 const s = self.getString(expr_node.data.literal_string.value);
                 const id = try module.internString(s);
@@ -896,6 +777,8 @@ pub const IRGenerator = struct {
         const class_name = self.getString(class_data.name);
 
         var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+        var traits = std.ArrayListUnmanaged([]const u8){};
+        defer traits.deinit(self.allocator);
 
         // Create type definition
         const type_def = try self.allocator.create(TypeDef);
@@ -904,12 +787,16 @@ pub const IRGenerator = struct {
             .kind = .class,
             .parent = if (class_data.extends) |ext_idx| blk: {
                 const ext_node = self.getNode(ext_idx) orelse break :blk null;
-                if (ext_node.tag == .named_type) {
-                    break :blk self.getString(ext_node.data.named_type.name);
+                switch (ext_node.tag) {
+                    .named_type => break :blk self.getString(ext_node.data.named_type.name),
+                    .variable => break :blk self.getString(ext_node.data.variable.name),
+                    .literal_string => break :blk self.getString(ext_node.data.literal_string.value),
+                    else => {},
                 }
                 break :blk null;
             } else null,
             .interfaces = &.{},
+            .traits = &.{},
             .properties = &.{},
             .methods = &.{},
             .location = self.current_location,
@@ -954,11 +841,24 @@ pub const IRGenerator = struct {
                     try self.generatePropertyDecl(member, class_name);
                 },
                 .const_decl => try self.generateClassConstDecl(member, class_name),
+                .trait_use => {
+                    const tu = member.data.trait_use;
+                    for (tu.traits) |tidx| {
+                        const tnode = self.getNode(tidx) orelse continue;
+                        switch (tnode.tag) {
+                            .named_type => try traits.append(self.allocator, self.getString(tnode.data.named_type.name)),
+                            .variable => try traits.append(self.allocator, self.getString(tnode.data.variable.name)),
+                            .literal_string => try traits.append(self.allocator, self.getString(tnode.data.literal_string.value)),
+                            else => {},
+                        }
+                    }
+                },
                 else => {},
             }
         }
 
         type_def.properties = try properties.toOwnedSlice(self.allocator);
+        type_def.traits = try traits.toOwnedSlice(self.allocator);
 
         // Leave class scope
         self.symbol_table.leaveScope();
@@ -975,6 +875,7 @@ pub const IRGenerator = struct {
             .kind = .interface,
             .parent = null,
             .interfaces = &.{},
+            .traits = &.{},
             .properties = &.{},
             .methods = &.{},
             .location = self.current_location,
@@ -990,12 +891,15 @@ pub const IRGenerator = struct {
         const trait_data = node.data.container_decl;
         const trait_name = self.getString(trait_data.name);
 
+        var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
             .name = trait_name,
             .kind = .trait,
             .parent = null,
             .interfaces = &.{},
+            .traits = &.{},
             .properties = &.{},
             .methods = &.{},
             .location = self.current_location,
@@ -1004,6 +908,43 @@ pub const IRGenerator = struct {
         if (self.module) |module| {
             try module.addTypeDef(type_def);
         }
+
+        _ = try self.symbol_table.enterScope(.class, trait_name);
+        defer self.symbol_table.leaveScope();
+
+        for (trait_data.members) |member_idx| {
+            const member = self.getNode(member_idx) orelse continue;
+            switch (member.tag) {
+                .method_decl => try self.generateMethodDecl(member, trait_name),
+                .property_decl => {
+                    const prop_data = member.data.property_decl;
+                    const prop_name = self.getString(prop_data.name);
+                    const prop_type = if (prop_data.type) |t| try self.resolveTypeNode(t) else .php_value;
+                    const default_inst = if (prop_data.default_value) |dv| try self.tryMakeConstInstruction(dv) else null;
+
+                    const visibility: TypeDef.Visibility = if (prop_data.modifiers.is_private)
+                        .private
+                    else if (prop_data.modifiers.is_protected)
+                        .protected
+                    else
+                        .public;
+
+                    try properties.append(self.allocator, .{
+                        .name = prop_name,
+                        .type_ = prop_type,
+                        .default_value = default_inst,
+                        .is_static = prop_data.modifiers.is_static,
+                        .visibility = visibility,
+                    });
+
+                    try self.generatePropertyDecl(member, trait_name);
+                },
+                .const_decl => try self.generateClassConstDecl(member, trait_name),
+                else => {},
+            }
+        }
+
+        type_def.properties = try properties.toOwnedSlice(self.allocator);
     }
 
     /// Generate IR for method declaration
@@ -1048,8 +989,14 @@ pub const IRGenerator = struct {
                     .is_variadic = false,
                     .is_reference = false,
                 });
+                
+                // Emit param instruction
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = 0, .name = "this" } }, Type{ .php_object = class_name });
+
                 // 同时注册$this变量，以便在方法体中通过$this访问
                 const this_reg = try self.getOrCreateVarRegister("this", .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = this_reg, .value = param_reg } }, null);
+                
                 try self.var_registers.put(self.allocator, "$this", this_reg);
             }
 
@@ -1310,16 +1257,24 @@ pub const IRGenerator = struct {
         const increment_block = try self.createBlock("foreach_increment");
         const exit_block = try self.createBlock("foreach_exit");
 
-        // Create index variable (starts at 0)
+        // Initialize iterator
+        const iter_args = try self.allocator.alloc(Register, 1);
+        iter_args[0] = iterable_reg;
+        
+        // iter_addr = php_array_iter_init(iterable)
+        const iter_addr = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_array_iter_init",
+            .args = iter_args,
+            .return_type = .i64, // Using i64 for pointer address
+        } }, .i64);
+
+        // Alloc iterator storage (to update it in increment)
         const i64_type_ptr = try self.allocator.create(Type);
         i64_type_ptr.* = Type{ .i64 = {} };
-        const index_type = Type{ .ptr = i64_type_ptr };
-        const index_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .i64, .count = 1 } }, index_type);
-        const zero_reg = try self.emitWithResult(.{ .const_int = 0 }, .i64);
-        _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = zero_reg } }, null);
-
-        // Get array length once
-        const length_reg = try self.emitWithResult(.{ .array_count = .{ .operand = iterable_reg } }, .i64);
+        const iter_ptr_type = Type{ .ptr = i64_type_ptr };
+        const iter_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .i64, .count = 1 } }, iter_ptr_type);
+        
+        _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = iter_addr } }, null);
 
         // Jump to condition check
         self.setTerminator(.{ .br = cond_block });
@@ -1327,13 +1282,22 @@ pub const IRGenerator = struct {
         // Push loop context for break/continue
         try self.loop_stack.append(self.allocator, .{
             .break_block = exit_block,
-            .continue_block = increment_block, // ✅ 修复：continue跳到increment块
+            .continue_block = increment_block,
         });
 
-        // Condition check: index < length
+        // Condition check: php_array_iter_valid(iter)
         self.setCurrentBlock(cond_block);
-        const index_reg = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
-        const cond_reg = try self.emitWithResult(.{ .lt = .{ .lhs = index_reg, .rhs = length_reg } }, .bool);
+        const curr_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        
+        const valid_args = try self.allocator.alloc(Register, 1);
+        valid_args[0] = curr_iter;
+        
+        const cond_reg = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_array_iter_valid",
+            .args = valid_args,
+            .return_type = .bool,
+        } }, .bool);
+        
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
             .then_block = body_block,
@@ -1342,9 +1306,8 @@ pub const IRGenerator = struct {
 
         // Body
         self.setCurrentBlock(body_block);
-
-        // Load current index
-        const current_index = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
+        // Load iter again (SSA)
+        const body_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
 
         // Get key if needed
         if (foreach_data.key) |key_idx| {
@@ -1352,9 +1315,17 @@ pub const IRGenerator = struct {
             if (key_node != null and key_node.?.tag == .variable) {
                 const key_name = self.getString(key_node.?.data.variable.name);
                 const key_var = try self.getOrCreateVarRegister(key_name, .php_value);
-                // For now, use index as key (works for numeric arrays)
-                const key_value = try self.emitWithResult(.{ .cast = .{ .value = current_index, .from_type = .i64, .to_type = .php_value } }, .php_value);
-                _ = try self.emit(.{ .store = .{ .ptr = key_var, .value = key_value } }, null);
+                
+                const key_args = try self.allocator.alloc(Register, 1);
+                key_args[0] = body_iter;
+                
+                const key_val = try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_array_iter_key",
+                    .args = key_args,
+                    .return_type = .php_value,
+                } }, .php_value);
+                
+                _ = try self.emit(.{ .store = .{ .ptr = key_var, .value = key_val } }, null);
             }
         }
 
@@ -1363,10 +1334,17 @@ pub const IRGenerator = struct {
         if (value_node != null and value_node.?.tag == .variable) {
             const value_name = self.getString(value_node.?.data.variable.name);
             const value_var = try self.getOrCreateVarRegister(value_name, .php_value);
-            // Get array element at current index
-            const index_value = try self.emitWithResult(.{ .cast = .{ .value = current_index, .from_type = .i64, .to_type = .php_value } }, .php_value);
-            const element = try self.emitWithResult(.{ .array_get = .{ .array = iterable_reg, .key = index_value } }, .php_value);
-            _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = element } }, null);
+            
+            const val_args = try self.allocator.alloc(Register, 1);
+            val_args[0] = body_iter;
+            
+            const val_val = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_array_iter_value",
+                .args = val_args,
+                .return_type = .php_value,
+            } }, .php_value);
+            
+            _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = val_val } }, null);
         }
 
         // Generate loop body
@@ -1377,18 +1355,37 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .br = increment_block });
         }
 
-        // Increment block: increment index and jump back to condition
+        // Increment block: increment iterator
         self.setCurrentBlock(increment_block);
-        const current_idx = try self.emitWithResult(.{ .load = .{ .ptr = index_ptr, .type_ = .i64 } }, .i64);
-        const one_reg = try self.emitWithResult(.{ .const_int = 1 }, .i64);
-        const next_idx = try self.emitWithResult(.{ .add = .{ .lhs = current_idx, .rhs = one_reg } }, .i64);
-        _ = try self.emit(.{ .store = .{ .ptr = index_ptr, .value = next_idx } }, null);
-
-        // Jump back to condition
+        const inc_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        
+        const next_args = try self.allocator.alloc(Register, 1);
+        next_args[0] = inc_iter;
+        
+        const next_iter = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_array_iter_next",
+            .args = next_args,
+            .return_type = .i64,
+        } }, .i64);
+        _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = next_iter } }, null);
+        
         self.setTerminator(.{ .br = cond_block });
 
+        // Exit block
         _ = self.loop_stack.pop();
         self.setCurrentBlock(exit_block);
+        
+        // Cleanup iterator
+        const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        
+        const free_args = try self.allocator.alloc(Register, 1);
+        free_args[0] = exit_iter;
+        
+        _ = try self.emit(.{ .call = .{
+            .func_name = "php_array_iter_free",
+            .args = free_args,
+            .return_type = .void,
+        } }, null);
     }
 
     /// Generate IR for switch statement
@@ -1530,6 +1527,9 @@ pub const IRGenerator = struct {
             .finally_block = finally_block,
         });
 
+        // Fix up try_block handler (it was created before push)
+        try_block.exception_handler = catch_block;
+
         // Jump to try block
         self.setTerminator(.{ .br = try_block });
 
@@ -1594,17 +1594,17 @@ pub const IRGenerator = struct {
             }
         }
 
-        // Emit catch instruction
-        _ = try self.emit(.{ .catch_ = .{ .exception_type = exception_type } }, .php_value);
+        // Emit catch instruction (returns exception object)
+        const catch_reg = try self.emitWithResult(.{ .catch_ = .{ .exception_type = exception_type } }, .php_value);
 
         // Set up exception variable if present
         if (catch_data.variable) |var_idx| {
             const var_node = self.getNode(var_idx);
             if (var_node != null and var_node.?.tag == .variable) {
                 const var_name = self.getString(var_node.?.data.variable.name);
-                const ex_reg = try self.emitWithResult(.get_exception, .php_value);
+                // Use catch_reg directly
                 const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = ex_reg } }, null);
+                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg } }, null);
             }
         }
 
@@ -1660,7 +1660,19 @@ pub const IRGenerator = struct {
 
         if (call_node.tag == .function_call) {
             const call_data = call_node.data.function_call;
-            const func_name = self.getString(call_data.name);
+            const name_node = self.getNode(call_data.name) orelse return;
+            if (name_node.tag != .literal_string) {
+                const expr_reg = try self.generateExpression(go_data.call);
+                const args = try self.allocator.alloc(Register, 1);
+                args[0] = expr_reg;
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_go_builtin",
+                    .args = args,
+                    .return_type = .php_value,
+                } }, null);
+                return;
+            }
+            const func_name = self.getString(name_node.data.literal_string.value);
 
             // 生成参数
             const args = try self.allocator.alloc(Register, call_data.args.len);
@@ -1673,6 +1685,16 @@ pub const IRGenerator = struct {
                 .func_name = func_name,
                 .args = args,
             } }, null);
+        } else {
+             // Fallback: treat as expression and call php_go_builtin
+             const expr_reg = try self.generateExpression(go_data.call);
+             const args = try self.allocator.alloc(Register, 1);
+             args[0] = expr_reg;
+             _ = try self.emit(.{ .call = .{
+                 .func_name = "php_go_builtin",
+                 .args = args,
+                 .return_type = .php_value,
+             } }, null);
         }
     }
 
@@ -1782,6 +1804,15 @@ pub const IRGenerator = struct {
                     .return_type = .php_value,
                 } }, null);
             },
+            .static_property_access => {
+                const class_name = self.getString(target_node.data.static_property_access.class_name);
+                const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                _ = try self.emit(.{ .static_property_set = .{
+                    .class_name = class_name,
+                    .property_name = prop_name,
+                    .value = value_reg,
+                } }, null);
+            },
             else => {},
         }
     }
@@ -1809,6 +1840,12 @@ pub const IRGenerator = struct {
             .slash_equal => try self.emitWithResult(.{ .div = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
             .percent_equal => try self.emitWithResult(.{ .mod = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
             .dot_equal => try self.emitWithResult(.{ .concat = .{ .lhs = current_value, .rhs = rhs_value } }, .php_string),
+            .star_star_equal => try self.emitWithResult(.{ .pow = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
+            .caret_equal => try self.emitWithResult(.{ .bit_xor = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .and_equal => try self.emitWithResult(.{ .bit_and = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .or_equal => try self.emitWithResult(.{ .bit_or = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .less_less_equal => try self.emitWithResult(.{ .shl = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .greater_greater_equal => try self.emitWithResult(.{ .shr = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
             else => return error.UnsupportedCompoundOperator,
         };
 
@@ -1855,6 +1892,15 @@ pub const IRGenerator = struct {
                     .return_type = .php_value,
                 } }, null);
             },
+            .static_property_access => {
+                const class_name = self.getString(target_node.data.static_property_access.class_name);
+                const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                _ = try self.emit(.{ .static_property_set = .{
+                    .class_name = class_name,
+                    .property_name = prop_name,
+                    .value = result_reg,
+                } }, null);
+            },
             else => {},
         }
     }
@@ -1894,18 +1940,19 @@ pub const IRGenerator = struct {
         // Evaluate constant value (with constant folding)
         const value_reg = try self.generateExpression(const_data.value);
 
-        // Create global constant
-        if (self.module) |module| {
-            const global = try self.allocator.create(Global);
-            global.* = .{
-                .name = const_name,
-                .type_ = value_reg.type_,
-                .initializer = null, // TODO: Implement proper constant initializer
-                .is_constant = true,
-                .location = self.current_location,
-            };
-            try module.addGlobal(global);
-        }
+        // Emit call to php_define(name, value)
+        const name_id = const_data.name;
+        const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_value);
+        
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = name_reg;
+        args[1] = value_reg;
+        
+        _ = try self.emitWithResult(.{ .call = .{
+            .func_name = "php_define",
+            .args = args,
+            .return_type = .php_value,
+        } }, .php_value);
 
         try self.symbol_table.defineConstant(const_name, .dynamic, self.current_location);
     }
@@ -2123,7 +2170,7 @@ pub const IRGenerator = struct {
     /// Generate IR for boolean literal
     fn generateLiteralBool(self: *Self, node: *const Node) !Register {
         // Boolean value is determined by the token
-        const is_true = node.main_token.tag == .keyword_true;
+        const is_true = node.main_token.tag == .k_true;
         return self.emitWithResult(.{ .const_bool = is_true }, .bool);
     }
 
@@ -2211,7 +2258,7 @@ pub const IRGenerator = struct {
             // Arithmetic
             .plus => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
             .minus => self.emitWithResult(.{ .sub = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
-            .star => self.emitWithResult(.{ .mul = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
+            .asterisk => self.emitWithResult(.{ .mul = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
             .slash => self.emitWithResult(.{ .div = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
             .percent => self.emitWithResult(.{ .mod = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
             .star_star => self.emitWithResult(.{ .pow = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
@@ -2221,15 +2268,15 @@ pub const IRGenerator = struct {
             .bang_equal => self.emitWithResult(.{ .ne = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .equal_equal_equal => self.emitWithResult(.{ .identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .bang_equal_equal => self.emitWithResult(.{ .not_identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .less_than => self.emitWithResult(.{ .lt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .less => self.emitWithResult(.{ .lt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .less_equal => self.emitWithResult(.{ .le = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .greater_than => self.emitWithResult(.{ .gt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .greater => self.emitWithResult(.{ .gt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .greater_equal => self.emitWithResult(.{ .ge = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
             .spaceship => self.emitWithResult(.{ .spaceship = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
 
             // Logical
-            .keyword_and, .ampersand_ampersand => self.emitWithResult(.{ .and_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .keyword_or, .pipe_pipe => self.emitWithResult(.{ .or_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .k_and, .double_ampersand => self.emitWithResult(.{ .and_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            .k_or, .double_pipe => self.emitWithResult(.{ .or_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
 
             // Bitwise
             .ampersand => self.emitWithResult(.{ .bit_and = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
@@ -2242,7 +2289,8 @@ pub const IRGenerator = struct {
             .dot => self.emitWithResult(.{ .concat = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_string),
 
             // Null coalescing
-            .question_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
+            .double_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
+            // .question_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
 
             else => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
         };
@@ -2392,17 +2440,331 @@ pub const IRGenerator = struct {
             return self.emitWithResult(.const_null, .php_value);
         };
 
+        // If callee is not a direct identifier, treat it as a runtime callable and use call_indirect.
+        // This covers patterns like: ($arr[$k])($x), ($obj->prop)($x), ("strlen")($x), etc.
         var func_name: []const u8 = "";
+        var indirect_callee: ?Register = null;
         if (name_node.tag == .variable) {
-            func_name = self.getString(name_node.data.variable.name);
+            const is_variable_token = name_node.main_token.tag == .t_variable;
+            if (is_variable_token) {
+                const var_name = self.getString(name_node.data.variable.name);
+                if (self.var_registers.get(var_name)) |reg| {
+                    indirect_callee = try self.emitWithResult(.{ .load = .{ .ptr = reg, .type_ = .php_value } }, .php_value);
+                } else {
+                    indirect_callee = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                }
+            } else {
+                func_name = self.getString(name_node.data.variable.name);
+            }
         } else if (name_node.tag == .literal_string) {
             func_name = self.getString(name_node.data.literal_string.value);
+        } else {
+            indirect_callee = try self.generateExpression(call_data.name);
         }
 
-        // Generate arguments
-        const args = try self.allocator.alloc(Register, call_data.args.len);
-        for (call_data.args, 0..) |arg_idx, i| {
-            args[i] = try self.generateExpression(arg_idx);
+        var has_unpacking: bool = false;
+        for (call_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .unpacking_expr) {
+                has_unpacking = true;
+                break;
+            }
+        }
+        if (has_unpacking) {
+            const callback_reg = if (indirect_callee) |r| r else blk: {
+                if (func_name.len == 0) {
+                    break :blk try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                }
+                const sid = try self.module.?.internString(func_name);
+                break :blk try self.emitWithResult(.{ .const_string = sid }, .php_value);
+            };
+
+            const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                    const spread_args = try self.allocator.alloc(Register, 2);
+                    spread_args[0] = args_arr;
+                    spread_args[1] = spread_reg;
+                    _ = try self.emit(.{ .call = .{ .func_name = "php_args_append_spread", .args = spread_args, .return_type = .php_value } }, null);
+                    continue;
+                }
+
+                const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
+                const val_reg = try self.generateExpression(expr_idx);
+                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+            }
+
+            const invoke_args = try self.allocator.alloc(Register, 2);
+            invoke_args[0] = callback_reg;
+            invoke_args[1] = args_arr;
+            return self.emitWithResult(.{ .call = .{ .func_name = "php_invoke_callable_args_array", .args = invoke_args, .return_type = .php_value } }, .php_value);
+        }
+
+        // Generate arguments (positional + named)
+        const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
+
+        var has_named: bool = false;
+        var positional_args = std.ArrayListUnmanaged(Node.Index){};
+        defer positional_args.deinit(self.allocator);
+        var named_args = std.StringHashMapUnmanaged(Node.Index){};
+        defer named_args.deinit(self.allocator);
+
+        for (call_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .named_arg) {
+                has_named = true;
+                const arg_name = self.getString(arg_node.data.named_arg.name);
+                try named_args.put(self.allocator, arg_name, arg_node.data.named_arg.value);
+            } else {
+                try positional_args.append(self.allocator, arg_idx);
+            }
+        }
+
+        var args: []Register = &[_]Register{};
+
+        if (has_named and indirect_callee == null and func_symbol != null and func_symbol.?.metadata == .function) {
+            const params = func_symbol.?.metadata.function.params;
+            var final_args = std.ArrayListUnmanaged(Register){};
+            defer final_args.deinit(self.allocator);
+            try final_args.ensureTotalCapacity(self.allocator, params.len + positional_args.items.len);
+
+            var pos_i: usize = 0;
+            for (params) |p| {
+                var chosen: ?Node.Index = null;
+                const p_name = if (p.name.len > 0 and p.name[0] == '$') p.name[1..] else p.name;
+                if (named_args.get(p_name)) |named_idx| {
+                    chosen = named_idx;
+                } else if (pos_i < positional_args.items.len) {
+                    chosen = positional_args.items[pos_i];
+                    pos_i += 1;
+                }
+
+                if (chosen) |expr_idx| {
+                    if (p.is_reference) {
+                        const chosen_node = self.getNode(expr_idx);
+                        if (chosen_node != null and chosen_node.?.tag == .variable) {
+                            const var_name = self.getString(chosen_node.?.data.variable.name);
+                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                            const r = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                            try final_args.append(self.allocator, r);
+                            continue;
+                        }
+                    }
+                    const r = try self.generateExpression(expr_idx);
+                    try final_args.append(self.allocator, r);
+                } else {
+                    const r = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
+                    try final_args.append(self.allocator, r);
+                }
+            }
+
+            while (pos_i < positional_args.items.len) : (pos_i += 1) {
+                const r = try self.generateExpression(positional_args.items[pos_i]);
+                try final_args.append(self.allocator, r);
+            }
+
+            args = try final_args.toOwnedSlice(self.allocator);
+        } else {
+            args = try self.allocator.alloc(Register, call_data.args.len);
+            for (call_data.args, 0..) |arg_idx, i| {
+                const arg_node = self.getNode(arg_idx);
+                const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) arg_node.?.data.named_arg.value else arg_idx;
+
+                var is_ref = false;
+                if (func_symbol) |sym| {
+                    if (sym.metadata == .function) {
+                        const params = sym.metadata.function.params;
+                        if (i < params.len) {
+                            is_ref = params[i].is_reference;
+                        }
+                    }
+                }
+
+                if (is_ref) {
+                    const real_node = self.getNode(expr_idx);
+                    if (real_node != null and real_node.?.tag == .variable) {
+                        const var_name = self.getString(real_node.?.data.variable.name);
+                        const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                        args[i] = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                    } else {
+                        args[i] = try self.generateExpression(expr_idx);
+                    }
+                } else {
+                    args[i] = try self.generateExpression(expr_idx);
+                }
+            }
+        }
+
+        // Builtins with optional boolean flag: print_r($v[, $return]) / var_export($v[, $return])
+        if (func_name.len != 0 and (std.mem.eql(u8, func_name, "print_r") or std.mem.eql(u8, func_name, "var_export"))) {
+            if (args.len == 1) {
+                const padded = try self.allocator.alloc(Register, 2);
+                padded[0] = args[0];
+                padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+                args = padded;
+            }
+        }
+
+        if (func_name.len != 0 and indirect_callee == null) {
+            if (std.mem.eql(u8, func_name, "strpos") or std.mem.eql(u8, func_name, "stripos") or std.mem.eql(u8, func_name, "strrpos") or std.mem.eql(u8, func_name, "strripos")) {
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "substr")) {
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "trim") or std.mem.eql(u8, func_name, "ltrim") or std.mem.eql(u8, func_name, "rtrim")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "explode")) {
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "str_replace")) {
+                if (args.len == 3) {
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = args[2];
+                    padded[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "ucwords")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "str_split")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "str_pad")) {
+                if (args.len == 2) {
+                    const sid_space = try self.module.?.internString(" ");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_string = sid_space }, .php_value);
+                    padded[3] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+                    args = padded;
+                } else if (args.len == 3) {
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = args[2];
+                    padded[3] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "chunk_split")) {
+                if (args.len < 3) {
+                    const sid_end = try self.module.?.internString("\r\n");
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 76 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_end }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "wordwrap")) {
+                if (args.len < 4) {
+                    const sid_break = try self.module.?.internString("\n");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 75 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_break }, .php_value);
+                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "nl2br")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_bool = true }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "strip_tags")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "htmlspecialchars") or std.mem.eql(u8, func_name, "htmlentities")) {
+                if (args.len < 4) {
+                    const sid_utf8 = try self.module.?.internString("UTF-8");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_utf8 }, .php_value);
+                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = true }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "htmlspecialchars_decode")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "number_format")) {
+                if (args.len < 4) {
+                    const sid_dot = try self.module.?.internString(".");
+                    const sid_comma = try self.module.?.internString(",");
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_dot }, .php_value);
+                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_string = sid_comma }, .php_value);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "md5") or std.mem.eql(u8, func_name, "sha1") or std.mem.eql(u8, func_name, "base64_decode")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "uniqid")) {
+                if (args.len < 2) {
+                    const sid_empty = try self.module.?.internString("");
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = sid_empty }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            }
+        }
+
+        if (indirect_callee) |callee_reg| {
+            return self.emitWithResult(.{ .call_indirect = .{
+                .func_ptr = callee_reg,
+                .args = args,
+                .return_type = .php_value,
+            } }, .php_value);
         }
 
         return self.emitWithResult(.{ .call = .{
@@ -2445,15 +2807,10 @@ pub const IRGenerator = struct {
             args[i] = try self.generateExpression(arg_idx);
         }
 
-        // Mangle name for static call
-        var buf: [256]u8 = undefined;
-        const full_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method_name }) catch method_name;
-        const name_copy = try self.allocator.dupe(u8, full_name);
-
-        return self.emitWithResult(.{ .call = .{
-            .func_name = name_copy,
+        return self.emitWithResult(.{ .static_method_call = .{
+            .class_name = class_name,
+            .method_name = method_name,
             .args = args,
-            .return_type = .php_value,
         } }, .php_value);
     }
 
@@ -2522,6 +2879,12 @@ pub const IRGenerator = struct {
         if (class_node.tag == .named_type) {
             class_name = self.getString(class_node.data.named_type.name);
         } else if (class_node.tag == .variable) {
+            class_name = self.getString(class_node.data.variable.name);
+        } else if (class_node.tag == .self_expr) {
+            class_name = self.getString(class_node.data.variable.name);
+        } else if (class_node.tag == .parent_expr) {
+            class_name = self.getString(class_node.data.variable.name);
+        } else if (class_node.tag == .static_expr) {
             class_name = self.getString(class_node.data.variable.name);
         }
 
@@ -2592,7 +2955,7 @@ pub const IRGenerator = struct {
         const cast_data = node.data.cast_expr;
         const value_reg = try self.generateExpression(cast_data.expr);
         return switch (cast_data.cast_type) {
-            .array => blk: {
+            .k_array => blk: {
                 const args = try self.allocator.alloc(Register, 1);
                 args[0] = value_reg;
                 break :blk self.emitWithResult(.{ .call = .{
@@ -2601,7 +2964,7 @@ pub const IRGenerator = struct {
                     .return_type = .php_value,
                 } }, .php_value);
             },
-            .object => blk: {
+            .k_object => blk: {
                 const args = try self.allocator.alloc(Register, 1);
                 args[0] = value_reg;
                 break :blk self.emitWithResult(.{ .call = .{
@@ -2610,7 +2973,7 @@ pub const IRGenerator = struct {
                     .return_type = .php_value,
                 } }, .php_value);
             },
-            .unknown => value_reg,
+            else => value_reg,
         };
     }
 
@@ -2620,15 +2983,9 @@ pub const IRGenerator = struct {
         const class_name = self.getString(access_data.class_name);
         const prop_name = self.getString(access_data.property_name);
 
-        // Static properties are accessed via runtime call
-        var buf: [256]u8 = undefined;
-        const full_name = std.fmt.bufPrint(&buf, "{s}::${s}", .{ class_name, prop_name }) catch prop_name;
-        const name_copy = try self.allocator.dupe(u8, full_name);
-
-        return self.emitWithResult(.{ .call = .{
-            .func_name = name_copy,
-            .args = try self.allocator.alloc(Register, 0),
-            .return_type = .php_value,
+        return self.emitWithResult(.{ .static_property_get = .{
+            .class_name = class_name,
+            .property_name = prop_name,
         } }, .php_value);
     }
 
@@ -2654,10 +3011,65 @@ pub const IRGenerator = struct {
     fn generateClosure(self: *Self, node: *const Node) !Register {
         const closure_data = node.data.closure;
 
-        // Create anonymous function
+        // 1. Capture variables from parent scope (keep indices dense, handle &capture)
+        var cap_names = std.ArrayListUnmanaged([]const u8){};
+        defer cap_names.deinit(self.allocator);
+        var captures = std.ArrayListUnmanaged(Register){};
+        defer captures.deinit(self.allocator);
+
+        for (closure_data.captures) |cap_idx| {
+            const cap_node = self.getNode(cap_idx) orelse continue;
+
+            var var_name: []const u8 = undefined;
+            var by_ref: bool = false;
+
+            switch (cap_node.tag) {
+                .variable => {
+                    var_name = self.getString(cap_node.data.variable.name);
+                },
+                .unary_expr => {
+                    if (cap_node.data.unary_expr.op == .ampersand) {
+                        const inner = self.getNode(cap_node.data.unary_expr.expr) orelse continue;
+                        if (inner.tag == .variable) {
+                            var_name = self.getString(inner.data.variable.name);
+                            by_ref = true;
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                },
+                else => continue,
+            }
+
+            // Get from parent scope
+            if (by_ref) {
+                if (self.var_registers.get(var_name)) |ptr_reg| {
+                    const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = ptr_reg } }, .php_value);
+                    try captures.append(self.allocator, ref_reg);
+                    try cap_names.append(self.allocator, var_name);
+                } else {
+                    const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    try captures.append(self.allocator, null_reg);
+                    try cap_names.append(self.allocator, var_name);
+                }
+            } else {
+                var val_reg: Register = undefined;
+                if (self.var_registers.get(var_name)) |ptr_reg| {
+                    val_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+                } else {
+                    val_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                }
+                try captures.append(self.allocator, val_reg);
+                try cap_names.append(self.allocator, var_name);
+            }
+        }
+
+        // Create anonymous function (must be globally unique within the generated Zig compilation unit)
+        const unique_id: usize = if (self.module) |m| m.functions.items.len else 0;
         var buf: [64]u8 = undefined;
-        const func_name = std.fmt.bufPrint(&buf, "__closure_{d}", .{self.block_counter}) catch "__closure";
-        self.block_counter += 1;
+        const func_name = std.fmt.bufPrint(&buf, "__closure_{d}", .{unique_id}) catch "__closure";
         const name_copy = try self.allocator.dupe(u8, func_name);
 
         const func = try self.allocator.create(Function);
@@ -2684,6 +3096,13 @@ pub const IRGenerator = struct {
             try self.generateParameter(param_idx);
         }
 
+        // Process captures (inject into local scope)
+        for (cap_names.items, 0..) |var_name, i| {
+            const capture_val = try self.emitWithResult(.{ .capture_get = .{ .index = @intCast(i), .name = var_name } }, .php_value);
+            const local_ptr = try self.getOrCreateVarRegister(var_name, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = local_ptr, .value = capture_val } }, null);
+        }
+
         // Generate body
         try self.generateStatement(closure_data.body);
 
@@ -2697,9 +3116,25 @@ pub const IRGenerator = struct {
         self.current_block = prev_block;
 
         // Return callable reference
+        // Create array for captures
+        const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);
+        
+        for (captures.items) |cap_reg| {
+             _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg } }, null);
+        }
+
+        // Closure name
+        const name_id = try self.module.?.internString(name_copy);
+        const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_string);
+
+        // Call php_create_closure
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = name_reg;
+        args[1] = caps_arr_reg;
+        
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
-            .args = try self.allocator.alloc(Register, 0),
+            .args = args,
             .return_type = .php_callable,
         } }, .php_callable);
     }
@@ -2708,10 +3143,25 @@ pub const IRGenerator = struct {
     fn generateArrowFunction(self: *Self, node: *const Node) !Register {
         const arrow_data = node.data.arrow_function;
 
-        // Arrow functions are similar to closures but with implicit return
+        // Arrow functions are similar to closures but with implicit return and auto-capture.
+        // For parity with the interpreter implementation, capture all visible locals from the parent scope.
+        var cap_names = std.ArrayListUnmanaged([]const u8){};
+        defer cap_names.deinit(self.allocator);
+        var captures = std.ArrayListUnmanaged(Register){};
+        defer captures.deinit(self.allocator);
+
+        var parent_iter = self.var_registers.iterator();
+        while (parent_iter.next()) |entry| {
+            const var_name = entry.key_ptr.*;
+            const ptr_reg = entry.value_ptr.*;
+            const val_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+            try captures.append(self.allocator, val_reg);
+            try cap_names.append(self.allocator, var_name);
+        }
+
+        const unique_id: usize = if (self.module) |m| m.functions.items.len else 0;
         var buf: [64]u8 = undefined;
-        const func_name = std.fmt.bufPrint(&buf, "__arrow_{d}", .{self.block_counter}) catch "__arrow";
-        self.block_counter += 1;
+        const func_name = std.fmt.bufPrint(&buf, "__arrow_{d}", .{unique_id}) catch "__arrow";
         const name_copy = try self.allocator.dupe(u8, func_name);
 
         const func = try self.allocator.create(Function);
@@ -2736,6 +3186,13 @@ pub const IRGenerator = struct {
             try self.generateParameter(param_idx);
         }
 
+        // Inject captures into local scope
+        for (cap_names.items, 0..) |cap_name, i| {
+            const capture_val = try self.emitWithResult(.{ .capture_get = .{ .index = @intCast(i), .name = cap_name } }, .php_value);
+            const local_ptr = try self.getOrCreateVarRegister(cap_name, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = local_ptr, .value = capture_val } }, null);
+        }
+
         // Arrow function body is an expression that's implicitly returned
         const result_reg = try self.generateExpression(arrow_data.body);
         self.setTerminator(.{ .ret = result_reg });
@@ -2745,9 +3202,23 @@ pub const IRGenerator = struct {
         self.current_function = prev_function;
         self.current_block = prev_block;
 
+        // Create array for captures
+        const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);
+        for (captures.items) |cap_reg| {
+            _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg } }, null);
+        }
+
+        // Closure name
+        const name_id = try self.module.?.internString(name_copy);
+        const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_string);
+
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = name_reg;
+        args[1] = caps_arr_reg;
+
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
-            .args = try self.allocator.alloc(Register, 0),
+            .args = args,
             .return_type = .php_callable,
         } }, .php_callable);
     }
@@ -2888,7 +3359,7 @@ pub const IRGenerator = struct {
             const result: ?i64 = switch (op) {
                 .plus => lhs_val +% rhs_val,
                 .minus => lhs_val -% rhs_val,
-                .star => lhs_val *% rhs_val,
+                .asterisk => lhs_val *% rhs_val,
                 .slash => if (rhs_val != 0) @divTrunc(lhs_val, rhs_val) else null,
                 .percent => if (rhs_val != 0) @mod(lhs_val, rhs_val) else null,
                 .ampersand => lhs_val & rhs_val,
@@ -2896,7 +3367,7 @@ pub const IRGenerator = struct {
                 .caret => lhs_val ^ rhs_val,
                 .less_less => lhs_val << @intCast(@mod(rhs_val, 64)),
                 .greater_greater => lhs_val >> @intCast(@mod(rhs_val, 64)),
-                else => null,
+            else => null,
             };
 
             if (result) |val| {
@@ -2908,9 +3379,9 @@ pub const IRGenerator = struct {
             const bool_result: ?bool = switch (op) {
                 .equal_equal, .equal_equal_equal => lhs_val == rhs_val,
                 .bang_equal, .bang_equal_equal => lhs_val != rhs_val,
-                .less_than => lhs_val < rhs_val,
+                .less => lhs_val < rhs_val,
                 .less_equal => lhs_val <= rhs_val,
-                .greater_than => lhs_val > rhs_val,
+                .greater => lhs_val > rhs_val,
                 .greater_equal => lhs_val >= rhs_val,
                 else => null,
             };
@@ -2929,7 +3400,7 @@ pub const IRGenerator = struct {
             const result: ?f64 = switch (op) {
                 .plus => lhs_val + rhs_val,
                 .minus => lhs_val - rhs_val,
-                .star => lhs_val * rhs_val,
+                .asterisk => lhs_val * rhs_val,
                 .slash => if (rhs_val != 0) lhs_val / rhs_val else null,
                 else => null,
             };
@@ -2943,9 +3414,9 @@ pub const IRGenerator = struct {
             const bool_result: ?bool = switch (op) {
                 .equal_equal => lhs_val == rhs_val,
                 .bang_equal => lhs_val != rhs_val,
-                .less_than => lhs_val < rhs_val,
+                .less => lhs_val < rhs_val,
                 .less_equal => lhs_val <= rhs_val,
-                .greater_than => lhs_val > rhs_val,
+                .greater => lhs_val > rhs_val,
                 .greater_equal => lhs_val >= rhs_val,
                 else => null,
             };
@@ -2966,7 +3437,7 @@ pub const IRGenerator = struct {
             const result: ?f64 = switch (op) {
                 .plus => lhs_val + rhs_val,
                 .minus => lhs_val - rhs_val,
-                .star => lhs_val * rhs_val,
+                .asterisk => lhs_val * rhs_val,
                 .slash => if (rhs_val != 0) lhs_val / rhs_val else null,
                 else => null,
             };
@@ -2983,8 +3454,8 @@ pub const IRGenerator = struct {
             const rhs_val = rhs_const.?.bool_val.?;
 
             const result: ?bool = switch (op) {
-                .keyword_and, .ampersand_ampersand => lhs_val and rhs_val,
-                .keyword_or, .pipe_pipe => lhs_val or rhs_val,
+                .k_and, .double_ampersand => lhs_val and rhs_val,
+                .k_or, .double_pipe => lhs_val or rhs_val,
                 .equal_equal, .equal_equal_equal => lhs_val == rhs_val,
                 .bang_equal, .bang_equal_equal => lhs_val != rhs_val,
                 else => null,
@@ -3075,7 +3546,7 @@ pub const IRGenerator = struct {
         return switch (node.tag) {
             .literal_int => .{ .int_val = node.data.literal_int.value },
             .literal_float => .{ .float_val = node.data.literal_float.value },
-            .literal_bool => .{ .bool_val = node.main_token.tag == .keyword_true },
+            .literal_bool => .{ .bool_val = node.main_token.tag == .k_true },
             .literal_null => .{ .is_null = true },
             .literal_string => .{ .string_val = self.getString(node.data.literal_string.value) },
             else => null,
@@ -3144,7 +3615,7 @@ test "IRGenerator simple module generation" {
     const nodes = [_]Node{
         .{
             .tag = .root,
-            .main_token = .{ .tag = .eof, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .eof, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .root = .{ .stmts = &.{} } },
         },
     };
@@ -3201,25 +3672,25 @@ test "IRGenerator constant folding - integer addition" {
         // 0: root
         .{
             .tag = .root,
-            .main_token = .{ .tag = .eof, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .eof, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .root = .{ .stmts = &[_]Node.Index{1} } },
         },
         // 1: binary_expr (2 + 3)
         .{
             .tag = .binary_expr,
-            .main_token = .{ .tag = .plus, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .plus, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .binary_expr = .{ .lhs = 2, .op = .plus, .rhs = 3 } },
         },
         // 2: literal_int (2)
         .{
             .tag = .literal_int,
-            .main_token = .{ .tag = .integer_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_lnumber, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_int = .{ .value = 2 } },
         },
         // 3: literal_int (3)
         .{
             .tag = .literal_int,
-            .main_token = .{ .tag = .integer_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_lnumber, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_int = .{ .value = 3 } },
         },
     };
@@ -3277,19 +3748,19 @@ test "IRGenerator constant folding - string concatenation" {
         // 0: binary_expr ("hello" . " world")
         .{
             .tag = .binary_expr,
-            .main_token = .{ .tag = .dot, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .dot, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .binary_expr = .{ .lhs = 1, .op = .dot, .rhs = 2 } },
         },
         // 1: literal_string ("hello")
         .{
             .tag = .literal_string,
-            .main_token = .{ .tag = .string_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_string, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_string = .{ .value = 0, .quote_type = .double } },
         },
         // 2: literal_string (" world")
         .{
             .tag = .literal_string,
-            .main_token = .{ .tag = .string_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+            .main_token = .{ .tag = .t_string, .loc = .{ .start = 0, .end = 0 } },
             .data = .{ .literal_string = .{ .value = 1, .quote_type = .double } },
         },
     };
@@ -3322,7 +3793,7 @@ test "IRGenerator getConstantValue" {
     // Test integer constant
     const int_node = Node{
         .tag = .literal_int,
-        .main_token = .{ .tag = .integer_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+        .main_token = .{ .tag = .t_lnumber, .loc = .{ .start = 0, .end = 0 } },
         .data = .{ .literal_int = .{ .value = 42 } },
     };
     const int_const = generator.getConstantValue(&int_node);
@@ -3332,7 +3803,7 @@ test "IRGenerator getConstantValue" {
     // Test float constant
     const float_node = Node{
         .tag = .literal_float,
-        .main_token = .{ .tag = .float_literal, .start = 0, .end = 0, .line = 1, .column = 1 },
+        .main_token = .{ .tag = .t_dnumber, .loc = .{ .start = 0, .end = 0 } },
         .data = .{ .literal_float = .{ .value = 3.14 } },
     };
     const float_const = generator.getConstantValue(&float_node);
@@ -3342,7 +3813,7 @@ test "IRGenerator getConstantValue" {
     // Test null constant
     const null_node = Node{
         .tag = .literal_null,
-        .main_token = .{ .tag = .keyword_null, .start = 0, .end = 0, .line = 1, .column = 1 },
+        .main_token = .{ .tag = .k_null, .loc = .{ .start = 0, .end = 0 } },
         .data = .{ .none = {} },
     };
     const null_const = generator.getConstantValue(&null_node);

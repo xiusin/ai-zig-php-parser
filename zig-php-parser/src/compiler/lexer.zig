@@ -98,9 +98,11 @@ pub const Lexer = struct {
             },
             '+' => if (self.match('+')) .{ .tag = .plus_plus, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) .{ .tag = .plus_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .plus, .loc = .{ .start = start, .end = self.pos } },
             '-' => if (self.match('>')) .{ .tag = .arrow, .loc = .{ .start = start, .end = self.pos } } else if (self.match('-')) .{ .tag = .minus_minus, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) .{ .tag = .minus_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .minus, .loc = .{ .start = start, .end = self.pos } },
-            '*' => if (self.match('=')) .{ .tag = .asterisk_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .asterisk, .loc = .{ .start = start, .end = self.pos } },
+            '*' => if (self.match('*')) (if (self.match('=')) .{ .tag = .star_star_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .star_star, .loc = .{ .start = start, .end = self.pos } }) else if (self.match('=')) .{ .tag = .asterisk_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .asterisk, .loc = .{ .start = start, .end = self.pos } },
             '/' => if (self.match('=')) .{ .tag = .slash_equal, .loc = .{ .start = start, .end = self.pos } } else if (self.match('/')) self.skipLineComment(start) else if (self.match('*')) self.skipBlockComment(start) else .{ .tag = .slash, .loc = .{ .start = start, .end = self.pos } },
             '%' => if (self.match('=')) .{ .tag = .percent_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .percent, .loc = .{ .start = start, .end = self.pos } },
+            '^' => if (self.match('=')) .{ .tag = .caret_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .caret, .loc = .{ .start = start, .end = self.pos } },
+            '~' => .{ .tag = .tilde, .loc = .{ .start = start, .end = self.pos } },
             '?' => if (self.match('>')) .{ .tag = .t_close_tag, .loc = .{ .start = start, .end = self.pos } } else if (self.match('?')) .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } } else if (self.match('-')) {
                 // Check for ?-> (safe arrow in PHP mode)
                 if (self.match('>')) {
@@ -114,11 +116,12 @@ pub const Lexer = struct {
             } else .{ .tag = .question, .loc = .{ .start = start, .end = self.pos } },
             '=' => if (self.match('>')) .{ .tag = .fat_arrow, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) (if (self.match('=')) .{ .tag = .equal_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .equal_equal, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .equal, .loc = .{ .start = start, .end = self.pos } },
             '!' => if (self.match('=')) (if (self.match('=')) .{ .tag = .bang_equal_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .bang_equal, .loc = .{ .start = start, .end = self.pos } }) else .{ .tag = .bang, .loc = .{ .start = start, .end = self.pos } },
-            '&' => if (self.match('&')) .{ .tag = .double_ampersand, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .ampersand, .loc = .{ .start = start, .end = self.pos } },
-            '|' => if (self.match('|')) .{ .tag = .double_pipe, .loc = .{ .start = start, .end = self.pos } } else if (self.match('>')) .{ .tag = .pipe_greater, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .pipe, .loc = .{ .start = start, .end = self.pos } },
+            '&' => if (self.match('&')) .{ .tag = .double_ampersand, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) .{ .tag = .and_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .ampersand, .loc = .{ .start = start, .end = self.pos } },
+            '|' => if (self.match('|')) .{ .tag = .double_pipe, .loc = .{ .start = start, .end = self.pos } } else if (self.match('=')) .{ .tag = .or_equal, .loc = .{ .start = start, .end = self.pos } } else if (self.match('>')) .{ .tag = .pipe_greater, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .pipe, .loc = .{ .start = start, .end = self.pos } },
             '<' => if (self.match('<')) {
                 if (self.match('<')) return self.lexHeredocStart(start);
-                return .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } };
+                if (self.match('=')) return .{ .tag = .less_less_equal, .loc = .{ .start = start, .end = self.pos } };
+                return .{ .tag = .less_less, .loc = .{ .start = start, .end = self.pos } };
             } else if (self.match('=')) {
                 // Check for <=> (spaceship) first, then <= (less_equal)
                 if (self.match('>')) {
@@ -126,7 +129,7 @@ pub const Lexer = struct {
                 }
                 return .{ .tag = .less_equal, .loc = .{ .start = start, .end = self.pos } };
             } else .{ .tag = .less, .loc = .{ .start = start, .end = self.pos } },
-            '>' => if (self.match('=')) .{ .tag = .greater_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .greater, .loc = .{ .start = start, .end = self.pos } },
+            '>' => if (self.match('>')) (if (self.match('=')) .{ .tag = .greater_greater_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .greater_greater, .loc = .{ .start = start, .end = self.pos } }) else if (self.match('=')) .{ .tag = .greater_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .greater, .loc = .{ .start = start, .end = self.pos } },
             '#' => if (self.match('[')) .{ .tag = .t_attribute_start, .loc = .{ .start = start, .end = self.pos } } else self.skipLineComment(start),
             ':' => if (self.match(':')) .{ .tag = .double_colon, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .colon, .loc = .{ .start = start, .end = self.pos } },
             '0'...'9' => self.lexNumber(start),

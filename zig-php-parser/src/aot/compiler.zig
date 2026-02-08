@@ -93,11 +93,6 @@ const SymbolTableMod = @import("symbol_table.zig");
 const SymbolTable = SymbolTableMod.SymbolTable;
 const TypeInferenceMod = @import("type_inference.zig");
 const TypeInferencer = TypeInferenceMod.TypeInferencer;
-const CodeGen = @import("codegen.zig");
-const CodeGenerator = CodeGen.CodeGenerator;
-const LinkerMod = @import("linker.zig");
-const StaticLinker = LinkerMod.StaticLinker;
-const LinkerConfig = LinkerMod.LinkerConfig;
 const OptimizerMod = @import("optimizer.zig");
 const IROptimizer = OptimizerMod.IROptimizer;
 const IROptimizeLevel = OptimizerMod.OptimizeLevel;
@@ -115,6 +110,24 @@ const IRGeneratorMod = @import("ir_generator.zig");
 // Compile Options
 // ============================================================================
 
+pub const LoweringPolicy = enum {
+    warn,
+    @"error",
+
+    pub fn fromString(str: []const u8) ?LoweringPolicy {
+        if (std.mem.eql(u8, str, "warn")) return .warn;
+        if (std.mem.eql(u8, str, "error")) return .@"error";
+        return null;
+    }
+
+    pub fn toString(self: LoweringPolicy) []const u8 {
+        return switch (self) {
+            .warn => "warn",
+            .@"error" => "error",
+        };
+    }
+};
+
 /// AOT Compiler configuration options
 pub const CompileOptions = struct {
     /// Input PHP source file path
@@ -129,26 +142,65 @@ pub const CompileOptions = struct {
     static_link: bool = true,
     /// Generate debug information
     debug_info: bool = true,
+    /// Whether to invoke Zig to produce the final executable
+    link_executable: bool = true,
     /// Dump generated IR for debugging
     dump_ir: bool = false,
+    emit_ir_path: ?[]const u8 = null,
     /// Dump parsed AST for debugging
     dump_ast: bool = false,
+    dump_zig: bool = false,
+    dump_zig_path: ?[]const u8 = null,
+    emit_asm_path: ?[]const u8 = null,
+    emit_llvm_ir_path: ?[]const u8 = null,
+    emit_llvm_bc_path: ?[]const u8 = null,
+    mcpu: ?[]const u8 = null,
+    extra_zig_flags: []const []const u8 = &.{},
+    timing: bool = false,
+    timing_json_path: ?[]const u8 = null,
     /// Verbose output during compilation
     verbose: bool = false,
     /// Syntax mode for parsing (PHP or Go style)
     syntax_mode: SyntaxMode = .php,
+    /// Behavior when encountering IR ops not supported by lowering
+    lowering_policy: LoweringPolicy = .@"error",
+    verify_ir: bool = false,
+    fallback_on_opt_fail: bool = true,
+    pass_overrides: PassOverrides = .{},
 
     /// Get the output file path, deriving from input if not specified
-    /// 默认输出文件名统一为 "hello"，用户可通过 --output 参数自定义
     pub fn getOutputPath(self: *const CompileOptions, allocator: Allocator) ![]const u8 {
         if (self.output_file) |out| {
             return try allocator.dupe(u8, out);
         }
 
-        // 统一默认输出文件名为 "hello"
-        // 这样用户不需要每次授予执行权限
-        return try allocator.dupe(u8, "hello");
+        const base = std.fs.path.basename(self.input_file);
+        const stem = if (std.mem.endsWith(u8, base, ".php") and base.len > 4) base[0 .. base.len - 4] else base;
+        if (stem.len == 0) {
+            return try allocator.dupe(u8, "a.out");
+        }
+        if (self.target.os == .windows) {
+            return try std.fmt.allocPrint(allocator, "{s}.exe", .{stem});
+        }
+        return try allocator.dupe(u8, stem);
     }
+};
+
+pub const PassOverrides = struct {
+    dead_code_elimination: ?bool = null,
+    constant_propagation: ?bool = null,
+    box_unbox_elim: ?bool = null,
+    function_inlining: ?bool = null,
+    type_specialization: ?bool = null,
+    cse: ?bool = null,
+    licm: ?bool = null,
+    strength_reduction: ?bool = null,
+    mem2reg: ?bool = null,
+    loop_unroll: ?bool = null,
+    cfg_cleanup: ?bool = null,
+    inline_threshold: ?u32 = null,
+    unroll_factor: ?u32 = null,
+    max_iterations: ?u32 = null,
 };
 
 // ============================================================================
@@ -181,16 +233,6 @@ pub const OptimizeLevel = enum {
         if (std.mem.eql(u8, str, "release-fast")) return .release_fast;
         if (std.mem.eql(u8, str, "release-small")) return .release_small;
         return null;
-    }
-
-    /// Convert to CodeGen optimization level
-    pub fn toCodeGenLevel(self: OptimizeLevel) CodeGen.OptimizeLevel {
-        return switch (self) {
-            .debug => .debug,
-            .release_safe => .release_safe,
-            .release_fast => .release_fast,
-            .release_small => .release_small,
-        };
     }
 
     /// Convert to IR optimizer level
@@ -333,25 +375,8 @@ pub const Target = struct {
     }
 
     /// Convert to CodeGen target
-    pub fn toCodeGenTarget(self: Target) CodeGen.Target {
-        return .{
-            .arch = switch (self.arch) {
-                .x86_64 => .x86_64,
-                .aarch64 => .aarch64,
-                .arm => .arm,
-            },
-            .os = switch (self.os) {
-                .linux => .linux,
-                .macos => .macos,
-                .windows => .windows,
-            },
-            .abi = switch (self.abi) {
-                .gnu => .gnu,
-                .musl => .musl,
-                .msvc => .msvc,
-                .none => .none,
-            },
-        };
+    pub fn toCodeGenTarget(self: Target) void {
+        _ = self;
     }
 };
 
@@ -440,8 +465,6 @@ pub const AOTCompiler = struct {
     symbol_table: ?*SymbolTable,
     type_inferencer: ?*TypeInferencer,
     ir_generator: ?*IRGenerator,
-    codegen: ?*CodeGenerator,
-    linker: ?*StaticLinker,
     optimizer: ?*IROptimizer,
     native_linker: ?*NativeLinker,
     /// Syntax configuration derived from options
@@ -468,6 +491,8 @@ pub const AOTCompiler = struct {
         // Initialize diagnostics engine
         const diagnostics = try allocator.create(DiagnosticEngine);
         diagnostics.* = DiagnosticEngine.init(allocator);
+        const base_dir = std.fs.path.dirname(options.input_file) orelse ".";
+        try diagnostics.setPathBase(base_dir);
 
         // Initialize syntax config from options
         const syntax_config = SyntaxConfig.init(options.syntax_mode);
@@ -479,8 +504,6 @@ pub const AOTCompiler = struct {
             .symbol_table = null,
             .type_inferencer = null,
             .ir_generator = null,
-            .codegen = null,
-            .linker = null,
             .optimizer = null,
             .native_linker = null,
             .syntax_config = syntax_config,
@@ -518,16 +541,6 @@ pub const AOTCompiler = struct {
         if (self.symbol_table) |st| {
             st.deinit();
             self.allocator.destroy(st);
-        }
-
-        // Free code generator
-        if (self.codegen) |cg| {
-            cg.deinit();
-        }
-
-        // Free linker
-        if (self.linker) |lnk| {
-            lnk.deinit();
         }
 
         // Free native linker
@@ -589,39 +602,9 @@ pub const AOTCompiler = struct {
             self.options.optimize_level.toIROptimizeLevel(),
             self.diagnostics,
         );
+        optimizer.verify_ir = self.options.verify_ir;
+        applyPassOverrides(&optimizer.config, self.options.pass_overrides);
         self.optimizer = optimizer;
-
-        // Initialize code generator
-        self.codegen = try CodeGenerator.init(
-            self.allocator,
-            self.options.target.toCodeGenTarget(),
-            self.options.optimize_level.toCodeGenLevel(),
-            self.options.debug_info,
-            self.diagnostics,
-        );
-
-        // Initialize linker (for symbol resolution) - 使用简化配置
-        const linker_target: LinkerMod.Target = switch (self.options.target.os) {
-            .linux => switch (self.options.target.arch) {
-                .x86_64 => .linux_x86_64,
-                .aarch64 => .linux_aarch64,
-                else => .linux_x86_64,
-            },
-            .macos => switch (self.options.target.arch) {
-                .x86_64 => .macos_x86_64,
-                .aarch64 => .macos_aarch64,
-                else => .macos_aarch64,
-            },
-            .windows => .windows_x86_64,
-        };
-        
-        const linker_config = LinkerConfig{
-            .target = linker_target,
-            .output_format = linker_target.getObjectFormat(),
-            .strip_debug = self.options.optimize_level == .release_small,
-            .optimize = self.options.optimize_level != .debug,
-        };
-        self.linker = try StaticLinker.init(self.allocator, linker_config, self.diagnostics);
 
         // Initialize native linker (for actual executable generation)
         const native_config = NativeLinkerConfig{
@@ -652,28 +635,68 @@ pub const AOTCompiler = struct {
             .static_link = self.options.static_link,
             .debug_info = self.options.debug_info,
             .strip_symbols = self.options.optimize_level == .release_small,
+            .mcpu = self.options.mcpu,
+            .extra_zig_flags = self.options.extra_zig_flags,
             .verbose = self.options.verbose,
+            .lowering_policy = switch (self.options.lowering_policy) {
+                .warn => .warn,
+                .@"error" => .@"error",
+            },
+            .dump_zig = self.options.dump_zig,
+            .dump_zig_path = self.options.dump_zig_path,
+            .emit_asm_path = self.options.emit_asm_path,
+            .emit_llvm_ir_path = self.options.emit_llvm_ir_path,
+            .emit_llvm_bc_path = self.options.emit_llvm_bc_path,
         };
         self.native_linker = try NativeLinker.init(self.allocator, native_config, self.diagnostics);
     }
 
+    fn applyPassOverrides(config: *OptimizerMod.PassConfig, o: PassOverrides) void {
+        if (o.dead_code_elimination) |v| config.dead_code_elimination = v;
+        if (o.constant_propagation) |v| config.constant_propagation = v;
+        if (o.box_unbox_elim) |v| config.box_unbox_elim = v;
+        if (o.function_inlining) |v| config.function_inlining = v;
+        if (o.type_specialization) |v| config.type_specialization = v;
+        if (o.cse) |v| config.cse = v;
+        if (o.licm) |v| config.licm = v;
+        if (o.strength_reduction) |v| config.strength_reduction = v;
+        if (o.mem2reg) |v| config.mem2reg = v;
+        if (o.loop_unroll) |v| config.loop_unroll = v;
+        if (o.cfg_cleanup) |v| config.cfg_cleanup = v;
+        if (o.inline_threshold) |v| config.inline_threshold = v;
+        if (o.unroll_factor) |v| config.unroll_factor = v;
+        if (o.max_iterations) |v| config.max_iterations = v;
+    }
+
     /// Main compilation entry point
     pub fn compile(self: *Self) !CompileResult {
+        var timer = if (self.options.timing) try std.time.Timer.start() else undefined;
+        var t_init: u64 = 0;
+        var t_load: u64 = 0;
+        var t_parse: u64 = 0;
+        var t_ir: u64 = 0;
+        var t_opt: u64 = 0;
+        var t_codegen: u64 = 0;
+        var t_link: u64 = 0;
+
         if (self.options.verbose) {
             self.printCompileInfo();
         }
 
         // Initialize all components
         try self.initComponents();
+        if (self.options.timing) t_init = timer.lap();
 
         // Step 1: Load and parse source file
         try self.loadSource();
+        if (self.options.timing) t_load = timer.lap();
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
         // Step 2: Parse source into AST
         try self.parseSource();
+        if (self.options.timing) t_parse = timer.lap();
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
@@ -685,12 +708,14 @@ pub const AOTCompiler = struct {
 
         // Step 3: Generate IR
         try self.generateIR();
+        if (self.options.timing) t_ir = timer.lap();
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
         // Step 4: Optimize IR
         try self.optimizeIR();
+        if (self.options.timing) t_opt = timer.lap();
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
@@ -699,23 +724,60 @@ pub const AOTCompiler = struct {
         if (self.options.dump_ir) {
             self.dumpIR();
         }
+        if (self.options.emit_ir_path) |path| {
+            if (path.len == 0) {
+                const out = try self.options.getOutputPath(self.allocator);
+                defer self.allocator.free(out);
+                const derived = try std.fmt.allocPrint(self.allocator, "{s}.ir", .{out});
+                defer self.allocator.free(derived);
+                try self.emitIR(derived);
+            } else {
+                try self.emitIR(path);
+            }
+        }
 
         // Step 5: Generate native code
         try self.generateCode();
+        if (self.options.timing) t_codegen = timer.lap();
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
-        // Step 6: Link executable
-        const output_path = try self.options.getOutputPath(self.allocator);
+        // Step 6: Link executable (or just generate Zig code)
+        var output_path = try self.options.getOutputPath(self.allocator);
         try self.linkExecutable(output_path);
+        if (self.options.timing) t_link = timer.lap();
         if (self.diagnostics.hasErrors()) {
             self.allocator.free(output_path);
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
+        if (!self.options.link_executable) {
+            if (self.options.dump_zig_path) |p| {
+                const dup = try self.allocator.dupe(u8, p);
+                self.allocator.free(output_path);
+                output_path = dup;
+            } else if (self.options.dump_zig) {
+                const derived = try std.fmt.allocPrint(self.allocator, "{s}.zig", .{output_path});
+                self.allocator.free(output_path);
+                output_path = derived;
+            }
+        }
+
         if (self.options.verbose) {
             std.debug.print("Compilation successful: {s}\n", .{output_path});
+        }
+
+        if (self.options.timing) {
+            try self.emitTimings(output_path, .{
+                .init = t_init,
+                .load = t_load,
+                .parse = t_parse,
+                .ir_gen = t_ir,
+                .ir_opt = t_opt,
+                .codegen = t_codegen,
+                .link = t_link,
+            });
         }
 
         return CompileResult.succeeded(output_path);
@@ -738,6 +800,7 @@ pub const AOTCompiler = struct {
         std.debug.print("  Static link: {}\n", .{self.options.static_link});
         std.debug.print("  Debug info: {}\n", .{self.options.debug_info});
         std.debug.print("  Syntax mode: {s}\n", .{self.options.syntax_mode.toString()});
+        std.debug.print("  Lowering policy: {s}\n", .{self.options.lowering_policy.toString()});
     }
 
     /// Load source file
@@ -774,6 +837,15 @@ pub const AOTCompiler = struct {
         if (self.options.verbose) {
             std.debug.print("  Loaded {d} bytes from {s}\n", .{ file_size, self.options.input_file });
         }
+    }
+
+    /// Set source code manually
+    pub fn setSource(self: *Self, source: []const u8) !void {
+        if (self.source) |s| {
+            self.allocator.free(s);
+        }
+        self.source = try self.allocator.dupe(u8, source);
+        try self.diagnostics.setSource(self.source.?);
     }
 
     /// Set pre-parsed AST nodes and string table
@@ -855,12 +927,13 @@ pub const AOTCompiler = struct {
         };
 
         // Generate IR module using the correct root index
+        const rel_path = self.diagnostics.relativizePath(self.options.input_file);
         self.ir_module = ir_gen.generateFromRoot(
             self.ast_nodes.?,
             self.string_table.?,
             self.root_index,
-            self.options.input_file,
-            self.options.input_file,
+            rel_path,
+            rel_path,
         ) catch |err| {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
@@ -903,12 +976,39 @@ pub const AOTCompiler = struct {
 
         // Run optimization passes
         optimizer.optimize(self.ir_module.?) catch |err| {
-            self.diagnostics.reportError(
+            if (!self.options.fallback_on_opt_fail) {
+                self.diagnostics.reportError(
+                    .{ .file = self.options.input_file },
+                    "IR optimization failed: {s}",
+                    .{@errorName(err)},
+                );
+                return;
+            }
+
+            const original = optimizer.config;
+            var fallback = original;
+            fallback.function_inlining = false;
+            fallback.type_specialization = false;
+            fallback.licm = false;
+            fallback.loop_unroll = false;
+            fallback.strength_reduction = false;
+            optimizer.config = fallback;
+            optimizer.resetStats();
+
+            optimizer.optimize(self.ir_module.?) catch |err2| {
+                self.diagnostics.reportError(
+                    .{ .file = self.options.input_file },
+                    "IR optimization failed (fallback also failed): {s}",
+                    .{@errorName(err2)},
+                );
+                return;
+            };
+
+            self.diagnostics.reportWarning(
                 .{ .file = self.options.input_file },
-                "IR optimization failed: {s}",
+                "IR optimization failed ({s}); fell back to conservative pass config",
                 .{@errorName(err)},
             );
-            return;
         };
 
         // Print optimization statistics in verbose mode
@@ -936,37 +1036,18 @@ pub const AOTCompiler = struct {
         }
 
         if (self.options.verbose) {
-            std.debug.print("  Generating native code...\n", .{});
-        }
-
-        const codegen = self.codegen orelse {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "code generator not initialized",
-                .{},
-            );
-            return;
-        };
-
-        // Generate LLVM IR and native code
-        codegen.generateModule(self.ir_module.?) catch |err| {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "code generation failed: {s}",
-                .{@errorName(err)},
-            );
-            return;
-        };
-
-        if (self.options.verbose) {
-            std.debug.print("  Code generation completed.\n", .{});
+            std.debug.print("  Code generation phase skipped (handled by linker).\n", .{});
         }
     }
 
     /// Link executable
     fn linkExecutable(self: *Self, output_path: []const u8) !void {
         if (self.options.verbose) {
-            std.debug.print("  Linking executable: {s}\n", .{output_path});
+            if (self.options.link_executable) {
+                std.debug.print("  Linking executable: {s}\n", .{output_path});
+            } else {
+                std.debug.print("  Generating Zig code (skip link): {s}\n", .{output_path});
+            }
         }
 
         const native_linker = self.native_linker orelse {
@@ -1002,18 +1083,35 @@ pub const AOTCompiler = struct {
             std.debug.print("  Generated Zig code ({d} bytes)\n", .{zig_code.len});
         }
 
-        // 编译为可执行文件
-        native_linker.compileToExecutable(zig_code, output_path) catch |err| {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "executable generation failed: {s}",
-                .{@errorName(err)},
-            );
-            return;
-        };
+        if (self.options.dump_zig or self.options.dump_zig_path != null) {
+            const dump_path = if (self.options.dump_zig_path) |p|
+                p
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}.zig", .{output_path});
+            defer if (self.options.dump_zig_path == null) self.allocator.free(dump_path);
+
+            const f = try std.fs.cwd().createFile(dump_path, .{});
+            defer f.close();
+            try f.writeAll(zig_code);
+        }
+
+        if (self.options.link_executable) {
+            native_linker.compileToExecutable(zig_code, output_path) catch |err| {
+                self.diagnostics.reportError(
+                    .{ .file = self.options.input_file },
+                    "executable generation failed: {s}",
+                    .{@errorName(err)},
+                );
+                return;
+            };
+        }
 
         if (self.options.verbose) {
-            std.debug.print("  Linking completed.\n", .{});
+            if (self.options.link_executable) {
+                std.debug.print("  Linking completed.\n", .{});
+            } else {
+                std.debug.print("  Zig code generation completed.\n", .{});
+            }
         }
     }
 
@@ -1062,6 +1160,57 @@ pub const AOTCompiler = struct {
         }
 
         std.debug.print("=== End IR ===\n\n", .{});
+    }
+
+    const CompileTimings = struct {
+        init: u64,
+        load: u64,
+        parse: u64,
+        ir_gen: u64,
+        ir_opt: u64,
+        codegen: u64,
+        link: u64,
+    };
+
+    fn emitIR(self: *const Self, path: []const u8) !void {
+        const module = self.ir_module orelse return;
+        const ir_text = try IR.serializeModule(self.allocator, module);
+        defer self.allocator.free(ir_text);
+
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        try file.writeAll(ir_text);
+    }
+
+    fn emitTimings(self: *const Self, output_path: []const u8, t: CompileTimings) !void {
+        const total: u64 = t.init + t.load + t.parse + t.ir_gen + t.ir_opt + t.codegen + t.link;
+
+        if (self.options.timing_json_path) |path| {
+            const file = try std.fs.cwd().createFile(path, .{});
+            defer file.close();
+            const json_line = try std.fmt.allocPrint(
+                self.allocator,
+                "{{\"output\":\"{s}\",\"init_ns\":{d},\"load_ns\":{d},\"parse_ns\":{d},\"ir_gen_ns\":{d},\"ir_opt_ns\":{d},\"codegen_ns\":{d},\"link_ns\":{d},\"total_ns\":{d}}}\n",
+                .{ output_path, t.init, t.load, t.parse, t.ir_gen, t.ir_opt, t.codegen, t.link, total },
+            );
+            defer self.allocator.free(json_line);
+            try file.writeAll(json_line);
+            return;
+        }
+
+        std.debug.print(
+            "AOT timing (ms): init={d:.3} load={d:.3} parse={d:.3} ir_gen={d:.3} ir_opt={d:.3} codegen={d:.3} link={d:.3} total={d:.3}\n",
+            .{
+                @as(f64, @floatFromInt(t.init)) / 1_000_000.0,
+                @as(f64, @floatFromInt(t.load)) / 1_000_000.0,
+                @as(f64, @floatFromInt(t.parse)) / 1_000_000.0,
+                @as(f64, @floatFromInt(t.ir_gen)) / 1_000_000.0,
+                @as(f64, @floatFromInt(t.ir_opt)) / 1_000_000.0,
+                @as(f64, @floatFromInt(t.codegen)) / 1_000_000.0,
+                @as(f64, @floatFromInt(t.link)) / 1_000_000.0,
+                @as(f64, @floatFromInt(total)) / 1_000_000.0,
+            },
+        );
     }
 
     /// Compile to IR only (for testing/debugging)
@@ -1132,7 +1281,7 @@ test "CompileOptions.getOutputPath" {
         try std.testing.expectEqualStrings("myapp", path);
     }
 
-    // Test deriving from input - 现在统一输出为 "hello"
+    // Test deriving from input
     {
         const opts = CompileOptions{
             .input_file = "hello.php",
@@ -1142,14 +1291,14 @@ test "CompileOptions.getOutputPath" {
         try std.testing.expectEqualStrings("hello", path);
     }
 
-    // Test input without .php extension - 现在统一输出为 "hello"
+    // Test input without .php extension
     {
         const opts = CompileOptions{
             .input_file = "script",
         };
         const path = try opts.getOutputPath(allocator);
         defer allocator.free(path);
-        try std.testing.expectEqualStrings("hello", path);
+        try std.testing.expectEqualStrings("script", path);
     }
 }
 

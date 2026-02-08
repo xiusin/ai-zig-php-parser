@@ -144,6 +144,8 @@ pub const Token = struct {
         asterisk,
         slash,
         percent,
+        caret, // ^ (bitwise XOR)
+        tilde, // ~ (bitwise NOT)
         equal,
         plus_plus,
         minus_minus,
@@ -152,6 +154,15 @@ pub const Token = struct {
         asterisk_equal,
         slash_equal,
         percent_equal,
+        caret_equal, // ^=
+        and_equal,   // &=
+        or_equal,    // |=
+        star_star,   // **
+        star_star_equal, // **=
+        less_less, // <<
+        less_less_equal, // <<=
+        greater_greater, // >>
+        greater_greater_equal, // >>=
         dot_equal, // .= string concatenation assignment
         equal_equal,
         equal_equal_equal,

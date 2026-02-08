@@ -145,7 +145,7 @@ pub const CompilationLogger = struct {
     allocator: std.mem.Allocator,
     
     /// 失败记录列表
-    failure_records: std.ArrayList(CompilationFailureRecord),
+    failure_records: std.ArrayListUnmanaged(CompilationFailureRecord),
     
     /// 日志文件路径（可选）
     log_file_path: ?[]const u8,
@@ -162,7 +162,7 @@ pub const CompilationLogger = struct {
     pub fn init(allocator: std.mem.Allocator) CompilationLogger {
         return .{
             .allocator = allocator,
-            .failure_records = std.ArrayList(CompilationFailureRecord).init(allocator),
+            .failure_records = .{},
             .log_file_path = null,
             .log_file = null,
             .verbose = false,
@@ -188,7 +188,7 @@ pub const CompilationLogger = struct {
         
         return .{
             .allocator = allocator,
-            .failure_records = std.ArrayList(CompilationFailureRecord).init(allocator),
+            .failure_records = .{},
             .log_file_path = path_copy,
             .log_file = file,
             .verbose = false,
@@ -207,7 +207,7 @@ pub const CompilationLogger = struct {
         for (self.failure_records.items) |*record| {
             record.deinit(self.allocator);
         }
-        self.failure_records.deinit();
+        self.failure_records.deinit(self.allocator);
         
         if (self.log_file_path) |path| {
             self.allocator.free(path);

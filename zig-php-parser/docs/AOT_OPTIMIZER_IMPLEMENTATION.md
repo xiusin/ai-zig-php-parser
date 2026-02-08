@@ -45,7 +45,11 @@
   - 位运算 (and, or, xor, shl, shr)
   - 比较运算 (eq, ne, lt, le, gt, ge)
   - 逻辑运算 (and, or, not)
-  - 类型操作 (cast, type_check)
+  - 一元运算 (neg, not, bit_not)
+  - 类型操作 (cast, type_check, get_type)
+  - 装箱/拆箱 (box, unbox)
+  - 常量指令 (const_*)
+  - 注：当前实现显式排除内存读写类指令（如 load），因为缺少别名分析/内存 SSA 时无法证明“中间没有可能写入该地址”的条件
 
 #### 4. 函数内联 (Function Inlining)
 - **位置**: `src/aot/optimizer.zig::runFunctionInlining()`
@@ -81,6 +85,46 @@
   - 特化比较和逻辑运算
   - 优化类型转换
 
+#### 7. Mem2Reg（内存提升到寄存器）
+- **位置**: `src/aot/optimizer.zig::runMem2Reg()`
+- **功能**:
+  - 将局部 alloc/store/load 的模式提升为 SSA 寄存器与 phi
+
+#### 8. Box/Unbox 消除
+- **位置**: `src/aot/optimizer.zig::runBoxUnboxElimination()`
+- **功能**:
+  - 消除多余的 box/unbox 链路，减少 Value 装箱/拆箱开销
+
+#### 9. SCCP（稀疏条件常量传播）
+- **位置**: `src/aot/optimizer.zig::runSCCP()`
+- **功能**:
+  - 联立推导寄存器常量与 CFG 可达性
+  - 将恒真/恒假分支与常量 switch 折叠为 br
+  - 触发不可达块删除并清理 phi incoming
+
+#### 10. RC（retain/release）消除
+- **位置**: `src/aot/optimizer.zig::runRCEllision()`
+- **功能**:
+  - 删除非 RC 类型上的 retain/release
+  - 消除相邻 retain+release 配对（语义等价且无中间副作用）
+
+#### 11. CFG Cleanup
+- **位置**: `src/aot/optimizer.zig::runCFGCleanup()`
+- **功能**:
+  - 合并可合并基本块、删除跳板块
+  - 简化平凡条件分支、清理 phi
+
+#### 12. LICM / Loop Unroll
+- **位置**: `src/aot/optimizer.zig::runLICM()` / `runLoopUnroll()`
+- **功能**:
+  - 循环不变式外提、按配置展开循环体
+
+#### 13. AOT 代码生成去虚化（方法直调）
+- **位置**: `src/aot/native_linker.zig` 的 `method_call/static_method_call` 生成
+- **功能**:
+  - 当接收者类名可静态确定且存在已编译的 `Class::method` 时，直接生成对 `@"Class::method"` 的调用
+  - 否则回退到 `runtime.php_object_call/runtime.php_call_static` 的动态查找路径
+
 ### 优化配置
 
 #### 优化级别
@@ -94,12 +138,19 @@
 pub const PassConfig = struct {
     dead_code_elimination: bool,
     constant_propagation: bool,
+    sccp: bool,
+    box_unbox_elim: bool,
     function_inlining: bool,
     inline_threshold: u32,
     type_specialization: bool,
     cse: bool,
     licm: bool,
     strength_reduction: bool,
+    mem2reg: bool,
+    loop_unroll: bool,
+    cfg_cleanup: bool,
+    rc_elision: bool,
+    unroll_factor: u32,
     max_iterations: u32,
 };
 ```
@@ -113,6 +164,9 @@ pub const PassConfig = struct {
 - 内联的函数数量
 - 类型特化次数
 - CSE 消除次数
+- 循环展开次数
+- RC 指令移除与配对消除次数
+- SCCP 折叠常量与简化分支次数
 - 运行的优化轮数
 
 ## 属性测试

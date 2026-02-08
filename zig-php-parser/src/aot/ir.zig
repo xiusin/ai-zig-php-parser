@@ -145,6 +145,8 @@ pub const TypeDef = struct {
     parent: ?[]const u8,
     /// Implemented interfaces
     interfaces: []const []const u8,
+    /// Used traits (for classes)
+    traits: []const []const u8,
     /// Properties
     properties: []const Property,
     /// Methods (references to functions)
@@ -234,7 +236,7 @@ pub const Function = struct {
     pub fn createBlock(self: *Self, label: []const u8) !*BasicBlock {
         const label_copy = try self.allocator.dupe(u8, label);
         const block = try self.allocator.create(BasicBlock);
-        block.* = BasicBlock.init(self.allocator, label_copy);
+        block.* = BasicBlock.init(self.allocator, label_copy, @intCast(self.blocks.items.len));
         try self.blocks.append(self.allocator, block);
         return block;
     }
@@ -282,6 +284,8 @@ pub const BasicBlock = struct {
     allocator: Allocator,
     /// Block label (for jumps)
     label: []const u8,
+    /// Block index in function (for analysis)
+    index: u32,
     /// Instructions in this block
     instructions: std.ArrayListUnmanaged(*Instruction),
     /// Block terminator (branch, return, etc.)
@@ -290,18 +294,22 @@ pub const BasicBlock = struct {
     predecessors: std.ArrayListUnmanaged(*BasicBlock),
     /// Successor blocks
     successors: std.ArrayListUnmanaged(*BasicBlock),
+    /// Exception handler block (if any)
+    exception_handler: ?*BasicBlock,
 
     const Self = @This();
 
     /// Initialize a new basic block
-    pub fn init(allocator: Allocator, label: []const u8) Self {
+    pub fn init(allocator: Allocator, label: []const u8, index: u32) Self {
         return .{
             .allocator = allocator,
             .label = label,
+            .index = index,
             .instructions = .{},
             .terminator = null,
             .predecessors = .{},
             .successors = .{},
+            .exception_handler = null,
         };
     }
 
@@ -430,6 +438,25 @@ pub const Type = union(enum) {
         params: []const Type,
         return_type: *const Type,
     };
+
+    /// Check if two types are equal
+    pub fn eql(self: Type, other: Type) bool {
+        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
+        switch (self) {
+            .ptr => |inner| return inner.eql(other.ptr.*),
+            .php_object => |name| return std.mem.eql(u8, name, other.php_object),
+            .nullable => |inner| return inner.eql(other.nullable.*),
+            .function => |func| {
+                if (func.params.len != other.function.params.len) return false;
+                if (!func.return_type.eql(other.function.return_type.*)) return false;
+                for (func.params, 0..) |p, i| {
+                    if (!p.eql(other.function.params[i])) return false;
+                }
+                return true;
+            },
+            else => return true,
+        }
+    }
 
     /// Check if this type is a PHP dynamic type
     pub fn isDynamic(self: Type) bool {
@@ -591,6 +618,8 @@ pub const Instruction = struct {
         load: LoadOp,
         /// Store to memory
         store: StoreOp,
+        /// Create a reference to memory
+        make_ref: MakeRefOp,
 
         // ============ Constants ============
         /// Integer constant
@@ -603,6 +632,8 @@ pub const Instruction = struct {
         const_string: u32,
         /// Null constant
         const_null: void,
+        /// Missing argument sentinel (used for named args holes)
+        const_missing: void,
 
         // ============ Function Operations ============
         /// Function call
@@ -723,6 +754,32 @@ pub const Instruction = struct {
         // ============ Debugging ============
         /// Debug print
         debug_print: UnaryOp,
+        /// No operation (placeholder for removed instructions)
+        nop: void,
+        /// Get function parameter
+        param: ParamOp,
+        /// Get captured variable
+        capture_get: CaptureGetOp,
+        /// Get argument count
+        arg_count: void,
+        /// Check whether argument at index is present and not missing
+        has_arg: HasArgOp,
+    };
+
+    /// Parameter operation
+    pub const ParamOp = struct {
+        index: u32,
+        name: []const u8,
+    };
+
+    /// Capture get operation
+    pub const CaptureGetOp = struct {
+        index: u32,
+        name: []const u8,
+    };
+
+    pub const HasArgOp = struct {
+        index: u32,
     };
 
     /// Binary operation operands
@@ -752,6 +809,11 @@ pub const Instruction = struct {
     pub const StoreOp = struct {
         ptr: Register,
         value: Register,
+    };
+
+    /// Create reference to memory
+    pub const MakeRefOp = struct {
+        ptr: Register,
     };
 
     /// Function call
@@ -1073,6 +1135,14 @@ pub const IRPrinter = struct {
             }
         }
 
+        if (type_def.traits.len > 0) {
+            try self.write(" uses ");
+            for (type_def.traits, 0..) |tr, i| {
+                if (i > 0) try self.write(", ");
+                try self.print("{s}", .{tr});
+            }
+        }
+
         try self.write(" {\n");
 
         for (type_def.properties) |prop| {
@@ -1193,6 +1263,7 @@ pub const IRPrinter = struct {
             .alloca => |op| try self.print("alloca {any} x {d}", .{ op.type_, op.count }),
             .load => |op| try self.print("load {any} from {any}", .{ op.type_, op.ptr }),
             .store => |op| try self.print("store {any} to {any}", .{ op.value, op.ptr }),
+            .make_ref => |op| try self.print("make_ref {any}", .{op.ptr}),
 
             // Constants
             .const_int => |val| try self.print("const.i64 {d}", .{val}),
@@ -1200,6 +1271,7 @@ pub const IRPrinter = struct {
             .const_bool => |val| try self.print("const.bool {any}", .{val}),
             .const_string => |id| try self.print("const.string ${d}", .{id}),
             .const_null => try self.write("const.null"),
+            .const_missing => try self.write("const.missing"),
 
             // Function calls
             .call => |op| {
@@ -1343,6 +1415,11 @@ pub const IRPrinter = struct {
 
             // Debug
             .debug_print => |op| try self.print("debug.print {any}", .{op.operand}),
+            .nop => try self.write("nop"),
+            .param => |op| try self.print("param {d} ({s})", .{ op.index, op.name }),
+            .capture_get => |op| try self.print("capture_get {d} ({s})", .{ op.index, op.name }),
+            .arg_count => try self.write("arg_count"),
+            .has_arg => |op| try self.print("has_arg {d}", .{op.index}),
         }
     }
 
