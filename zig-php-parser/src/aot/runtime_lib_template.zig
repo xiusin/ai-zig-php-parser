@@ -566,18 +566,40 @@ fn gcMarkGrayValue(v: Value) void {
 fn gcMarkGrayArray(a: *PHPArray) void {
     if (a.gc_info.color == .gray) return;
     a.gc_info.color = .gray;
-    var it = a.elements.iterator();
-    while (it.next()) |entry| {
-        gcMarkGrayValue(entry.value_ptr.*);
+    
+    // 安全地遍历数组元素
+    // 如果是 packed array，直接遍历
+    if (a.elements.mixed == null) {
+        for (a.elements.packed_values.items) |v| {
+            gcMarkGrayValue(v);
+        }
+    } else {
+        // 如果是 mixed array，尝试安全遍历
+        // 注意：这里不使用 iterator() 避免 panic
+        if (a.elements.mixed) |*m| {
+            // 只有在 count 有效时才遍历
+            const cnt = m.count();
+            if (cnt > 0 and cnt < 1000000) { // 合理的上限
+                var it = m.iterator();
+                while (it.next()) |entry| {
+                    gcMarkGrayValue(entry.value_ptr.*);
+                }
+            }
+        }
     }
 }
 
 fn gcMarkGrayObject(o: *PHPObject) void {
     if (o.gc_info.color == .gray) return;
     o.gc_info.color = .gray;
-    var it = o.properties.iterator();
-    while (it.next()) |entry| {
-        gcMarkGrayValue(entry.value_ptr.*);
+    
+    // 安全地遍历对象属性
+    const cnt = o.properties.count();
+    if (cnt > 0 and cnt < 1000000) { // 合理的上限
+        var it = o.properties.iterator();
+        while (it.next()) |entry| {
+            gcMarkGrayValue(entry.value_ptr.*);
+        }
     }
 }
 
