@@ -3581,23 +3581,61 @@ pub const NativeLinker = struct {
                 }
             },
             .array_push => |op| {
-                const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
+                // 检查寄存器是否是 alloca（指针）
+                const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                
+                // 获取实际类型
+                const value_type = if (self.current_register_types) |types|
+                    types.get(op.value.id) orelse op.value.type_
+                else
+                    op.value.type_;
+                const value_type_tag = @as(std.meta.Tag(IR.Type), value_type);
+                
+                // 生成访问表达式
+                // 对于 alloca 寄存器：
+                // - 如果是 php_value，直接解引用：reg_N.*
+                // - 如果是基本类型（i64/f64/bool），需要从 Value 中提取：reg_N.*.asInt()
+                var value_expr: []const u8 = undefined;
+                var needs_free = false;
+                
+                if (is_alloca) {
+                    if (value_type_tag == .php_value) {
+                        value_expr = try std.fmt.allocPrint(self.allocator, "reg_{d}.*", .{op.value.id});
+                        needs_free = true;
+                    } else if (value_type_tag == .i64) {
+                        value_expr = try std.fmt.allocPrint(self.allocator, "reg_{d}.*.asInt()", .{op.value.id});
+                        needs_free = true;
+                    } else if (value_type_tag == .f64) {
+                        value_expr = try std.fmt.allocPrint(self.allocator, "reg_{d}.*.asFloat()", .{op.value.id});
+                        needs_free = true;
+                    } else if (value_type_tag == .bool) {
+                        value_expr = try std.fmt.allocPrint(self.allocator, "reg_{d}.*.asBool()", .{op.value.id});
+                        needs_free = true;
+                    } else {
+                        value_expr = try std.fmt.allocPrint(self.allocator, "reg_{d}.*", .{op.value.id});
+                        needs_free = true;
+                    }
+                } else {
+                    value_expr = try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.value.id});
+                    needs_free = true;
+                }
+                defer if (needs_free) self.allocator.free(value_expr);
 
                 if (value_type_tag == .php_value) {
                     // 值已经是Value类型，直接使用
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, {s});\n", .{ op.array.id, value_expr });
                 } else if (value_type_tag == .i64) {
                     // 值是i64类型，需要转换
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, runtime.Value.initInt(reg_{d}));\n", .{ op.array.id, op.value.id });
+                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, runtime.Value.initInt({s}));\n", .{ op.array.id, value_expr });
                 } else if (value_type_tag == .f64) {
                     // 值是f64类型，需要转换
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, runtime.Value.initFloat(reg_{d}));\n", .{ op.array.id, op.value.id });
+                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, runtime.Value.initFloat({s}));\n", .{ op.array.id, value_expr });
                 } else if (value_type_tag == .bool) {
                     // 值是bool类型，需要转换
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, runtime.Value.initBool(reg_{d}));\n", .{ op.array.id, op.value.id });
+                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, runtime.Value.initBool({s}));\n", .{ op.array.id, value_expr });
                 } else {
                     // 其他类型，默认直接使用
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, {s});\n", .{ op.array.id, value_expr });
                 }
             },
             .array_count => |op| {
