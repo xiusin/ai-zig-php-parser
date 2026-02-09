@@ -2029,6 +2029,24 @@ pub const NativeLinker = struct {
         return writer.print("reg_{d}", .{src_id});
     }
 
+    fn writeRegAssignment(
+        self: *Self,
+        writer: anytype,
+        reg_id: usize,
+        value_expr: []const u8,
+    ) !void {
+        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+            alloca_regs.contains(reg_id)
+        else
+            false;
+        
+        if (is_alloca) {
+            try writer.print("    reg_{d}.* = {s};\n", .{ reg_id, value_expr });
+        } else {
+            try writer.print("    reg_{d} = {s};\n", .{ reg_id, value_expr });
+        }
+    }
+
     fn writePhpValueExpr(
         self: *Self,
         writer: anytype,
@@ -3480,8 +3498,18 @@ pub const NativeLinker = struct {
             .array_new => |op| {
                 _ = op; // 暂时忽略容量
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                    try writer.print("    reg_{d} = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));\n", .{reg.id});
+                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(reg.id)
+                    else
+                        false;
+                    
+                    if (is_alloca) {
+                        try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
+                        try writer.print("    reg_{d}.* = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));\n", .{reg.id});
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                        try writer.print("    reg_{d} = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));\n", .{reg.id});
+                    }
                 }
             },
             .array_get => |op| {
