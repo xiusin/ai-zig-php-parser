@@ -151,6 +151,8 @@ pub const TypeDef = struct {
     properties: []const Property,
     /// Methods (references to functions)
     methods: []const []const u8,
+    /// Constants
+    constants: []const Constant,
     /// Source location
     location: SourceLocation,
 
@@ -168,6 +170,20 @@ pub const TypeDef = struct {
         default_value: ?*Instruction,
         is_static: bool,
         visibility: Visibility,
+    };
+
+    pub const Constant = struct {
+        name: []const u8,
+        value: ConstantValue,
+        visibility: Visibility,
+    };
+
+    pub const ConstantValue = union(enum) {
+        int: i64,
+        float: f64,
+        string: []const u8,
+        bool: bool,
+        null: void,
     };
 
     pub const Visibility = enum {

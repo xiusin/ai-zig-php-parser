@@ -746,6 +746,37 @@ pub const NativeLinker = struct {
             try writer.print("    try runtime.registerClass({s}_meta);\n", .{cname});
         }
 
+        // 初始化类常量
+        for (0..class_count) |ci| {
+            if (type_def_idx[ci]) |tdi| {
+                const td = ir_module.types.items[tdi].*;
+                const cname = class_names[ci];
+                
+                for (td.constants) |const_info| {
+                    const value_code = switch (const_info.value) {
+                        .int => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt({d})", .{v}),
+                        .float => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat({d})", .{v}),
+                        .string => |s| blk: {
+                            const escaped = try self.escapeString(s);
+                            defer self.allocator.free(escaped);
+                            break :blk try std.fmt.allocPrint(self.allocator, 
+                                "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", 
+                                .{escaped});
+                        },
+                        .bool => |b| try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
+                        .null => try std.fmt.allocPrint(self.allocator, "runtime.Value.initNull()", .{}),
+                    };
+                    defer self.allocator.free(value_code);
+                    
+                    const escaped_name = try self.escapeString(const_info.name);
+                    defer self.allocator.free(escaped_name);
+                    
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", 
+                        .{ cname, escaped_name, value_code });
+                }
+            }
+        }
+
         for (0..class_count) |ci| {
             if (type_def_idx[ci]) |tdi| {
                 const td = ir_module.types.items[tdi].*;

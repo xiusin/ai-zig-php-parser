@@ -788,6 +788,7 @@ pub const IRGenerator = struct {
         const class_name = self.getString(class_data.name);
 
         var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
         var traits = std.ArrayListUnmanaged([]const u8){};
         defer traits.deinit(self.allocator);
 
@@ -810,6 +811,7 @@ pub const IRGenerator = struct {
             .traits = &.{},
             .properties = &.{},
             .methods = &.{},
+            .constants = &.{},
             .location = self.current_location,
         };
 
@@ -851,7 +853,36 @@ pub const IRGenerator = struct {
 
                     try self.generatePropertyDecl(member, class_name);
                 },
-                .const_decl => try self.generateClassConstDecl(member, class_name),
+                .const_decl => {
+                    // 收集常量信息
+                    const const_data = member.data.const_decl;
+                    const const_name = self.getString(const_data.name);
+                    
+                    // 提取常量值（仅支持简单字面量）
+                    const value_node = self.getNode(const_data.value) orelse continue;
+                    const const_value: ?TypeDef.ConstantValue = switch (value_node.tag) {
+                        .literal_int => .{ .int = value_node.data.literal_int.value },
+                        .literal_float => .{ .float = value_node.data.literal_float.value },
+                        .literal_string => .{ .string = self.getString(value_node.data.literal_string.value) },
+                        .literal_bool => blk: {
+                            // 从 main_token 判断是 true 还是 false
+                            const is_true = value_node.main_token.tag == .k_true;
+                            break :blk .{ .bool = is_true };
+                        },
+                        .literal_null => .{ .null = {} },
+                        else => null, // 跳过复杂表达式
+                    };
+                    
+                    if (const_value) |cv| {
+                        try constants.append(self.allocator, .{
+                            .name = const_name,
+                            .value = cv,
+                            .visibility = .public,
+                        });
+                    }
+                    
+                    try self.generateClassConstDecl(member, class_name);
+                },
                 .trait_use => {
                     const tu = member.data.trait_use;
                     for (tu.traits) |tidx| {
@@ -869,6 +900,7 @@ pub const IRGenerator = struct {
         }
 
         type_def.properties = try properties.toOwnedSlice(self.allocator);
+        type_def.constants = try constants.toOwnedSlice(self.allocator);
         type_def.traits = try traits.toOwnedSlice(self.allocator);
 
         // Leave class scope
@@ -889,6 +921,7 @@ pub const IRGenerator = struct {
             .traits = &.{},
             .properties = &.{},
             .methods = &.{},
+            .constants = &.{},
             .location = self.current_location,
         };
 
@@ -913,6 +946,7 @@ pub const IRGenerator = struct {
             .traits = &.{},
             .properties = &.{},
             .methods = &.{},
+            .constants = &.{},
             .location = self.current_location,
         };
 
