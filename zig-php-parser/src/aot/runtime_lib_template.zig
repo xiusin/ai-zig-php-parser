@@ -319,6 +319,16 @@ pub fn initRuntime(allocator: Allocator) void {
     php_array_pool = std.heap.MemoryPool(PHPArray).init(runtime_allocator);
     php_closure_pool = std.heap.MemoryPool(PHPClosure).init(runtime_allocator);
     resetAllocStats();
+    initPredefinedConstants() catch {};
+}
+
+fn initPredefinedConstants() !void {
+    const keys = [_][]const u8{ "STR_PAD_LEFT", "STR_PAD_RIGHT", "STR_PAD_BOTH" };
+    const values = [_]i64{ 0, 1, 2 };
+    for (keys, values) |key, val| {
+        const key_copy = try runtime_allocator.dupe(u8, key);
+        try constants.put(key_copy, Value.initInt(val));
+    }
 }
 
 pub fn resetAllocStats() void {
@@ -2738,7 +2748,7 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
     const name = name_val.asString().data;
     
     if (constants.get(name)) |val| {
-        val.retain();
+        _ = val.retain();
         return val;
     }
     
