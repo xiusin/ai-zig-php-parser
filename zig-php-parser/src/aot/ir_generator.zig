@@ -89,6 +89,8 @@ pub const IRGenerator = struct {
     loop_stack: std.ArrayListUnmanaged(LoopContext),
     /// Try-catch context stack
     try_stack: std.ArrayListUnmanaged(TryContext),
+    /// 常量缓存：class_name::const_name -> ConstantValue
+    constant_cache: std.StringHashMapUnmanaged(TypeDef.ConstantValue),
 
     const Self = @This();
 
@@ -132,6 +134,7 @@ pub const IRGenerator = struct {
             .block_counter = 0,
             .loop_stack = .{},
             .try_stack = .{},
+            .constant_cache = .{},
         };
     }
 
@@ -141,6 +144,8 @@ pub const IRGenerator = struct {
         self.var_usage.deinit(self.allocator);
         self.entry_allocas.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
+        self.try_stack.deinit(self.allocator);
+        self.constant_cache.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
     }
 
@@ -902,6 +907,14 @@ pub const IRGenerator = struct {
         type_def.properties = try properties.toOwnedSlice(self.allocator);
         type_def.constants = try constants.toOwnedSlice(self.allocator);
         type_def.traits = try traits.toOwnedSlice(self.allocator);
+
+        // 构建常量缓存：O(1) 查找
+        for (type_def.constants) |const_info| {
+            var key_buf: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_info.name }) catch continue;
+            const key_owned = try self.allocator.dupe(u8, key);
+            try self.constant_cache.put(self.allocator, key_owned, const_info.value);
+        }
 
         // Leave class scope
         self.symbol_table.leaveScope();
@@ -3124,11 +3137,34 @@ pub const IRGenerator = struct {
         const class_name_id = access_data.class_name;
         const const_name_id = access_data.constant_name;
 
-        // 获取类名和常量名
         const class_name = self.getString(class_name_id);
         const const_name = self.getString(const_name_id);
 
-        // 类常量作为静态属性访问
+        // 优化：O(1) 哈希表查找 + 编译时内联
+        var key_buf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_name }) catch {
+            // 回退：运行时查找
+            return self.emitWithResult(.{ .static_property_get = .{
+                .class_name = class_name,
+                .property_name = const_name,
+            } }, .php_value);
+        };
+
+        if (self.constant_cache.get(key)) |const_value| {
+            // 直接内联常量值，零运行时开销
+            return switch (const_value) {
+                .int => |v| self.emitWithResult(.{ .const_int = v }, .i64),
+                .float => |v| self.emitWithResult(.{ .const_float = v }, .f64),
+                .string => |s| blk: {
+                    const str_id = try self.module.?.internString(s);
+                    break :blk self.emitWithResult(.{ .const_string = str_id }, .php_string);
+                },
+                .bool => |b| self.emitWithResult(.{ .const_bool = b }, .bool),
+                .null => self.emitWithResult(.{ .const_null = {} }, .php_value),
+            };
+        }
+
+        // 回退：运行时查找（用于动态类或未找到的常量）
         return self.emitWithResult(.{ .static_property_get = .{
             .class_name = class_name,
             .property_name = const_name,
