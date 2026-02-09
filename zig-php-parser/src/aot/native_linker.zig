@@ -1002,6 +1002,8 @@ pub const NativeLinker = struct {
         .{ "is_string", .{ .runtime_name = "php_is_string", .needs_allocator = false } },
         .{ "is_array", .{ .runtime_name = "php_is_array", .needs_allocator = false } },
         .{ "is_numeric", .{ .runtime_name = "php_is_numeric", .needs_allocator = false } },
+        .{ "isset", .{ .runtime_name = "php_isset", .needs_allocator = false } },
+        .{ "empty", .{ .runtime_name = "php_empty", .needs_allocator = false } },
 
         .{ "intval", .{ .runtime_name = "php_intval", .needs_allocator = false } },
         .{ "floatval", .{ .runtime_name = "php_floatval", .needs_allocator = false } },
