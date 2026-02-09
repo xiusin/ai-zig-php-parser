@@ -2128,6 +2128,15 @@ pub const IRGenerator = struct {
                             .return_type = .php_value,
                         } }, null);
                     },
+                    .static_property_access => {
+                        const class_name = self.getString(target_node.data.static_property_access.class_name);
+                        const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                        _ = try self.emit(.{ .static_property_set = .{
+                            .class_name = class_name,
+                            .property_name = prop_name,
+                            .value = result_reg,
+                        } }, null);
+                    },
                     else => {},
                 }
 
