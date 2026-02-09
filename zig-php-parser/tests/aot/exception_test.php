@@ -34,14 +34,16 @@ try {
 }
 echo "Finally executed: " . ($executed ? "yes" : "no") . "\n\n";
 
-// 测试 4: try-catch-finally (暂时跳过，有 bug)
-// echo "Test 4: Try-catch-finally\n";
-// try {
-//     throw new MyException("Error in try");
-// } catch (MyException $e) {
-//     echo "Caught in catch\n";
-// } finally {
-//     echo "Executed finally\n";
-// }
+// 测试 4: try-catch-finally
+// 注意：多个 try-catch 块会导致寄存器重用问题
+// 单独的 try-catch-finally 工作正常（见 minimal_exception.php）
+echo "Test 4: Try-catch-finally\n";
+try {
+    throw new MyException("Error in try");
+} catch (MyException $e) {
+    echo "Caught in catch\n";
+} finally {
+    echo "Executed finally\n";
+}
 
 echo "\nAll tests completed!\n";
