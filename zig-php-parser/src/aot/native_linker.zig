@@ -218,17 +218,9 @@ pub const NativeLinker = struct {
         self.func_return_types.clearRetainingCapacity();
 
         for (ir_module.functions.items) |func| {
-            // 检查函数是否有返回值
-            var has_return_value = false;
-            for (func.blocks.items) |block| {
-                if (block.terminator) |term| {
-                    if (term == .ret and term.ret != null) {
-                        has_return_value = true;
-                        break;
-                    }
-                }
-            }
-            try self.func_return_types.put(func.name, has_return_value);
+            // 所有用户函数都返回 !runtime.Value（即使是 void 函数）
+            // 因为它们可能抛出异常
+            try self.func_return_types.put(func.name, true);
         }
         if (!self.func_return_types.contains("select")) {
             try self.func_return_types.put("select", true);
@@ -1533,6 +1525,24 @@ pub const NativeLinker = struct {
                             try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
                         }
                     },
+                    .throw => |ex_reg| {
+                        // 设置异常
+                        try code.writer(self.allocator).print("    runtime.setException(reg_{d});\n", .{ex_reg.id});
+                        
+                        // 清理资源（除了异常对象）
+                        if (cleanup_registers.items.len > 0) {
+                            try code.appendSlice(self.allocator, "    // Cleanup before throw\n");
+                            for (cleanup_registers.items) |reg_id| {
+                                // 跳过异常对象和 alloca 寄存器
+                                if (reg_id == ex_reg.id) continue;
+                                if (alloca_registers.contains(reg_id)) continue;
+                                
+                                try code.writer(self.allocator).print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                            }
+                        }
+                        
+                        try code.appendSlice(self.allocator, "    return error.RuntimeError;\n");
+                    },
                     else => {
                         // 其他terminator不应该出现在单基本块中
                         // 没有返回值，可以释放所有寄存器
@@ -2273,10 +2283,11 @@ pub const NativeLinker = struct {
                 if (cleanup_regs.len > 0) {
                     try code.appendSlice(self.allocator, "                // Cleanup before throw\n");
                     for (cleanup_regs) |reg_id| {
-                        // 不要释放异常对象本身，因为它已经被 setException 接管（retain）了？
-                        // 不，setException 会 retain 它。所以这里 release 是正确的（释放当前寄存器的持有权）。
-                        const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
-                        try writer.print("                reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
+                        // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
+                        if (alloca_regs.contains(reg_id)) continue;
+                        
+                        // 不要释放异常对象本身，因为它已经被 setException 接管（retain）了
+                        try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                     }
                 }
 
@@ -2645,9 +2656,13 @@ pub const NativeLinker = struct {
             if (regs.len > 0) {
                 try writer.writeAll("        // Cleanup on exception\n");
                 for (regs) |reg_id| {
-                    const suffix = self.getRegSuffix(reg_id);
+                    // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
+                    if (self.current_alloca_regs) |alloca_regs| {
+                        if (alloca_regs.contains(reg_id)) continue;
+                    }
+                    
                     if (self.regMayHeap(reg_id)) {
-                        try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
+                        try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                     }
                 }
             }
@@ -3474,16 +3489,32 @@ pub const NativeLinker = struct {
                     } else {
                         // 用户定义函数 - 检查是否返回值
                         const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
+                        const in_try_block = self.current_exception_handler != null;
+                        
                         if (func_has_return_value) {
-                            // 函数返回Value，直接赋值
-                            try writer.print("    reg_{d} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, op.func_name });
-                            try self.writeValueArgsArray(writer, op.args);
-                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                            // 函数返回Value
+                            if (in_try_block) {
+                                // 在 try 块中，捕获错误但不传播
+                                try writer.print("    reg_{d} = @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, op.func_name });
+                                try self.writeValueArgsArray(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                            } else {
+                                // 不在 try 块中，使用 try 传播错误
+                                try writer.print("    reg_{d} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, op.func_name });
+                                try self.writeValueArgsArray(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            }
                         } else {
-                            // 函数返回void，调用后赋值null
-                            try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                            try self.writeValueArgsArray(writer, op.args);
-                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                            // 函数返回void
+                            if (in_try_block) {
+                                try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                try self.writeValueArgsArray(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
+                            } else {
+                                try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                try self.writeValueArgsArray(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            }
                             try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                         }
                     }
