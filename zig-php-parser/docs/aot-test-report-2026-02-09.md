@@ -12,9 +12,9 @@
 | postfix_test.php | ✅ 通过 | 后缀递增/递减 |
 | comprehensive_test.php | ✅ 通过 | 综合功能测试 |
 | closure_test.php | ✅ 通过 | 闭包测试（已修复） |
+| error_handling.php | ✅ 通过 | 异常处理（isset 已修复） |
+| string_operations.php | ✅ 通过 | 字符串操作（所有 14 个测试点） |
 | array_operations.php | ⚠️ 部分通过 | 编译成功，运行正常，GC 有小问题 |
-| string_operations.php | ❌ 失败 | 缺少 preg_match 等函数 |
-| error_handling.php | ❌ 失败 | 缺少 isset 函数 |
 
 ## 已支持的功能
 
