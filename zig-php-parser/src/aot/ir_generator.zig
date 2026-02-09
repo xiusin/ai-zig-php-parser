@@ -1820,6 +1820,12 @@ pub const IRGenerator = struct {
                         .key = key_reg,
                         .value = value_reg,
                     } }, null);
+                } else {
+                    // $arr[] = value - push to array
+                    _ = try self.emit(.{ .array_push = .{
+                        .array = array_reg,
+                        .value = value_reg,
+                    } }, null);
                 }
             },
             .property_access => {
@@ -1908,6 +1914,9 @@ pub const IRGenerator = struct {
                         .key = key_reg,
                         .value = result_reg,
                     } }, null);
+                } else {
+                    // $arr[] += value - not supported, would need to read last element
+                    return error.UnsupportedCompoundOperator;
                 }
             },
             .property_access => {
@@ -2144,6 +2153,9 @@ pub const IRGenerator = struct {
                                 .key = key_reg,
                                 .value = result_reg,
                             } }, null);
+                        } else {
+                            // $arr[] += value - not supported
+                            return error.UnsupportedCompoundOperator;
                         }
                     },
                     .property_access => {
