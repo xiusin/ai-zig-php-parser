@@ -2387,10 +2387,44 @@ pub const IRGenerator = struct {
 
         // 存储回变量
         const expr_node = self.getNode(postfix_data.expr);
-        if (expr_node != null and expr_node.?.tag == .variable) {
-            const var_name = self.getString(expr_node.?.data.variable.name);
-            if (self.lookupVarRegister(var_name)) |ptr_reg| {
-                _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = new_value } }, null);
+        if (expr_node) |en| {
+            switch (en.tag) {
+                .variable => {
+                    const var_name = self.getString(en.data.variable.name);
+                    if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                        _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = new_value } }, null);
+                    }
+                },
+                .static_property_access => {
+                    const class_name = self.getString(en.data.static_property_access.class_name);
+                    const prop_name = self.getString(en.data.static_property_access.property_name);
+                    _ = try self.emit(.{ .static_property_set = .{
+                        .class_name = class_name,
+                        .property_name = prop_name,
+                        .value = new_value,
+                    } }, null);
+                },
+                .property_access => {
+                    const obj_reg = try self.generateExpression(en.data.property_access.target);
+                    const prop_name = self.getString(en.data.property_access.property_name);
+                    _ = try self.emit(.{ .property_set = .{
+                        .object = obj_reg,
+                        .property_name = prop_name,
+                        .value = new_value,
+                    } }, null);
+                },
+                .array_access => {
+                    const array_reg = try self.generateExpression(en.data.array_access.target);
+                    if (en.data.array_access.index) |idx| {
+                        const key_reg = try self.generateExpression(idx);
+                        _ = try self.emit(.{ .array_set = .{
+                            .array = array_reg,
+                            .key = key_reg,
+                            .value = new_value,
+                        } }, null);
+                    }
+                },
+                else => {},
             }
         }
 
