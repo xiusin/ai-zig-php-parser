@@ -1597,14 +1597,37 @@ pub const IRGenerator = struct {
         // Emit catch instruction (returns exception object)
         const catch_reg = try self.emitWithResult(.{ .catch_ = .{ .exception_type = exception_type } }, .php_value);
 
+        // 保存当前的变量寄存器映射
+        const saved_var_registers = self.var_registers;
+        defer self.var_registers = saved_var_registers;
+        
+        // 为这个 catch 块创建新的变量寄存器映射
+        self.var_registers = std.StringHashMap(Register).init(self.allocator);
+        defer {
+            var it = self.var_registers.iterator();
+            while (it.next()) |_| {}
+            self.var_registers.deinit();
+        }
+        
+        // 复制父作用域的变量（除了异常变量）
+        var it = saved_var_registers.iterator();
+        while (it.next()) |entry| {
+            try self.var_registers.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
         // Set up exception variable if present
         if (catch_data.variable) |var_idx| {
             const var_node = self.getNode(var_idx);
             if (var_node != null and var_node.?.tag == .variable) {
                 const var_name = self.getString(var_node.?.data.variable.name);
-                // Use catch_reg directly
-                const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                // 为这个 catch 块创建新的寄存器
+                const unique_var_name = try std.fmt.allocPrint(self.allocator, "{s}_catch_{d}", .{ var_name, index });
+                defer self.allocator.free(unique_var_name);
+                const var_reg = try self.getOrCreateVarRegister(unique_var_name, .php_value);
                 _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg } }, null);
+                
+                // 在当前作用域中注册异常变量
+                try self.var_registers.put(var_name, var_reg);
             }
         }
 
