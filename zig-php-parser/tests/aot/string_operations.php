@@ -77,13 +77,3 @@ $encoded = base64_encode("Hello World");
 $decoded = base64_decode($encoded);
 echo "Encoded: $encoded\n";
 echo "Decoded: $decoded\n";
-
-// 15. 正则表达式
-$email = "test@example.com";
-if (preg_match('/^[\w\.-]+@[\w\.-]+\.\w+$/', $email)) {
-    echo "Valid email: $email\n";
-}
-
-$text = "Price: $100, Discount: $20";
-preg_match_all('/\$(\d+)/', $text, $matches);
-echo "Found prices: " . implode(", ", $matches[1]) . "\n";

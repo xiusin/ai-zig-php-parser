@@ -1312,7 +1312,7 @@ pub const NativeLinker = struct {
                     try code.appendSlice(self.allocator, "    var reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, "_storage: runtime.Value = runtime.Value.initNull();\n");
-                    try code.appendSlice(self.allocator, "    const reg_");
+                    try code.appendSlice(self.allocator, "    var reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, ": *runtime.Value = &reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -2583,13 +2583,21 @@ pub const NativeLinker = struct {
         }
         return true;
     }
+    
+    /// 获取寄存器访问后缀（alloca 寄存器需要 .*）
+    fn getRegSuffix(self: *const Self, reg_id: usize) []const u8 {
+        if (self.current_alloca_regs) |regs| {
+            if (regs.contains(reg_id)) return ".*";
+        }
+        return "";
+    }
 
     fn generateCleanupCode(self: *Self, writer: anytype) !void {
         if (self.current_cleanup_regs) |regs| {
             if (regs.len > 0) {
                 try writer.writeAll("        // Cleanup on exception\n");
                 for (regs) |reg_id| {
-                    const suffix = if (self.current_alloca_regs.?.contains(reg_id)) ".*" else "";
+                    const suffix = self.getRegSuffix(reg_id);
                     if (self.regMayHeap(reg_id)) {
                         try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
                     }
@@ -2681,10 +2689,11 @@ pub const NativeLinker = struct {
             },
             .const_string => |string_id| {
                 if (inst.result) |reg| {
+                    const suffix = self.getRegSuffix(reg.id);
                     if (self.regMayHeap(reg.id)) {
-                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                        try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg.id, suffix });
                     }
-                    try writer.print("    reg_{d} = runtime.Value.initString(runtime.PHPString.initStatic(string_table[{d}]));\n", .{ reg.id, string_id });
+                    try writer.print("    reg_{d}{s} = runtime.Value.initString(runtime.PHPString.initStatic(string_table[{d}]));\n", .{ reg.id, suffix, string_id });
                 }
             },
             .alloca => {
@@ -2769,9 +2778,17 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     
+                    // 检查结果寄存器是否是 alloca
+                    const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                    const result_prefix = if (result_is_alloca) ".*" else "";
+                    
                     if (type_tag != .i64 and type_tag != .f64 and type_tag != .bool) {
                         if (self.regMayHeap(reg.id)) {
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                            if (result_is_alloca) {
+                                try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
+                            } else {
+                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                            }
                         }
                     }
 
@@ -2780,15 +2797,19 @@ pub const NativeLinker = struct {
                     const ptr_prefix = if (is_ptr) "" else "&";
 
                     if (type_tag == .i64) {
-                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ reg.id, ptr_prefix, op.ptr.id });
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
                     } else if (type_tag == .f64) {
-                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ reg.id, ptr_prefix, op.ptr.id });
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
                     } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, ptr_prefix, op.ptr.id });
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
                     } else {
-                        try writer.print("    reg_{d} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, ptr_prefix, op.ptr.id });
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
                         if (self.regMayHeap(reg.id)) {
-                            try writer.print("    _ = reg_{d}.retain();\n", .{ reg.id });
+                            if (result_is_alloca) {
+                                try writer.print("    _ = reg_{d}.*.retain();\n", .{ reg.id });
+                            } else {
+                                try writer.print("    _ = reg_{d}.retain();\n", .{ reg.id });
+                            }
                         }
                     }
                 }
