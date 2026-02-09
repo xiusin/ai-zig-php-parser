@@ -12,9 +12,9 @@
 | complex_closures_test.php | ✅ 通过 | 闭包、高阶函数 |
 | complex_algorithms_test.php | ✅ 通过 | 递归算法 |
 | complex_references_test.php | ❌ 失败 | 引用返回有问题 |
-| complex_static_test.php | ❌ 失败 | 静态数组访问有问题 |
+| complex_static_test.php | ✅ 通过 | 静态数组属性 |
 
-**通过率**: 60% (3/5)
+**通过率**: 80% (4/5)
 
 ## 发现的问题
 
@@ -47,7 +47,7 @@ runtime_lib.zig:1513:16: in asArray
 - 引用返回功能完全不可用
 - 影响需要修改数组元素的场景
 
-### 2. 静态数组属性的 Alignment 错误 ❌ 高优先级
+### 2. 静态数组属性的 Alignment 错误 ✅ 已修复
 
 **问题描述**：
 ```php
@@ -73,13 +73,37 @@ main.zig:191:26: in MathUtils::memoize
 ```
 
 **根本原因**：
-- 静态数组属性的值没有正确初始化或编码
-- 访问 `self::$cache` 返回的不是有效的数组指针
-- 可能是静态属性初始化的问题
+- IR Generator 的 `tryMakeConstInstruction` 不支持 `array_init`
+- 空数组 `[]` 被当作 `null` 处理
+- Native Linker 生成 `runtime.Value.initNull()` 而不是 `initArray()`
+- 访问时 `asArray()` 尝试解码 null 值的指针，导致 alignment 错误
+
+**修复方案**：
+1. **ir_generator.zig**: 在 `tryMakeConstInstruction` 中添加对空数组的支持
+   ```zig
+   .array_init => {
+       const array_data = expr_node.data.array_init;
+       if (array_data.elements.len == 0) {
+           inst.op = .{ .array_new = .{ .capacity = 0 } };
+       } else {
+           return null;  // 非空数组不能作为常量
+       }
+   }
+   ```
+
+2. **native_linker.zig**: 在代码生成中处理 `array_new` 指令
+   ```zig
+   .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))")
+   ```
+
+**修复结果**：
+- ✅ 静态数组属性正确初始化为空数组
+- ✅ `complex_static_test.php` 通过
+- ✅ 缓存、单例等模式可以正常工作
 
 **影响**：
-- 静态数组属性不可用
-- 影响缓存、单例等模式
+- 静态数组属性完全可用
+- 不影响其他功能
 
 ### 3. 嵌套闭包返回 ⚠️ 中优先级
 
