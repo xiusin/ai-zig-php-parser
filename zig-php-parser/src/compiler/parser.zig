@@ -569,6 +569,11 @@ pub const Parser = struct {
             self.nextToken();
         }
 
+        // 处理 const 声明
+        if (self.curr.tag == .k_const) {
+            return self.parseConst();
+        }
+
         if (self.curr.tag == .k_function or self.curr.tag == .k_fn) {
             const is_arrow = self.curr.tag == .k_fn;
             const token = try self.eat(if (is_arrow) .k_fn else .k_function);
@@ -795,11 +800,10 @@ pub const Parser = struct {
             var member_attributes: []const ast.Node.Index = &.{};
             if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
 
-            if (self.curr.tag == .k_const) {
-                try members.append(self.allocator, try self.parseConst());
-            } else if (self.curr.tag == .k_use) {
+            if (self.curr.tag == .k_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else {
+                // parseClassMember 会处理修饰符、const、函数和属性
                 try members.append(self.allocator, try self.parseClassMember(member_attributes, is_interface));
             }
         }
