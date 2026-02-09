@@ -14,7 +14,10 @@
 | closure_test.php | ✅ 通过 | 闭包测试（已修复） |
 | error_handling.php | ✅ 通过 | 异常处理（isset 已修复） |
 | string_operations.php | ✅ 通过 | 字符串操作（所有 14 个测试点） |
-| array_operations.php | ⚠️ 部分通过 | 编译成功，运行正常，GC 有小问题 |
+| array_operations.php | ✅ 通过 | 数组操作（GC 已修复） |
+| stdlib_test.php | ✅ 通过 | 标准库函数测试 |
+
+**测试通过率：100% (10/10)** 🎉
 
 ## 已支持的功能
 
