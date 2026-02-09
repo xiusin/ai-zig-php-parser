@@ -1521,6 +1521,16 @@ pub const Value = struct {
         return @ptrFromInt(nanbox_abi.decodePtr(self.val));
     }
 
+    /// 获取数组元素的引用（用于引用返回）
+    pub fn getArrayElementRef(arr: *PHPArray, key: ArrayKey, allocator: Allocator) !*Value {
+        const entry = arr.data.getPtr(key) orelse {
+            // 如果元素不存在，创建一个 null 值
+            try arr.data.put(allocator, key, Value.initNull());
+            return arr.data.getPtr(key).?;
+        };
+        return entry;
+    }
+
     // ========================================================================
     // 引用计数
     // ========================================================================
@@ -2002,6 +2012,32 @@ pub fn php_forward_static_call_builtin(ctx: Value, args: []const Value, allocato
 pub fn php_forward_static_call_array_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     return wrapBuiltin_forward_static_call_array(ctx, args, allocator);
 }
+
+/// 获取数组元素的引用（用于引用返回）
+/// 参数：array, key
+/// 返回：Value.initRef(指向数组元素的指针)
+pub fn php_array_get_ref(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
+    if (!arr_val.isArray()) return error.InvalidArgument;
+    const arr = arr_val.asArray();
+    
+    const key = if (key_val.isInt())
+        ArrayKey{ .integer = key_val.toInt() }
+    else if (key_val.isString())
+        ArrayKey{ .string = key_val.asString() }
+    else
+        return error.InvalidKey;
+    
+    // 获取或创建数组元素
+    const entry_ptr = arr.data.getPtr(key) orelse blk: {
+        // 元素不存在，创建一个 null 值
+        try arr.data.put(allocator, key, Value.initNull());
+        break :blk arr.data.getPtr(key).?;
+    };
+    
+    // 返回指向数组元素的引用
+    return Value.initRef(entry_ptr);
+}
+
 
 fn php_get_class_methods(class_name_val: Value, allocator: Allocator) !Value {
     var meta_opt: ?*const ClassMeta = null;

@@ -625,6 +625,7 @@ pub const NativeLinker = struct {
                                 "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
                                 .{sid},
                             ),
+                            .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
                             else => try writer.writeAll("runtime.Value.initNull()"),
                         }
                     } else {
@@ -644,6 +645,7 @@ pub const NativeLinker = struct {
                                     "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
                                     .{sid},
                                 ),
+                                .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
                                 else => try writer.writeAll("runtime.Value.initNull()"),
                             }
                         } else {

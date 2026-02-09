@@ -758,6 +758,17 @@ pub const IRGenerator = struct {
                 const id = try module.internString(s);
                 inst.op = .{ .const_string = id };
             },
+            .array_init => {
+                // 对于空数组初始化，生成 array_new 指令
+                const array_data = expr_node.data.array_init;
+                if (array_data.elements.len == 0) {
+                    inst.op = .{ .array_new = .{ .capacity = 0 } };
+                } else {
+                    // 非空数组不能作为常量
+                    self.allocator.destroy(inst);
+                    return null;
+                }
+            },
             else => {
                 self.allocator.destroy(inst);
                 return null;
