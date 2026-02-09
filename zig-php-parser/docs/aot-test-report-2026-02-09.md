@@ -11,8 +11,8 @@
 | static_property_test.php | ✅ 通过 | 静态属性读写 |
 | postfix_test.php | ✅ 通过 | 后缀递增/递减 |
 | comprehensive_test.php | ✅ 通过 | 综合功能测试 |
+| closure_test.php | ✅ 通过 | 闭包测试（已修复） |
 | array_operations.php | ⚠️ 部分通过 | 编译成功，运行正常，GC 有小问题 |
-| closure_test.php | ❌ 失败 | Parser bug：闭包导致函数声明丢失 |
 | string_operations.php | ❌ 失败 | 缺少 preg_match 等函数 |
 | error_handling.php | ❌ 失败 | 缺少 isset 函数 |
 
@@ -101,12 +101,16 @@
 
 ## 待修复的问题
 
-### 1. Parser 闭包 bug ❌
+### 1. Parser 闭包 bug ✅ 已修复
 **问题**：当函数内部有闭包时，Parser 没有正确地将函数声明放到根节点的语句列表中。
 
-**影响**：包含闭包的脚本无法正确编译。
+**原因**：`parseClosure` 没有处理返回类型声明（`: type`），导致解析错误。
 
-**优先级**：高
+**修复**：在 `parseClosure` 中添加返回类型解析逻辑。
+
+**影响**：闭包现在可以正确编译和运行。
+
+**优先级**：~~高~~ 已完成
 
 ### 2. 缺少标准库函数 ❌
 **缺少的函数**：
