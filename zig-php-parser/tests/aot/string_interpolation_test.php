@@ -21,8 +21,8 @@ $p = new Point(10, 20);
 echo "X: " . $p->x . "\n";
 echo "Y: " . $p->y . "\n";
 
-// 测试 2: 字符串插值中的属性访问
-echo "Point: ($p->x, $p->y)\n";
+// 测试 2: 字符串插值中的属性访问（使用 {$expr} 语法）
+echo "Point: ({$p->x}, {$p->y})\n";
 
 // 测试 3: __toString
 echo "ToString: $p\n";
