@@ -2074,13 +2074,20 @@ pub const Parser = struct {
             _ = try self.eat(.r_paren);
         }
 
+        // Parse optional return type declaration (: type)
+        var return_type: ?ast.Node.Index = null;
+        if (self.curr.tag == .colon) {
+            self.nextToken(); // consume ':'
+            return_type = try self.parseType();
+        }
+
         const body = try self.parseBlock();
         const arena = self.context.arena.allocator();
         const params_slice = try arena.dupe(ast.Node.Index, params.items);
         const captures_slice = try arena.dupe(ast.Node.Index, captures.items);
         params.deinit(self.allocator);
         captures.deinit(self.allocator);
-        return self.createNode(.{ .tag = .closure, .main_token = token, .data = .{ .closure = .{ .attributes = &.{}, .params = params_slice, .captures = captures_slice, .return_type = null, .body = body, .is_static = false } } });
+        return self.createNode(.{ .tag = .closure, .main_token = token, .data = .{ .closure = .{ .attributes = &.{}, .params = params_slice, .captures = captures_slice, .return_type = return_type, .body = body, .is_static = false } } });
     }
 
     fn parseMatch(self: *Parser) anyerror!ast.Node.Index {
