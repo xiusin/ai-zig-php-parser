@@ -1816,9 +1816,10 @@ pub const NativeLinker = struct {
         const dest_is_value = !(dest_tag == .i64 or dest_tag == .f64 or dest_tag == .bool);
 
         const dest_may_heap = if (self.current_reg_may_heap) |mh| mh[result_reg.id] else true;
-        if (dest_is_value and dest_may_heap) {
-            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ result_reg.id });
-        }
+        // 不要在 phi 节点前 release，因为寄存器可能未初始化
+        // if (dest_is_value and dest_may_heap) {
+        //     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ result_reg.id });
+        // }
 
         try writer.writeAll("    switch (prev_block) {\n");
         for (phi.incoming) |incoming| {
@@ -5204,108 +5205,39 @@ pub const NativeLinker = struct {
         defer file.close();
         try file.writeAll(template_content);
 
-        const profiler_src_path = "src/aot/profiler.zig";
-        const profiler_content = try std.fs.cwd().readFileAlloc(
-            self.allocator,
-            profiler_src_path,
-            10 * 1024 * 1024,
-        );
-        defer self.allocator.free(profiler_content);
-        const profiler_dest = try std.fs.path.join(
-            self.allocator,
-            &[_][]const u8{ temp_dir, "profiler.zig" },
-        );
-        defer self.allocator.free(profiler_dest);
-        const profiler_file = try std.fs.cwd().createFile(profiler_dest, .{});
-        defer profiler_file.close();
-        try profiler_file.writeAll(profiler_content);
+        // 复制其他运行时文件（容错处理）
+        const files = [_]struct { src: []const u8, dst: []const u8 }{
+            .{ .src = "src/aot/profiler.zig", .dst = "profiler.zig" },
+            .{ .src = "src/aot/flamegraph.zig", .dst = "flamegraph.zig" },
+            .{ .src = "src/aot/pprof.zig", .dst = "pprof.zig" },
+            .{ .src = "src/aot/concurrency_runtime.zig", .dst = "concurrency_runtime.zig" },
+            .{ .src = "src/aot/array_ops_shared.zig", .dst = "array_ops_shared.zig" },
+            .{ .src = "src/aot/nanbox_abi.zig", .dst = "nanbox_abi.zig" },
+        };
 
-        const flamegraph_src_path = "src/aot/flamegraph.zig";
-        const flamegraph_content = try std.fs.cwd().readFileAlloc(
-            self.allocator,
-            flamegraph_src_path,
-            10 * 1024 * 1024,
-        );
-        defer self.allocator.free(flamegraph_content);
-        const flamegraph_dest = try std.fs.path.join(
-            self.allocator,
-            &[_][]const u8{ temp_dir, "flamegraph.zig" },
-        );
-        defer self.allocator.free(flamegraph_dest);
-        const flamegraph_file = try std.fs.cwd().createFile(flamegraph_dest, .{});
-        defer flamegraph_file.close();
-        try flamegraph_file.writeAll(flamegraph_content);
+        for (files) |f| {
+            const content = std.fs.cwd().readFileAlloc(
+                self.allocator,
+                f.src,
+                10 * 1024 * 1024,
+            ) catch |err| {
+                if (self.config.verbose) {
+                    std.debug.print("  Warning: Failed to copy {s}: {}\n", .{ f.src, err });
+                }
+                continue;
+            };
+            defer self.allocator.free(content);
 
-        const pprof_src_path = "src/aot/pprof.zig";
-        const pprof_content = try std.fs.cwd().readFileAlloc(
-            self.allocator,
-            pprof_src_path,
-            10 * 1024 * 1024,
-        );
-        defer self.allocator.free(pprof_content);
-        const pprof_dest = try std.fs.path.join(
-            self.allocator,
-            &[_][]const u8{ temp_dir, "pprof.zig" },
-        );
-        defer self.allocator.free(pprof_dest);
-        const pprof_file = try std.fs.cwd().createFile(pprof_dest, .{});
-        defer pprof_file.close();
-        try pprof_file.writeAll(pprof_content);
+            const dest = try std.fs.path.join(
+                self.allocator,
+                &[_][]const u8{ temp_dir, f.dst },
+            );
+            defer self.allocator.free(dest);
 
-        // 复制concurrency_runtime.zig
-        const concurrency_path = "src/aot/concurrency_runtime.zig";
-        const concurrency_content = try std.fs.cwd().readFileAlloc(
-            self.allocator,
-            concurrency_path,
-            10 * 1024 * 1024,
-        );
-        defer self.allocator.free(concurrency_content);
-
-        const concurrency_dest = try std.fs.path.join(
-            self.allocator,
-            &[_][]const u8{ temp_dir, "concurrency_runtime.zig" },
-        );
-        defer self.allocator.free(concurrency_dest);
-
-        const concurrency_file = try std.fs.cwd().createFile(concurrency_dest, .{});
-        defer concurrency_file.close();
-        try concurrency_file.writeAll(concurrency_content);
-
-        const array_ops_path = "src/aot/array_ops_shared.zig";
-        const array_ops_content = try std.fs.cwd().readFileAlloc(
-            self.allocator,
-            array_ops_path,
-            10 * 1024 * 1024,
-        );
-        defer self.allocator.free(array_ops_content);
-
-        const array_ops_dest = try std.fs.path.join(
-            self.allocator,
-            &[_][]const u8{ temp_dir, "array_ops_shared.zig" },
-        );
-        defer self.allocator.free(array_ops_dest);
-
-        const array_ops_file = try std.fs.cwd().createFile(array_ops_dest, .{});
-        defer array_ops_file.close();
-        try array_ops_file.writeAll(array_ops_content);
-
-        const nanbox_path = "src/shared/nanbox_abi.zig";
-        const nanbox_content = try std.fs.cwd().readFileAlloc(
-            self.allocator,
-            nanbox_path,
-            10 * 1024 * 1024,
-        );
-        defer self.allocator.free(nanbox_content);
-
-        const nanbox_dest = try std.fs.path.join(
-            self.allocator,
-            &[_][]const u8{ temp_dir, "nanbox_abi.zig" },
-        );
-        defer self.allocator.free(nanbox_dest);
-
-        const nanbox_file = try std.fs.cwd().createFile(nanbox_dest, .{});
-        defer nanbox_file.close();
-        try nanbox_file.writeAll(nanbox_content);
+            const dest_file = try std.fs.cwd().createFile(dest, .{});
+            defer dest_file.close();
+            try dest_file.writeAll(content);
+        }
 
         if (self.config.verbose) {
             std.debug.print("  Copied runtime libraries to {s}\n", .{temp_dir});

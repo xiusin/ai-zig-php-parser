@@ -64,6 +64,12 @@ pub const HotspotDetector = struct {
     pub fn getFunctionCount(self: *HotspotDetector, function_name: []const u8) u32 {
         return self.function_counters.get(function_name) orelse 0;
     }
+
+    /// 检查是否为热点函数
+    pub fn isHotspot(self: *HotspotDetector, function_name: []const u8) bool {
+        const count = self.function_counters.get(function_name) orelse 0;
+        return count >= self.function_threshold;
+    }
     
     /// 获取循环执行次数
     pub fn getLoopCount(self: *HotspotDetector, loop: *Loop) u32 {

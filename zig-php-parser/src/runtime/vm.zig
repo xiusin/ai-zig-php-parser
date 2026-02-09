@@ -2259,7 +2259,7 @@ pub const VM = struct {
             .fast_string_pool = undefined, // Will be initialized below
             .fast_int_cache = fast_value.SmallIntCache.init(),
             .loop_optimizer = loop_optimizer.LoopOptimizer.init(allocator),
-            .inline_cache = inline_cache.InlineCache.init(),
+            .inline_cache = .{},
         };
 
         // Initialize string pool (requires allocator)
