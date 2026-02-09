@@ -4234,7 +4234,7 @@ fn setCurrentScopeClass(meta: ?*const ClassMeta) void {
     concurrency.getExecutionContext().scope_class = if (meta) |m| @intFromPtr(m) else null;
 }
 
-const ClassContext = struct {
+pub const ClassContext = struct {
     prev_called: ?*const ClassMeta,
     prev_scope: ?*const ClassMeta,
 
@@ -4885,12 +4885,19 @@ pub fn @"property_exists"(ctx: Value, args: []const Value, allocator: Allocator)
 
 /// 调用静态方法
 pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
+    return php_call_static_with_ctx(Value.initNull(), class_name, method_name, args, allocator);
+}
+
+pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
             break :blk getCurrentScopeClass() orelse return error.ClassNotFound;
         }
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
+            if (scope.parent == null) {
+                std.debug.print("ERROR: Class {s} has no parent\n", .{scope.name});
+            }
             break :blk scope.parent orelse return error.ClassNotFound;
         }
         if (std.mem.eql(u8, class_name, "static")) {
@@ -4909,13 +4916,11 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
         break :blk lookup_meta;
     };
 
-    // 查找静态方法
+    // 查找方法（静态或实例方法）
     if (lookup_meta.findMethodLookup(method_name)) |lookup| {
-        if (lookup.method.is_static) {
-            const guard = ClassContext.init(called_meta, lookup.owner);
-            defer guard.deinit();
-            return lookup.method.func(Value.initNull(), args, allocator);
-        }
+        const guard = ClassContext.init(called_meta, lookup.owner);
+        defer guard.deinit();
+        return lookup.method.func(ctx, args, allocator);
     }
 
     // 调用 __callStatic 魔法函数
@@ -4940,7 +4945,11 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
 pub fn php_get_static_property(class_name: []const u8, property_name: []const u8) !Value {
     const meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
-            break :blk getCurrentScopeClass() orelse return error.ClassNotFound;
+            const scope = getCurrentScopeClass();
+            if (scope == null) {
+                std.debug.print("ERROR: getCurrentScopeClass() returned null\n", .{});
+            }
+            break :blk scope orelse return error.ClassNotFound;
         }
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
@@ -4951,7 +4960,11 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
         }
         break :blk findClass(class_name) orelse return error.ClassNotFound;
     };
-    return meta.getStaticProperty(property_name) orelse Value.initNull();
+    const val = meta.getStaticProperty(property_name);
+    if (val == null) {
+        std.debug.print("ERROR: Property {s}.{s} not found\n", .{meta.name, property_name});
+    }
+    return val orelse Value.initNull();
 }
 
 /// 设置静态属性

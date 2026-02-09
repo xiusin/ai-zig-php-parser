@@ -1081,6 +1081,21 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "    _ = allocator;\n");
         try code.appendSlice(self.allocator, "    _ = runtime;\n");
 
+        // 如果是类方法，设置 ClassContext
+        if (std.mem.indexOf(u8, func.name, "::")) |_| {
+            const class_name = blk: {
+                var it = std.mem.splitScalar(u8, func.name, ':');
+                break :blk it.first();
+            };
+            const escaped_class = try self.escapeString(class_name);
+            defer self.allocator.free(escaped_class);
+            try code.appendSlice(self.allocator, "    const __class_meta = runtime.findClass(\"");
+            try code.appendSlice(self.allocator, escaped_class);
+            try code.appendSlice(self.allocator, "\") orelse return error.ClassNotFound;\n");
+            try code.appendSlice(self.allocator, "    const __class_guard = runtime.ClassContext.init(__class_meta, __class_meta);\n");
+            try code.appendSlice(self.allocator, "    defer __class_guard.deinit();\n");
+        }
+
         const escaped_prof_name = try self.escapeString(func.name);
         defer self.allocator.free(escaped_prof_name);
         try code.appendSlice(self.allocator, "    runtime.profiler.enterGlobal(\"");
@@ -3829,13 +3844,24 @@ pub const NativeLinker = struct {
                     break :blk;
                 }
 
+                // 检测是否是 parent:: 调用，需要传递 ctx
+                const is_parent_call = std.mem.eql(u8, op.class_name, "parent");
+                
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                    try writer.print("    reg_{d} = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                    if (is_parent_call) {
+                        try writer.print("    reg_{d} = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                    } else {
+                        try writer.print("    reg_{d} = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                    }
                     try self.writeValueArgsArray(writer, op.args);
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                 } else {
-                    try writer.print("    _ = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                    if (is_parent_call) {
+                        try writer.print("    _ = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                    } else {
+                        try writer.print("    _ = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                    }
                     try self.writeValueArgsArray(writer, op.args);
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                 }
