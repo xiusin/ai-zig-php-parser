@@ -3713,6 +3713,26 @@ pub const IRGenerator = struct {
             .literal_bool => .{ .bool_val = node.main_token.tag == .k_true },
             .literal_null => .{ .is_null = true },
             .literal_string => .{ .string_val = self.getString(node.data.literal_string.value) },
+            .class_constant_access => blk: {
+                // 支持类常量折叠
+                const access_data = node.data.class_constant_access;
+                const class_name = self.getString(access_data.class_name);
+                const const_name = self.getString(access_data.constant_name);
+                
+                var key_buf: [256]u8 = undefined;
+                const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_name }) catch break :blk null;
+                
+                if (self.constant_cache.get(key)) |const_value| {
+                    break :blk switch (const_value) {
+                        .int => |v| ConstantValue{ .int_val = v },
+                        .float => |v| ConstantValue{ .float_val = v },
+                        .string => |s| ConstantValue{ .string_val = s },
+                        .bool => |b| ConstantValue{ .bool_val = b },
+                        .null => ConstantValue{ .is_null = true },
+                    };
+                }
+                break :blk null;
+            },
             else => null,
         };
     }
