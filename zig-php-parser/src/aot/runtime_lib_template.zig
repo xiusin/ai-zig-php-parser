@@ -2753,24 +2753,24 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 pub const ArrayIterator = struct {
-    iter: std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).Iterator,
-    current: ?std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).Entry,
+    iter: PHPArray.Elements.Iterator,
+    current: ?PHPArray.Elements.Entry,
 };
 
-pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !i64 {
-    if (!array_val.isArray()) return 0;
+pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
+    if (!array_val.isArray()) return Value.initInt(0);
     const array = array_val.asArray();
     const iter = try allocator.create(ArrayIterator);
     iter.iter = array.elements.iterator();
     iter.current = iter.iter.next();
-    return @as(i64, @intCast(@intFromPtr(iter)));
+    return Value.initInt(@as(i64, @intCast(@intFromPtr(iter))));
 }
 
-pub fn php_array_iter_valid(iter_val: Value) !bool {
+pub fn php_array_iter_valid(iter_val: Value) !Value {
     const iter_addr = iter_val.asInt();
-    if (iter_addr == 0) return false;
+    if (iter_addr == 0) return Value.initBool(false);
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
-    return iter.current != null;
+    return Value.initBool(iter.current != null);
 }
 
 pub fn php_array_iter_key(iter_val: Value, allocator: Allocator) !Value {
@@ -2795,18 +2795,18 @@ pub fn php_array_iter_value(iter_val: Value) !Value {
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     if (iter.current) |entry| {
-        entry.value_ptr.retain();
+        _ = entry.value_ptr.retain();
         return entry.value_ptr.*;
     }
     return Value.initNull();
 }
 
-pub fn php_array_iter_next(iter_val: Value) !i64 {
+pub fn php_array_iter_next(iter_val: Value) !Value {
     const iter_addr = iter_val.asInt();
-    if (iter_addr == 0) return 0;
+    if (iter_addr == 0) return Value.initInt(0);
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     iter.current = iter.iter.next();
-    return iter_addr;
+    return Value.initInt(iter_addr);
 }
 
 pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !void {

@@ -3514,16 +3514,33 @@ pub const NativeLinker = struct {
             },
             .array_get => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(reg.id)
+                    else
+                        false;
+                    
+                    if (is_alloca) {
+                        try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                    }
 
                     const key_type_tag = @as(std.meta.Tag(IR.Type), op.key.type_);
 
                     if (key_type_tag == .i64) {
                         // 键是i64类型，直接使用
-                        try writer.print("    reg_{d} = reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
+                        if (is_alloca) {
+                            try writer.print("    reg_{d}.* = reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
+                        } else {
+                            try writer.print("    reg_{d} = reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
+                        }
                     } else {
                         // 键是Value类型，使用 getByValue
-                        try writer.print("    reg_{d} = reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
+                        if (is_alloca) {
+                            try writer.print("    reg_{d}.* = reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
+                        } else {
+                            try writer.print("    reg_{d} = reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
+                        }
                     }
                 }
             },
@@ -3649,11 +3666,23 @@ pub const NativeLinker = struct {
             // ============ PHP Object Operations ============
             .new_object => |op| {
                 if (inst.result) |reg| {
+                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(reg.id)
+                    else
+                        false;
+                    
                     // 创建对象
                     const escaped_class = try self.escapeString(op.class_name);
                     defer self.allocator.free(escaped_class);
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                    try writer.print("    reg_{d} = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                    
+                    if (is_alloca) {
+                        try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
+                        try writer.print("    reg_{d}.* = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                        try writer.print("    reg_{d} = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                    }
+                    
                     try self.writeValueArgsArray(writer, op.args);
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                     
