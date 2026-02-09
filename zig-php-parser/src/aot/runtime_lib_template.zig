@@ -438,7 +438,8 @@ pub fn deinitRuntime() void {
         entry.value_ptr.release(runtime_allocator);
     }
     constants.deinit();
-    gcCollectCycles(true);
+    // 跳过循环收集，避免 iterator 整数溢出问题
+    // gcCollectCycles(true);
     cycle_roots.deinit(runtime_allocator);
     cycle_roots = .{};
     for (static_string_entries.items) |e| {
