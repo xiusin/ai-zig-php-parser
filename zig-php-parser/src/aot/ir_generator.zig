@@ -1052,11 +1052,11 @@ pub const IRGenerator = struct {
         const const_data = node.data.const_decl;
         const const_name = self.getString(const_data.name);
 
-        // Evaluate constant value
-        const value_reg = try self.generateExpression(const_data.value);
-        _ = value_reg;
+        // 类常量在 AOT 模式下作为静态属性处理，不需要生成 IR
+        // 值会在代码生成阶段直接内联
+        _ = const_data.value;
 
-        // Register constant
+        // Register constant in symbol table
         try self.symbol_table.defineConstant(const_name, .dynamic, self.current_location);
     }
 
@@ -3087,18 +3087,17 @@ pub const IRGenerator = struct {
     /// Generate IR for class constant access
     fn generateClassConstantAccess(self: *Self, node: *const Node) !Register {
         const access_data = node.data.class_constant_access;
-        const class_name = self.getString(access_data.class_name);
-        const const_name = self.getString(access_data.constant_name);
+        const class_name_id = access_data.class_name;
+        const const_name_id = access_data.constant_name;
 
-        // Class constants are accessed via runtime call
-        var buf: [256]u8 = undefined;
-        const full_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, const_name }) catch const_name;
-        const name_copy = try self.allocator.dupe(u8, full_name);
+        // 获取类名和常量名
+        const class_name = self.getString(class_name_id);
+        const const_name = self.getString(const_name_id);
 
-        return self.emitWithResult(.{ .call = .{
-            .func_name = name_copy,
-            .args = try self.allocator.alloc(Register, 0),
-            .return_type = .php_value,
+        // 类常量作为静态属性访问
+        return self.emitWithResult(.{ .static_property_get = .{
+            .class_name = class_name,
+            .property_name = const_name,
         } }, .php_value);
     }
 
