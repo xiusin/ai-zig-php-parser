@@ -3733,19 +3733,20 @@ pub fn php_ceil(val: Value) !Value {
 }
 
 /// min - 最小值
-pub fn php_min(a: Value, b: Value) !Value {
-    if (a.isInt() and b.isInt()) {
-        return Value.initInt(@min(a.asInt(), b.asInt()));
-    }
-    return Value.initFloat(@min(a.toFloat(), b.toFloat()));
-}
-
 /// max - 最大值
 pub fn php_max(a: Value, b: Value) !Value {
     if (a.isInt() and b.isInt()) {
         return Value.initInt(@max(a.asInt(), b.asInt()));
     }
     return Value.initFloat(@max(a.toFloat(), b.toFloat()));
+}
+
+/// min - 最小值
+pub fn php_min(a: Value, b: Value) !Value {
+    if (a.isInt() and b.isInt()) {
+        return Value.initInt(@min(a.asInt(), b.asInt()));
+    }
+    return Value.initFloat(@min(a.toFloat(), b.toFloat()));
 }
 
 /// sin - 正弦
