@@ -3252,10 +3252,19 @@ pub const NativeLinker = struct {
                     // 检查操作数类型是否一致且为基本类型
                     if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
                         // 两个i64直接比较
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} < reg_{d};\n", .{op.lhs.id, op.rhs.id });
+                        if (type_tag == .bool) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} < reg_{d};\n", .{op.lhs.id, op.rhs.id });
+                        } else {
+                            // 结果是 Value 类型，需要包装
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d} < reg_{d});\n", .{op.lhs.id, op.rhs.id });
+                        }
                     } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
                         // 两个f64直接比较
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} < reg_{d};\n", .{op.lhs.id, op.rhs.id });
+                        if (type_tag == .bool) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} < reg_{d};\n", .{op.lhs.id, op.rhs.id });
+                        } else {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d} < reg_{d});\n", .{op.lhs.id, op.rhs.id });
+                        }
                     } else if (lhs_type_tag == .php_value and rhs_type_tag == .php_value) {
                         // 两个Value类型，直接调用运行时函数
                         if (type_tag == .bool) {
@@ -4394,9 +4403,7 @@ pub const NativeLinker = struct {
             return false;
         }
         
-        // 处理多个循环：按顺序生成每个循环
-        // 简化实现：只处理不嵌套的循环
-        
+        var code_list = writer.context.self;
         var current_block: usize = 0;
         
         for (cfg.loops.items) |loop| {
@@ -4406,8 +4413,8 @@ pub const NativeLinker = struct {
                 try writer.print("    // Block {d}: {s}\n", .{ current_block, block.label });
                 
                 for (block.instructions.items) |inst| {
-                    try writer.writeAll("    ");
-                    try self.generateInstructionSimple(writer.context.self, inst);
+                    try code_list.appendSlice(self.allocator, "    ");
+                    try self.generateInstructionSimple(code_list, inst);
                 }
                 
                 current_block += 1;
@@ -4430,8 +4437,8 @@ pub const NativeLinker = struct {
             try writer.print("    // Block {d}: {s}\n", .{ current_block, block.label });
             
             for (block.instructions.items) |inst| {
-                try writer.writeAll("    ");
-                try self.generateInstructionSimple(writer.context.self, inst);
+                try code_list.appendSlice(self.allocator, "    ");
+                try self.generateInstructionSimple(code_list, inst);
             }
             
             // 处理终止指令
@@ -4467,13 +4474,13 @@ pub const NativeLinker = struct {
         try writer.writeAll("    // Optimized: structured while loop\n");
         try writer.writeAll("    while (true) {\n");
         
+        var code_list = writer.context.self;
+        
         // 生成循环头（条件）
         const header_block = func.blocks.items[loop.header];
         try writer.print("        // Header: {s}\n", .{header_block.label});
         
         for (header_block.instructions.items) |inst| {
-            try writer.writeAll("        ");
-            var code_list = writer.context.self;
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
@@ -4496,8 +4503,6 @@ pub const NativeLinker = struct {
         try writer.print("        // Body: {s}\n", .{body_block.label});
         
         for (body_block.instructions.items) |inst| {
-            try writer.writeAll("        ");
-            var code_list = writer.context.self;
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
@@ -4512,13 +4517,13 @@ pub const NativeLinker = struct {
         try writer.writeAll("    // Optimized: structured for loop\n");
         try writer.writeAll("    while (true) {\n");
         
+        var code_list = writer.context.self;
+        
         // 生成循环头（条件）
         const header_block = func.blocks.items[loop.header];
         try writer.print("        // Header: {s}\n", .{header_block.label});
         
         for (header_block.instructions.items) |inst| {
-            try writer.writeAll("        ");
-            var code_list = writer.context.self;
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
@@ -4541,8 +4546,6 @@ pub const NativeLinker = struct {
         try writer.print("        // Body: {s}\n", .{body_block.label});
         
         for (body_block.instructions.items) |inst| {
-            try writer.writeAll("        ");
-            var code_list = writer.context.self;
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
@@ -4553,10 +4556,8 @@ pub const NativeLinker = struct {
             try writer.print("        // Increment: {s}\n", .{inc_block.label});
             
             for (inc_block.instructions.items) |inst| {
-                try writer.writeAll("        ");
-                var code_list = writer.context.self;
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
+                try code_list.appendSlice(self.allocator, "        ");
+                try self.generateInstructionSimple(code_list, inst);
             }
         }
         
