@@ -7720,37 +7720,63 @@ pub const NativeLinker = struct {
             // 函数调用指令
             // ========================================================================
             .call => |op| {
-                // 格式化参数列表
-                var args_list = std.ArrayList(u8){};
-                defer args_list.deinit(self.allocator);
-                const args_writer = args_list.writer(self.allocator);
-
-                for (op.args, 0..) |arg, i| {
-                    if (i > 0) try args_writer.writeAll(", ");
-                    var arg_buf: [32]u8 = undefined;
-                    const arg_str = try std.fmt.bufPrint(&arg_buf, "reg_{d}", .{arg.id});
-                    try args_writer.writeAll(arg_str);
-                }
-
-                // 检查是否是内置函数（runtime函数）
+                // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
 
                 // 生成函数调用
                 if (result_reg) |r| {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
-                        try writer.print("        {s} = try runtime.{s}({s});\n", .{ r, runtime_name, args_list.items });
+                        const needs_alloc = self.functionNeedsAllocator(op.func_name);
+                        
+                        try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                        for (op.args, 0..) |arg, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            // 只对需要 allocator 的函数转换参数类型
+                            if (needs_alloc) {
+                                const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                if (arg_type == .i64) {
+                                    try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                } else if (arg_type == .f64) {
+                                    try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                } else if (arg_type == .bool) {
+                                    try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                } else {
+                                    try writer.print("reg_{d}", .{arg.id});
+                                }
+                            } else {
+                                try writer.print("reg_{d}", .{arg.id});
+                            }
+                        }
+                        if (needs_alloc) {
+                            try writer.writeAll(", runtime.runtime_allocator");
+                        }
+                        try writer.writeAll(");\n");
                     } else {
-                        // 用户定义函数：使用@"函数名"语法
-                        try writer.print("        {s} = try @\"{s}\"({s});\n", .{ r, op.func_name, args_list.items });
+                        // 用户定义函数
+                        try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), ", .{ r, op.func_name });
+                        for (op.args, 0..) |arg, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            try writer.print("reg_{d}", .{arg.id});
+                        }
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
                     }
                 } else {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
-                        try writer.print("        _ = try runtime.{s}({s});\n", .{ runtime_name, args_list.items });
+                        try writer.print("        _ = try runtime.{s}(", .{runtime_name});
+                        for (op.args, 0..) |arg, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            try writer.print("reg_{d}", .{arg.id});
+                        }
+                        try writer.writeAll(");\n");
                     } else {
-                        // 用户定义函数：使用@"函数名"语法
-                        try writer.print("        _ = try @\"{s}\"({s});\n", .{ op.func_name, args_list.items });
+                        try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                        for (op.args, 0..) |arg, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            try writer.print("reg_{d}", .{arg.id});
+                        }
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
                     }
                 }
             },
@@ -7906,8 +7932,8 @@ pub const NativeLinker = struct {
             // ========================================================================
             else => {
                 // Fallback: 使用 generateInstructionSimple
-                var code = std.ArrayList(u8).init(self.allocator);
-                defer code.deinit();
+                var code = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+                defer code.deinit(self.allocator);
                 try self.generateInstructionSimple(&code, inst);
                 try writer.writeAll(code.items);
             },
