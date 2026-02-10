@@ -4874,7 +4874,9 @@ pub const NativeLinker = struct {
                     const load_result = inst.result orelse continue;
                     
                     // 检查地址是否循环不变（不在 modified_addrs 中）
-                    if (modified_addrs.contains(load_ptr)) continue;
+                    if (modified_addrs.contains(load_ptr)) {
+                        continue;
+                    }
                     
                     // 查找使用 load 结果的 call
                     if (i + 1 < block.instructions.items.len) {
@@ -4883,7 +4885,9 @@ pub const NativeLinker = struct {
                             const call_op = next_inst.op.call;
                             
                             // 检查是否是纯函数
-                            if (!pure_functions.has(call_op.func_name)) continue;
+                            if (!pure_functions.has(call_op.func_name)) {
+                                continue;
+                            }
                             
                             // 检查参数是否是 load 的结果
                             if (call_op.args.len > 0 and call_op.args[0].id == load_result.id) {
@@ -4956,7 +4960,7 @@ pub const NativeLinker = struct {
     /// 生成 load 指令的值读取代码
     fn generateLoadValue(self: *Self, writer: anytype, ptr_reg: IR.Register) !void {
         const suffix = self.getRegSuffix(ptr_reg.id);
-        try writer.print("runtime.val_deref(reg_{d}{s}).*", .{ ptr_reg.id, suffix });
+        try writer.print("runtime.val_deref(&reg_{d}{s}).*", .{ ptr_reg.id, suffix });
     }
 
     /// 检测并优化增量模式: load → const → add → store → reg += const
