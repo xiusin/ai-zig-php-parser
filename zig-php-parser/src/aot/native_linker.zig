@@ -4480,20 +4480,49 @@ pub const NativeLinker = struct {
         const header_block = func.blocks.items[loop.header];
         try writer.print("        // Header: {s}\n", .{header_block.label});
         
+        // 找到条件寄存器（最后一条指令的结果）
+        var cond_reg_id: ?usize = null;
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                cond_reg_id = term.cond_br.cond.id;
+            }
+        }
+        
+        // 生成指令，但跳过条件寄存器的赋值（会内联到 if 语句中）
         for (header_block.instructions.items) |inst| {
+            // 如果这条指令的结果是条件寄存器，跳过（会内联）
+            if (inst.result) |result_reg| {
+                if (cond_reg_id) |cond_id| {
+                    if (result_reg.id == cond_id) {
+                        // 跳过条件寄存器的赋值
+                        continue;
+                    }
+                }
+            }
+            
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
         
-        // 生成条件判断
+        // 生成条件判断（内联条件表达式）
         if (header_block.terminator) |term| {
             if (term == .cond_br) {
-                const cond_reg = term.cond_br.cond.id;
-                const reg_type = self.current_reg_types.?.get(cond_reg) orelse IR.Type{ .php_value = {} };
-                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
-                
                 try writer.writeAll("        if (!(");
-                try self.writeBoolExprToWriter(writer, type_tag, cond_reg);
+                
+                // 内联条件表达式
+                if (cond_reg_id) |cond_id| {
+                    // 找到生成条件的指令
+                    for (header_block.instructions.items) |inst| {
+                        if (inst.result) |result_reg| {
+                            if (result_reg.id == cond_id) {
+                                // 内联这条指令的表达式
+                                try self.writeInlinedConditionExpr(writer, inst);
+                                break;
+                            }
+                        }
+                    }
+                }
+                
                 try writer.writeAll(")) break;\n");
             }
         }
@@ -4523,20 +4552,44 @@ pub const NativeLinker = struct {
         const header_block = func.blocks.items[loop.header];
         try writer.print("        // Header: {s}\n", .{header_block.label});
         
+        // 找到条件寄存器
+        var cond_reg_id: ?usize = null;
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                cond_reg_id = term.cond_br.cond.id;
+            }
+        }
+        
+        // 生成指令，但跳过条件寄存器的赋值（会内联到 if 语句中）
         for (header_block.instructions.items) |inst| {
+            if (inst.result) |result_reg| {
+                if (cond_reg_id) |cond_id| {
+                    if (result_reg.id == cond_id) {
+                        continue;
+                    }
+                }
+            }
+            
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
         
-        // 生成条件判断
+        // 生成条件判断（内联条件表达式）
         if (header_block.terminator) |term| {
             if (term == .cond_br) {
-                const cond_reg = term.cond_br.cond.id;
-                const reg_type = self.current_reg_types.?.get(cond_reg) orelse IR.Type{ .php_value = {} };
-                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
-                
                 try writer.writeAll("        if (!(");
-                try self.writeBoolExprToWriter(writer, type_tag, cond_reg);
+                
+                if (cond_reg_id) |cond_id| {
+                    for (header_block.instructions.items) |inst| {
+                        if (inst.result) |result_reg| {
+                            if (result_reg.id == cond_id) {
+                                try self.writeInlinedConditionExpr(writer, inst);
+                                break;
+                            }
+                        }
+                    }
+                }
+                
                 try writer.writeAll(")) break;\n");
             }
         }
@@ -4574,6 +4627,148 @@ pub const NativeLinker = struct {
             .bool => try writer.print("reg_{d}", .{reg_id}),
             .php_value => try writer.print("reg_{d}.toBool()", .{reg_id}),
             else => try writer.print("reg_{d}.toBool()", .{reg_id}),
+        }
+    }
+    
+    /// 内联条件表达式（用于结构化循环优化）
+    fn writeInlinedConditionExpr(self: *Self, writer: anytype, inst: *const IR.Instruction) !void {
+        switch (inst.op) {
+            .lt => |op| {
+                const lhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.lhs.id) orelse op.lhs.type_
+                else
+                    op.lhs.type_;
+                const rhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.rhs.id) orelse op.rhs.type_
+                else
+                    op.rhs.type_;
+                
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
+
+                if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
+                    try writer.print("reg_{d} < reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
+                    try writer.print("reg_{d} < reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else {
+                    try writer.writeAll("(try runtime.php_lt(");
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(")).toBool()");
+                }
+            },
+            .le => |op| {
+                const lhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.lhs.id) orelse op.lhs.type_
+                else
+                    op.lhs.type_;
+                const rhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.rhs.id) orelse op.rhs.type_
+                else
+                    op.rhs.type_;
+                
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
+
+                if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
+                    try writer.print("reg_{d} <= reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
+                    try writer.print("reg_{d} <= reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else {
+                    try writer.writeAll("(try runtime.php_le(");
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(")).toBool()");
+                }
+            },
+            .gt => |op| {
+                const lhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.lhs.id) orelse op.lhs.type_
+                else
+                    op.lhs.type_;
+                const rhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.rhs.id) orelse op.rhs.type_
+                else
+                    op.rhs.type_;
+                
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
+
+                if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
+                    try writer.print("reg_{d} > reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
+                    try writer.print("reg_{d} > reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else {
+                    try writer.writeAll("(try runtime.php_gt(");
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(")).toBool()");
+                }
+            },
+            .ge => |op| {
+                const lhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.lhs.id) orelse op.lhs.type_
+                else
+                    op.lhs.type_;
+                const rhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.rhs.id) orelse op.rhs.type_
+                else
+                    op.rhs.type_;
+                
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
+
+                if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
+                    try writer.print("reg_{d} >= reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
+                    try writer.print("reg_{d} >= reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else {
+                    try writer.writeAll("(try runtime.php_ge(");
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(")).toBool()");
+                }
+            },
+            .eq => |op| {
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+
+                if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
+                    try writer.print("reg_{d} == reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else {
+                    try writer.writeAll("(try runtime.php_eq(");
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(")).toBool()");
+                }
+            },
+            .ne => |op| {
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+
+                if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
+                    try writer.print("reg_{d} != reg_{d}", .{op.lhs.id, op.rhs.id});
+                } else {
+                    try writer.writeAll("(try runtime.php_ne(");
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(")).toBool()");
+                }
+            },
+            else => {
+                // 其他操作，回退到寄存器
+                if (inst.result) |reg| {
+                    const reg_type = self.current_reg_types.?.get(reg.id) orelse IR.Type{ .php_value = {} };
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                    try self.writeBoolExprToWriter(writer, type_tag, reg.id);
+                }
+            },
         }
     }
     
