@@ -4816,6 +4816,50 @@ pub const NativeLinker = struct {
             break :blk null;
         };
         
+        // 检测数学化简：sum += 1 循环可化简为 sum += N
+        const math_simplify: ?struct { target_reg: usize, loop_count_reg: usize } = blk: {
+            if (full_unroll_count != null) break :blk null;
+            if (loop.increment == null) break :blk null;
+            
+            // 检查循环体：必须只有 load + const + add + store
+            if (body_block.instructions.items.len != 4) break :blk null;
+            
+            var has_add_one = false;
+            var target_reg: ?usize = null;
+            
+            for (body_block.instructions.items) |inst| {
+                if (inst.op == .const_int and inst.op.const_int == 1) {
+                    has_add_one = true;
+                } else if (inst.op == .store) {
+                    target_reg = inst.op.store.ptr.id;
+                }
+            }
+            
+            if (!has_add_one or target_reg == null) break :blk null;
+            
+            // 检查循环条件 i < limit
+            var loop_count_reg: ?usize = null;
+            if (cond_reg_id) |cond_id| {
+                for (header_block.instructions.items) |inst| {
+                    if (inst.result) |res| {
+                        if (res.id == cond_id and inst.op == .lt) {
+                            loop_count_reg = inst.op.lt.rhs.id;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (loop_count_reg != null) {
+                break :blk .{
+                    .target_reg = target_reg.?,
+                    .loop_count_reg = loop_count_reg.?,
+                };
+            }
+            
+            break :blk null;
+        };
+        
         // 检测循环展开和剥离
         const unroll_factor: usize = blk: {
             if (full_unroll_count != null) break :blk 1;  // 完全展开时不需要部分展开
@@ -4907,8 +4951,23 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 完全展开小循环
-        if (full_unroll_count) |count| {
+        // 数学化简：sum += 1 循环 → sum += N
+        if (math_simplify) |ms| {
+            try writer.print("    // Mathematical simplification: sum += N\n", .{});
+            try writer.print("    reg_{d} += reg_{d};\n", .{ ms.target_reg, ms.loop_count_reg });
+            
+            // 更新循环变量到上界
+            if (loop.increment) |inc_idx| {
+                const inc_block = func.blocks.items[inc_idx];
+                for (inc_block.instructions.items) |inst| {
+                    if (inst.op == .store) {
+                        const inc_reg = inst.op.store.ptr.id;
+                        try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                        break;
+                    }
+                }
+            }
+        } else if (full_unroll_count) |count| {
             try writer.print("    // Fully unrolled loop ({d} iterations)\n", .{count});
             
             // 找到循环体的目标寄存器
