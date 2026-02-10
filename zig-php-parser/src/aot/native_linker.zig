@@ -5122,49 +5122,8 @@ pub const NativeLinker = struct {
         // 检测完全展开：禁用（bug：无法正确模拟循环变量）
         const full_unroll_count: ?usize = null;
 
-        // 检测数学化简：sum += 1 循环可化简为 sum += N
-        const math_simplify: ?struct { target_reg: usize, loop_count_reg: usize } = blk: {
-            if (full_unroll_count != null) break :blk null;
-            if (loop.increment == null) break :blk null;
-
-            // 检查循环体：必须只有 load + const + add + store
-            if (body_block.instructions.items.len != 4) break :blk null;
-
-            var has_add_one = false;
-            var target_reg: ?usize = null;
-
-            for (body_block.instructions.items) |inst| {
-                if (inst.op == .const_int and inst.op.const_int == 1) {
-                    has_add_one = true;
-                } else if (inst.op == .store) {
-                    target_reg = inst.op.store.ptr.id;
-                }
-            }
-
-            if (!has_add_one or target_reg == null) break :blk null;
-
-            // 检查循环条件 i < limit
-            var loop_count_reg: ?usize = null;
-            if (cond_reg_id) |cond_id| {
-                for (header_block.instructions.items) |inst| {
-                    if (inst.result) |res| {
-                        if (res.id == cond_id and inst.op == .lt) {
-                            loop_count_reg = inst.op.lt.rhs.id;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (loop_count_reg != null) {
-                break :blk .{
-                    .target_reg = target_reg.?,
-                    .loop_count_reg = loop_count_reg.?,
-                };
-            }
-
-            break :blk null;
-        };
+        // 检测数学化简：禁用（导致嵌套循环问题）
+        const math_simplify: ?struct { target_reg: usize, loop_count_reg: usize } = null;
 
         // 检测无效循环：循环体只有常量赋值
         const dead_loop = blk: {
@@ -6027,6 +5986,9 @@ pub const NativeLinker = struct {
     /// 检测循环（回边分析）
     fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
         // 检测所有可能的循环头：有条件分支且有回边的块
+        var all_loops = try std.ArrayList(LoopInfo).initCapacity(self.allocator, 0);
+        defer all_loops.deinit(self.allocator);
+        
         for (func.blocks.items, 0..) |block, header_idx| {
             const term = block.terminator orelse continue;
             if (term != .cond_br) continue;
@@ -6049,8 +6011,25 @@ pub const NativeLinker = struct {
             if (has_back_edge) {
                 // 分析循环结构
                 if (try self.analyzeLoop(func, cfg, header_idx, back_edge_source)) |loop_info| {
-                    try cfg.loops.append(self.allocator, loop_info);
+                    try all_loops.append(self.allocator, loop_info);
                 }
+            }
+        }
+        
+        // 过滤嵌套循环：只保留最外层循环
+        for (all_loops.items) |loop| {
+            var is_inner = false;
+            for (all_loops.items) |outer| {
+                if (loop.header == outer.header) continue;
+                // 检查 loop 是否在 outer 的 body 内
+                if (loop.header > outer.body_start and 
+                    loop.header <= outer.body_end) {
+                    is_inner = true;
+                    break;
+                }
+            }
+            if (!is_inner) {
+                try cfg.loops.append(self.allocator, loop);
             }
         }
     }
@@ -6120,7 +6099,7 @@ pub const NativeLinker = struct {
         return LoopInfo{
             .header = header,
             .body_start = body_start,
-            .body_end = if (increment) |inc| inc else body_start,
+            .body_end = back_edge_source,
             .exit_block = exit,
             .increment = increment,
             .is_for_loop = is_for_loop,
