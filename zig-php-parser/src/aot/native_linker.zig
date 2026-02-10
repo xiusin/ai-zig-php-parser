@@ -7515,21 +7515,40 @@ pub const NativeLinker = struct {
                 }
             },
             .mul => |op| {
-                var lhs_buf: [32]u8 = undefined;
-                var rhs_buf: [32]u8 = undefined;
-                const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
-                const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
                 // 快速路径：纯整数/浮点
                 if (inst.result) |reg| {
                     if (reg.type_ == .i64 and op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
-                        try writer.print("        {s} = {s} * {s};\n", .{ result_reg.?, lhs, rhs });
+                        try writer.print("        {s} = reg_{d} * reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                     } else if (reg.type_ == .f64 and op.lhs.type_ == .f64 and op.rhs.type_ == .f64) {
-                        try writer.print("        {s} = {s} * {s};\n", .{ result_reg.?, lhs, rhs });
+                        try writer.print("        {s} = reg_{d} * reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                     } else {
-                        try writer.print("        {s} = try runtime.php_mul({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                        // 需要类型转换
+                        try writer.print("        {s} = try runtime.php_mul(", .{result_reg.?});
+                        const lhs_type = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                        if (lhs_type == .i64) {
+                            try writer.print("runtime.Value.initInt(reg_{d})", .{op.lhs.id});
+                        } else if (lhs_type == .f64) {
+                            try writer.print("runtime.Value.initFloat(reg_{d})", .{op.lhs.id});
+                        } else if (lhs_type == .bool) {
+                            try writer.print("runtime.Value.initBool(reg_{d})", .{op.lhs.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.lhs.id});
+                        }
+                        try writer.writeAll(", ");
+                        const rhs_type = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                        if (rhs_type == .i64) {
+                            try writer.print("runtime.Value.initInt(reg_{d})", .{op.rhs.id});
+                        } else if (rhs_type == .f64) {
+                            try writer.print("runtime.Value.initFloat(reg_{d})", .{op.rhs.id});
+                        } else if (rhs_type == .bool) {
+                            try writer.print("runtime.Value.initBool(reg_{d})", .{op.rhs.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.rhs.id});
+                        }
+                        try writer.writeAll(");\n");
                     }
                 } else {
-                    try writer.print("        _ = try runtime.php_mul({s}, {s});\n", .{ lhs, rhs });
+                    try writer.print("        _ = try runtime.php_mul(reg_{d}, reg_{d});\n", .{ op.lhs.id, op.rhs.id });
                 }
             },
             .div => |op| {
@@ -7723,6 +7742,8 @@ pub const NativeLinker = struct {
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
 
+                std.debug.print("DEBUG: generateInstruction call: {s}, builtin={}\n", .{op.func_name, is_builtin});
+
                 // 生成函数调用
                 if (result_reg) |r| {
                     if (is_builtin) {
@@ -7732,18 +7753,14 @@ pub const NativeLinker = struct {
                         try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            // 只对需要 allocator 的函数转换参数类型
-                            if (needs_alloc) {
-                                const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
-                                if (arg_type == .i64) {
-                                    try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
-                                } else if (arg_type == .f64) {
-                                    try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
-                                } else if (arg_type == .bool) {
-                                    try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
-                                } else {
-                                    try writer.print("reg_{d}", .{arg.id});
-                                }
+                            // 转换基本类型参数为 Value
+                            const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                            if (arg_type == .i64) {
+                                try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                            } else if (arg_type == .f64) {
+                                try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                            } else if (arg_type == .bool) {
+                                try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
                             } else {
                                 try writer.print("reg_{d}", .{arg.id});
                             }
