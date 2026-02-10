@@ -146,7 +146,6 @@ pub const IRGenerator = struct {
         self.loop_stack.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
         self.constant_cache.deinit(self.allocator);
-        self.try_stack.deinit(self.allocator);
     }
 
     fn flushEntryAllocas(self: *Self, entry_block: *BasicBlock) !void {

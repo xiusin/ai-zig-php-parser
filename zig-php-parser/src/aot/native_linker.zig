@@ -194,6 +194,8 @@ pub const NativeLinker = struct {
             // }
             self.allocator.free(dir);
         }
+        // 清空 HashMap（不释放 key，因为 key 属于 IR 模块）
+        self.func_return_types.clearRetainingCapacity();
         self.func_return_types.deinit();
         self.allocator.destroy(self);
     }
