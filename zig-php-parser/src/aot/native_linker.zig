@@ -4548,79 +4548,47 @@ pub const NativeLinker = struct {
             try processed.put(idx, {});
         }
 
-        // 生成每个循环
-        std.debug.print("Generating {d} loops for {s}...\n", .{ cfg.loops.items.len, func.name });
+        // 顺序生成每个循环及其后续块
         for (cfg.loops.items, 0..) |loop, i| {
-            std.debug.print("Loop {d}: header={d} body={d}..{d} exit={?d}\n", .{ i, loop.header, loop.body_start, loop.body_end, loop.exit_block });
             // 标记循环块为已处理
             try processed.put(loop.header, {});
             for (loop.body_start..loop.body_end + 1) |idx| {
                 try processed.put(idx, {});
             }
             if (loop.increment) |inc| try processed.put(inc, {});
+            if (loop.exit_block) |exit| try processed.put(exit, {});
 
-            // 生成循环间的块
-            if (i > 0) {
-                const prev_exit = cfg.loops.items[i - 1].exit_block orelse loop.header;
-                for (prev_exit..loop.header) |idx| {
-                    if (processed.contains(idx)) continue;
-                    const block = func.blocks.items[idx];
-                    try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-                    for (block.instructions.items) |inst| {
-                        try writer.writeAll("    ");
-                        try self.generateInstruction(writer, inst);
-                    }
-                    // 不标记为已处理，让"生成剩余块"统一处理
-                    // try processed.put(idx, {});
-                }
-            }
-
-            // 生成循环（不生成退出块）
-            std.debug.print("Generating loop {d}...\n", .{i});
+            // 生成循环
             if (loop.is_for_loop) {
                 try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
             } else {
                 try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
             }
-            std.debug.print("Loop {d} generated\n", .{i});
+
+            // 生成退出块
+            if (loop.exit_block) |exit_idx| {
+                const exit_block = func.blocks.items[exit_idx];
+                try writer.print("    // Block {d}: {s}\n", .{ exit_idx, exit_block.label });
+                for (exit_block.instructions.items) |inst| {
+                    try writer.writeAll("    ");
+                    try self.generateInstruction(writer, inst);
+                }
+            }
         }
 
-        std.debug.print("Finished generating loops for {s}\n", .{func.name});
-
-        // 生成所有剩余的块（包括退出块）
-        std.debug.print("Generating remaining blocks for {s}...\n", .{func.name});
+        // 生成所有剩余的块
         var has_return = false;
-        var block_count: usize = 0;
-        var last_non_alloca_reg: ?usize = null; // 记录最后一个非 alloca 赋值
-        
         for (func.blocks.items, 0..) |block, idx| {
-            if (processed.contains(idx)) {
-                std.debug.print("Block {d} already processed\n", .{idx});
-                continue;
-            }
+            if (processed.contains(idx)) continue;
             
-            std.debug.print("Generating Block {d}\n", .{idx});
-            block_count += 1;
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-            
-            // 记录块中的非 alloca 赋值
             for (block.instructions.items) |inst| {
-                if (inst.result) |res| {
-                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                        alloca_regs.contains(res.id)
-                    else
-                        false;
-                    if (!is_alloca) {
-                        last_non_alloca_reg = res.id;
-                    }
-                }
                 try writer.writeAll("    ");
                 try self.generateInstruction(writer, inst);
             }
             
-            // 检查是否有 ret terminator
+            // 检查 ret terminator
             if (block.terminator) |term| {
-                std.debug.print("Block {d} terminator: {s}\n", .{ idx, @tagName(term) });
                 if (term == .ret) {
                     has_return = true;
                     const maybe_reg = term.ret;
@@ -4651,18 +4619,35 @@ pub const NativeLinker = struct {
                         try writer.writeAll("    return runtime.Value.initNull();\n");
                     }
                 }
-            } else {
-                std.debug.print("Block {d} has no terminator\n", .{idx});
             }
             
             try processed.put(idx, {});
         }
         
-        std.debug.print("Generated {d} remaining blocks, has_return: {}, last_reg: {?d}\n", .{ block_count, has_return, last_non_alloca_reg });
-        // 如果没有任何块生成了返回，添加默认返回
+        // 如果没有返回，查找最后一个循环退出块的赋值
         if (!has_return) {
-            std.debug.print("Adding default return with reg: {?d}\n", .{last_non_alloca_reg});
-            if (last_non_alloca_reg) |reg| {
+            var return_reg: ?usize = null;
+            if (cfg.loops.items.len > 0) {
+                // 从第一个循环的退出块开始查找
+                for (cfg.loops.items) |loop| {
+                    if (loop.exit_block) |exit_idx| {
+                        const exit_block = func.blocks.items[exit_idx];
+                        for (exit_block.instructions.items) |inst| {
+                            if (inst.result) |res| {
+                                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                    alloca_regs.contains(res.id)
+                                else
+                                    false;
+                                if (!is_alloca) {
+                                    return_reg = res.id;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (return_reg) |reg| {
                 if (self.current_reg_types) |reg_types| {
                     const real_type = reg_types.get(reg) orelse IR.Type.php_value;
                     const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
@@ -4899,14 +4884,44 @@ pub const NativeLinker = struct {
             }
         }
 
-        // 生成循环体（所有从 body_start 到 body_end 的块）
-        for (loop.body_start..loop.body_end + 1) |idx| {
-            const body_block = func.blocks.items[idx];
-            try writer.print("        // Body: {s}\n", .{body_block.label});
+        // 生成循环体
+        const body_block = func.blocks.items[loop.body_start];
+        try writer.print("        // Body: {s}\n", .{body_block.label});
 
-            for (body_block.instructions.items) |inst| {
-                try code_list.appendSlice(self.allocator, "        ");
-                try self.generateInstructionSimple(code_list, inst);
+        for (body_block.instructions.items) |inst| {
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
+        }
+
+        // 检查 body 块的 terminator，如果跳转到另一个循环，内联那个循环
+        if (body_block.terminator) |term| {
+            if (term == .br) {
+                const target = term.br;
+                // 检查目标是否是另一个循环的 header
+                for (cfg.loops.items) |inner_loop| {
+                    if (inner_loop.header == target) {
+                        // 内联内层循环
+                        try writer.writeAll("        // Inlined inner loop\n");
+                        if (inner_loop.is_for_loop) {
+                            try self.generateForLoopStructuredNew(writer, func, inner_loop, cleanup_regs);
+                        } else {
+                            try self.generateWhileLoopStructuredNew(writer, func, inner_loop, cleanup_regs);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 生成增量块（如果有且不是 for 循环）
+        if (loop.increment) |inc_idx| {
+            if (!loop.is_for_loop) {
+                const inc_block = func.blocks.items[inc_idx];
+                try writer.print("        // Increment: {s}\n", .{inc_block.label});
+                for (inc_block.instructions.items) |inst| {
+                    try code_list.appendSlice(self.allocator, "        ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
             }
         }
 
