@@ -967,7 +967,19 @@ pub const PHPString = struct {
             return error.StringTooLarge;
         }
 
-        // 安全的内存分配
+        // 小字符串优化：≤256 字节使用栈缓冲
+        if (new_length <= 256) {
+            var stack_buf: [256]u8 = undefined;
+            if (self.length > 0) {
+                @memcpy(stack_buf[0..self.length], self.data[0..self.length]);
+            }
+            if (other.length > 0) {
+                @memcpy(stack_buf[self.length..new_length], other.data[0..other.length]);
+            }
+            return try PHPString.init(allocator, stack_buf[0..new_length]);
+        }
+
+        // 大字符串：堆分配
         const new_data = try allocator.alloc(u8, new_length);
         errdefer allocator.free(new_data);
 
@@ -2510,6 +2522,13 @@ pub fn php_not(val: Value) !Value {
 
 /// 字符串连接运算
 pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
+    // 快速路径：两个都是字符串
+    if (lhs.isString() and rhs.isString()) {
+        const result = try lhs.asString().concat(rhs.asString(), allocator);
+        return Value.initString(result);
+    }
+    
+    // 慢速路径：需要类型转换
     const lhs_str = try lhs.toString(allocator);
     defer lhs_str.release(allocator);
 
