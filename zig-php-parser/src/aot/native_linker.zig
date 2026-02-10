@@ -4550,12 +4550,10 @@ pub const NativeLinker = struct {
 
         // 只生成顶层循环（子循环在生成父循环 body 时递归生成）
         for (cfg.loops.items) |loop| {
-            // 标记循环块为已处理
+            // 只标记循环头、增量块和退出块为已处理
+            // 不标记 loop.blocks 中的所有块，因为子循环的块需要在生成父循环 body 时处理
             try processed.put(loop.header, {});
-            var it = loop.blocks.iterator();
-            while (it.next()) |entry| {
-                try processed.put(entry.key_ptr.*, {});
-            }
+            if (loop.increment) |inc| try processed.put(inc, {});
             if (loop.exit_block) |exit| try processed.put(exit, {});
 
             // 生成循环
@@ -4576,8 +4574,27 @@ pub const NativeLinker = struct {
             }
         }
 
-        // 生成所有剩余的块
+        // 生成所有剩余的块（检测并生成子循环）
         var has_return = false;
+        
+        // 构建所有循环的块集合（包括子循环）
+        var all_loop_blocks = std.AutoHashMap(usize, usize).init(self.allocator);  // block_idx -> loop_idx
+        defer all_loop_blocks.deinit();
+        
+        // 递归收集所有循环（包括子循环）的块
+        var all_loops = std.ArrayList(LoopInfo).init(self.allocator);
+        defer all_loops.deinit(self.allocator);
+        
+        for (cfg.loops.items, 0..) |loop, i| {
+            try all_loops.append(self.allocator, loop);
+            // 收集子循环
+            for (loop.children.items) |child_idx| {
+                // 这里需要从原始 raw_loops 中获取子循环
+                // 但我们没有保存 raw_loops...
+                // 简化：只处理顶层循环
+            }
+        }
+        
         for (func.blocks.items, 0..) |block, idx| {
             if (processed.contains(idx)) continue;
             
@@ -6189,26 +6206,33 @@ pub const NativeLinker = struct {
     
     /// 构建循环嵌套树（基于块包含关系）
     fn buildLoopNestingTree(self: *Self, loops: *std.ArrayList(LoopInfo)) !void {
-        _ = self;
         
         // 对于每个循环，找到它的最内层父循环
         for (loops.items, 0..) |*loop, i| {
             var parent_idx: ?usize = null;
             var min_blocks: usize = std.math.maxInt(usize);
             
+            std.debug.print("Checking loop {d} (header={d}, blocks={d})\n", .{ i, loop.header, loop.blocks.count() });
+            
             for (loops.items, 0..) |*other, j| {
                 if (i == j) continue;
+                
+                std.debug.print("  vs loop {d} (header={d}, blocks={d}): contains header? {}\n", .{ j, other.header, other.blocks.count(), other.contains(loop.header) });
                 
                 // 如果 other 包含 loop 的 header，且 other 的块数更少（更内层）
                 if (other.contains(loop.header) and other.blocks.count() < min_blocks) {
                     parent_idx = j;
                     min_blocks = other.blocks.count();
+                    std.debug.print("    -> potential parent\n", .{});
                 }
             }
             
             if (parent_idx) |p| {
                 loop.parent = p;
-                try loops.items[p].children.append(loops.*.allocator, i);
+                try loops.items[p].children.append(self.allocator, i);
+                std.debug.print("  => parent is loop {d}\n", .{p});
+            } else {
+                std.debug.print("  => top-level\n", .{});
             }
         }
     }

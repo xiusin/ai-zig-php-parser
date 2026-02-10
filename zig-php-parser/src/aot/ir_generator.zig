@@ -1224,20 +1224,22 @@ pub const IRGenerator = struct {
             try self.generateStatement(init_idx);
         }
 
-        // Create blocks
+        // Create blocks (延迟创建 exit_block)
         const cond_block = try self.createBlock("for_cond");
         const body_block = try self.createBlock("for_body");
         const loop_block = try self.createBlock("for_loop");
-        const exit_block = try self.createBlock("for_exit");
 
-        std.debug.print("Created blocks: cond, body, loop, exit\n", .{});
+        std.debug.print("Created blocks: cond, body, loop (exit delayed)\n", .{});
+
+        // 临时创建 exit_block 用于 loop context（稍后会替换）
+        const temp_exit_block = try self.createBlock("for_exit_temp");
 
         // Jump to condition from current block
         self.setTerminator(.{ .br = cond_block });
 
-        // Push loop context
+        // Push loop context (使用临时 exit block)
         try self.loop_stack.append(self.allocator, .{
-            .break_block = exit_block,
+            .break_block = temp_exit_block,
             .continue_block = loop_block,
         });
 
@@ -1248,7 +1250,7 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .cond_br = .{
                 .cond = cond_reg,
                 .then_block = body_block,
-                .else_block = exit_block,
+                .else_block = temp_exit_block,
             } });
         } else {
             // Infinite loop if no condition
@@ -1282,6 +1284,28 @@ pub const IRGenerator = struct {
             // Body 已终止（嵌套循环），当前块是内层 exit，需要跳转到外层 loop
             std.debug.print("Body block already terminated, setting current block terminator to loop_block\n", .{});
             self.setTerminator(.{ .br = loop_block });
+        }
+
+        // 现在创建真正的 exit_block（在所有嵌套循环之后）
+        const exit_block = try self.createBlock("for_exit");
+        std.debug.print("Created exit_block after body\n", .{});
+        
+        // 替换 temp_exit_block 的引用
+        // 1. 更新 cond_block 的 terminator
+        if (cond_block.terminator) |*term| {
+            if (term.* == .cond_br) {
+                if (term.cond_br.else_block == temp_exit_block) {
+                    term.cond_br.else_block = exit_block;
+                }
+            }
+        }
+        
+        // 2. 更新 loop context
+        if (self.loop_stack.items.len > 0) {
+            const last_idx = self.loop_stack.items.len - 1;
+            if (self.loop_stack.items[last_idx].break_block == temp_exit_block) {
+                self.loop_stack.items[last_idx].break_block = exit_block;
+            }
         }
 
         // Generate loop expression
