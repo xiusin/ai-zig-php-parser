@@ -362,6 +362,17 @@ pub const IRGenerator = struct {
     fn setTerminator(self: *Self, term: Terminator) void {
         if (self.current_block) |block| {
             if (!block.isTerminated()) {
+                // 获取块索引用于调试
+                var block_idx: usize = 0;
+                if (self.current_function) |func| {
+                    for (func.blocks.items, 0..) |blk, i| {
+                        if (blk == block) {
+                            block_idx = i;
+                            break;
+                        }
+                    }
+                }
+                std.debug.print("setTerminator: block={d}, term={s}\n", .{ block_idx, @tagName(term) });
                 block.setTerminator(term);
             }
         }
@@ -1193,7 +1204,22 @@ pub const IRGenerator = struct {
     fn generateForStmt(self: *Self, node: *const Node) !void {
         const for_data = node.data.for_stmt;
 
-        // Generate init
+        std.debug.print("\n=== Generating FOR statement ===\n", .{});
+
+        // 如果当前块已有指令，创建新块用于 init
+        const need_init_block = if (self.current_block) |block| 
+            block.instructions.items.len > 0 
+        else 
+            false;
+        
+        var init_block: ?*BasicBlock = null;
+        if (need_init_block) {
+            init_block = try self.createBlock("for_init");
+            self.setTerminator(.{ .br = init_block.? });
+            self.setCurrentBlock(init_block.?);
+        }
+
+        // Generate init in current block (or new init block)
         if (for_data.init) |init_idx| {
             try self.generateStatement(init_idx);
         }
@@ -1204,7 +1230,9 @@ pub const IRGenerator = struct {
         const loop_block = try self.createBlock("for_loop");
         const exit_block = try self.createBlock("for_exit");
 
-        // Jump to condition
+        std.debug.print("Created blocks: cond, body, loop, exit\n", .{});
+
+        // Jump to condition from current block
         self.setTerminator(.{ .br = cond_block });
 
         // Push loop context
@@ -1229,21 +1257,31 @@ pub const IRGenerator = struct {
 
         // Generate body
         self.setCurrentBlock(body_block);
-        const saved_current = self.current_block;
+        
+        // 获取 body_block 的索引用于调试
+        var body_block_idx: usize = 0;
+        for (self.current_function.?.blocks.items, 0..) |blk, i| {
+            if (blk == body_block) {
+                body_block_idx = i;
+                break;
+            }
+        }
+        std.debug.print("Generating body, body_block_idx={d}, terminator_before={}\n", .{ body_block_idx, body_block.terminator != null });
+        
         try self.generateStatement(for_data.body);
         
-        // 如果当前块变了（说明 body 包含控制流），需要将新的当前块跳转到 loop
-        if (self.current_block != saved_current) {
-            // Body 包含嵌套循环或其他控制流
-            // 当前块是内层结构的 exit，应该跳转到外层的 loop
-            if (!self.isBlockTerminated()) {
-                self.setTerminator(.{ .br = loop_block });
-            }
+        // 检查 body_block 是否已终止
+        const body_terminated = body_block.terminator != null;
+        std.debug.print("After body, body_terminated={}, terminator={s}\n", .{ body_terminated, if (body_block.terminator) |t| @tagName(t) else "null" });
+        
+        if (!body_terminated) {
+            std.debug.print("Setting terminator: body_block -> loop_block\n", .{});
+            self.setCurrentBlock(body_block);
+            self.setTerminator(.{ .br = loop_block });
         } else {
-            // Body 是简单语句，检查 body_block 是否终止
-            if (!self.isBlockTerminated()) {
-                self.setTerminator(.{ .br = loop_block });
-            }
+            // Body 已终止（嵌套循环），当前块是内层 exit，需要跳转到外层 loop
+            std.debug.print("Body block already terminated, setting current block terminator to loop_block\n", .{});
+            self.setTerminator(.{ .br = loop_block });
         }
 
         // Generate loop expression
@@ -1258,6 +1296,7 @@ pub const IRGenerator = struct {
 
         // Continue in exit block
         self.setCurrentBlock(exit_block);
+        std.debug.print("=== FOR statement complete ===\n\n", .{});
     }
 
     /// Generate IR for for-range statement

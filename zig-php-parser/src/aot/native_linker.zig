@@ -4533,11 +4533,35 @@ pub const NativeLinker = struct {
             return false;
         }
 
+        // 过滤掉嵌套在其他循环内的循环
+        var top_level_loops = try std.ArrayList(LoopInfo).initCapacity(self.allocator, cfg.loops.items.len);
+        defer top_level_loops.deinit(self.allocator);
+        
+        std.debug.print("Total loops: {d}\n", .{cfg.loops.items.len});
+        for (cfg.loops.items, 0..) |loop, i| {
+            std.debug.print("Loop {d}: header={d}, body={d}..{d}, exit={?d}\n", .{ i, loop.header, loop.body_start, loop.body_end, loop.exit_block });
+            var is_nested = false;
+            for (cfg.loops.items) |other_loop| {
+                // 检查 loop 是否在 other_loop 的循环体内
+                if (loop.header != other_loop.header and
+                    loop.header >= other_loop.body_start and
+                    loop.header <= other_loop.body_end) {
+                    is_nested = true;
+                    std.debug.print("  -> nested in loop header={d}\n", .{other_loop.header});
+                    break;
+                }
+            }
+            if (!is_nested) {
+                try top_level_loops.append(self.allocator, loop);
+                std.debug.print("  -> top-level\n", .{});
+            }
+        }
+
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
 
         // 生成第一个循环前的块
-        const first_loop = cfg.loops.items[0];
+        const first_loop = top_level_loops.items[0];
         for (0..first_loop.header) |idx| {
             const block = func.blocks.items[idx];
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
@@ -4548,8 +4572,8 @@ pub const NativeLinker = struct {
             try processed.put(idx, {});
         }
 
-        // 顺序生成每个循环及其后续块
-        for (cfg.loops.items, 0..) |loop, _| {
+        // 顺序生成每个顶层循环及其后续块
+        for (top_level_loops.items) |loop| {
             // 标记循环块为已处理
             try processed.put(loop.header, {});
             for (loop.body_start..loop.body_end + 1) |idx| {
@@ -6133,9 +6157,9 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 简单使用 back_edge_source 作为 body_end
-        // 对于嵌套循环，内层循环不在外层的 CFG 可达范围内
-        const body_end = back_edge_source;
+        // body_end 应该是 exit 之前的最后一个块
+        // 对于嵌套循环，内层循环的所有块都应该在外层循环的 body 范围内
+        const body_end = if (exit > body_start) exit - 1 else back_edge_source;
 
         return LoopInfo{
             .header = header,
