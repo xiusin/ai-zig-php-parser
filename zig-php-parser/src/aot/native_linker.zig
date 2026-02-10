@@ -4860,6 +4860,26 @@ pub const NativeLinker = struct {
             break :blk null;
         };
         
+        // 检测无效循环：循环体只有常量赋值
+        const dead_loop = blk: {
+            if (math_simplify != null or full_unroll_count != null) break :blk false;
+            
+            // 检查循环体是否只有 const + store
+            var only_const_store = true;
+            for (body_block.instructions.items) |inst| {
+                const is_const = switch (inst.op) {
+                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                    else => false,
+                };
+                if (!is_const and inst.op != .store) {
+                    only_const_store = false;
+                    break;
+                }
+            }
+            
+            break :blk only_const_store;
+        };
+        
         // 检测循环展开和剥离
         const unroll_factor: usize = blk: {
             if (full_unroll_count != null) break :blk 1;  // 完全展开时不需要部分展开
@@ -4992,6 +5012,42 @@ pub const NativeLinker = struct {
                         const inc_reg = inst.op.store.ptr.id;
                         try writer.print("    reg_{d} += {d};\n", .{ inc_reg, count });
                         break;
+                    }
+                }
+            }
+        } else if (dead_loop) {
+            // 无效循环：只执行最后一次赋值
+            try writer.print("    // Dead loop eliminated\n", .{});
+            
+            for (body_block.instructions.items) |inst| {
+                if (inst.op == .store) {
+                    try code_list.appendSlice(self.allocator, "    ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
+            }
+            
+            // 更新循环变量到上界
+            if (loop.increment) |inc_idx| {
+                const inc_block = func.blocks.items[inc_idx];
+                var loop_limit_reg: ?usize = null;
+                if (cond_reg_id) |cond_id| {
+                    for (header_block.instructions.items) |inst| {
+                        if (inst.result) |res| {
+                            if (res.id == cond_id and inst.op == .lt) {
+                                loop_limit_reg = inst.op.lt.rhs.id;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (loop_limit_reg) |limit_reg| {
+                    for (inc_block.instructions.items) |inst| {
+                        if (inst.op == .store) {
+                            const inc_reg = inst.op.store.ptr.id;
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, limit_reg });
+                            break;
+                        }
                     }
                 }
             }
