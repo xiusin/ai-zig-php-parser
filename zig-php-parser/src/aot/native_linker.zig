@@ -4585,6 +4585,7 @@ pub const NativeLinker = struct {
                             if (cleanup_regs.len > 0) {
                                 try writer.writeAll("    // Cleanup\n");
                                 for (cleanup_regs) |reg_id| {
+                                    if (!self.shouldReleaseReg(reg_id)) continue;
                                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                                 }
                             }
@@ -4815,6 +4816,7 @@ pub const NativeLinker = struct {
 
     /// 生成结构化 for 循环（新版本）
     fn generateForLoopStructuredNew(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
+        _ = cleanup_regs;
         try writer.writeAll("    // Optimized: structured for loop\n");
 
         // 🔥 LICM 代码生成层优化：检测并提升循环不变量
@@ -6012,20 +6014,30 @@ pub const NativeLinker = struct {
 
     /// 检测循环（回边分析）
     fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
-        // 检测回边：从后面的块跳转到前面的块
-        for (func.blocks.items, 0..) |_, idx| {
-            const successors = cfg.successors.get(idx) orelse continue;
+        // 检测所有可能的循环头：有条件分支且有回边的块
+        for (func.blocks.items, 0..) |block, header_idx| {
+            const term = block.terminator orelse continue;
+            if (term != .cond_br) continue;
 
-            for (successors.items) |succ_idx| {
-                // 回边：succ_idx <= idx
-                if (succ_idx <= idx) {
-                    // 找到循环头
-                    const header = succ_idx;
+            // 检查是否有回边指向这个块
+            const preds = cfg.predecessors.get(header_idx) orelse continue;
+            
+            var has_back_edge = false;
+            var back_edge_source: usize = 0;
+            
+            for (preds.items) |pred_idx| {
+                // 回边：从后面的块跳回来
+                if (pred_idx >= header_idx) {
+                    has_back_edge = true;
+                    back_edge_source = pred_idx;
+                    break;
+                }
+            }
 
-                    // 分析循环结构
-                    if (try self.analyzeLoop(func, cfg, header, idx)) |loop_info| {
-                        try cfg.loops.append(self.allocator, loop_info);
-                    }
+            if (has_back_edge) {
+                // 分析循环结构
+                if (try self.analyzeLoop(func, cfg, header_idx, back_edge_source)) |loop_info| {
+                    try cfg.loops.append(self.allocator, loop_info);
                 }
             }
         }
