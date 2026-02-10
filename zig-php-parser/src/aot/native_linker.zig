@@ -4610,9 +4610,16 @@ pub const NativeLinker = struct {
                                 try writer.writeAll("    return runtime.Value.initNull();\n");
                             }
                         },
-                        else => {},
+                        else => {
+                            // 其他 terminator：可能需要跳转或其他处理
+                            // 暂时忽略，但记录警告
+                        },
                     }
+                } else {
+                    // 没有 terminator：添加默认返回
+                    try writer.writeAll("    return runtime.Value.initNull();\n");
                 }
+                try processed.put(idx, {});
             }
         }
 
