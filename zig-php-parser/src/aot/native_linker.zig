@@ -4463,30 +4463,13 @@ pub const NativeLinker = struct {
     /// 尝试生成结构化控制流（新版本，使用 ArrayList writer）
     fn tryGenerateStructuredControlFlowNew(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void)) !bool {
         _ = alloca_regs;
+        _ = writer;
+        _ = func;
+        _ = cleanup_regs;
+        _ = self;
         
-        // std.debug.print("=== tryGenerateStructuredControlFlowNew: blocks={d} ===\n", .{func.blocks.items.len});
-        
-        // 分析控制流
-        var cfg = ControlFlowAnalysis.init(self.allocator);
-        defer cfg.deinit();
-        
-        // 构建前驱/后继关系
-        try self.buildCFG(func, &cfg);
-        // std.debug.print("CFG built\n", .{});
-        
-        // 检测循环
-        try self.detectLoops(func, &cfg);
-        
-        // 如果没有检测到循环，返回 false
-        if (cfg.loops.items.len == 0) {
-            // std.debug.print("No loops detected, falling back to state machine\n", .{});
-            return false;
-        }
-        
-        // 生成结构化代码
-        const result = try self.generateStructuredCodeNew(writer, func, &cfg, cleanup_regs);
-        // std.debug.print("generateStructuredCodeNew returned: {}\n", .{result});
-        return result;
+        // 暂时禁用结构化控制流，修复嵌套循环问题
+        return false;
     }
     
     /// 生成结构化代码（新版本）
@@ -4520,8 +4503,12 @@ pub const NativeLinker = struct {
                 try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
             }
             
-            // 跳过循环体
-            current_block = loop.exit;
+            // 标记循环块已处理（但不跳过，让后续逻辑处理）
+            if (loop.exit_block) |exit_idx| {
+                if (exit_idx > current_block) {
+                    current_block = exit_idx;
+                }
+            }
         }
         
         // 生成剩余的代码
@@ -4686,6 +4673,24 @@ pub const NativeLinker = struct {
             try self.generateOptimizedForLoop(writer, func, loop, var_reg);
         } else {
             try self.generateStandardForLoop(writer, func, loop);
+        }
+        
+        // 查找并生成包含 ret 的退出块（处理嵌套循环）
+        for (func.blocks.items, 0..) |block, idx| {
+            if (block.terminator) |term| {
+                if (term == .ret) {
+                    // 找到包含 ret 的块，生成它
+                    try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                    
+                    for (block.instructions.items) |inst| {
+                        try writer.writeAll("    ");
+                        try self.generateInstructionSimple(writer.context.self, inst);
+                    }
+                    
+                    try writer.writeAll("    return runtime.Value.initNull();\n");
+                    break;
+                }
+            }
         }
     }
     
