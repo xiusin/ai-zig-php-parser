@@ -4741,6 +4741,30 @@ pub const NativeLinker = struct {
             }
         }
         
+        // 构建死代码集合：条件中被解析的寄存器
+        var dead_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer dead_regs.deinit();
+        
+        if (cond_reg_id) |cond_id| {
+            for (header_block.instructions.items) |inst| {
+                if (inst.result) |res| {
+                    if (res.id == cond_id) {
+                        // 检查条件操作数是否会被解析
+                        switch (inst.op) {
+                            .lt, .le, .gt, .ge, .eq, .ne => |op| {
+                                const lhs_resolved = self.resolveLoadSource(op.lhs.id);
+                                const rhs_resolved = self.resolveLoadSource(op.rhs.id);
+                                if (lhs_resolved != op.lhs.id) try dead_regs.put(op.lhs.id, {});
+                                if (rhs_resolved != op.rhs.id) try dead_regs.put(op.rhs.id, {});
+                            },
+                            else => {},
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        
         // 提取所有循环不变量到循环外（header + body + increment）
         for (header_block.instructions.items) |inst| {
             if (inst.result) |result_reg| {
@@ -4798,6 +4822,8 @@ pub const NativeLinker = struct {
                 if (cond_reg_id) |cond_id| {
                     if (result_reg.id == cond_id) continue;
                 }
+                // 跳过死代码
+                if (dead_regs.contains(result_reg.id)) continue;
             }
             
             // 跳过常量指令（已在循环外）
