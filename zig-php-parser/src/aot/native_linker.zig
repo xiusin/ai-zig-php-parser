@@ -115,9 +115,20 @@ pub const NativeLinker = struct {
     current_exception_handler: ?u32 = null,
     current_cleanup_regs: ?[]const usize = null,
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
+    current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
 
     const Self = @This();
+
+    /// 检查寄存器是否需要 release（排除优化的 alloca）
+    fn shouldReleaseReg(self: *Self, reg_id: usize) bool {
+        if (self.current_optimized_alloca_regs) |opt_regs| {
+            if (opt_regs.contains(reg_id)) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     fn handleUnsupportedOp(self: *Self, inst: *const IR.Instruction) !void {
         const tag = std.meta.activeTag(inst.op);
@@ -1315,6 +1326,11 @@ pub const NativeLinker = struct {
         // 保存到 self，供代码生成时使用
         self.current_register_types = &all_registers;
 
+        // 记录被优化的 alloca 寄存器（直接变量而不是指针）
+        var optimized_alloca_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer optimized_alloca_regs.deinit();
+        self.current_optimized_alloca_regs = &optimized_alloca_regs;
+
         // 生成寄存器声明 - 使用简单的方式
         if (all_registers.count() > 0) {
             try code.appendSlice(self.allocator, "    // Register declarations\n");
@@ -1335,7 +1351,33 @@ pub const NativeLinker = struct {
                 const is_alloca = alloca_registers.contains(reg_id);
 
                 if (is_alloca) {
-                    // alloca指令：声明为指针
+                    // 检查 alloca 指向的类型
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                    if (type_tag == .ptr) {
+                        const pointee_type = reg_type.ptr;
+                        const pointee_tag = @as(std.meta.Tag(IR.Type), pointee_type.*);
+                        
+                        // 如果指向简单类型，直接生成该类型的变量
+                        if (pointee_tag == .i64 or pointee_tag == .f64 or pointee_tag == .bool) {
+                            try code.appendSlice(self.allocator, "    var reg_");
+                            try code.writer(self.allocator).print("{d}", .{reg_id});
+                            switch (pointee_tag) {
+                                .i64 => try code.appendSlice(self.allocator, ": i64 = 0;\n"),
+                                .f64 => try code.appendSlice(self.allocator, ": f64 = 0.0;\n"),
+                                .bool => try code.appendSlice(self.allocator, ": bool = false;\n"),
+                                else => unreachable,
+                            }
+                            try code.appendSlice(self.allocator, "    _ = &reg_");
+                            try code.writer(self.allocator).print("{d}", .{reg_id});
+                            try code.appendSlice(self.allocator, ";\n");
+                            
+                            // 标记为优化的 alloca
+                            try optimized_alloca_regs.put(reg_id, {});
+                            continue;
+                        }
+                    }
+                    
+                    // 默认：alloca指针
                     try code.appendSlice(self.allocator, "    var reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, "_storage: runtime.Value = runtime.Value.initNull();\n");
@@ -1344,7 +1386,6 @@ pub const NativeLinker = struct {
                     try code.appendSlice(self.allocator, ": *runtime.Value = &reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, "_storage;\n");
-                    // 标记为可能未使用（避免Zig编译器警告）
                     try code.appendSlice(self.allocator, "    _ = &reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, ";\n");
@@ -1373,6 +1414,8 @@ pub const NativeLinker = struct {
 
         self.current_reg_types = &all_registers;
         defer self.current_reg_types = null;
+        defer self.current_optimized_alloca_regs = null;
+        
         var max_reg_id: usize = 0;
         var max_iter = all_registers.iterator();
         while (max_iter.next()) |entry| {
@@ -1521,9 +1564,8 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
-                                // 检查是否是返回值寄存器
                                 const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
-                                if (!is_return_reg) {
+                                if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                     try code.appendSlice(self.allocator, "    reg_");
                                     try code.writer(self.allocator).print("{d}", .{reg_id});
                                     if (alloca_registers.contains(reg_id)) {
@@ -1564,9 +1606,9 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "    // Cleanup before throw\n");
                             for (cleanup_registers.items) |reg_id| {
-                                // 跳过异常对象和 alloca 寄存器
                                 if (reg_id == ex_reg.id) continue;
                                 if (alloca_registers.contains(reg_id)) continue;
+                                if (!self.shouldReleaseReg(reg_id)) continue;
                                 
                                 try code.writer(self.allocator).print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                             }
@@ -1580,6 +1622,8 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
                             for (cleanup_registers.items) |reg_id| {
+                                if (!self.shouldReleaseReg(reg_id)) continue;
+                                
                                 try code.appendSlice(self.allocator, "    reg_");
                                 try code.writer(self.allocator).print("{d}", .{reg_id});
                                 if (alloca_registers.contains(reg_id)) {
@@ -1599,6 +1643,8 @@ pub const NativeLinker = struct {
                 if (cleanup_registers.items.len > 0) {
                     try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
                     for (cleanup_registers.items) |reg_id| {
+                        if (!self.shouldReleaseReg(reg_id)) continue;
+                        
                         try code.appendSlice(self.allocator, "    reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
                         if (alloca_registers.contains(reg_id)) {
@@ -1693,7 +1739,7 @@ pub const NativeLinker = struct {
                             try code.appendSlice(self.allocator, "        // Cleanup\n");
                             for (cleanup_regs) |reg_id| {
                                 const is_return_reg = reg.id == reg_id;
-                                if (!is_return_reg) {
+                                if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                     const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                     try code.appendSlice(self.allocator, "        reg_");
                                     try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -1712,7 +1758,7 @@ pub const NativeLinker = struct {
                                 try code.appendSlice(self.allocator, "        // Cleanup\n");
                                 for (cleanup_regs) |reg_id| {
                                     const is_return_reg = reg.id == reg_id;
-                                    if (!is_return_reg) {
+                                    if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                         const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                         try code.appendSlice(self.allocator, "        reg_");
                                         try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -1749,7 +1795,7 @@ pub const NativeLinker = struct {
                                 try code.appendSlice(self.allocator, "        // Cleanup\n");
                                 for (cleanup_regs) |reg_id| {
                                     const is_return_reg = reg.id == reg_id;
-                                    if (!is_return_reg) {
+                                    if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                         const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                         try code.appendSlice(self.allocator, "        reg_");
                                         try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -1768,6 +1814,7 @@ pub const NativeLinker = struct {
                             try code.appendSlice(self.allocator, "        // Cleanup\n");
                             for (cleanup_regs) |reg_id| {
                                 const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
+                                if (!self.shouldReleaseReg(reg_id)) continue;
                                 try code.appendSlice(self.allocator, "        reg_");
                                 try code.writer(self.allocator).print("{d}", .{reg_id});
                                 try code.appendSlice(self.allocator, suffix);
@@ -1847,7 +1894,7 @@ pub const NativeLinker = struct {
                             try code.appendSlice(self.allocator, "        // Cleanup\n");
                             for (cleanup_regs) |reg_id| {
                                 const is_return_reg = reg.id == reg_id;
-                                if (!is_return_reg) {
+                                if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                     const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                     try code.appendSlice(self.allocator, "        reg_");
                                     try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -1890,6 +1937,7 @@ pub const NativeLinker = struct {
                             if (cleanup_regs.len > 0) {
                                 try code.appendSlice(self.allocator, "        // Cleanup\n");
                                 for (cleanup_regs) |reg_id| {
+                                    if (!self.shouldReleaseReg(reg_id)) continue;
                                     const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                     try code.appendSlice(self.allocator, "        reg_");
                                     try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -2017,6 +2065,7 @@ pub const NativeLinker = struct {
                         try code.appendSlice(self.allocator, "                // Cleanup\n");
                         for (cleanup_regs) |reg_id| {
                             const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
+                            if (!self.shouldReleaseReg(reg_id)) continue;
                             try writer.print("                reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
                         }
                     }
@@ -2249,7 +2298,7 @@ pub const NativeLinker = struct {
                     for (cleanup_regs) |reg_id| {
                         // 检查是否是返回值寄存器
                         const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
-                        if (!is_return_reg) {
+                        if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                             const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                             try writer.print("                reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
                         }
@@ -2325,6 +2374,7 @@ pub const NativeLinker = struct {
                         // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
                         if (alloca_regs.contains(reg_id)) continue;
                         
+                        if (!self.shouldReleaseReg(reg_id)) continue;
                         // 不要释放异常对象本身，因为它已经被 setException 接管（retain）了
                         try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                     }
@@ -2802,26 +2852,51 @@ pub const NativeLinker = struct {
                 // alloca不需要生成代码
             },
             .store => |op| {
-                // 检查是否是 alloca 寄存器（即指针类型）
-                const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
-                const ptr_prefix = if (is_ptr) "" else "&";
-                
-                // 1. 释放旧值
-                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ op.ptr.id });
-
-                // 2. 增加新值引用计数并赋值
-                // 使用修正后的类型
-                const corrected_value_type = if (self.current_register_types) |types|
-                    types.get(op.value.id) orelse op.value.type_
-                else
-                    op.value.type_;
-                const corrected_value_tag = @as(std.meta.Tag(IR.Type), corrected_value_type);
-                
-                // 检查 value 是否是 alloca 寄存器
-                const value_is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                    alloca_regs.contains(op.value.id)
+                // 检查 ptr 是否是优化的 alloca（直接变量）
+                const ptr_is_optimized_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
+                    opt_regs.contains(op.ptr.id)
                 else
                     false;
+                
+                if (ptr_is_optimized_alloca) {
+                    // 优化的 alloca：直接赋值
+                    const corrected_value_type = if (self.current_register_types) |types|
+                        types.get(op.value.id) orelse op.value.type_
+                    else
+                        op.value.type_;
+                    const corrected_value_tag = @as(std.meta.Tag(IR.Type), corrected_value_type);
+                    
+                    if (corrected_value_tag == .i64 or corrected_value_tag == .f64 or corrected_value_tag == .bool) {
+                        // 直接赋值
+                        try writer.print("    reg_{d} = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                    } else {
+                        // 需要转换
+                        try writer.print("    reg_{d} = ", .{op.ptr.id});
+                        try self.writePhpValueExpr(writer, corrected_value_tag, op.value.id);
+                        try writer.writeAll(".asInt();\n");  // TODO: 根据类型选择转换方法
+                    }
+                } else {
+                    // 原有的 store 逻辑
+                    // 检查是否是 alloca 寄存器（即指针类型）
+                    const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                    const ptr_prefix = if (is_ptr) "" else "&";
+                    
+                    // 1. 释放旧值
+                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ op.ptr.id });
+
+                    // 2. 增加新值引用计数并赋值
+                    // 使用修正后的类型
+                    const corrected_value_type = if (self.current_register_types) |types|
+                        types.get(op.value.id) orelse op.value.type_
+                    else
+                        op.value.type_;
+                    const corrected_value_tag = @as(std.meta.Tag(IR.Type), corrected_value_type);
+                    
+                    // 检查 value 是否是 alloca 寄存器
+                    const value_is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(op.value.id)
+                    else
+                        false;
                 
                 if (corrected_value_tag == .php_value or corrected_value_tag == .php_string or corrected_value_tag == .php_array or corrected_value_tag == .php_object or corrected_value_tag == .php_callable) {
                     // 已经是Value类型，需要retain
@@ -2870,6 +2945,7 @@ pub const NativeLinker = struct {
                         try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                     }
                 }
+                }  // end of optimized_alloca else
             },
             .make_ref => |op| {
                 if (inst.result) |reg| {
@@ -2878,39 +2954,51 @@ pub const NativeLinker = struct {
             },
             .load => |op| {
                 if (inst.result) |reg| {
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    // 检查 ptr 是否是优化的 alloca（直接变量）
+                    const ptr_is_optimized_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
+                        opt_regs.contains(op.ptr.id)
+                    else
+                        false;
                     
-                    // 检查结果寄存器是否是 alloca
-                    const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
-                    const result_prefix = if (result_is_alloca) ".*" else "";
-                    
-                    if (type_tag != .i64 and type_tag != .f64 and type_tag != .bool) {
-                        if (self.regMayHeap(reg.id)) {
-                            if (result_is_alloca) {
-                                try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
-                            } else {
-                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                    if (ptr_is_optimized_alloca) {
+                        // 优化的 alloca：直接读取
+                        try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.ptr.id });
+                    } else {
+                        // 原有的 load 逻辑
+                        const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                        
+                        // 检查结果寄存器是否是 alloca
+                        const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                        const result_prefix = if (result_is_alloca) ".*" else "";
+                        
+                        if (type_tag != .i64 and type_tag != .f64 and type_tag != .bool) {
+                            if (self.regMayHeap(reg.id)) {
+                                if (result_is_alloca) {
+                                    try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
+                                } else {
+                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
+                                }
                             }
                         }
-                    }
 
-                    // 检查是否是 alloca 寄存器（即指针类型）
-                    const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
-                    const ptr_prefix = if (is_ptr) "" else "&";
+                        // 检查是否是 alloca 寄存器（即指针类型）
+                        const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                        const ptr_prefix = if (is_ptr) "" else "&";
 
-                    if (type_tag == .i64) {
-                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else if (type_tag == .f64) {
-                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else {
-                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                        if (self.regMayHeap(reg.id)) {
-                            if (result_is_alloca) {
-                                try writer.print("    _ = reg_{d}.*.retain();\n", .{ reg.id });
-                            } else {
-                                try writer.print("    _ = reg_{d}.retain();\n", .{ reg.id });
+                        if (type_tag == .i64) {
+                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                        } else if (type_tag == .f64) {
+                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                        } else if (type_tag == .bool) {
+                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                        } else {
+                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                            if (self.regMayHeap(reg.id)) {
+                                if (result_is_alloca) {
+                                    try writer.print("    _ = reg_{d}.*.retain();\n", .{ reg.id });
+                                } else {
+                                    try writer.print("    _ = reg_{d}.retain();\n", .{ reg.id });
+                                }
                             }
                         }
                     }
@@ -4280,6 +4368,7 @@ pub const NativeLinker = struct {
                                 try writer.writeAll("    // Cleanup: release all allocated values\n");
                                 for (cleanup_regs) |reg_id| {
                                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    if (!self.shouldReleaseReg(reg_id)) continue;
                                 }
                             }
                             if (ret_val) |reg| {
@@ -4448,6 +4537,7 @@ pub const NativeLinker = struct {
                         if (cleanup_regs.len > 0) {
                             try writer.writeAll("    // Cleanup\n");
                             for (cleanup_regs) |reg_id| {
+                                if (!self.shouldReleaseReg(reg_id)) continue;
                                 try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                             }
                         }
@@ -4544,15 +4634,44 @@ pub const NativeLinker = struct {
         _ = cleanup_regs;
         
         try writer.writeAll("    // Optimized: structured for loop\n");
+        
+        // 分析循环变量：查找在 increment 块中被修改的 alloca 寄存器
+        var loop_var_reg: ?usize = null;
+        if (loop.increment) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            // 查找 val_assign 操作
+            for (inc_block.instructions.items) |inst| {
+                if (inst.op == .call) {
+                    if (inst.op.call.args.len >= 2) {
+                        const first_arg = inst.op.call.args[0];
+                        // 检查是否是 alloca 寄存器
+                        if (self.current_alloca_regs) |alloca_regs| {
+                            if (alloca_regs.contains(first_arg.id)) {
+                                loop_var_reg = first_arg.id;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 如果找到循环变量，生成优化的循环
+        if (loop_var_reg) |var_reg| {
+            try self.generateOptimizedForLoop(writer, func, loop, var_reg);
+        } else {
+            try self.generateStandardForLoop(writer, func, loop);
+        }
+    }
+    
+    fn generateStandardForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo) !void {
         try writer.writeAll("    while (true) {\n");
         
         var code_list = writer.context.self;
         
-        // 生成循环头（条件）
         const header_block = func.blocks.items[loop.header];
         try writer.print("        // Header: {s}\n", .{header_block.label});
         
-        // 找到条件寄存器
         var cond_reg_id: ?usize = null;
         if (header_block.terminator) |term| {
             if (term == .cond_br) {
@@ -4560,7 +4679,6 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 生成指令，但跳过条件寄存器的赋值（会内联到 if 语句中）
         for (header_block.instructions.items) |inst| {
             if (inst.result) |result_reg| {
                 if (cond_reg_id) |cond_id| {
@@ -4574,7 +4692,6 @@ pub const NativeLinker = struct {
             try self.generateInstructionSimple(code_list, inst);
         }
         
-        // 生成条件判断（内联条件表达式）
         if (header_block.terminator) |term| {
             if (term == .cond_br) {
                 try writer.writeAll("        if (!(");
@@ -4594,7 +4711,6 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 生成循环体
         const body_block = func.blocks.items[loop.body_start];
         try writer.print("        // Body: {s}\n", .{body_block.label});
         
@@ -4603,7 +4719,6 @@ pub const NativeLinker = struct {
             try self.generateInstructionSimple(code_list, inst);
         }
         
-        // 生成增量块
         if (loop.increment) |inc_idx| {
             const inc_block = func.blocks.items[inc_idx];
             try writer.print("        // Increment: {s}\n", .{inc_block.label});
@@ -4615,6 +4730,13 @@ pub const NativeLinker = struct {
         }
         
         try writer.writeAll("    }\n");
+    }
+    
+    fn generateOptimizedForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, loop_var_reg: usize) !void {
+        // TODO: 实现优化的循环
+        // 暂时回退到标准循环
+        try self.generateStandardForLoop(writer, func, loop);
+        _ = loop_var_reg;
     }
     
     /// 写布尔表达式到 writer
@@ -5072,6 +5194,7 @@ pub const NativeLinker = struct {
                                 try writer.writeAll("    // Cleanup\n");
                                 for (cleanup_regs) |reg_id| {
                                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    if (!self.shouldReleaseReg(reg_id)) continue;
                                 }
                             }
                             if (maybe_reg) |reg| {
@@ -5248,6 +5371,7 @@ pub const NativeLinker = struct {
                         try writer.writeAll("    // Cleanup\n");
                         for (cleanup_regs) |reg_id| {
                             try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                            if (!self.shouldReleaseReg(reg_id)) continue;
                         }
                     }
                     if (term.ret) |reg| {
@@ -5852,7 +5976,7 @@ pub const NativeLinker = struct {
                     for (cleanup_regs) |reg_id| {
                         // 检查是否是返回值寄存器
                         const is_return_reg = if (maybe_reg) |reg| reg.id == reg_id else false;
-                        if (!is_return_reg) {
+                        if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                             if (alloca_regs.contains(reg_id)) {
                                 try writer.print("                reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                             } else {
