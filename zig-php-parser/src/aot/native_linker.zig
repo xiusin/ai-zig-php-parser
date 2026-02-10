@@ -7902,10 +7902,14 @@ pub const NativeLinker = struct {
             },
 
             // ========================================================================
-            // 其他指令（暂时生成注释）
+            // 其他指令（fallback 到 Simple 版本）
             // ========================================================================
             else => {
-                try writer.print("        // TODO: {s}\n", .{@tagName(inst.op)});
+                // Fallback: 使用 generateInstructionSimple
+                var code = std.ArrayList(u8).init(self.allocator);
+                defer code.deinit();
+                try self.generateInstructionSimple(&code, inst);
+                try writer.writeAll(code.items);
             },
         }
 
