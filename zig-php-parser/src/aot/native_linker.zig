@@ -7742,8 +7742,6 @@ pub const NativeLinker = struct {
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
 
-                std.debug.print("DEBUG: generateInstruction call: {s}, builtin={}\n", .{op.func_name, is_builtin});
-
                 // 生成函数调用
                 if (result_reg) |r| {
                     if (is_builtin) {
@@ -7771,9 +7769,9 @@ pub const NativeLinker = struct {
                         try writer.writeAll(");\n");
                     } else {
                         // 用户定义函数
-                        try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), ", .{ r, op.func_name });
-                        for (op.args, 0..) |arg, i| {
-                            if (i > 0) try writer.writeAll(", ");
+                        try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull()", .{ r, op.func_name });
+                        for (op.args) |arg| {
+                            try writer.writeAll(", ");
                             try writer.print("reg_{d}", .{arg.id});
                         }
                         try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -7788,9 +7786,9 @@ pub const NativeLinker = struct {
                         }
                         try writer.writeAll(");\n");
                     } else {
-                        try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                        for (op.args, 0..) |arg, i| {
-                            if (i > 0) try writer.writeAll(", ");
+                        try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull()", .{op.func_name});
+                        for (op.args) |arg| {
+                            try writer.writeAll(", ");
                             try writer.print("reg_{d}", .{arg.id});
                         }
                         try writer.writeAll(", runtime.runtime_allocator);\n");
