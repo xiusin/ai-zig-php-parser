@@ -5795,18 +5795,13 @@ pub const NativeLinker = struct {
                     // 找到循环头
                     const header = succ_idx;
                     
-                    // std.debug.print("Found back edge: {d} -> {d}\n", .{ idx, header });
-                    
                     // 分析循环结构
                     if (try self.analyzeLoop(func, cfg, header, idx)) |loop_info| {
-                        // Detected loop
                         try cfg.loops.append(self.allocator, loop_info);
                     }
                 }
             }
         }
-        
-        // std.debug.print("Total loops detected: {d}\n", .{cfg.loops.items.len});
     }
     
     /// 分析循环结构
