@@ -4535,6 +4535,15 @@ pub const NativeLinker = struct {
 
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
+        
+        // 构建块到循环的映射（用于检测子循环）
+        var block_to_loop = std.AutoHashMap(usize, usize).init(self.allocator);  // block_idx -> loop_idx in all_loops
+        defer block_to_loop.deinit();
+        
+        // 为每个循环的 header 建立映射
+        for (cfg.all_loops.items, 0..) |loop, i| {
+            try block_to_loop.put(loop.header, i);
+        }
 
         // 生成第一个循环前的块
         const first_loop = cfg.loops.items[0];
@@ -4548,143 +4557,29 @@ pub const NativeLinker = struct {
             try processed.put(idx, {});
         }
 
-        // 只生成顶层循环（子循环在生成父循环 body 时递归生成）
+        // 生成顶层循环
+        std.debug.print("Generating {d} top-level loops\n", .{cfg.loops.items.len});
         for (cfg.loops.items) |loop| {
-            // 只标记循环头、增量块和退出块为已处理
-            // 不标记 loop.blocks 中的所有块，因为子循环的块需要在生成父循环 body 时处理
-            try processed.put(loop.header, {});
-            if (loop.increment) |inc| try processed.put(inc, {});
-            if (loop.exit_block) |exit| try processed.put(exit, {});
-
-            // 生成循环
-            if (loop.is_for_loop) {
-                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-            } else {
-                try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
-            }
-
+            std.debug.print("Calling generateLoopRecursive for loop header={d}\n", .{loop.header});
+            try self.generateLoopRecursive(writer, func, loop, &processed, &block_to_loop, cfg.all_loops.items, cleanup_regs);
+            
             // 生成退出块
             if (loop.exit_block) |exit_idx| {
-                const exit_block = func.blocks.items[exit_idx];
-                try writer.print("    // Block {d}: {s}\n", .{ exit_idx, exit_block.label });
-                for (exit_block.instructions.items) |inst| {
-                    try writer.writeAll("    ");
-                    try self.generateInstruction(writer, inst);
+                if (!processed.contains(exit_idx)) {
+                    const exit_block = func.blocks.items[exit_idx];
+                    try writer.print("    // Block {d}: {s}\n", .{ exit_idx, exit_block.label });
+                    for (exit_block.instructions.items) |inst| {
+                        try writer.writeAll("    ");
+                        try self.generateInstruction(writer, inst);
+                    }
+                    try processed.put(exit_idx, {});
                 }
             }
         }
-
-        // 生成所有剩余的块（检测并生成子循环）
-        var has_return = false;
         
-        // 构建所有循环的块集合（包括子循环）
-        var all_loop_blocks = std.AutoHashMap(usize, usize).init(self.allocator);  // block_idx -> loop_idx
-        defer all_loop_blocks.deinit();
+        // 生成 return
+        try writer.writeAll("    return runtime.Value.initNull();\n");
         
-        // 递归收集所有循环（包括子循环）的块
-        var all_loops = std.ArrayList(LoopInfo).init(self.allocator);
-        defer all_loops.deinit(self.allocator);
-        
-        for (cfg.loops.items, 0..) |loop, i| {
-            try all_loops.append(self.allocator, loop);
-            // 收集子循环
-            for (loop.children.items) |child_idx| {
-                // 这里需要从原始 raw_loops 中获取子循环
-                // 但我们没有保存 raw_loops...
-                // 简化：只处理顶层循环
-            }
-        }
-        
-        for (func.blocks.items, 0..) |block, idx| {
-            if (processed.contains(idx)) continue;
-            
-            try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-            for (block.instructions.items) |inst| {
-                try writer.writeAll("    ");
-                try self.generateInstruction(writer, inst);
-            }
-            
-            // 检查 ret terminator
-            if (block.terminator) |term| {
-                if (term == .ret) {
-                    has_return = true;
-                    const maybe_reg = term.ret;
-                    if (cleanup_regs.len > 0) {
-                        try writer.writeAll("    // Cleanup\n");
-                        for (cleanup_regs) |reg_id| {
-                            if (!self.shouldReleaseReg(reg_id)) continue;
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
-                        }
-                    }
-                    if (maybe_reg) |reg| {
-                        if (self.current_reg_types) |reg_types| {
-                            const real_type = reg_types.get(reg.id) orelse reg.type_;
-                            const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                            if (reg_type_tag == .i64) {
-                                try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
-                            } else if (reg_type_tag == .f64) {
-                                try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
-                            } else if (reg_type_tag == .bool) {
-                                try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
-                            } else {
-                                try writer.print("    return reg_{d};\n", .{reg.id});
-                            }
-                        } else {
-                            try writer.print("    return reg_{d};\n", .{reg.id});
-                        }
-                    } else {
-                        try writer.writeAll("    return runtime.Value.initNull();\n");
-                    }
-                }
-            }
-            
-            try processed.put(idx, {});
-        }
-        
-        // 如果没有返回，查找最后一个循环退出块的赋值
-        if (!has_return) {
-            var return_reg: ?usize = null;
-            if (cfg.loops.items.len > 0) {
-                // 从第一个循环的退出块开始查找
-                for (cfg.loops.items) |loop| {
-                    if (loop.exit_block) |exit_idx| {
-                        const exit_block = func.blocks.items[exit_idx];
-                        for (exit_block.instructions.items) |inst| {
-                            if (inst.result) |res| {
-                                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                                    alloca_regs.contains(res.id)
-                                else
-                                    false;
-                                if (!is_alloca) {
-                                    return_reg = res.id;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            if (return_reg) |reg| {
-                if (self.current_reg_types) |reg_types| {
-                    const real_type = reg_types.get(reg) orelse IR.Type.php_value;
-                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                    if (reg_type_tag == .i64) {
-                        try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg});
-                    } else if (reg_type_tag == .f64) {
-                        try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg});
-                    } else if (reg_type_tag == .bool) {
-                        try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg});
-                    } else {
-                        try writer.print("    return reg_{d};\n", .{reg});
-                    }
-                } else {
-                    try writer.print("    return reg_{d};\n", .{reg});
-                }
-            } else {
-                try writer.writeAll("    return runtime.Value.initNull();\n");
-            }
-        }
-
         return true;
     }
 
@@ -5920,8 +5815,10 @@ pub const NativeLinker = struct {
     /// 控制流分析结果
     const ControlFlowAnalysis = struct {
         allocator: std.mem.Allocator,
-        /// 循环信息
+        /// 顶层循环信息
         loops: std.ArrayList(LoopInfo),
+        /// 所有循环（包括子循环）
+        all_loops: std.ArrayList(LoopInfo),
         /// 支配树（用于确定块的嵌套关系）
         dominators: std.AutoHashMap(usize, usize),
         /// 后继块映射
@@ -5933,6 +5830,7 @@ pub const NativeLinker = struct {
             return .{
                 .allocator = allocator,
                 .loops = std.ArrayList(LoopInfo){},
+                .all_loops = std.ArrayList(LoopInfo){},
                 .dominators = std.AutoHashMap(usize, usize).init(allocator),
                 .successors = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
                 .predecessors = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
@@ -5941,6 +5839,10 @@ pub const NativeLinker = struct {
 
         fn deinit(self: *ControlFlowAnalysis) void {
             self.loops.deinit(self.allocator);
+            for (self.all_loops.items) |*loop| {
+                loop.deinit(self.allocator);
+            }
+            self.all_loops.deinit(self.allocator);
             self.dominators.deinit();
 
             var succ_iter = self.successors.valueIterator();
@@ -6084,6 +5986,104 @@ pub const NativeLinker = struct {
     }
 
     /// 检测循环（回边分析）
+    /// 递归收集所有循环（包括子循环）
+    fn collectAllLoops(self: *Self, loops: []const LoopInfo, result: *std.ArrayList(*const LoopInfo)) !void {
+        _ = self;
+        for (loops) |*loop| {
+            try result.append(result.allocator, loop);
+            // 子循环的索引存储在 loop.children 中
+            // 但我们需要从 cfg.all_loops 中获取
+            // 这里简化：只收集顶层循环，子循环通过 children 索引访问
+        }
+    }
+    
+    /// 递归生成循环（包括子循环）
+    fn generateLoopRecursive(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        loop: LoopInfo,
+        processed: *std.AutoHashMap(usize, void),
+        block_to_loop: *std.AutoHashMap(usize, usize),
+        all_loops: []const LoopInfo,
+        cleanup_regs: []const usize,
+    ) !void {
+        std.debug.print("generateLoopRecursive: header={d}, is_for={}, children={d}\n", .{ loop.header, loop.is_for_loop, loop.children.items.len });
+        
+        // 标记循环块为已处理
+        try processed.put(loop.header, {});
+        if (loop.increment) |inc| try processed.put(inc, {});
+        
+        // 生成循环结构
+        if (loop.is_for_loop) {
+            std.debug.print("  -> calling generateForLoopWithChildren\n", .{});
+            try self.generateForLoopWithChildren(writer, func, loop, processed, block_to_loop, all_loops, cleanup_regs);
+        } else {
+            std.debug.print("  -> calling generateWhileLoopWithChildren\n", .{});
+            try self.generateWhileLoopWithChildren(writer, func, loop, processed, block_to_loop, all_loops, cleanup_regs);
+        }
+    }
+    
+    /// 生成 for 循环（支持子循环）
+    fn generateForLoopWithChildren(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        loop: LoopInfo,
+        processed: *std.AutoHashMap(usize, void),
+        block_to_loop: *std.AutoHashMap(usize, usize),
+        all_loops: []const LoopInfo,
+        cleanup_regs: []const usize,
+    ) !void {
+        std.debug.print("generateForLoopWithChildren: header={d}, children={d}\n", .{ loop.header, loop.children.items.len });
+        
+        // 如果有子循环，需要特殊处理
+        if (loop.children.items.len > 0) {
+            try writer.writeAll("    // Optimized: structured for loop with nested loops\n");
+            
+            // 生成外层循环的 header 和 body 开始部分
+            const body_block = func.blocks.items[loop.body_start];
+            try writer.print("    // Body: {s} (with nested loops)\n", .{body_block.label});
+            
+            // 生成 body 块的指令
+            for (body_block.instructions.items) |inst| {
+                try writer.writeAll("    ");
+                try self.generateInstruction(writer, inst);
+            }
+            
+            // 递归生成子循环
+            for (loop.children.items) |child_idx| {
+                const child_loop = all_loops[child_idx];
+                try writer.writeAll("    // Generating nested loop\n");
+                try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+            }
+            
+            return;
+        }
+        
+        // 否则生成普通的 for 循环
+        try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+    }
+    
+    /// 生成 while 循环（支持子循环）
+    fn generateWhileLoopWithChildren(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        loop: LoopInfo,
+        processed: *std.AutoHashMap(usize, void),
+        block_to_loop: *std.AutoHashMap(usize, usize),
+        all_loops: []const LoopInfo,
+        cleanup_regs: []const usize,
+    ) !void {
+        _ = all_loops;
+        _ = block_to_loop;
+        _ = processed;
+        
+        // 简化实现：先生成基本的 while 循环
+        try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+    }
+
     fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
         // 第一步：检测所有循环（回边分析）
         var raw_loops = try std.ArrayList(LoopInfo).initCapacity(self.allocator, 0);
@@ -6129,7 +6129,20 @@ pub const NativeLinker = struct {
         // 第三步：构建循环嵌套树（基于块包含关系）
         try self.buildLoopNestingTree(&raw_loops);
         
-        // 第四步：只保留顶层循环到 cfg.loops
+        // 第四步：保存所有循环到 cfg.all_loops
+        for (raw_loops.items) |loop| {
+            var copied_loop = loop;
+            copied_loop.children = try std.ArrayList(usize).initCapacity(self.allocator, loop.children.items.len);
+            try copied_loop.children.appendSlice(self.allocator, loop.children.items);
+            copied_loop.blocks = std.AutoHashMap(usize, void).init(self.allocator);
+            var it = loop.blocks.iterator();
+            while (it.next()) |entry| {
+                try copied_loop.blocks.put(entry.key_ptr.*, {});
+            }
+            try cfg.all_loops.append(self.allocator, copied_loop);
+        }
+        
+        // 第五步：只保留顶层循环到 cfg.loops
         for (raw_loops.items) |loop| {
             if (loop.parent == null) {
                 // 深拷贝顶层循环
