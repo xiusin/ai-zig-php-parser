@@ -4826,13 +4826,23 @@ pub const NativeLinker = struct {
     /// 🔥 代码生成层 LICM：检测并提升循环不变量
     /// 策略：扫描循环体，找到 load(循环不变地址) + call(纯函数) 序列，提升到循环前
     fn hoistLoopInvariantsAtCodegen(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo) !void {
-        // 纯函数白名单
+        // 纯函数白名单（无副作用，结果只依赖参数）
         const pure_functions = std.StaticStringMap(void).initComptime(.{
             .{ "array_sum", {} },
             .{ "array_product", {} },
             .{ "count", {} },
             .{ "strlen", {} },
             .{ "array_count", {} },
+            .{ "sizeof", {} },
+            .{ "abs", {} },
+            .{ "max", {} },
+            .{ "min", {} },
+            .{ "array_key_exists", {} },
+            .{ "in_array", {} },
+            .{ "array_keys", {} },
+            .{ "array_values", {} },
+            .{ "implode", {} },
+            .{ "join", {} },
         });
 
         // 收集循环内所有块
