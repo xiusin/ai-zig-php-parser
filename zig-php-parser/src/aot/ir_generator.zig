@@ -2338,6 +2338,23 @@ pub const IRGenerator = struct {
     fn generateBinaryExpr(self: *Self, node: *const Node) !Register {
         const bin_data = node.data.binary_expr;
 
+        // 常量字符串折叠
+        if (bin_data.op == .dot) {
+            const lhs_node = self.getNode(bin_data.lhs);
+            const rhs_node = self.getNode(bin_data.rhs);
+            
+            if (lhs_node != null and rhs_node != null and
+                lhs_node.?.tag == .literal_string and rhs_node.?.tag == .literal_string) {
+                const lhs_id = lhs_node.?.data.literal_string.value;
+                const rhs_id = rhs_node.?.data.literal_string.value;
+                const lhs_str = self.getString(lhs_id);
+                const rhs_str = self.getString(rhs_id);
+                const folded = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{lhs_str, rhs_str});
+                const folded_id = try self.module.?.internString(folded);
+                return try self.emitWithResult(.{ .const_string = folded_id }, .php_string);
+            }
+        }
+
         // Try constant folding first
         if (try self.tryConstantFold(node)) |folded_reg| {
             return folded_reg;
