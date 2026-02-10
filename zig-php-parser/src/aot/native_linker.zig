@@ -118,6 +118,7 @@ pub const NativeLinker = struct {
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
+    hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
 
     const Self = @This();
 
@@ -197,6 +198,9 @@ pub const NativeLinker = struct {
         // 清空 HashMap（不释放 key，因为 key 属于 IR 模块）
         self.func_return_types.clearRetainingCapacity();
         self.func_return_types.deinit();
+        if (self.hoisted_instructions) |*map| {
+            map.deinit();
+        }
         self.allocator.destroy(self);
     }
 
@@ -4754,6 +4758,9 @@ pub const NativeLinker = struct {
     fn generateForLoopStructuredNew(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
         try writer.writeAll("    // Optimized: structured for loop\n");
 
+        // 🔥 LICM 代码生成层优化：检测并提升循环不变量
+        try self.hoistLoopInvariantsAtCodegen(writer, func, loop);
+
         // 分析循环变量：查找在 increment 块中被修改的 alloca 寄存器
         var loop_var_reg: ?usize = null;
         if (loop.increment) |inc_idx| {
@@ -4814,6 +4821,142 @@ pub const NativeLinker = struct {
                 }
             }
         }
+    }
+
+    /// 🔥 代码生成层 LICM：检测并提升循环不变量
+    /// 策略：扫描循环体，找到 load(循环不变地址) + call(纯函数) 序列，提升到循环前
+    fn hoistLoopInvariantsAtCodegen(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo) !void {
+        // 纯函数白名单
+        const pure_functions = std.StaticStringMap(void).initComptime(.{
+            .{ "array_sum", {} },
+            .{ "array_product", {} },
+            .{ "count", {} },
+            .{ "strlen", {} },
+            .{ "array_count", {} },
+        });
+
+        // 收集循环内所有块
+        var loop_blocks = try std.ArrayList(usize).initCapacity(self.allocator, 0);
+        defer loop_blocks.deinit(self.allocator);
+
+        // 添加 body（只检查 body，不包括 header 和 increment）
+        try loop_blocks.append(self.allocator, loop.body_start);
+
+        // 收集循环内修改的地址（store 的目标）
+        var modified_addrs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer modified_addrs.deinit();
+
+        // 扫描所有循环块（包括 header 和 increment）
+        const all_blocks = [_]?usize{ loop.header, loop.body_start, loop.increment };
+        for (all_blocks) |maybe_idx| {
+            if (maybe_idx) |block_idx| {
+                const block = func.blocks.items[block_idx];
+                for (block.instructions.items) |inst| {
+                    if (inst.op == .store) {
+                        try modified_addrs.put(inst.op.store.ptr.id, {});
+                    }
+                }
+            }
+        }
+
+        // 扫描循环体，找到可提升的指令并生成
+        var hoisted_count: usize = 0;
+        for (loop_blocks.items) |block_idx| {
+            const block = func.blocks.items[block_idx];
+            
+            var i: usize = 0;
+            while (i < block.instructions.items.len) : (i += 1) {
+                const inst = block.instructions.items[i];
+                
+                // 检测模式：load + call(纯函数)
+                if (inst.op == .load) {
+                    const load_ptr = inst.op.load.ptr.id;
+                    const load_result = inst.result orelse continue;
+                    
+                    // 检查地址是否循环不变（不在 modified_addrs 中）
+                    if (modified_addrs.contains(load_ptr)) continue;
+                    
+                    // 查找使用 load 结果的 call
+                    if (i + 1 < block.instructions.items.len) {
+                        const next_inst = block.instructions.items[i + 1];
+                        if (next_inst.op == .call) {
+                            const call_op = next_inst.op.call;
+                            
+                            // 检查是否是纯函数
+                            if (!pure_functions.has(call_op.func_name)) continue;
+                            
+                            // 检查参数是否是 load 的结果
+                            if (call_op.args.len > 0 and call_op.args[0].id == load_result.id) {
+                                // 🎯 找到可提升的序列！生成提升后的代码（在循环前）
+                                try writer.writeAll("    // LICM: hoisted loop-invariant call\n");
+                                
+                                // 生成 load
+                                const suffix = self.getRegSuffix(load_result.id);
+                                if (self.regMayHeap(load_result.id)) {
+                                    try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ load_result.id, suffix });
+                                }
+                                try writer.print("    reg_{d}{s} = ", .{ load_result.id, suffix });
+                                try self.generateLoadValue(writer, inst.op.load.ptr);
+                                try writer.writeAll(";\n");
+                                
+                                // 生成 call
+                                if (next_inst.result) |call_result| {
+                                    const call_suffix = self.getRegSuffix(call_result.id);
+                                    if (self.regMayHeap(call_result.id)) {
+                                        try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ call_result.id, call_suffix });
+                                    }
+                                    try writer.print("    reg_{d}{s} = try runtime.php_{s}(reg_{d}{s}", .{
+                                        call_result.id,
+                                        call_suffix,
+                                        call_op.func_name,
+                                        load_result.id,
+                                        suffix,
+                                    });
+                                    // 其他参数
+                                    for (call_op.args[1..]) |arg| {
+                                        try writer.print(", reg_{d}", .{arg.id});
+                                    }
+                                    try writer.writeAll(");\n");
+                                    
+                                    // 标记这两条指令为已提升（在循环体生成时跳过）
+                                    try self.markInstructionHoisted(inst);
+                                    try self.markInstructionHoisted(next_inst);
+                                }
+                                
+                                hoisted_count += 1;
+                                i += 1; // 跳过 call 指令
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (hoisted_count > 0) {
+            try writer.print("    // LICM: hoisted {d} loop-invariant sequence(s)\n\n", .{hoisted_count});
+        }
+    }
+
+    /// 标记指令为已提升（在循环体生成时跳过）
+    fn markInstructionHoisted(self: *Self, inst: *const IR.Instruction) !void {
+        if (self.hoisted_instructions == null) {
+            self.hoisted_instructions = std.AutoHashMap(*const IR.Instruction, void).init(self.allocator);
+        }
+        try self.hoisted_instructions.?.put(inst, {});
+    }
+
+    /// 检查指令是否已提升
+    fn isInstructionHoisted(self: *Self, inst: *const IR.Instruction) bool {
+        if (self.hoisted_instructions) |*map| {
+            return map.contains(inst);
+        }
+        return false;
+    }
+
+    /// 生成 load 指令的值读取代码
+    fn generateLoadValue(self: *Self, writer: anytype, ptr_reg: IR.Register) !void {
+        const suffix = self.getRegSuffix(ptr_reg.id);
+        try writer.print("runtime.val_deref(reg_{d}{s}).*", .{ ptr_reg.id, suffix });
     }
 
     /// 检测并优化增量模式: load → const → add → store → reg += const
@@ -5208,8 +5351,11 @@ pub const NativeLinker = struct {
                             else => false,
                         };
                         if (!is_invariant) {
-                            try code_list.appendSlice(self.allocator, "        ");
-                            try self.generateInstructionSimple(code_list, inst);
+                            // 🔥 LICM: 跳过已提升的指令
+                            if (!self.isInstructionHoisted(inst)) {
+                                try code_list.appendSlice(self.allocator, "        ");
+                                try self.generateInstructionSimple(code_list, inst);
+                            }
                         }
                     }
                 }
@@ -5224,8 +5370,11 @@ pub const NativeLinker = struct {
                                 else => false,
                             };
                             if (!is_invariant) {
-                                try code_list.appendSlice(self.allocator, "        ");
-                                try self.generateInstructionSimple(code_list, inst);
+                                // 🔥 LICM: 跳过已提升的指令
+                                if (!self.isInstructionHoisted(inst)) {
+                                    try code_list.appendSlice(self.allocator, "        ");
+                                    try self.generateInstructionSimple(code_list, inst);
+                                }
                             }
                         }
                     }
