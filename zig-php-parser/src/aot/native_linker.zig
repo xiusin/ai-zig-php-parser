@@ -7112,32 +7112,40 @@ pub const NativeLinker = struct {
                 try writer.print("        // alloca: {s}\n", .{result_reg.?});
             },
             .load => |op| {
+                // 检查是否是优化的 alloca
+                const ptr_is_optimized = if (self.current_optimized_alloca_regs) |opt_regs|
+                    opt_regs.contains(op.ptr.id)
+                else
+                    false;
+                
                 var ptr_buf: [32]u8 = undefined;
                 const ptr = try std.fmt.bufPrint(&ptr_buf, "reg_{d}", .{op.ptr.id});
 
-                // 智能处理类型转换
-                // 检查结果寄存器的类型和加载的类型
-                if (inst.result) |reg| {
-                    const result_type = reg.type_;
-                    const load_type = op.type_;
+                if (ptr_is_optimized) {
+                    // 优化的 alloca：直接读取，不需要解引用
+                    try writer.print("        {s} = {s};\n", .{ result_reg.?, ptr });
+                } else {
+                    // 智能处理类型转换
+                    if (inst.result) |reg| {
+                        const result_type = reg.type_;
+                        const load_type = op.type_;
 
-                    // 使用标签比较类型
-                    const result_tag = @as(std.meta.Tag(IR.Type), result_type);
-                    const load_tag = @as(std.meta.Tag(IR.Type), load_type);
+                        const result_tag = @as(std.meta.Tag(IR.Type), result_type);
+                        const load_tag = @as(std.meta.Tag(IR.Type), load_type);
 
-                    // 如果结果类型和加载类型不匹配，需要转换
-                    if (result_tag != load_tag) {
-                        // 从Value类型转换到基本类型
-                        if (load_tag == .php_value and result_tag == .i64) {
-                            try writer.print("        {s} = {s}.*.toInt();\n", .{ result_reg.?, ptr });
-                        } else if (load_tag == .php_value and result_tag == .f64) {
-                            try writer.print("        {s} = {s}.*.toFloat();\n", .{ result_reg.?, ptr });
-                        } else if (load_tag == .php_value and result_tag == .bool) {
-                            try writer.print("        {s} = {s}.*.toBool();\n", .{ result_reg.?, ptr });
-                        } else if (result_tag == .i64 and load_tag == .i64) {
-                            // i64到i64，直接加载
-                            try writer.print("        {s} = {s}.*;\n", .{ result_reg.?, ptr });
-                        } else if (result_tag == .php_value and load_tag == .i64) {
+                        // 如果结果类型和加载类型不匹配，需要转换
+                        if (result_tag != load_tag) {
+                            // 从Value类型转换到基本类型
+                            if (load_tag == .php_value and result_tag == .i64) {
+                                try writer.print("        {s} = {s}.*.toInt();\n", .{ result_reg.?, ptr });
+                            } else if (load_tag == .php_value and result_tag == .f64) {
+                                try writer.print("        {s} = {s}.*.toFloat();\n", .{ result_reg.?, ptr });
+                            } else if (load_tag == .php_value and result_tag == .bool) {
+                                try writer.print("        {s} = {s}.*.toBool();\n", .{ result_reg.?, ptr });
+                            } else if (result_tag == .i64 and load_tag == .i64) {
+                                // i64到i64，直接加载
+                                try writer.print("        {s} = {s}.*;\n", .{ result_reg.?, ptr });
+                            } else if (result_tag == .php_value and load_tag == .i64) {
                             // i64到php_value，需要转换
                             try writer.print("        {s} = runtime.Value.initInt({s}.*);\n", .{ result_reg.?, ptr });
                         } else if (result_tag == .f64 and load_tag == .f64) {
@@ -7161,43 +7169,53 @@ pub const NativeLinker = struct {
                         try writer.print("        {s} = {s}.*;\n", .{ result_reg.?, ptr });
                     }
                 }
+                }
             },
             .store => |op| {
+                // 检查是否是优化的 alloca
+                const ptr_is_optimized = if (self.current_optimized_alloca_regs) |opt_regs|
+                    opt_regs.contains(op.ptr.id)
+                else
+                    false;
+                
                 var ptr_buf: [32]u8 = undefined;
                 var value_buf: [32]u8 = undefined;
                 const ptr = try std.fmt.bufPrint(&ptr_buf, "reg_{d}", .{op.ptr.id});
                 const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
 
-                // 获取指针指向的类型
-                const ptr_inner_type = switch (op.ptr.type_) {
-                    .ptr => |inner| inner.*,
-                    else => .php_value,
-                };
-
-                // 在存储新值之前，释放旧值（如果是引用类型）
-                // 这对于字符串和数组特别重要，防止内存泄漏
-                if (ptr_inner_type == .php_value) {
-                    try writer.print("        {s}.*.release(runtime.runtime_allocator);\n", .{ptr});
-                }
-
-                // 存储新值 - 需要类型转换
-                const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_inner_type);
-                const value_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
-
-                if (ptr_tag == value_tag) {
-                    // 类型匹配，直接赋值
-                    try writer.print("        {s}.* = {s};\n", .{ ptr, value });
+                if (ptr_is_optimized) {
+                    // 优化的 alloca：直接赋值，不需要解引用
+                    try writer.print("        {s} = {s};\n", .{ ptr, value });
                 } else {
-                    // 类型不匹配，需要转换
-                    if (ptr_tag == .php_value) {
-                        // 存储到php_value指针，需要从基本类型转换
-                        switch (value_tag) {
-                            .i64 => try writer.print("        {s}.* = runtime.Value.initInt({s});\n", .{ ptr, value }),
-                            .f64 => try writer.print("        {s}.* = runtime.Value.initFloat({s});\n", .{ ptr, value }),
-                            .bool => try writer.print("        {s}.* = runtime.Value.initBool({s});\n", .{ ptr, value }),
-                            else => try writer.print("        {s}.* = {s};\n", .{ ptr, value }),
-                        }
-                    } else if (value_tag == .php_value) {
+                    // 获取指针指向的类型
+                    const ptr_inner_type = switch (op.ptr.type_) {
+                        .ptr => |inner| inner.*,
+                        else => .php_value,
+                    };
+
+                    // 在存储新值之前，释放旧值（如果是引用类型）
+                    if (ptr_inner_type == .php_value) {
+                        try writer.print("        {s}.*.release(runtime.runtime_allocator);\n", .{ptr});
+                    }
+
+                    // 存储新值 - 需要类型转换
+                    const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_inner_type);
+                    const value_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
+
+                    if (ptr_tag == value_tag) {
+                        // 类型匹配，直接赋值
+                        try writer.print("        {s}.* = {s};\n", .{ ptr, value });
+                    } else {
+                        // 类型不匹配，需要转换
+                        if (ptr_tag == .php_value) {
+                            // 存储到php_value指针，需要从基本类型转换
+                            switch (value_tag) {
+                                .i64 => try writer.print("        {s}.* = runtime.Value.initInt({s});\n", .{ ptr, value }),
+                                .f64 => try writer.print("        {s}.* = runtime.Value.initFloat({s});\n", .{ ptr, value }),
+                                .bool => try writer.print("        {s}.* = runtime.Value.initBool({s});\n", .{ ptr, value }),
+                                else => try writer.print("        {s}.* = {s};\n", .{ ptr, value }),
+                            }
+                        } else if (value_tag == .php_value) {
                         // 从php_value存储到基本类型指针，需要提取
                         switch (ptr_tag) {
                             .i64 => try writer.print("        {s}.* = {s}.asInt();\n", .{ ptr, value }),
@@ -7209,6 +7227,7 @@ pub const NativeLinker = struct {
                         // 基本类型之间的转换
                         try writer.print("        {s}.* = @as({s}, {s});\n", .{ ptr, @tagName(ptr_tag), value });
                     }
+                }
                 }
             },
 
@@ -7425,10 +7444,29 @@ pub const NativeLinker = struct {
             // 字符串运算指令
             // ========================================================================
             .concat => |op| {
-                var lhs_buf: [32]u8 = undefined;
-                var rhs_buf: [32]u8 = undefined;
-                const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
-                const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
+                var lhs_buf: [64]u8 = undefined;
+                var rhs_buf: [64]u8 = undefined;
+                
+                // 检查操作数类型，需要时转换为 Value
+                const lhs_type = op.lhs.type_;
+                const rhs_type = op.rhs.type_;
+                const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
+                const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
+                
+                const lhs = if (lhs_tag == .i64)
+                    try std.fmt.bufPrint(&lhs_buf, "runtime.Value.initInt(reg_{d})", .{op.lhs.id})
+                else if (lhs_tag == .f64)
+                    try std.fmt.bufPrint(&lhs_buf, "runtime.Value.initFloat(reg_{d})", .{op.lhs.id})
+                else
+                    try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
+                
+                const rhs = if (rhs_tag == .i64)
+                    try std.fmt.bufPrint(&rhs_buf, "runtime.Value.initInt(reg_{d})", .{op.rhs.id})
+                else if (rhs_tag == .f64)
+                    try std.fmt.bufPrint(&rhs_buf, "runtime.Value.initFloat(reg_{d})", .{op.rhs.id})
+                else
+                    try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
+                
                 try writer.print("        {s} = try runtime.php_concat({s}, {s}, runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs });
             },
 
