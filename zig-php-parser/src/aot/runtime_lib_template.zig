@@ -966,21 +966,21 @@ pub const PHPString = struct {
             return error.StringTooLarge;
         }
 
-        // COW 就地复用：当 self 是唯一持有者且非静态时，尝试原地扩展避免新建对象
-        if (self.ref_count == 1 and !self.is_static and other.length > 0) {
-            const old_len = self.length;
-            const new_data = try allocator.realloc(self.data, new_length);
-            @memcpy(new_data[old_len..new_length], other.data[0..other.length]);
-            self.data = new_data;
-            self.length = new_length;
-            alloc_counters.php_string_bytes += other.length;
-            alloc_counters.php_string_live_bytes += other.length;
-            alloc_counters.php_string_peak_live_bytes = @max(
-                alloc_counters.php_string_peak_live_bytes,
-                alloc_counters.php_string_live_bytes,
-            );
-            return self;
-        }
+        // 临时禁用 COW 优化（有 bug）
+        // if (self.ref_count == 1 and !self.is_static and other.length > 0) {
+        //     const old_len = self.length;
+        //     const new_data = try allocator.realloc(self.data, new_length);
+        //     @memcpy(new_data[old_len..new_length], other.data[0..other.length]);
+        //     self.data = new_data;
+        //     self.length = new_length;
+        //     alloc_counters.php_string_bytes += other.length;
+        //     alloc_counters.php_string_live_bytes += other.length;
+        //     alloc_counters.php_string_peak_live_bytes = @max(
+        //         alloc_counters.php_string_peak_live_bytes,
+        //         alloc_counters.php_string_live_bytes,
+        //     );
+        //     return self;
+        // }
 
         // 小字符串优化：≤256 字节使用栈缓冲
         if (new_length <= 256) {
