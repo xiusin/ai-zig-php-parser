@@ -5329,21 +5329,52 @@ pub const NativeLinker = struct {
                 var rhs_buf: [32]u8 = undefined;
                 const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
                 const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
-                try writer.print("        {s} = try runtime.php_sub({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                // 快速路径：纯整数/浮点
+                if (inst.result) |reg| {
+                    if (reg.type_ == .i64 and op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
+                        try writer.print("        {s} = {s} - {s};\n", .{ result_reg.?, lhs, rhs });
+                    } else if (reg.type_ == .f64 and op.lhs.type_ == .f64 and op.rhs.type_ == .f64) {
+                        try writer.print("        {s} = {s} - {s};\n", .{ result_reg.?, lhs, rhs });
+                    } else {
+                        try writer.print("        {s} = try runtime.php_sub({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                    }
+                } else {
+                    try writer.print("        _ = try runtime.php_sub({s}, {s});\n", .{ lhs, rhs });
+                }
             },
             .mul => |op| {
                 var lhs_buf: [32]u8 = undefined;
                 var rhs_buf: [32]u8 = undefined;
                 const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
                 const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
-                try writer.print("        {s} = try runtime.php_mul({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                // 快速路径：纯整数/浮点
+                if (inst.result) |reg| {
+                    if (reg.type_ == .i64 and op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
+                        try writer.print("        {s} = {s} * {s};\n", .{ result_reg.?, lhs, rhs });
+                    } else if (reg.type_ == .f64 and op.lhs.type_ == .f64 and op.rhs.type_ == .f64) {
+                        try writer.print("        {s} = {s} * {s};\n", .{ result_reg.?, lhs, rhs });
+                    } else {
+                        try writer.print("        {s} = try runtime.php_mul({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                    }
+                } else {
+                    try writer.print("        _ = try runtime.php_mul({s}, {s});\n", .{ lhs, rhs });
+                }
             },
             .div => |op| {
                 var lhs_buf: [32]u8 = undefined;
                 var rhs_buf: [32]u8 = undefined;
                 const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
                 const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
-                try writer.print("        {s} = try runtime.php_div({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                // 快速路径：纯浮点（除法总是返回浮点）
+                if (inst.result) |reg| {
+                    if (reg.type_ == .f64 and op.lhs.type_ == .f64 and op.rhs.type_ == .f64) {
+                        try writer.print("        {s} = {s} / {s};\n", .{ result_reg.?, lhs, rhs });
+                    } else {
+                        try writer.print("        {s} = try runtime.php_div({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                    }
+                } else {
+                    try writer.print("        _ = try runtime.php_div({s}, {s});\n", .{ lhs, rhs });
+                }
             },
             .mod => |op| {
                 var lhs_buf: [32]u8 = undefined;
