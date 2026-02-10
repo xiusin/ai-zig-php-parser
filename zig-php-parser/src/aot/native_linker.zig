@@ -4591,14 +4591,18 @@ pub const NativeLinker = struct {
                             }
                             if (maybe_reg) |reg| {
                                 // 类型转换
-                                const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
-                                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                                if (reg_type_tag == .i64) {
-                                    try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
-                                } else if (reg_type_tag == .f64) {
-                                    try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
-                                } else if (reg_type_tag == .bool) {
-                                    try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                                if (self.current_reg_types) |reg_types| {
+                                    const real_type = reg_types.get(reg.id) orelse reg.type_;
+                                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                                    if (reg_type_tag == .i64) {
+                                        try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                                    } else if (reg_type_tag == .f64) {
+                                        try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                                    } else if (reg_type_tag == .bool) {
+                                        try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                                    } else {
+                                        try writer.print("    return reg_{d};\n", .{reg.id});
+                                    }
                                 } else {
                                     try writer.print("    return reg_{d};\n", .{reg.id});
                                 }
@@ -4679,14 +4683,18 @@ pub const NativeLinker = struct {
                             }
                             if (maybe_reg) |reg| {
                                 // 类型转换
-                                const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
-                                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                                if (reg_type_tag == .i64) {
-                                    try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
-                                } else if (reg_type_tag == .f64) {
-                                    try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
-                                } else if (reg_type_tag == .bool) {
-                                    try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                                if (self.current_reg_types) |reg_types| {
+                                    const real_type = reg_types.get(reg.id) orelse reg.type_;
+                                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                                    if (reg_type_tag == .i64) {
+                                        try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                                    } else if (reg_type_tag == .f64) {
+                                        try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                                    } else if (reg_type_tag == .bool) {
+                                        try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                                    } else {
+                                        try writer.print("    return reg_{d};\n", .{reg.id});
+                                    }
                                 } else {
                                     try writer.print("    return reg_{d};\n", .{reg.id});
                                 }
@@ -5226,7 +5234,38 @@ pub const NativeLinker = struct {
         // 数学化简：sum += 1 循环 → sum += N
         if (math_simplify) |ms| {
             try writer.print("    // Mathematical simplification: sum += N\n", .{});
-            try writer.print("    reg_{d} += reg_{d};\n", .{ ms.target_reg, ms.loop_count_reg });
+            
+            // 检查是否是优化的 alloca
+            const target_is_opt_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
+                opt_regs.contains(ms.target_reg)
+            else
+                false;
+            
+            // 检查类型并生成正确的代码
+            const ms_target_type = if (self.current_reg_types) |rt| rt.get(ms.target_reg) orelse IR.Type.php_value else IR.Type.php_value;
+            const ms_count_type = if (self.current_reg_types) |rt| rt.get(ms.loop_count_reg) orelse IR.Type.i64 else IR.Type.i64;
+            const ms_target_tag = @as(std.meta.Tag(IR.Type), ms_target_type);
+            const ms_count_tag = @as(std.meta.Tag(IR.Type), ms_count_type);
+            
+            // 如果是优化的 alloca，强制为 i64
+            if (target_is_opt_alloca or ms_target_tag == .i64) {
+                if (ms_count_tag == .i64) {
+                    try writer.print("    reg_{d} += reg_{d};\n", .{ ms.target_reg, ms.loop_count_reg });
+                } else if (ms_count_tag == .php_value) {
+                    try writer.print("    reg_{d} += reg_{d}.asInt();\n", .{ ms.target_reg, ms.loop_count_reg });
+                } else {
+                    try writer.print("    reg_{d} += reg_{d};\n", .{ ms.target_reg, ms.loop_count_reg });
+                }
+            } else if (ms_target_tag == .php_value) {
+                if (ms_count_tag == .i64) {
+                    try writer.print("    reg_{d} = try runtime.php_add(reg_{d}, runtime.Value.initInt(reg_{d}));\n", .{ ms.target_reg, ms.target_reg, ms.loop_count_reg });
+                } else {
+                    try writer.print("    reg_{d} = try runtime.php_add(reg_{d}, reg_{d});\n", .{ ms.target_reg, ms.target_reg, ms.loop_count_reg });
+                }
+            } else {
+                // 默认：直接加法
+                try writer.print("    reg_{d} += reg_{d};\n", .{ ms.target_reg, ms.loop_count_reg });
+            }
 
             // 更新循环变量到上界
             if (loop.increment) |inc_idx| {
@@ -5234,17 +5273,38 @@ pub const NativeLinker = struct {
                 for (inc_block.instructions.items) |inst| {
                     if (inst.op == .store) {
                         const inc_reg = inst.op.store.ptr.id;
-                        // 检查类型并转换
-                        const inc_type = self.current_reg_types.?.get(inc_reg) orelse IR.Type.php_value;
+                        
+                        // 获取两个寄存器的类型
+                        const inc_type = if (self.current_reg_types) |rt| rt.get(inc_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                        const count_type = if (self.current_reg_types) |rt| rt.get(ms.loop_count_reg) orelse IR.Type.i64 else IR.Type.i64;
                         const inc_tag = @as(std.meta.Tag(IR.Type), inc_type);
-                        const count_type = self.current_reg_types.?.get(ms.loop_count_reg) orelse IR.Type.i64;
                         const count_tag = @as(std.meta.Tag(IR.Type), count_type);
                         
-                        if (inc_tag == .i64 and count_tag == .i64) {
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
-                        } else if (inc_tag == .php_value and count_tag == .i64) {
-                            try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ inc_reg, ms.loop_count_reg });
+                        // 检查是否是优化的 alloca
+                        const is_optimized_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
+                            opt_regs.contains(inc_reg)
+                        else
+                            false;
+                        
+                        // 生成赋值
+                        if (is_optimized_alloca or inc_tag == .i64) {
+                            // 目标是 i64
+                            if (count_tag == .i64) {
+                                try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                            } else if (count_tag == .php_value) {
+                                try writer.print("    reg_{d} = reg_{d}.asInt();\n", .{ inc_reg, ms.loop_count_reg });
+                            } else {
+                                try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                            }
+                        } else if (inc_tag == .php_value) {
+                            // 目标是 Value
+                            if (count_tag == .i64) {
+                                try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ inc_reg, ms.loop_count_reg });
+                            } else {
+                                try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                            }
                         } else {
+                            // 其他情况
                             try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
                         }
                         break;
@@ -7746,13 +7806,27 @@ pub const NativeLinker = struct {
                         }
                         try writer.writeAll(");\n");
                     } else {
-                        // 用户定义函数
-                        try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull()", .{ r, op.func_name });
-                        for (op.args) |arg| {
-                            try writer.writeAll(", ");
-                            try writer.print("reg_{d}", .{arg.id});
+                        // 用户定义函数 - 构建参数数组
+                        if (op.args.len == 0) {
+                            try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{ r, op.func_name });
+                        } else {
+                            try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, op.func_name });
+                            for (op.args, 0..) |arg, i| {
+                                if (i > 0) try writer.writeAll(", ");
+                                // 转换基本类型为 Value
+                                const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                if (arg_type == .i64) {
+                                    try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                } else if (arg_type == .f64) {
+                                    try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                } else if (arg_type == .bool) {
+                                    try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                } else {
+                                    try writer.print("reg_{d}", .{arg.id});
+                                }
+                            }
+                            try writer.writeAll("}, runtime.runtime_allocator);\n");
                         }
-                        try writer.writeAll(", runtime.runtime_allocator);\n");
                     }
                 } else {
                     if (is_builtin) {
@@ -7764,12 +7838,27 @@ pub const NativeLinker = struct {
                         }
                         try writer.writeAll(");\n");
                     } else {
-                        try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull()", .{op.func_name});
-                        for (op.args) |arg| {
-                            try writer.writeAll(", ");
-                            try writer.print("reg_{d}", .{arg.id});
+                        // 用户定义函数 - 构建参数数组
+                        if (op.args.len == 0) {
+                            try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{op.func_name});
+                        } else {
+                            try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{op.func_name});
+                            for (op.args, 0..) |arg, i| {
+                                if (i > 0) try writer.writeAll(", ");
+                                // 转换基本类型为 Value
+                                const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                if (arg_type == .i64) {
+                                    try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                } else if (arg_type == .f64) {
+                                    try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                } else if (arg_type == .bool) {
+                                    try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                } else {
+                                    try writer.print("reg_{d}", .{arg.id});
+                                }
+                            }
+                            try writer.writeAll("}, runtime.runtime_allocator);\n");
                         }
-                        try writer.writeAll(", runtime.runtime_allocator);\n");
                     }
                 }
             },
