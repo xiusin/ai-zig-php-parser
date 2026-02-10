@@ -736,18 +736,7 @@ pub const IROptimizer = struct {
             }
         }
 
-        // Loop Unrolling
-        // We only unroll innermost loops (no sub-loops) for now to keep it simple.
-        if (self.config.loop_unroll and loop.sub_loops.items.len == 0) {
-            if (try self.unrollLoop(func, loop, dt)) {
-                self.stats.loops_unrolled += 1;
-                changed = true;
-                // If unrolled, the loop structure changes significantly.
-                // We might need to stop further optimizations on this loop struct.
-                return true;
-            }
-        }
-
+        // LICM 优先：先提升循环不变量，再展开（避免展开后跳过 LICM）
         // Find loop invariants
         // An instruction is invariant if:
         // 1. It is side-effect free
@@ -756,28 +745,33 @@ pub const IROptimizer = struct {
         var invariant_instrs = std.ArrayListUnmanaged(*Instruction){};
         defer invariant_instrs.deinit(self.allocator);
 
-        // Iterate over all blocks in the loop
+        // 两遍扫描：第一遍找出所有可能的不变量，第二遍按依赖顺序提升
+        // 第一遍：标记所有潜在不变量
+        var potentially_invariant = std.AutoHashMap(*Instruction, void).init(self.allocator);
+        defer potentially_invariant.deinit();
+
         for (loop.blocks.items) |block| {
             for (block.instructions.items) |inst| {
                 if (self.isLoopInvariant(inst, loop)) {
+                    try potentially_invariant.put(inst, {});
+                }
+            }
+        }
+
+        // 第二遍：按依赖顺序收集（简化：直接收集，移动时会保持顺序）
+        for (loop.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (potentially_invariant.contains(inst)) {
                     try invariant_instrs.append(self.allocator, inst);
                 }
             }
         }
 
-        if (invariant_instrs.items.len == 0) return changed;
-
-        // Move invariants to pre-header
         if (invariant_instrs.items.len > 0) {
             const pre_header = try self.getOrCreatePreHeader(func, loop, dt);
 
             for (invariant_instrs.items) |inst| {
                 // Remove from original block
-                // We need to find which block it belongs to.
-                // Since we don't store parent pointer in Instruction, we search.
-                // Optimization: isLoopInvariant could return the block too.
-                // Or we just search again.
-
                 var removed = false;
                 for (loop.blocks.items) |block| {
                     if (self.removeInstructionFromBlock(block, inst)) {
@@ -787,15 +781,21 @@ pub const IROptimizer = struct {
                 }
 
                 if (removed) {
-                    // Insert into pre-header (before terminator)
-                    // If pre-header is empty (except terminator), just append.
-                    // Pre-header should be a new block or a unique predecessor.
-
-                    // We need to insert at the end of instructions list, but before terminator?
-                    // BasicBlock.instructions does not include terminator.
                     try pre_header.instructions.append(self.allocator, inst);
                     changed = true;
                 }
+            }
+        }
+
+        // Loop Unrolling（在 LICM 之后）
+        // We only unroll innermost loops (no sub-loops) for now to keep it simple.
+        if (self.config.loop_unroll and loop.sub_loops.items.len == 0) {
+            if (try self.unrollLoop(func, loop, dt)) {
+                self.stats.loops_unrolled += 1;
+                changed = true;
+                // If unrolled, the loop structure changes significantly.
+                // We might need to stop further optimizations on this loop struct.
+                return true;
             }
         }
 
@@ -814,12 +814,19 @@ pub const IROptimizer = struct {
         .{ "in_array", {} },
     });
 
-    /// 检查指令是否为循环不变量（扩展：含 concat、纯函数调用等安全可提升的指令）
+    /// 检查指令是否为循环不变量（扩展：含 concat、纯函数调用、load 等安全可提升的指令）
     fn isLoopInvariant(self: *Self, inst: *Instruction, loop: *Analysis.Loop) bool {
         // 纯常量指令始终可提升
         switch (inst.op) {
             .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => return true,
             else => {},
+        }
+
+        // load：如果地址循环不变且循环内无 store 到该地址，可提升
+        // 简化：如果地址循环不变，假设可提升（保守但实用）
+        if (inst.op == .load) {
+            const op = inst.op.load;
+            return self.isInvariant(op.ptr, loop);
         }
 
         // concat 虽有分配副作用，但操作数为循环不变量时可安全提升
@@ -829,11 +836,14 @@ pub const IROptimizer = struct {
         }
 
         // 纯函数调用：操作数为循环不变量时可安全提升
+        // 特殊处理：如果参数是 load，检查 load 的地址是否循环不变（忽略循环内的 store）
         if (inst.op == .call) {
             const op = inst.op.call;
             if (pure_functions.has(op.func_name)) {
                 for (op.args) |arg| {
-                    if (!self.isInvariant(arg, loop)) return false;
+                    // 检查参数寄存器的定义是否在循环外
+                    // 如果是 load，检查 load 的地址
+                    if (!self.isInvariantForPureCall(arg, loop)) return false;
                 }
                 return true;
             }
@@ -904,6 +914,29 @@ pub const IROptimizer = struct {
         }
 
         return true; // Defined outside
+    }
+
+    /// 检查寄存器是否为纯函数调用的循环不变参数
+    /// 特殊处理：如果是 load，检查 load 的地址而不是 load 本身
+    fn isInvariantForPureCall(self: *Self, reg: Register, loop: *Analysis.Loop) bool {
+        // 先找到寄存器的定义指令
+        for (loop.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |res| {
+                    if (res.id == reg.id) {
+                        // 如果是 load，检查 load 的地址是否循环不变
+                        if (inst.op == .load) {
+                            const load_op = inst.op.load;
+                            return self.isInvariant(load_op.ptr, loop);
+                        }
+                        // 其他指令在循环内定义，不是不变量
+                        return false;
+                    }
+                }
+            }
+        }
+        // 在循环外定义，是不变量
+        return true;
     }
 
     /// Check if loop contains any store instructions
