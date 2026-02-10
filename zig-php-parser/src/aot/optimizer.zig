@@ -89,7 +89,7 @@ pub const PassConfig = struct {
     unroll_factor: u32 = 4,
     /// Maximum optimization iterations
     max_iterations: u32 = 3,
-    
+
     // ========== 高级优化（现代编译器技术）==========
     /// Scalar Replacement (Java HotSpot)
     scalar_replacement: bool = false,
@@ -136,7 +136,7 @@ pub const PassConfig = struct {
             .inline_threshold = 10,
             .type_specialization = false,
             .cse = true,
-            .licm = false,
+            .licm = true,
             .strength_reduction = false,
             .mem2reg = true,
             .loop_unroll = true,
@@ -224,7 +224,7 @@ pub const OptimizationStats = struct {
     rc_pairs_elided: u32 = 0,
     sccp_constants_folded: u32 = 0,
     sccp_branches_simplified: u32 = 0,
-    
+
     // ========== 高级优化统计 ==========
     scalar_replacements: u32 = 0,
     gvn_eliminations: u32 = 0,
@@ -253,7 +253,7 @@ pub const OptimizationStats = struct {
         try writer.print("  SCCP constants folded: {d}\n", .{self.sccp_constants_folded});
         try writer.print("  SCCP branches simplified: {d}\n", .{self.sccp_branches_simplified});
         try writer.print("  Passes run: {d}\n", .{self.passes_run});
-        
+
         // 高级优化统计
         const has_advanced = self.scalar_replacements > 0 or self.gvn_eliminations > 0 or
             self.advanced_sccp_propagations > 0 or self.slp_vectorizations > 0 or
@@ -294,6 +294,8 @@ pub const IROptimizer = struct {
     diagnostics: ?*DiagnosticEngine,
     verify_ir: bool = false,
 
+    /// 当前正在优化的模块（用于字符串常量折叠等需要访问字符串表的场景）
+    current_module: ?*Module = null,
     /// Set of used registers (for dead code elimination)
     used_registers: std.AutoHashMap(u32, void),
     /// Constant values for propagation
@@ -383,6 +385,9 @@ pub const IROptimizer = struct {
 
     /// Optimize an IR module
     pub fn optimize(self: *Self, module: *Module) !void {
+        self.current_module = module;
+        defer self.current_module = null;
+
         // Build call graph for inlining decisions
         try self.buildCallGraph(module);
 
@@ -479,44 +484,44 @@ pub const IROptimizer = struct {
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
-            
+
             // ========== 高级优化 Passes ==========
-            
+
             if (self.config.scalar_replacement) {
                 if (try self.runScalarReplacement(module)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
-            
+
             if (self.config.gvn) {
                 if (try self.runGlobalValueNumbering(module)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
-            
+
             if (self.config.advanced_sccp) {
                 if (try self.runAdvancedSCCP(module)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
-            
+
             if (self.config.loop_vectorization) {
                 if (try self.runLoopVectorization(module)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
-            
+
             if (self.config.slp_vectorization) {
                 if (try self.runSLPVectorization(module)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
-            
+
             if (self.config.polyhedral_optimization) {
                 if (try self.runPolyhedralOptimization(module)) {
                     changed = true;
@@ -707,10 +712,10 @@ pub const IROptimizer = struct {
 
         // 3. Optimize Loops
         // We iterate top-level loops. optimizeLoop will handle sub-loops recursively if needed,
-        // or we can just iterate all loops if we flatten them. 
+        // or we can just iterate all loops if we flatten them.
         // Analysis returns hierarchy. Let's process bottom-up (inner loops first) usually better,
         // but for basic LICM, processing any order is fine as long as we hoist to immediate pre-header.
-        
+
         for (loop_info.loops.items) |loop| {
             if (try self.optimizeLoop(func, loop, &dt)) {
                 changed = true;
@@ -747,7 +752,7 @@ pub const IROptimizer = struct {
         // An instruction is invariant if:
         // 1. It is side-effect free
         // 2. All operands are loop-invariant (constants or defined outside the loop)
-        
+
         var invariant_instrs = std.ArrayListUnmanaged(*Instruction){};
         defer invariant_instrs.deinit(self.allocator);
 
@@ -765,14 +770,14 @@ pub const IROptimizer = struct {
         // Move invariants to pre-header
         if (invariant_instrs.items.len > 0) {
             const pre_header = try self.getOrCreatePreHeader(func, loop, dt);
-            
+
             for (invariant_instrs.items) |inst| {
                 // Remove from original block
                 // We need to find which block it belongs to.
                 // Since we don't store parent pointer in Instruction, we search.
                 // Optimization: isLoopInvariant could return the block too.
                 // Or we just search again.
-                
+
                 var removed = false;
                 for (loop.blocks.items) |block| {
                     if (self.removeInstructionFromBlock(block, inst)) {
@@ -785,7 +790,7 @@ pub const IROptimizer = struct {
                     // Insert into pre-header (before terminator)
                     // If pre-header is empty (except terminator), just append.
                     // Pre-header should be a new block or a unique predecessor.
-                    
+
                     // We need to insert at the end of instructions list, but before terminator?
                     // BasicBlock.instructions does not include terminator.
                     try pre_header.instructions.append(self.allocator, inst);
@@ -797,12 +802,56 @@ pub const IROptimizer = struct {
         return changed;
     }
 
-    /// Check if instruction is loop invariant
+    /// comptime 纯函数白名单：这些函数无全局副作用，操作数不变时可安全提升
+    const pure_functions = std.StaticStringMap(void).initComptime(.{
+        .{ "array_sum", {} },
+        .{ "array_product", {} },
+        .{ "array_count", {} },
+        .{ "count", {} },
+        .{ "strlen", {} },
+        .{ "sizeof", {} },
+        .{ "array_key_exists", {} },
+        .{ "in_array", {} },
+    });
+
+    /// 检查指令是否为循环不变量（扩展：含 concat、纯函数调用等安全可提升的指令）
     fn isLoopInvariant(self: *Self, inst: *Instruction, loop: *Analysis.Loop) bool {
-        // 1. Must be side-effect free
+        // 纯常量指令始终可提升
+        switch (inst.op) {
+            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => return true,
+            else => {},
+        }
+
+        // concat 虽有分配副作用，但操作数为循环不变量时可安全提升
+        if (inst.op == .concat) {
+            const op = inst.op.concat;
+            return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop);
+        }
+
+        // 纯函数调用：操作数为循环不变量时可安全提升
+        if (inst.op == .call) {
+            const op = inst.op.call;
+            if (pure_functions.has(op.func_name)) {
+                for (op.args) |arg| {
+                    if (!self.isInvariant(arg, loop)) return false;
+                }
+                return true;
+            }
+        }
+
+        // strlen / array_count 等一元操作：操作数为循环不变量时可提升
+        if (inst.op == .strlen or inst.op == .array_count) {
+            const op = switch (inst.op) {
+                .strlen, .array_count => |v| v,
+                else => unreachable,
+            };
+            return self.isInvariant(op.operand, loop);
+        }
+
+        // 其他有副作用的指令不可提升
         if (self.hasSideEffects(inst)) return false;
 
-        // 2. Operands must be invariant
+        // 操作数必须全部为循环不变量
         return self.areOperandsInvariant(inst, loop);
     }
 
@@ -819,7 +868,7 @@ pub const IROptimizer = struct {
                 // For now, assume any store invalidates loads (conservative).
                 // Or better: check if there are any stores in the loop.
                 if (!self.isInvariant(op.ptr, loop)) return false;
-                if (self.hasStoreInLoop(loop)) return false; 
+                if (self.hasStoreInLoop(loop)) return false;
                 return true;
             },
             .cast => |op| return self.isInvariant(op.value, loop),
@@ -829,7 +878,7 @@ pub const IROptimizer = struct {
             // Constants are always invariant
             .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .arg_count, .has_arg => return true,
             // Allocas are invariant (address is constant)
-            .alloca => return true, 
+            .alloca => return true,
             else => return false, // Conservative
         }
     }
@@ -840,7 +889,7 @@ pub const IROptimizer = struct {
         // Find definition of register
         // Since we don't have use-def chains, we have to search blocks.
         // Optimization: If register ID is very small (params), it's invariant.
-        
+
         // Scan loop blocks to see if they define this register
         for (loop.blocks.items) |block| {
             for (block.instructions.items) |inst| {
@@ -853,7 +902,7 @@ pub const IROptimizer = struct {
             // However, a Phi in a loop header depends on back-edge, so it varies.
             // So Phi result is NOT invariant.
         }
-        
+
         return true; // Defined outside
     }
 
@@ -886,22 +935,22 @@ pub const IROptimizer = struct {
     fn getOrCreatePreHeader(self: *Self, func: *Function, loop: *Analysis.Loop, dt: *const Analysis.DominatorTree) !*BasicBlock {
         _ = dt;
         const header = loop.header;
-        
+
         // Check if there is already a unique predecessor that dominates header and is not in loop
         // And is not a back-edge source (which is in loop).
-        // Ideally, a pre-header is a block that has only 'header' as successor, 
+        // Ideally, a pre-header is a block that has only 'header' as successor,
         // and 'header' has only 'pre-header' as non-loop predecessor.
-        
+
         // Count non-loop predecessors
         var non_loop_preds = std.ArrayListUnmanaged(*BasicBlock){};
         defer non_loop_preds.deinit(self.allocator);
-        
+
         for (header.predecessors.items) |pred| {
             if (!loop.contains(pred)) {
                 try non_loop_preds.append(self.allocator, pred);
             }
         }
-        
+
         if (non_loop_preds.items.len == 1) {
             const pred = non_loop_preds.items[0];
             // Check if this pred flows ONLY to header
@@ -909,19 +958,50 @@ pub const IROptimizer = struct {
                 return pred; // Found valid pre-header
             }
         }
-        
-        // Create new pre-header
-        const pre_header = try func.createBlock("preheader");
-        
-        // Redirect non-loop predecessors to pre-header
+
+        // 创建新 pre-header 并插入到 header 之前（代码生成依赖块顺序）
+        const label_copy = try self.allocator.dupe(u8, "preheader");
+        const pre_header = try self.allocator.create(BasicBlock);
+        pre_header.* = BasicBlock.init(self.allocator, label_copy, 0);
+
+        // 找到 header 在 func.blocks 中的位置并在其前插入
+        var header_idx: usize = 0;
+        for (func.blocks.items, 0..) |b, idx| {
+            if (b == header) {
+                header_idx = idx;
+                break;
+            }
+        }
+        try func.blocks.insert(self.allocator, header_idx, pre_header);
+
+        // 重新编号 block index
+        for (func.blocks.items, 0..) |b, idx| {
+            b.index = @intCast(idx);
+        }
+
+        // 重定向非循环前驱 → pre_header
         for (non_loop_preds.items) |pred| {
             try self.redirectEdge(pred, header, pre_header);
         }
-        
-        // Connect pre-header to header
+
+        // 更新 header 中 phi 节点的 incoming：将非循环前驱替换为 pre_header
+        for (header.instructions.items) |inst| {
+            if (inst.*.op == .phi) {
+                const inc = inst.op.phi.incoming;
+                for (0..inc.len) |idx| {
+                    for (non_loop_preds.items) |nlp| {
+                        if (@constCast(inc.ptr)[idx].block == nlp) {
+                            @constCast(inc.ptr)[idx].block = pre_header;
+                        }
+                    }
+                }
+            }
+        }
+
+        // pre_header → header
         pre_header.terminator = .{ .br = header };
-        try Analysis.rebuildCFG(func); // Update edges
-        
+        try Analysis.rebuildCFG(func);
+
         return pre_header;
     }
 
@@ -944,7 +1024,7 @@ pub const IROptimizer = struct {
                             break;
                         }
                     }
-                    
+
                     if (modified) {
                         const new_cases = try self.allocator.alloc(Terminator.SwitchCase, sw.cases.len);
                         for (sw.cases, 0..) |case, i| {
@@ -983,62 +1063,62 @@ pub const IROptimizer = struct {
     /// Run Loop Unrolling on a function
     fn runLoopUnrollInFunction(self: *Self, func: *Function) !bool {
         var changed = false;
-        
+
         // We need dominator tree for loop detection
         // Note: Rebuild CFG first to be safe
         try Analysis.rebuildCFG(func);
         var dt = try Analysis.computeDominators(self.allocator, func);
         defer dt.deinit();
-        
+
         var loop_info = try Analysis.computeLoops(self.allocator, func, &dt);
         defer loop_info.deinit();
-        
+
         // Iterate loops
         // Since unrolling modifies CFG, we should be careful.
         // Safe approach: unroll one loop per pass, or handle carefully.
         // For now, let's just try to unroll loops, and if we unroll one, we stop for this pass.
         for (loop_info.loops.items) |loop| {
-             if (try self.unrollLoop(func, loop, &dt)) {
-                 changed = true;
-                 // Rebuild CFG to ensure successors/predecessors are correct for next passes
-                 try Analysis.rebuildCFG(func);
-                 break; // CFG changed, stop processing loops
-             }
+            if (try self.unrollLoop(func, loop, &dt)) {
+                changed = true;
+                // Rebuild CFG to ensure successors/predecessors are correct for next passes
+                try Analysis.rebuildCFG(func);
+                break; // CFG changed, stop processing loops
+            }
         }
-        
+
         return changed;
     }
 
     /// Try to unroll a loop
     fn unrollLoop(self: *Self, func: *Function, loop: *Analysis.Loop, dt: *const Analysis.DominatorTree) !bool {
         _ = dt;
-        
+
         // 1. Analyze loop to check if it's a candidate
         // We verify it has a single latch that conditionally branches to header (do-while style)
         // OR we can handle standard while loops if we are careful.
         // For now, let's stick to the structure:
         // Latch -> Header (Back Edge)
-        
+
         var latch: ?*BasicBlock = null;
         for (loop.blocks.items) |block| {
             for (block.successors.items) |succ| {
                 if (succ == loop.header) {
                     if (latch != null) {
                         // std.debug.print("Multiple latches found\n", .{});
-                        return false; 
+                        return false;
                     }
                     latch = block;
                 }
             }
         }
-        
+
         if (latch == null) {
             // std.debug.print("No latch found. Loop blocks: {d}\n", .{loop.blocks.items.len});
             return false;
         }
         const latch_block = latch.?;
         // std.debug.print("Found latch: {s}\n", .{latch_block.label});
-        
+
         // Check loop size
         var instruction_count: usize = 0;
         for (loop.blocks.items) |block| {
@@ -1048,13 +1128,13 @@ pub const IROptimizer = struct {
             // std.debug.print("Loop too large: {d}\n", .{instruction_count});
             return false;
         }
-        
+
         const factor = self.config.unroll_factor;
         if (factor <= 1) {
             // std.debug.print("Unroll factor too small: {d}\n", .{factor});
             return false;
         }
-        
+
         // Map to track register renames across iterations (Original -> Latest)
         var reg_map = std.AutoHashMap(u32, u32).init(self.allocator);
         defer reg_map.deinit();
@@ -1077,21 +1157,21 @@ pub const IROptimizer = struct {
                 }
             }
         }
-        
+
         // We will chain: Latch(Original) -> Clone1 -> Clone2 -> ... -> Clone(K-1) -> Header(Original)
         // The Latch(Original) currently points to Header. We will redirect it to Clone1.
-        
+
         var current_predecessor = latch_block;
         var expected_target = loop.header;
         var first_unrolled_header: ?*BasicBlock = null;
-        
+
         // We need to order blocks for cloning.
-        // Simple heuristic: Header first, then others. 
+        // Simple heuristic: Header first, then others.
         // If we just iterate loop.blocks, we might visit in wrong order, but since we are mapping
-        // based on "latest", and definitions usually dominate uses, 
+        // based on "latest", and definitions usually dominate uses,
         // and we handle PHIs specially, topological sort of body is best.
         // Since we assume simple loops, let's just use the order in loop.blocks but ensure Header is processed.
-        
+
         // Perform unrolling
         for (1..factor) |k| {
             // 1. Resolve Header PHIs for this iteration
@@ -1100,52 +1180,52 @@ pub const IROptimizer = struct {
             while (phi_it.next()) |entry| {
                 const phi_id = entry.key_ptr.*;
                 const input_id = entry.value_ptr.*;
-                
+
                 // Get the remapped input from previous iteration (or original if first iter)
                 const resolved_input = reg_map.get(input_id) orelse input_id;
-                
+
                 // Map the PHI result in this iteration to that input
                 try reg_map.put(phi_id, resolved_input);
             }
-            
+
             // 2. Clone blocks
             var first_cloned_block: ?*BasicBlock = null;
             var last_cloned_block: ?*BasicBlock = null;
-            
+
             // We need to map OriginalBlock -> NewBlock for this iteration to fix internal edges
             var block_map = std.AutoHashMap(*BasicBlock, *BasicBlock).init(self.allocator);
             defer block_map.deinit();
-            
+
             // First pass: Create blocks
             for (loop.blocks.items) |block| {
-                const suffix = try std.fmt.allocPrint(self.allocator, "_unroll_{d}_{s}", .{k, block.label});
+                const suffix = try std.fmt.allocPrint(self.allocator, "_unroll_{d}_{s}", .{ k, block.label });
                 defer self.allocator.free(suffix);
                 const new_block = try func.createBlock(suffix);
                 try block_map.put(block, new_block);
-                
+
                 if (block == loop.header) first_cloned_block = new_block;
                 if (block == latch_block) last_cloned_block = new_block;
             }
-            
+
             // Second pass: Clone instructions and fix edges
             for (loop.blocks.items) |block| {
                 const new_block = block_map.get(block).?;
-                
+
                 // Clone instructions
                 for (block.instructions.items) |inst| {
                     // Skip PHIs in Header (we mapped them already)
                     if (block == loop.header and inst.op == .phi) continue;
-                    
+
                     if (try self.cloneAndRemapInstruction(inst, &reg_map, &func.next_register_id)) |new_inst| {
                         try new_block.appendInstruction(new_inst);
                     }
                 }
-                
+
                 // Clone terminator
                 if (block.terminator) |term| {
                     var new_term = term;
                     self.remapRegistersInTerminator(&new_term, &reg_map);
-                    
+
                     // Remap branch targets
                     switch (new_term) {
                         .br => |*target| {
@@ -1163,7 +1243,7 @@ pub const IROptimizer = struct {
                     new_block.terminator = new_term;
                 }
             }
-            
+
             // Link previous latch to this iteration's header
             if (k == 1) {
                 first_unrolled_header = first_cloned_block;
@@ -1192,64 +1272,64 @@ pub const IROptimizer = struct {
                     }
                 }
                 if (!linked) {
-                     // var actual_target_label: []const u8 = "unknown";
-                     // if (current_predecessor.terminator) |*term| {
-                     //     switch (term.*) {
-                     //         .br => |*target| actual_target_label = target.*.label,
-                     //         .cond_br => |*cb| actual_target_label = cb.then_block.label,
-                     //         else => {},
-                     //     }
-                     // }
-                     // std.debug.print("Failed to link latch {s} to clone header {s} (expected {s}, actual {s})\n", .{current_predecessor.label, first_cloned_block.?.label, expected_target.label, actual_target_label});
+                    // var actual_target_label: []const u8 = "unknown";
+                    // if (current_predecessor.terminator) |*term| {
+                    //     switch (term.*) {
+                    //         .br => |*target| actual_target_label = target.*.label,
+                    //         .cond_br => |*cb| actual_target_label = cb.then_block.label,
+                    //         else => {},
+                    //     }
+                    // }
+                    // std.debug.print("Failed to link latch {s} to clone header {s} (expected {s}, actual {s})\n", .{current_predecessor.label, first_cloned_block.?.label, expected_target.label, actual_target_label});
                 } else {
                     // std.debug.print("Linked latch {s} to clone header {s}\n", .{current_predecessor.label, first_cloned_block.?.label});
                 }
             }
-            
+
             // Update expected target for next iteration
             // The cloned latch will point to the cloned header (because of cloneAndRemap)
             expected_target = first_cloned_block.?;
-            
+
             current_predecessor = last_cloned_block.?;
         }
-        
+
         // 3. Final Linking
-        
+
         // Link Original Latch -> Clone 1 Header
         if (latch_block.terminator) |*term| {
-             switch (term.*) {
-                 .br => |*target| {
-                     if (target.* == loop.header) target.* = first_unrolled_header.?;
-                 },
-                 .cond_br => |*cb| {
-                     if (cb.then_block == loop.header) cb.then_block = first_unrolled_header.?;
-                     if (cb.else_block == loop.header) cb.else_block = first_unrolled_header.?;
-                 },
-                 else => {},
-             }
+            switch (term.*) {
+                .br => |*target| {
+                    if (target.* == loop.header) target.* = first_unrolled_header.?;
+                },
+                .cond_br => |*cb| {
+                    if (cb.then_block == loop.header) cb.then_block = first_unrolled_header.?;
+                    if (cb.else_block == loop.header) cb.else_block = first_unrolled_header.?;
+                },
+                else => {},
+            }
         }
-        
+
         // Link Last Clone Latch -> Original Header
         if (current_predecessor.terminator) |*term| {
-             switch (term.*) {
-                 .br => |*target| {
-                     if (target.* == expected_target) target.* = loop.header;
-                 },
-                 .cond_br => |*cb| {
-                     if (cb.then_block == expected_target) cb.then_block = loop.header;
-                     if (cb.else_block == expected_target) cb.else_block = loop.header;
-                 },
-                 else => {},
-             }
+            switch (term.*) {
+                .br => |*target| {
+                    if (target.* == expected_target) target.* = loop.header;
+                },
+                .cond_br => |*cb| {
+                    if (cb.then_block == expected_target) cb.then_block = loop.header;
+                    if (cb.else_block == expected_target) cb.else_block = loop.header;
+                },
+                else => {},
+            }
         }
-        
+
         // 4. Update Original Header PHIs to take input from `current_predecessor` instead of `latch_block`.
         for (loop.header.instructions.items) |inst| {
             if (inst.*.op == .phi) {
                 // The phi incoming values from latch need to be updated.
                 // The incoming VALUE should be what `current_predecessor` produces.
                 // This is `reg_map.get(original_incoming_id)`.
-                
+
                 // We need to modify the `PhiIncoming` struct.
                 // `inst.op.phi.incoming` is a slice. We can modify in place.
                 const inc_ptr = @constCast(inst.op.phi.incoming.ptr);
@@ -1266,11 +1346,11 @@ pub const IROptimizer = struct {
                 }
             }
         }
-        
+
         // Rebuild CFG info (preds/succs) since we messed with pointers
         // Ideally we should update incrementally, but full rebuild is safer.
         // Analysis.rebuildCFG(func); // Call this after optimization pass
-        
+
         self.stats.loops_unrolled += 1;
         return true;
     }
@@ -1370,7 +1450,10 @@ pub const IROptimizer = struct {
                             // Add block if not already there
                             var found = false;
                             for (list.items) |b| {
-                                if (b == block) { found = true; break; }
+                                if (b == block) {
+                                    found = true;
+                                    break;
+                                }
                             }
                             if (!found) try list.append(self.allocator, block);
                         }
@@ -1407,7 +1490,7 @@ pub const IROptimizer = struct {
                     .op = .{ .phi = .{ .incoming = &.{} } }, // Empty initially
                     .location = alloca.location,
                 };
-                
+
                 // Prepend to block instructions (Phis must be first)
                 try block.instructions.insert(self.allocator, 0, phi_inst);
 
@@ -1440,15 +1523,15 @@ pub const IROptimizer = struct {
         // We'll assume valid code or handle it.
 
         if (func.getEntryBlock()) |entry| {
-             try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca);
+            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca);
         }
 
         // 6. Cleanup (Remove allocas)
         // Stores and loads were marked as NOPs in renameVariables.
         // We just need to remove the allocas themselves.
         for (promotable_allocas.items) |alloca| {
-             alloca.op = .nop;
-             self.stats.allocas_promoted += 1;
+            alloca.op = .nop;
+            self.stats.allocas_promoted += 1;
         }
 
         return true;
@@ -1457,12 +1540,12 @@ pub const IROptimizer = struct {
     /// Compute Iterated Dominance Frontier
     fn computeIDF(self: *Self, defs: []const *BasicBlock, dt: *const Analysis.DominatorTree) !std.ArrayListUnmanaged(*BasicBlock) {
         var idf = std.ArrayListUnmanaged(*BasicBlock){};
-        
+
         // Priority Queue using level (higher level = deeper)
         // We actually need to process by level for efficiency, but simple worklist is fine.
         var worklist = std.ArrayListUnmanaged(*BasicBlock){};
         defer worklist.deinit(self.allocator);
-        
+
         var visited = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
         defer visited.deinit();
 
@@ -1567,17 +1650,17 @@ pub const IROptimizer = struct {
             while (it.next()) |entry| {
                 const alloca = entry.key_ptr.*;
                 const phi_inst = entry.value_ptr.*;
-                
+
                 // Push phi result to stack
                 var stack = current_values.getPtr(alloca);
                 if (stack == null) {
-                     try current_values.put(alloca, .{});
-                     stack = current_values.getPtr(alloca);
+                    try current_values.put(alloca, .{});
+                    stack = current_values.getPtr(alloca);
                 }
-                
+
                 // Save current height
                 try stack_heights.put(alloca, stack.?.items.len);
-                
+
                 if (phi_inst.result) |res| {
                     try stack.?.append(self.allocator, res);
                 }
@@ -1597,7 +1680,7 @@ pub const IROptimizer = struct {
                                 // But since we are iterating, we can't update future instructions yet.
                                 // Wait, in SSA construction, we usually update uses.
                                 // But here we don't have use lists.
-                                // So we cheat: We make this load a "copy" or "move" (identity cast) 
+                                // So we cheat: We make this load a "copy" or "move" (identity cast)
                                 // or simply replace the instruction in place with a specialized "alias" op?
                                 // No, standard way is to map the old register ID to the new register ID (val.id).
                                 // BUT, we don't have a global map for that here.
@@ -1621,7 +1704,7 @@ pub const IROptimizer = struct {
                                 // Or better: `r1` IS the register we want to replace.
                                 // But `r1` is defined here.
                                 //
-                                // We can change `inst.op` to `.bit_or { .lhs = val, .rhs = val }` (nop move) 
+                                // We can change `inst.op` to `.bit_or { .lhs = val, .rhs = val }` (nop move)
                                 // or `.cast` or `.select`.
                                 //
                                 // Let's use a new op `copy` or just `add val, 0` or similar.
@@ -1638,10 +1721,10 @@ pub const IROptimizer = struct {
                         // Push value to stack
                         var stack = current_values.getPtr(alloca);
                         if (stack == null) {
-                             try current_values.put(alloca, .{});
-                             stack = current_values.getPtr(alloca);
+                            try current_values.put(alloca, .{});
+                            stack = current_values.getPtr(alloca);
                         }
-                        
+
                         // Save current height (if not already saved for this block? No, stores push new values)
                         // Actually we need to pop *all* pushes from this block.
                         // So we should track pushes.
@@ -1652,9 +1735,9 @@ pub const IROptimizer = struct {
                         if (!stack_heights.contains(alloca)) {
                             try stack_heights.put(alloca, stack.?.items.len);
                         }
-                        
+
                         try stack.?.append(self.allocator, op.value);
-                        
+
                         // Remove store
                         inst.op = .nop;
                     }
@@ -1665,32 +1748,32 @@ pub const IROptimizer = struct {
 
         // 3. Update Successors' Phis
         for (block.successors.items) |succ| {
-             if (new_phis.getPtr(succ)) |succ_phis| {
-                 var it = succ_phis.iterator();
-                 while (it.next()) |entry| {
-                     const alloca = entry.key_ptr.*;
-                     const phi_inst = entry.value_ptr.*;
-                     
-                     if (current_values.getPtr(alloca)) |stack| {
-                         if (stack.items.len > 0) {
-                             const val = stack.items[stack.items.len - 1];
-                             
-                             // Add incoming value to phi
-                             // We need to reallocate the incoming slice
-                             const old_incoming = phi_inst.op.phi.incoming;
-                             const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
-                             @memcpy(new_incoming[0..old_incoming.len], old_incoming);
-                             new_incoming[old_incoming.len] = .{ .value = val, .block = block };
-                             
-                             // Free old slice if it wasn't empty/static?
-                             // Currently slices are owned by instruction if created.
-                             if (old_incoming.len > 0) self.allocator.free(old_incoming);
-                             
-                             phi_inst.op.phi.incoming = new_incoming;
-                         }
-                     }
-                 }
-             }
+            if (new_phis.getPtr(succ)) |succ_phis| {
+                var it = succ_phis.iterator();
+                while (it.next()) |entry| {
+                    const alloca = entry.key_ptr.*;
+                    const phi_inst = entry.value_ptr.*;
+
+                    if (current_values.getPtr(alloca)) |stack| {
+                        if (stack.items.len > 0) {
+                            const val = stack.items[stack.items.len - 1];
+
+                            // Add incoming value to phi
+                            // We need to reallocate the incoming slice
+                            const old_incoming = phi_inst.op.phi.incoming;
+                            const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
+                            @memcpy(new_incoming[0..old_incoming.len], old_incoming);
+                            new_incoming[old_incoming.len] = .{ .value = val, .block = block };
+
+                            // Free old slice if it wasn't empty/static?
+                            // Currently slices are owned by instruction if created.
+                            if (old_incoming.len > 0) self.allocator.free(old_incoming);
+
+                            phi_inst.op.phi.incoming = new_incoming;
+                        }
+                    }
+                }
+            }
         }
 
         // 4. Recurse
@@ -1705,7 +1788,7 @@ pub const IROptimizer = struct {
         while (it.next()) |entry| {
             const alloca = entry.key_ptr.*;
             const height = entry.value_ptr.*;
-            
+
             if (current_values.getPtr(alloca)) |stack| {
                 stack.shrinkRetainingCapacity(height);
             }
@@ -2450,8 +2533,6 @@ pub const IROptimizer = struct {
         block_ids: *const std.AutoHashMap(*BasicBlock, usize),
         executable: []const bool,
     ) ?SCCPLattice {
-        _ = self;
-
         const get = struct {
             fn reg(l: []const SCCPLattice, r: Register) SCCPLattice {
                 if (@as(usize, r.id) >= l.len) return .overdefined;
@@ -2592,6 +2673,29 @@ pub const IROptimizer = struct {
                     break :blk .{ .constant = .{ .bool_val = !v.constant.bool_val } };
                 }
                 if (v == .unknown) break :blk .unknown;
+                break :blk .overdefined;
+            },
+            .concat => |op| blk: {
+                const a = get(lattice, op.lhs);
+                const b = get(lattice, op.rhs);
+                if (a == .constant and b == .constant and a.constant == .string_id and b.constant == .string_id) {
+                    if (self.current_module) |module| {
+                        const lhs_str = module.getString(a.constant.string_id) orelse break :blk .overdefined;
+                        const rhs_str = module.getString(b.constant.string_id) orelse break :blk .overdefined;
+                        if (lhs_str.len + rhs_str.len > 1024) break :blk .overdefined;
+                        var buf: [1024]u8 = undefined;
+                        @memcpy(buf[0..lhs_str.len], lhs_str);
+                        @memcpy(buf[lhs_str.len .. lhs_str.len + rhs_str.len], rhs_str);
+                        const duped = self.allocator.dupe(u8, buf[0 .. lhs_str.len + rhs_str.len]) catch break :blk .overdefined;
+                        const new_id = module.internString(duped) catch {
+                            self.allocator.free(duped);
+                            break :blk .overdefined;
+                        };
+                        break :blk .{ .constant = .{ .string_id = new_id } };
+                    }
+                    break :blk .overdefined;
+                }
+                if (a == .unknown or b == .unknown) break :blk .unknown;
                 break :blk .overdefined;
             },
             else => null,
@@ -2822,6 +2926,67 @@ pub const IROptimizer = struct {
                     if (self.constant_values.get(op.rhs.id)) |rhs| {
                         if (lhs == .bool_val and rhs == .bool_val) {
                             inst.op = .{ .const_bool = lhs.bool_val or rhs.bool_val };
+                            return true;
+                        }
+                    }
+                }
+            },
+            .concat => |op| {
+                const module = self.current_module orelse return false;
+                if (self.constant_values.get(op.lhs.id)) |lhs| {
+                    if (self.constant_values.get(op.rhs.id)) |rhs| {
+                        if (lhs == .string_id and rhs == .string_id) {
+                            const lhs_str = module.getString(lhs.string_id) orelse return false;
+                            const rhs_str = module.getString(rhs.string_id) orelse return false;
+                            if (lhs_str.len + rhs_str.len > 1024) return false;
+                            var buf: [1024]u8 = undefined;
+                            @memcpy(buf[0..lhs_str.len], lhs_str);
+                            @memcpy(buf[lhs_str.len .. lhs_str.len + rhs_str.len], rhs_str);
+                            const merged = buf[0 .. lhs_str.len + rhs_str.len];
+                            const duped = self.allocator.dupe(u8, merged) catch return false;
+                            const new_id = module.internString(duped) catch {
+                                self.allocator.free(duped);
+                                return false;
+                            };
+                            inst.op = .{ .const_string = new_id };
+                            return true;
+                        }
+                    }
+                }
+            },
+            // comptime 内置纯函数常量折叠：abs/max/min/strlen
+            .call => |op| {
+                if (std.mem.eql(u8, op.func_name, "abs") and op.args.len == 1) {
+                    if (self.constant_values.get(op.args[0].id)) |v| {
+                        if (v == .int) {
+                            inst.op = .{ .const_int = if (v.int < 0) -v.int else v.int };
+                            return true;
+                        }
+                    }
+                } else if (std.mem.eql(u8, op.func_name, "max") and op.args.len == 2) {
+                    if (self.constant_values.get(op.args[0].id)) |a| {
+                        if (self.constant_values.get(op.args[1].id)) |b| {
+                            if (a == .int and b == .int) {
+                                inst.op = .{ .const_int = @max(a.int, b.int) };
+                                return true;
+                            }
+                        }
+                    }
+                } else if (std.mem.eql(u8, op.func_name, "min") and op.args.len == 2) {
+                    if (self.constant_values.get(op.args[0].id)) |a| {
+                        if (self.constant_values.get(op.args[1].id)) |b| {
+                            if (a == .int and b == .int) {
+                                inst.op = .{ .const_int = @min(a.int, b.int) };
+                                return true;
+                            }
+                        }
+                    }
+                } else if (std.mem.eql(u8, op.func_name, "strlen") and op.args.len == 1) {
+                    const module = self.current_module orelse return false;
+                    if (self.constant_values.get(op.args[0].id)) |v| {
+                        if (v == .string_id) {
+                            const s = module.getString(v.string_id) orelse return false;
+                            inst.op = .{ .const_int = @intCast(s.len) };
                             return true;
                         }
                     }
@@ -3477,19 +3642,21 @@ pub const IROptimizer = struct {
             .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .arg_count, .has_arg => op,
             .alloca => op,
             .param => op,
-            
+
             // Deep copy needed for slice fields
             .call => |call| blk: {
                 const new_args = try self.allocator.alloc(Register, call.args.len);
                 for (call.args, 0..) |arg, i| {
                     new_args[i] = remapRegister(arg, reg_map);
                 }
-                break :blk .{ .call = .{
-                     .func_name = call.func_name, // String literal/slice, usually static or owned by module? Assumed safe to share if const
-                     .args = new_args,
-                     .return_type = call.return_type,
-                 } };
-             },
+                break :blk .{
+                    .call = .{
+                        .func_name = call.func_name, // String literal/slice, usually static or owned by module? Assumed safe to share if const
+                        .args = new_args,
+                        .return_type = call.return_type,
+                    },
+                };
+            },
             .call_indirect => |call| blk: {
                 const new_args = try self.allocator.alloc(Register, call.args.len);
                 for (call.args, 0..) |arg, i| {
@@ -3560,17 +3727,17 @@ pub const IROptimizer = struct {
                 } };
             },
             .phi => |phi| blk: {
-                 const IncomingType = @TypeOf(phi.incoming[0]);
-                 const new_incoming = try self.allocator.alloc(IncomingType, phi.incoming.len);
-                 for (phi.incoming, 0..) |inc, i| {
-                    // Block pointers need to be remapped if we are cloning blocks... 
+                const IncomingType = @TypeOf(phi.incoming[0]);
+                const new_incoming = try self.allocator.alloc(IncomingType, phi.incoming.len);
+                for (phi.incoming, 0..) |inc, i| {
+                    // Block pointers need to be remapped if we are cloning blocks...
                     // But here we only remap registers.
                     // If blocks are also cloned, we might need a block map.
                     // For Loop Unrolling, we fix up Phi nodes separately after cloning.
                     // So we can just copy the block pointer for now?
                     // Or maybe we should clone the structure.
                     new_incoming[i] = .{
-                        .block = inc.block, 
+                        .block = inc.block,
                         .value = remapRegister(inc.value, reg_map),
                     };
                 }
@@ -3837,16 +4004,16 @@ pub const IROptimizer = struct {
         };
         var expr_map = std.AutoHashMap(u64, CSEEntry).init(self.allocator);
         defer expr_map.deinit();
-        
+
         // We must visit blocks in dominance order (e.g. RPO or pre-order on DomTree)
         // For simplicity, we just iterate blocks. But to be correct, we only reuse if:
         // 1. Definition dominates Use
         // Since we process all instructions, if we find a match in expr_map, we check dominance.
-        
+
         for (func.blocks.items) |block| {
             // Optimization: If we process blocks in RPO, we see definitions before uses more often.
             // But checking dominance is always required for correctness unless we scope the map.
-            
+
             for (block.instructions.items) |inst| {
                 // Only consider pure expressions
                 if (self.hasSideEffects(inst)) continue;
@@ -3864,30 +4031,30 @@ pub const IROptimizer = struct {
                             // But we need to update all USERS of 'result' to use 'entry.reg'
                             // Since we don't have use-def chains, this is expensive (scan all insts).
                             // For now, let's just mark it.
-                            // To implement replacement: 
+                            // To implement replacement:
                             // 1. Replace usages
                             // 2. Turn this inst into a COPY (or NOP if we replace usages directly)
-                            
+
                             // Let's implement usage replacement
                             self.replaceRegisterUsage(func, result, entry.reg);
-                            
+
                             // Turn current instruction into NOP
                             // We can't easily remove it from list while iterating (unless we handle index)
                             // So we make it a NOP or a COPY.
-                            // But we don't have COPY instruction? 
+                            // But we don't have COPY instruction?
                             // If we replaced usages, this instruction is dead (if side-effect free).
                             // DCE will remove it later.
-                            
+
                             // We should clear the result so it looks like it produces nothing?
                             // Or just change op to Nop.
                             // However, 'inst' is a pointer to the instruction in the list.
-                            
+
                             // IMPORTANT: We need to modify the instruction in place.
                             // Deinit old ops if needed.
                             inst.deinit(self.allocator);
                             inst.op = .nop;
                             inst.result = null; // Result is no longer produced here
-                            
+
                             self.stats.cse_eliminations += 1;
                             changed = true;
                         }
@@ -3921,15 +4088,11 @@ pub const IROptimizer = struct {
     fn replaceRegisterInInst(self: *Self, inst: *Instruction, old_reg: Register, new_reg: Register) void {
         _ = self;
         switch (inst.op) {
-            .add, .sub, .mul, .div, .mod, .pow,
-            .bit_and, .bit_or, .bit_xor, .shl, .shr,
-            .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship,
-            .and_, .or_, .concat => |*op| {
+            .add, .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship, .and_, .or_, .concat => |*op| {
                 if (op.lhs.id == old_reg.id) op.lhs = new_reg;
                 if (op.rhs.id == old_reg.id) op.rhs = new_reg;
             },
-            .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type,
-            .channel_close, .await_ => |*op| {
+            .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type, .channel_close, .await_ => |*op| {
                 if (op.operand.id == old_reg.id) op.operand = new_reg;
             },
             .channel_recv => |*op| {
@@ -4254,14 +4417,14 @@ pub const IROptimizer = struct {
                                 .op = .{ .const_int = shift },
                                 .location = inst.location,
                             };
-                            
+
                             try block.instructions.insert(self.allocator, index, shift_inst);
-                            
+
                             inst.op = .{ .shl = .{
                                 .lhs = op.lhs,
                                 .rhs = shift_reg,
                             } };
-                            
+
                             return 1;
                         }
                     }
@@ -4279,14 +4442,14 @@ pub const IROptimizer = struct {
                                 .op = .{ .const_int = shift },
                                 .location = inst.location,
                             };
-                            
+
                             try block.instructions.insert(self.allocator, index, shift_inst);
-                            
+
                             inst.op = .{ .shr = .{
                                 .lhs = op.lhs,
                                 .rhs = shift_reg,
                             } };
-                            
+
                             return 1;
                         }
                     }
@@ -4304,14 +4467,14 @@ pub const IROptimizer = struct {
                                 .op = .{ .const_int = rhs.int - 1 },
                                 .location = inst.location,
                             };
-                            
+
                             try block.instructions.insert(self.allocator, index, mask_inst);
-                            
+
                             inst.op = .{ .bit_and = .{
                                 .lhs = op.lhs,
                                 .rhs = mask_reg,
                             } };
-                            
+
                             return 1;
                         }
                     }
@@ -4330,11 +4493,11 @@ pub const IROptimizer = struct {
         if (uval & (uval - 1) != 0) return null;
         return @intCast(@ctz(uval));
     }
-    
+
     // ========================================================================
     // 高级优化 Passes（完整实现）
     // ========================================================================
-    
+
     /// 标量替换 - Java HotSpot C2
     // ========== 高级优化函数（简化版）==========
 
