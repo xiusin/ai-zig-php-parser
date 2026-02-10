@@ -2292,7 +2292,7 @@ pub const NativeLinker = struct {
     }
 
     /// 生成终止指令（简化版，用于状态机）
-    fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void), func: *const IR.Function, _: usize, _: bool) !void {
+    fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void), func: *const IR.Function, current_block_idx: usize, _: bool) !void {
         var writer = code.writer(self.allocator);
         switch (term) {
             .ret => |ret_val| {
@@ -2338,6 +2338,10 @@ pub const NativeLinker = struct {
                         break;
                     }
                 }
+                
+                // 设置目标块的 phi 节点值
+                try self.generatePhiAssignments(writer, func, target, current_block_idx);
+                
                 try writer.print("                prev_block = current_block;\n                current_block = {d};\n", .{target_idx});
             },
             .cond_br => |br| {
@@ -2362,10 +2366,17 @@ pub const NativeLinker = struct {
                 } else {
                     try writer.print("reg_{d}.toBool()", .{br.cond.id});
                 }
-                try writer.print(
-                    ") {{\n                    current_block = {d};\n                }} else {{\n                    current_block = {d};\n                }}\n",
-                    .{ then_idx, else_idx },
-                );
+                try writer.writeAll(") {\n");
+                
+                // 设置 then 分支的 phi 值
+                try self.generatePhiAssignments(writer, func, br.then_block, current_block_idx);
+                
+                try writer.print("                    current_block = {d};\n                }} else {{\n", .{then_idx});
+                
+                // 设置 else 分支的 phi 值
+                try self.generatePhiAssignments(writer, func, br.else_block, current_block_idx);
+                
+                try writer.print("                    current_block = {d};\n                }}\n", .{else_idx});
             },
             .throw => |ex_reg| {
                 try writer.print("                runtime.setException(reg_{d});\n", .{ex_reg.id});
@@ -4463,28 +4474,93 @@ pub const NativeLinker = struct {
     /// 尝试生成结构化控制流（新版本，使用 ArrayList writer）
     fn tryGenerateStructuredControlFlowNew(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void)) !bool {
         _ = alloca_regs;
-        _ = writer;
-        _ = func;
-        _ = cleanup_regs;
-        _ = self;
         
-        // 暂时禁用结构化控制流，修复嵌套循环问题
-        return false;
-    }
-    
-    /// 生成结构化代码（新版本）
-    fn generateStructuredCodeNew(self: *Self, writer: anytype, func: *const IR.Function, cfg: *ControlFlowAnalysis, cleanup_regs: []const usize) !bool {
-        // 如果没有循环，返回 false
+        // 分析控制流
+        var cfg = ControlFlowAnalysis.init(self.allocator);
+        defer cfg.deinit();
+        
+        try self.buildCFG(func, &cfg);
+        try self.detectLoops(func, &cfg);
+        
         if (cfg.loops.items.len == 0) {
             return false;
         }
         
-        var code_list = writer.context.self;
-        var current_block: usize = 0;
+        // 生成结构化代码
+        return try self.generateStructuredCodeNew(writer, func, &cfg, cleanup_regs);
+    }
+    
+    /// 生成结构化代码（新版本，支持嵌套循环）
+    fn generateStructuredCodeNew(self: *Self, writer: anytype, func: *const IR.Function, cfg: *ControlFlowAnalysis, cleanup_regs: []const usize) !bool {
+        if (cfg.loops.items.len == 0) {
+            return false;
+        }
         
-        for (cfg.loops.items) |loop| {
-            // 生成循环前的代码
-            while (current_block < loop.header) {
+        // 标记已处理的块
+        var processed = try std.ArrayList(bool).initCapacity(self.allocator, func.blocks.items.len);
+        defer processed.deinit(self.allocator);
+        for (0..func.blocks.items.len) |_| {
+            try processed.append(self.allocator, false);
+        }
+        
+        // 递归生成代码
+        try self.generateBlocksRecursive(writer, func, cfg, cleanup_regs, &processed, 0, func.blocks.items.len);
+        
+        return true;
+    }
+    
+    /// 递归生成块代码（支持嵌套循环）
+    fn generateBlocksRecursive(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        cfg: *ControlFlowAnalysis,
+        cleanup_regs: []const usize,
+        processed: *std.ArrayList(bool),
+        start_idx: usize,
+        end_idx: usize
+    ) !void {
+        var current_block = start_idx;
+        var code_list = writer.context.self;
+        
+        while (current_block < end_idx) {
+            if (processed.items[current_block]) {
+                current_block += 1;
+                continue;
+            }
+            
+            // 检查是否是循环头
+            var is_loop_header = false;
+            var loop_info: ?LoopInfo = null;
+            for (cfg.loops.items) |loop| {
+                if (loop.header == current_block) {
+                    is_loop_header = true;
+                    loop_info = loop;
+                    break;
+                }
+            }
+            
+            if (is_loop_header) {
+                const loop = loop_info.?;
+                
+                // 生成循环
+                if (loop.is_for_loop) {
+                    try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+                } else {
+                    try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+                }
+                
+                // 标记循环内的所有块为已处理
+                try self.markLoopBlocksProcessed(func, loop, processed);
+                
+                // 跳到循环退出块
+                if (loop.exit_block) |exit_idx| {
+                    current_block = exit_idx;
+                } else {
+                    current_block += 1;
+                }
+            } else {
+                // 生成普通块
                 const block = func.blocks.items[current_block];
                 try writer.print("    // Block {d}: {s}\n", .{ current_block, block.label });
                 
@@ -4493,59 +4569,70 @@ pub const NativeLinker = struct {
                     try self.generateInstructionSimple(code_list, inst);
                 }
                 
+                // 处理终止指令
+                if (block.terminator) |term| {
+                    switch (term) {
+                        .ret => |maybe_reg| {
+                            if (cleanup_regs.len > 0) {
+                                try writer.writeAll("    // Cleanup\n");
+                                for (cleanup_regs) |reg_id| {
+                                    if (!self.shouldReleaseReg(reg_id)) continue;
+                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                }
+                            }
+                            if (maybe_reg) |reg| {
+                                try writer.print("    return reg_{d};\n", .{reg.id});
+                            } else {
+                                try writer.writeAll("    return runtime.Value.initNull();\n");
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                
+                processed.items[current_block] = true;
                 current_block += 1;
             }
-            
-            // 生成循环
-            if (loop.is_for_loop) {
-                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-            } else {
-                try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
-            }
-            
-            // 标记循环块已处理（但不跳过，让后续逻辑处理）
-            if (loop.exit_block) |exit_idx| {
-                if (exit_idx > current_block) {
-                    current_block = exit_idx;
+        }
+    }
+    
+    /// 标记循环内的所有块为已处理
+    fn markLoopBlocksProcessed(self: *Self, func: *const IR.Function, loop: LoopInfo, processed: *std.ArrayList(bool)) !void {
+        _ = self;
+        
+        // 标记 header
+        processed.items[loop.header] = true;
+        
+        // 标记 body
+        processed.items[loop.body_start] = true;
+        
+        // 标记 increment
+        if (loop.increment) |inc| {
+            processed.items[inc] = true;
+        }
+        
+        // 标记循环内的所有块（通过遍历找到属于循环的块）
+        for (func.blocks.items, 0..) |block, idx| {
+            if (idx >= loop.header and idx < (loop.exit_block orelse func.blocks.items.len)) {
+                if (idx != loop.header and idx != loop.body_start and idx != (loop.increment orelse 9999)) {
+                    // 检查是否是循环内的块
+                    if (block.terminator) |term| {
+                        switch (term) {
+                            .br => |target| {
+                                // 如果跳转到 header，说明是循环内的块
+                                for (func.blocks.items, 0..) |b, i| {
+                                    if (b == target and i == loop.header) {
+                                        processed.items[idx] = true;
+                                        break;
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
+                    }
                 }
             }
         }
-        
-        // 生成剩余的代码
-        while (current_block < func.blocks.items.len) {
-            const block = func.blocks.items[current_block];
-            try writer.print("    // Block {d}: {s}\n", .{ current_block, block.label });
-            
-            for (block.instructions.items) |inst| {
-                try code_list.appendSlice(self.allocator, "    ");
-                try self.generateInstructionSimple(code_list, inst);
-            }
-            
-            // 处理终止指令
-            if (block.terminator) |term| {
-                switch (term) {
-                    .ret => |maybe_reg| {
-                        if (cleanup_regs.len > 0) {
-                            try writer.writeAll("    // Cleanup\n");
-                            for (cleanup_regs) |reg_id| {
-                                if (!self.shouldReleaseReg(reg_id)) continue;
-                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
-                            }
-                        }
-                        if (maybe_reg) |reg| {
-                            try writer.print("    return reg_{d};\n", .{reg.id});
-                        } else {
-                            try writer.writeAll("    return runtime.Value.initNull();\n");
-                        }
-                    },
-                    else => {},
-                }
-            }
-            
-            current_block += 1;
-        }
-        
-        return true;
     }
     
     /// 生成结构化 while 循环（新版本）
@@ -7509,13 +7596,14 @@ pub const NativeLinker = struct {
             // PHI指令（用于三元运算符等控制流合并）
             // ========================================================================
             .phi => |op| {
-                // PHI指令的处理：
-                // 在状态机模式中，每个前驱块在跳转到merge块之前会设置PHI结果
-                // 这里我们只需要声明，实际的赋值在前驱块的跳转代码中完成
-                // 但为了代码完整性，我们生成一个默认赋值
-                if (op.incoming.len > 0) {
-                    // 注释说明这是PHI节点
-                    try writer.writeAll("        // PHI node: value set by predecessor blocks\n");
+                // PHI 节点：根据前驱块选择值
+                // 在状态机中，我们在每个前驱块跳转前设置 phi 结果
+                // 这里生成默认值（第一个 incoming）
+                if (inst.result) |phi_result| {
+                    if (op.incoming.len > 0) {
+                        const first_value = op.incoming[0].value;
+                        try writer.print("        reg_{d} = reg_{d}; // PHI default\n", .{ phi_result.id, first_value.id });
+                    }
                 }
             },
 
