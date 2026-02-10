@@ -4533,35 +4533,11 @@ pub const NativeLinker = struct {
             return false;
         }
 
-        // 过滤掉嵌套在其他循环内的循环
-        var top_level_loops = try std.ArrayList(LoopInfo).initCapacity(self.allocator, cfg.loops.items.len);
-        defer top_level_loops.deinit(self.allocator);
-        
-        std.debug.print("Total loops: {d}\n", .{cfg.loops.items.len});
-        for (cfg.loops.items, 0..) |loop, i| {
-            std.debug.print("Loop {d}: header={d}, body={d}..{d}, exit={?d}\n", .{ i, loop.header, loop.body_start, loop.body_end, loop.exit_block });
-            var is_nested = false;
-            for (cfg.loops.items) |other_loop| {
-                // 检查 loop 是否在 other_loop 的循环体内
-                if (loop.header != other_loop.header and
-                    loop.header >= other_loop.body_start and
-                    loop.header <= other_loop.body_end) {
-                    is_nested = true;
-                    std.debug.print("  -> nested in loop header={d}\n", .{other_loop.header});
-                    break;
-                }
-            }
-            if (!is_nested) {
-                try top_level_loops.append(self.allocator, loop);
-                std.debug.print("  -> top-level\n", .{});
-            }
-        }
-
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
 
         // 生成第一个循环前的块
-        const first_loop = top_level_loops.items[0];
+        const first_loop = cfg.loops.items[0];
         for (0..first_loop.header) |idx| {
             const block = func.blocks.items[idx];
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
@@ -4572,14 +4548,14 @@ pub const NativeLinker = struct {
             try processed.put(idx, {});
         }
 
-        // 顺序生成每个顶层循环及其后续块
-        for (top_level_loops.items) |loop| {
+        // 只生成顶层循环（子循环在生成父循环 body 时递归生成）
+        for (cfg.loops.items) |loop| {
             // 标记循环块为已处理
             try processed.put(loop.header, {});
-            for (loop.body_start..loop.body_end + 1) |idx| {
-                try processed.put(idx, {});
+            var it = loop.blocks.iterator();
+            while (it.next()) |entry| {
+                try processed.put(entry.key_ptr.*, {});
             }
-            if (loop.increment) |inc| try processed.put(inc, {});
             if (loop.exit_block) |exit| try processed.put(exit, {});
 
             // 生成循环
@@ -5972,6 +5948,32 @@ pub const NativeLinker = struct {
         exit_block: ?usize, // 循环出口块
         increment: ?usize, // 增量块（for 循环）
         is_for_loop: bool, // 是否是 for 循环
+        parent: ?usize = null,  // 父循环索引
+        children: std.ArrayList(usize),  // 子循环索引列表
+        blocks: std.AutoHashMap(usize, void),  // 所有属于此循环的块
+        
+        pub fn init(allocator: Allocator) !LoopInfo {
+            return .{
+                .header = 0,
+                .body_start = 0,
+                .body_end = 0,
+                .exit_block = null,
+                .increment = null,
+                .is_for_loop = false,
+                .parent = null,
+                .children = try std.ArrayList(usize).initCapacity(allocator, 0),
+                .blocks = std.AutoHashMap(usize, void).init(allocator),
+            };
+        }
+        
+        pub fn deinit(self: *LoopInfo, allocator: Allocator) void {
+            self.children.deinit(allocator);
+            self.blocks.deinit();
+        }
+        
+        pub fn contains(self: *const LoopInfo, block_idx: usize) bool {
+            return self.blocks.contains(block_idx);
+        }
     };
 
     /// 尝试生成结构化控制流（最激进的优化）
@@ -6066,19 +6068,25 @@ pub const NativeLinker = struct {
 
     /// 检测循环（回边分析）
     fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
-        // 检测所有可能的循环头：有条件分支且有回边的块
+        // 第一步：检测所有循环（回边分析）
+        var raw_loops = try std.ArrayList(LoopInfo).initCapacity(self.allocator, 0);
+        defer {
+            for (raw_loops.items) |*loop| {
+                loop.deinit(self.allocator);
+            }
+            raw_loops.deinit(self.allocator);
+        }
+        
         for (func.blocks.items, 0..) |block, header_idx| {
             const term = block.terminator orelse continue;
             if (term != .cond_br) continue;
 
-            // 检查是否有回边指向这个块
             const preds = cfg.predecessors.get(header_idx) orelse continue;
             
             var has_back_edge = false;
             var back_edge_source: usize = 0;
             
             for (preds.items) |pred_idx| {
-                // 回边：从后面的块跳回来
                 if (pred_idx >= header_idx) {
                     has_back_edge = true;
                     back_edge_source = pred_idx;
@@ -6087,17 +6095,127 @@ pub const NativeLinker = struct {
             }
 
             if (has_back_edge) {
-                // 分析循环结构
                 if (try self.analyzeLoop(func, cfg, header_idx, back_edge_source)) |loop_info| {
-                    try cfg.loops.append(self.allocator, loop_info);
+                    try raw_loops.append(self.allocator, loop_info);
                 }
+            }
+        }
+        
+        // 第二步：计算每个循环包含的所有块（使用 DFS）
+        std.debug.print("Computing loop blocks...\n", .{});
+        for (raw_loops.items, 0..) |*loop, i| {
+            std.debug.print("Computing blocks for loop {d}\n", .{i});
+            try self.computeLoopBlocks(func, cfg, loop);
+            std.debug.print("Loop {d}: blocks count={d}\n", .{ i, loop.blocks.count() });
+        }
+        
+        // 第三步：构建循环嵌套树（基于块包含关系）
+        try self.buildLoopNestingTree(&raw_loops);
+        
+        // 第四步：只保留顶层循环到 cfg.loops
+        for (raw_loops.items) |loop| {
+            if (loop.parent == null) {
+                // 深拷贝顶层循环
+                var top_loop = loop;
+                top_loop.children = try std.ArrayList(usize).initCapacity(self.allocator, loop.children.items.len);
+                try top_loop.children.appendSlice(self.allocator, loop.children.items);
+                top_loop.blocks = std.AutoHashMap(usize, void).init(self.allocator);
+                var it = loop.blocks.iterator();
+                while (it.next()) |entry| {
+                    try top_loop.blocks.put(entry.key_ptr.*, {});
+                }
+                try cfg.loops.append(self.allocator, top_loop);
+            }
+        }
+    }
+    
+    /// 计算循环包含的所有块（DFS 从 header 到 exit）
+    fn computeLoopBlocks(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis, loop: *LoopInfo) !void {
+        
+        var visited = std.AutoHashMap(usize, void).init(cfg.allocator);
+        defer visited.deinit();
+        
+        var stack = try std.ArrayList(usize).initCapacity(cfg.allocator, 0);
+        defer stack.deinit(cfg.allocator);
+        
+        try stack.append(cfg.allocator, loop.header);
+        try loop.blocks.put(loop.header, {});
+        
+        while (stack.items.len > 0) {
+            const current = stack.pop() orelse break;
+            if (visited.contains(current)) continue;
+            try visited.put(current, {});
+            
+            // 不要越过 exit 块
+            if (loop.exit_block) |exit| {
+                if (current == exit) continue;
+            }
+            
+            // 遍历后继
+            const block = func.blocks.items[current];
+            const term = block.terminator orelse continue;
+            
+            switch (term) {
+                .br => |target| {
+                    const target_idx = self.tryFindBlockIndex(func, target);
+                    if (target_idx) |idx| {
+                        if (!visited.contains(idx)) {
+                            try stack.append(cfg.allocator, idx);
+                            try loop.blocks.put(idx, {});
+                        }
+                    }
+                },
+                .cond_br => |cond| {
+                    const then_idx = self.tryFindBlockIndex(func, cond.then_block);
+                    const else_idx = self.tryFindBlockIndex(func, cond.else_block);
+                    
+                    if (then_idx) |idx| {
+                        if (!visited.contains(idx)) {
+                            try stack.append(cfg.allocator, idx);
+                            try loop.blocks.put(idx, {});
+                        }
+                    }
+                    if (else_idx) |idx| {
+                        if (!visited.contains(idx)) {
+                            try stack.append(cfg.allocator, idx);
+                            try loop.blocks.put(idx, {});
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+    
+    /// 构建循环嵌套树（基于块包含关系）
+    fn buildLoopNestingTree(self: *Self, loops: *std.ArrayList(LoopInfo)) !void {
+        _ = self;
+        
+        // 对于每个循环，找到它的最内层父循环
+        for (loops.items, 0..) |*loop, i| {
+            var parent_idx: ?usize = null;
+            var min_blocks: usize = std.math.maxInt(usize);
+            
+            for (loops.items, 0..) |*other, j| {
+                if (i == j) continue;
+                
+                // 如果 other 包含 loop 的 header，且 other 的块数更少（更内层）
+                if (other.contains(loop.header) and other.blocks.count() < min_blocks) {
+                    parent_idx = j;
+                    min_blocks = other.blocks.count();
+                }
+            }
+            
+            if (parent_idx) |p| {
+                loop.parent = p;
+                try loops.items[p].children.append(loops.*.allocator, i);
             }
         }
     }
 
     /// 分析循环结构
     fn analyzeLoop(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis, header: usize, back_edge_source: usize) !?LoopInfo {
-        _ = self;
+        _ = cfg;
 
         // 循环头必须是条件分支
         const header_block = func.blocks.items[header];
@@ -6129,7 +6247,6 @@ pub const NativeLinker = struct {
         }
 
         // 确定循环体和出口
-        // 循环体应该在循环头之后，出口应该在循环体之后
         var body_start: usize = 0;
         var exit: usize = 0;
 
@@ -6148,27 +6265,21 @@ pub const NativeLinker = struct {
         var increment: ?usize = null;
 
         if (back_edge_source > body_start and back_edge_source != body_start) {
-            // 检查 back_edge_source 是否只有一个前驱（循环体）
-            const preds = cfg.predecessors.get(back_edge_source) orelse return null;
-            if (preds.items.len == 1 and preds.items[0] == body_start) {
-                // 这是增量块
-                is_for_loop = true;
-                increment = back_edge_source;
-            }
+            is_for_loop = true;
+            increment = back_edge_source;
         }
         
-        // body_end 应该是 exit 之前的最后一个块
-        // 对于嵌套循环，内层循环的所有块都应该在外层循环的 body 范围内
         const body_end = if (exit > body_start) exit - 1 else back_edge_source;
 
-        return LoopInfo{
-            .header = header,
-            .body_start = body_start,
-            .body_end = body_end,
-            .exit_block = exit,
-            .increment = increment,
-            .is_for_loop = is_for_loop,
-        };
+        var loop = try LoopInfo.init(self.allocator);
+        loop.header = header;
+        loop.body_start = body_start;
+        loop.body_end = body_end;
+        loop.exit_block = exit;
+        loop.increment = increment;
+        loop.is_for_loop = is_for_loop;
+        
+        return loop;
     }
 
     /// 生成结构化代码
@@ -7154,6 +7265,7 @@ pub const NativeLinker = struct {
 
     /// 查找基本块在函数中的索引
     fn findBlockIndex(self: *const Self, func: *const IR.Function, target: *const IR.BasicBlock) usize {
+        _ = self;
         const target_ptr = @intFromPtr(target);
         for (func.blocks.items, 0..) |block, i| {
             const block_ptr = @intFromPtr(block);
@@ -7161,9 +7273,19 @@ pub const NativeLinker = struct {
                 return i;
             }
         }
-        // 如果找不到，返回0（不应该发生）
-        _ = self.config.verbose;
-        return 0;
+        std.debug.panic("Block not found in function", .{});
+    }
+    
+    fn tryFindBlockIndex(self: *const Self, func: *const IR.Function, target: *const IR.BasicBlock) ?usize {
+        _ = self;
+        const target_ptr = @intFromPtr(target);
+        for (func.blocks.items, 0..) |block, i| {
+            const block_ptr = @intFromPtr(block);
+            if (block_ptr == target_ptr) {
+                return i;
+            }
+        }
+        return null;
     }
 
     /// 记录指令中使用的所有寄存器
