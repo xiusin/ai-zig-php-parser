@@ -271,6 +271,18 @@ pub const NativeLinker = struct {
                 try writer.writeAll("\",\n");
             }
             try writer.writeAll("};\n\n");
+            
+            // 静态字符串池：运行时初始化一次（懒加载）
+            try writer.writeAll("// 静态字符串池（运行时初始化一次）\n");
+            try writer.writeAll("var static_strings: [string_table.len]*runtime.PHPString = undefined;\n");
+            try writer.writeAll("var static_strings_initialized = false;\n\n");
+            try writer.writeAll("fn initStaticStrings() void {\n");
+            try writer.writeAll("    if (static_strings_initialized) return;\n");
+            try writer.writeAll("    for (string_table, 0..) |str, i| {\n");
+            try writer.writeAll("        static_strings[i] = runtime.PHPString.initStatic(str);\n");
+            try writer.writeAll("    }\n");
+            try writer.writeAll("    static_strings_initialized = true;\n");
+            try writer.writeAll("}\n\n");
         }
 
         // 生成全局变量
@@ -419,6 +431,9 @@ pub const NativeLinker = struct {
             \\    
             \\    runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
+            \\
+            \\    // 初始化静态字符串池（一次性开销）
+            \\    initStaticStrings();
             \\
             \\    var profiling_enabled: bool = false;
             \\    if (std.process.getEnvVarOwned(allocator, "ZIGPHP_PROFILE")) |v| {
@@ -2852,7 +2867,8 @@ pub const NativeLinker = struct {
                     if (self.regMayHeap(reg.id)) {
                         try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg.id, suffix });
                     }
-                    try writer.print("    reg_{d}{s} = runtime.Value.initString(runtime.PHPString.initStatic(string_table[{d}]));\n", .{ reg.id, suffix, string_id });
+                    // 使用 comptime 预分配的静态字符串（零运行时开销）
+                    try writer.print("    reg_{d}{s} = runtime.Value.initString(static_strings[{d}]);\n", .{ reg.id, suffix, string_id });
                 }
             },
             .alloca => {

@@ -5795,25 +5795,35 @@ pub fn php_array_sum(arr: Value) !Value {
     return Value.initInt(sum_int);
 }
 
-/// packed int 数组快速求和：4 路并行累加减少数据依赖
+/// packed int 数组快速求和：comptime @Vector SIMD 优化
 fn fastPackedIntSum(items: []const Value) i64 {
-    var a0: i64 = 0;
-    var a1: i64 = 0;
-    var a2: i64 = 0;
-    var a3: i64 = 0;
+    // comptime 自动选择最优向量宽度
+    const vec_len = comptime std.simd.suggestVectorLength(i64) orelse 4;
+    const V = @Vector(vec_len, i64);
+    
+    var accum: V = @splat(0);
     var i: usize = 0;
     const len = items.len;
-    const aligned = len & ~@as(usize, 3);
-    while (i < aligned) : (i += 4) {
-        a0 +%= items[i].toInt();
-        a1 +%= items[i + 1].toInt();
-        a2 +%= items[i + 2].toInt();
-        a3 +%= items[i + 3].toInt();
+    
+    // 主循环：向量化累加
+    const aligned = len & ~@as(usize, vec_len - 1);
+    while (i < aligned) : (i += vec_len) {
+        var batch: V = undefined;
+        inline for (0..vec_len) |j| {
+            batch[j] = items[i + j].toInt();
+        }
+        accum +%= batch;
     }
+    
+    // 水平归约
+    var sum: i64 = @reduce(.Add, accum);
+    
+    // 处理剩余元素
     while (i < len) : (i += 1) {
-        a0 +%= items[i].toInt();
+        sum +%= items[i].toInt();
     }
-    return a0 +% a1 +% a2 +% a3;
+    
+    return sum;
 }
 
 /// array_product - 计算数组元素的乘积
