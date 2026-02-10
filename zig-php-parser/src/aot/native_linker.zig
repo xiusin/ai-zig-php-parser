@@ -4867,13 +4867,15 @@ pub const NativeLinker = struct {
             }
         }
 
-        // 生成循环体
-        const body_block = func.blocks.items[loop.body_start];
-        try writer.print("        // Body: {s}\n", .{body_block.label});
+        // 生成循环体（所有从 body_start 到 body_end 的块）
+        for (loop.body_start..loop.body_end + 1) |idx| {
+            const body_block = func.blocks.items[idx];
+            try writer.print("        // Body: {s}\n", .{body_block.label});
 
-        for (body_block.instructions.items) |inst| {
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
+            for (body_block.instructions.items) |inst| {
+                try code_list.appendSlice(self.allocator, "        ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
         }
 
         try writer.writeAll("    }\n");
@@ -6104,42 +6106,14 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 计算真实的 body_end：包含所有从 body_start 到 back_edge_source 的块
-        // 使用 DFS 找到所有可达的块
-        var visited = std.AutoHashMap(usize, void).init(cfg.allocator);
-        defer visited.deinit();
-        
-        var stack = try std.ArrayList(usize).initCapacity(cfg.allocator, 0);
-        defer stack.deinit(cfg.allocator);
-        try stack.append(cfg.allocator, body_start);
-        
-        var max_block: usize = body_start;
-        
-        while (stack.items.len > 0) {
-            const current = stack.pop();
-            if (visited.contains(current)) continue;
-            if (exit) |exit_block| {
-                if (current == exit_block) continue; // 不进入退出块
-            }
-            if (current > back_edge_source) continue; // 不超过回边源
-            
-            try visited.put(current, {});
-            if (current > max_block) max_block = current;
-            
-            // 添加后继
-            if (cfg.successors.get(current)) |succs| {
-                for (succs.items) |succ| {
-                    if (!visited.contains(succ) and succ != header) { // 不回到 header
-                        try stack.append(cfg.allocator, succ);
-                    }
-                }
-            }
-        }
+        // 简单使用 back_edge_source 作为 body_end
+        // 对于嵌套循环，内层循环不在外层的 CFG 可达范围内
+        const body_end = back_edge_source;
 
         return LoopInfo{
             .header = header,
             .body_start = body_start,
-            .body_end = max_block,
+            .body_end = body_end,
             .exit_block = exit,
             .increment = increment,
             .is_for_loop = is_for_loop,
