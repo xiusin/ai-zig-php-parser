@@ -4590,7 +4590,18 @@ pub const NativeLinker = struct {
                                 }
                             }
                             if (maybe_reg) |reg| {
-                                try writer.print("    return reg_{d};\n", .{reg.id});
+                                // 类型转换
+                                const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
+                                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                                if (reg_type_tag == .i64) {
+                                    try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                                } else if (reg_type_tag == .f64) {
+                                    try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                                } else if (reg_type_tag == .bool) {
+                                    try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                                } else {
+                                    try writer.print("    return reg_{d};\n", .{reg.id});
+                                }
                             } else {
                                 try writer.writeAll("    return runtime.Value.initNull();\n");
                             }
@@ -4667,7 +4678,18 @@ pub const NativeLinker = struct {
                                 }
                             }
                             if (maybe_reg) |reg| {
-                                try writer.print("    return reg_{d};\n", .{reg.id});
+                                // 类型转换
+                                const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
+                                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                                if (reg_type_tag == .i64) {
+                                    try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                                } else if (reg_type_tag == .f64) {
+                                    try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                                } else if (reg_type_tag == .bool) {
+                                    try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
+                                } else {
+                                    try writer.print("    return reg_{d};\n", .{reg.id});
+                                }
                             } else {
                                 try writer.writeAll("    return runtime.Value.initNull();\n");
                             }
@@ -5082,54 +5104,8 @@ pub const NativeLinker = struct {
             }
         }
 
-        // 检测完全展开：循环上界为常量且 ≤ 32
-        const full_unroll_count: ?usize = blk: {
-            if (loop.increment == null) break :blk null;
-
-            // 检查条件是否为 i < const
-            var loop_limit: ?i64 = null;
-            if (cond_reg_id) |cond_id| {
-                for (header_block.instructions.items) |inst| {
-                    if (inst.result) |res| {
-                        if (res.id == cond_id and inst.op == .lt) {
-                            const rhs_id = inst.op.lt.rhs.id;
-                            // 查找 rhs 是否为常量
-                            for (header_block.instructions.items) |const_inst| {
-                                if (const_inst.result) |const_res| {
-                                    if (const_res.id == rhs_id and const_inst.op == .const_int) {
-                                        loop_limit = const_inst.op.const_int;
-                                        break;
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (loop_limit) |limit| {
-                if (limit > 0 and limit <= 16) {
-                    // 检查循环体是否简单
-                    var body_simple = true;
-                    for (body_block.instructions.items) |inst| {
-                        const is_const = switch (inst.op) {
-                            .const_int, .const_float, .const_string, .const_bool, .const_null => true,
-                            else => false,
-                        };
-                        if (!is_const and inst.op != .load and inst.op != .add and inst.op != .store) {
-                            body_simple = false;
-                            break;
-                        }
-                    }
-                    if (body_simple) {
-                        break :blk @intCast(limit);
-                    }
-                }
-            }
-
-            break :blk null;
-        };
+        // 检测完全展开：禁用（bug：无法正确模拟循环变量）
+        const full_unroll_count: ?usize = null;
 
         // 检测数学化简：sum += 1 循环可化简为 sum += N
         const math_simplify: ?struct { target_reg: usize, loop_count_reg: usize } = blk: {
@@ -5196,47 +5172,8 @@ pub const NativeLinker = struct {
         };
 
         // 检测循环展开和剥离
-        const unroll_factor: usize = blk: {
-            if (full_unroll_count != null) break :blk 1; // 完全展开时不需要部分展开
-            if (loop.increment == null) break :blk 1;
-
-            // 检查循环体是否简单
-            var body_simple = true;
-            for (body_block.instructions.items) |inst| {
-                const is_const = switch (inst.op) {
-                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
-                    else => false,
-                };
-                if (!is_const and inst.op != .load and inst.op != .add and inst.op != .store) {
-                    body_simple = false;
-                    break;
-                }
-            }
-            if (!body_simple) break :blk 1;
-
-            // 检查增量块是否有 += 1 模式
-            const inc_block = func.blocks.items[loop.increment.?];
-            var has_simple_inc = false;
-            for (inc_block.instructions.items) |inst| {
-                if (inst.op == .add) {
-                    for (inc_block.instructions.items) |const_inst| {
-                        if (const_inst.result) |res| {
-                            if (res.id == inst.op.add.rhs.id and const_inst.op == .const_int) {
-                                if (const_inst.op.const_int == 1) {
-                                    has_simple_inc = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (has_simple_inc) break;
-                }
-            }
-            if (!has_simple_inc) break :blk 1;
-
-            break :blk 4;
-        };
-        const enable_peeling = unroll_factor > 1;
+        const unroll_factor: usize = 1; // 禁用展开直到修复计算 bug
+        const enable_peeling = false;
 
         // 提取所有循环不变量到循环外（header + body + increment）
         for (header_block.instructions.items) |inst| {
@@ -5297,7 +5234,19 @@ pub const NativeLinker = struct {
                 for (inc_block.instructions.items) |inst| {
                     if (inst.op == .store) {
                         const inc_reg = inst.op.store.ptr.id;
-                        try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                        // 检查类型并转换
+                        const inc_type = self.current_reg_types.?.get(inc_reg) orelse IR.Type.php_value;
+                        const inc_tag = @as(std.meta.Tag(IR.Type), inc_type);
+                        const count_type = self.current_reg_types.?.get(ms.loop_count_reg) orelse IR.Type.i64;
+                        const count_tag = @as(std.meta.Tag(IR.Type), count_type);
+                        
+                        if (inc_tag == .i64 and count_tag == .i64) {
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                        } else if (inc_tag == .php_value and count_tag == .i64) {
+                            try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ inc_reg, ms.loop_count_reg });
+                        } else {
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                        }
                         break;
                     }
                 }
@@ -5305,27 +5254,23 @@ pub const NativeLinker = struct {
         } else if (full_unroll_count) |count| {
             try writer.print("    // Fully unrolled loop ({d} iterations)\n", .{count});
 
-            // 找到循环体的目标寄存器
-            var target_reg: ?usize = null;
-            for (body_block.instructions.items) |inst| {
-                if (inst.op == .store) {
-                    target_reg = inst.op.store.ptr.id;
-                    break;
+            // 完全展开：生成每次迭代
+            var iter: usize = 0;
+            while (iter < count) : (iter += 1) {
+                // 生成循环体指令
+                for (body_block.instructions.items) |inst| {
+                    try code_list.appendSlice(self.allocator, "    ");
+                    try self.generateInstructionSimple(code_list, inst);
                 }
             }
 
-            if (target_reg) |reg| {
-                // 直接生成 reg += count
-                try writer.print("    reg_{d} += {d};\n", .{ reg, count });
-            }
-
-            // 更新循环变量
+            // 更新循环变量到最终值
             if (loop.increment) |inc_idx| {
                 const inc_block = func.blocks.items[inc_idx];
                 for (inc_block.instructions.items) |inst| {
                     if (inst.op == .store) {
                         const inc_reg = inst.op.store.ptr.id;
-                        try writer.print("    reg_{d} += {d};\n", .{ inc_reg, count });
+                        try writer.print("    reg_{d} = {d};\n", .{ inc_reg, count });
                         break;
                     }
                 }
@@ -7552,27 +7497,60 @@ pub const NativeLinker = struct {
                 }
             },
             .div => |op| {
-                var lhs_buf: [32]u8 = undefined;
-                var rhs_buf: [32]u8 = undefined;
-                const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
-                const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
-                // 快速路径：纯浮点（除法总是返回浮点）
                 if (inst.result) |reg| {
                     if (reg.type_ == .f64 and op.lhs.type_ == .f64 and op.rhs.type_ == .f64) {
-                        try writer.print("        {s} = {s} / {s};\n", .{ result_reg.?, lhs, rhs });
+                        try writer.print("        {s} = reg_{d} / reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                     } else {
-                        try writer.print("        {s} = try runtime.php_div({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                        // 需要类型转换
+                        try writer.print("        {s} = try runtime.php_div(", .{result_reg.?});
+                        const lhs_type = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                        if (lhs_type == .i64) {
+                            try writer.print("runtime.Value.initInt(reg_{d})", .{op.lhs.id});
+                        } else if (lhs_type == .f64) {
+                            try writer.print("runtime.Value.initFloat(reg_{d})", .{op.lhs.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.lhs.id});
+                        }
+                        try writer.writeAll(", ");
+                        const rhs_type = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                        if (rhs_type == .i64) {
+                            try writer.print("runtime.Value.initInt(reg_{d})", .{op.rhs.id});
+                        } else if (rhs_type == .f64) {
+                            try writer.print("runtime.Value.initFloat(reg_{d})", .{op.rhs.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.rhs.id});
+                        }
+                        try writer.writeAll(");\n");
                     }
-                } else {
-                    try writer.print("        _ = try runtime.php_div({s}, {s});\n", .{ lhs, rhs });
                 }
             },
             .mod => |op| {
-                var lhs_buf: [32]u8 = undefined;
-                var rhs_buf: [32]u8 = undefined;
-                const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
-                const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
-                try writer.print("        {s} = try runtime.php_mod({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                if (inst.result) |reg| {
+                    if (reg.type_ == .i64 and op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
+                        try writer.print("        {s} = @mod(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                    } else {
+                        // 需要类型转换
+                        try writer.print("        {s} = try runtime.php_mod(", .{result_reg.?});
+                        const lhs_type = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                        if (lhs_type == .i64) {
+                            try writer.print("runtime.Value.initInt(reg_{d})", .{op.lhs.id});
+                        } else if (lhs_type == .f64) {
+                            try writer.print("runtime.Value.initFloat(reg_{d})", .{op.rhs.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.lhs.id});
+                        }
+                        try writer.writeAll(", ");
+                        const rhs_type = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                        if (rhs_type == .i64) {
+                            try writer.print("runtime.Value.initInt(reg_{d})", .{op.rhs.id});
+                        } else if (rhs_type == .f64) {
+                            try writer.print("runtime.Value.initFloat(reg_{d})", .{op.rhs.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.rhs.id});
+                        }
+                        try writer.writeAll(");\n");
+                    }
+                }
             },
             .pow => |op| {
                 if (inst.result) |reg| {
