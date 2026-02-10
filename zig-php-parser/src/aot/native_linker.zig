@@ -116,6 +116,7 @@ pub const NativeLinker = struct {
     current_cleanup_regs: ?[]const usize = null,
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
+    current_function_for_resolve: ?*const IR.Function = null,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
 
     const Self = @This();
@@ -2961,44 +2962,45 @@ pub const NativeLinker = struct {
                         false;
                     
                     if (ptr_is_optimized_alloca) {
-                        // 优化的 alloca：直接读取
-                        try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.ptr.id });
-                    } else {
-                        // 原有的 load 逻辑
-                        const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                        
-                        // 检查结果寄存器是否是 alloca
-                        const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
-                        const result_prefix = if (result_is_alloca) ".*" else "";
-                        
-                        if (type_tag != .i64 and type_tag != .f64 and type_tag != .bool) {
-                            if (self.regMayHeap(reg.id)) {
-                                if (result_is_alloca) {
-                                    try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
-                                } else {
-                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
-                                }
+                        // 跳过生成（复制传播）
+                        // 使用方会直接使用源寄存器
+                        return;
+                    }
+                    
+                    // 原有的 load 逻辑
+                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    
+                    // 检查结果寄存器是否是 alloca
+                    const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                    const result_prefix = if (result_is_alloca) ".*" else "";
+                    
+                    if (type_tag != .i64 and type_tag != .f64 and type_tag != .bool) {
+                        if (self.regMayHeap(reg.id)) {
+                            if (result_is_alloca) {
+                                try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg.id });
+                            } else {
+                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ reg.id });
                             }
                         }
+                    }
 
-                        // 检查是否是 alloca 寄存器（即指针类型）
-                        const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
-                        const ptr_prefix = if (is_ptr) "" else "&";
+                    // 检查是否是 alloca 寄存器（即指针类型）
+                    const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                    const ptr_prefix = if (is_ptr) "" else "&";
 
-                        if (type_tag == .i64) {
-                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                        } else if (type_tag == .f64) {
-                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                        } else if (type_tag == .bool) {
-                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                        } else {
-                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                            if (self.regMayHeap(reg.id)) {
-                                if (result_is_alloca) {
-                                    try writer.print("    _ = reg_{d}.*.retain();\n", .{ reg.id });
-                                } else {
-                                    try writer.print("    _ = reg_{d}.retain();\n", .{ reg.id });
-                                }
+                    if (type_tag == .i64) {
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asInt();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                    } else if (type_tag == .f64) {
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asFloat();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                    } else if (type_tag == .bool) {
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*.asBool();\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                    } else {
+                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                        if (self.regMayHeap(reg.id)) {
+                            if (result_is_alloca) {
+                                try writer.print("    _ = reg_{d}.*.retain();\n", .{ reg.id });
+                            } else {
+                                try writer.print("    _ = reg_{d}.retain();\n", .{ reg.id });
                             }
                         }
                     }
@@ -4724,6 +4726,9 @@ pub const NativeLinker = struct {
     }
     
     fn generateStandardForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo) !void {
+        self.current_function_for_resolve = func;
+        defer self.current_function_for_resolve = null;
+        
         var code_list = writer.context.self;
         
         const header_block = func.blocks.items[loop.header];
@@ -4876,6 +4881,33 @@ pub const NativeLinker = struct {
         try writer.writeAll("    }\n");
     }
     
+    /// 解析 load 源寄存器（复制传播）
+    fn resolveLoadSource(self: *Self, reg_id: usize) usize {
+        // 如果寄存器本身是优化的 alloca，直接返回
+        if (self.current_optimized_alloca_regs) |opt_regs| {
+            if (opt_regs.contains(reg_id)) return reg_id;
+        }
+        
+        // 否则，检查当前函数的指令，查找 reg_id = load from reg_X
+        // 如果 reg_X 是优化的 alloca，返回 reg_X
+        if (self.current_function_for_resolve) |func| {
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |inst| {
+                    if (inst.result) |res| {
+                        if (res.id == reg_id and inst.op == .load) {
+                            const ptr_id = inst.op.load.ptr.id;
+                            if (self.current_optimized_alloca_regs) |opt_regs| {
+                                if (opt_regs.contains(ptr_id)) return ptr_id;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return reg_id;
+    }
+    
     fn generateOptimizedForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, loop_var_reg: usize) !void {
         // TODO: 实现优化的循环
         // 暂时回退到标准循环
@@ -4913,9 +4945,14 @@ pub const NativeLinker = struct {
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
-                    try writer.print("reg_{d} < reg_{d}", .{op.lhs.id, op.rhs.id});
+                    // 复制传播：解析操作数
+                    const lhs_id = self.resolveLoadSource(op.lhs.id);
+                    const rhs_id = self.resolveLoadSource(op.rhs.id);
+                    try writer.print("reg_{d} < reg_{d}", .{lhs_id, rhs_id});
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
-                    try writer.print("reg_{d} < reg_{d}", .{op.lhs.id, op.rhs.id});
+                    const lhs_id = self.resolveLoadSource(op.lhs.id);
+                    const rhs_id = self.resolveLoadSource(op.rhs.id);
+                    try writer.print("reg_{d} < reg_{d}", .{lhs_id, rhs_id});
                 } else {
                     try writer.writeAll("(try runtime.php_lt(");
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
