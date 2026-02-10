@@ -4767,7 +4767,7 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 检测循环展开：简单循环体 + 增量为 += 1
+        // 检测循环展开和剥离
         const unroll_factor: usize = blk: {
             if (loop.increment == null) break :blk 1;
             
@@ -4785,12 +4785,11 @@ pub const NativeLinker = struct {
             }
             if (!body_simple) break :blk 1;
             
-            // 检查增量块是否有 += 1 模式（通过 tryOptimizeIncrement 检测）
+            // 检查增量块是否有 += 1 模式
             const inc_block = func.blocks.items[loop.increment.?];
             var has_simple_inc = false;
             for (inc_block.instructions.items) |inst| {
                 if (inst.op == .add) {
-                    // 检查 rhs 是否为常量 1
                     for (inc_block.instructions.items) |const_inst| {
                         if (const_inst.result) |res| {
                             if (res.id == inst.op.add.rhs.id and const_inst.op == .const_int) {
@@ -4808,6 +4807,8 @@ pub const NativeLinker = struct {
             
             break :blk 4;
         };
+        
+        const enable_peeling = unroll_factor > 1;
         
         // 提取所有循环不变量到循环外（header + body + increment）
         for (header_block.instructions.items) |inst| {
@@ -4855,6 +4856,59 @@ pub const NativeLinker = struct {
                     try self.generateInstructionSimple(code_list, inst);
                 }
             }
+        }
+        
+        // 循环剥离：提取第一次迭代
+        if (enable_peeling) {
+            try writer.writeAll("    // Loop peeling: first iteration\n");
+            try writer.writeAll("    if (");
+            
+            // 生成条件
+            if (cond_reg_id) |cond_id| {
+                for (header_block.instructions.items) |inst| {
+                    if (inst.result) |result_reg| {
+                        if (result_reg.id == cond_id) {
+                            try self.writeInlinedConditionExpr(writer, inst);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            try writer.writeAll(") {\n");
+            
+            // 循环体
+            if (!try self.tryOptimizeIncrement(writer, body_block)) {
+                for (body_block.instructions.items) |inst| {
+                    const is_invariant = switch (inst.op) {
+                        .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                        else => false,
+                    };
+                    if (!is_invariant) {
+                        try code_list.appendSlice(self.allocator, "        ");
+                        try self.generateInstructionSimple(code_list, inst);
+                    }
+                }
+            }
+            
+            // 增量
+            if (loop.increment) |inc_idx| {
+                const inc_block = func.blocks.items[inc_idx];
+                if (!try self.tryOptimizeIncrement(writer, inc_block)) {
+                    for (inc_block.instructions.items) |inst| {
+                        const is_invariant = switch (inst.op) {
+                            .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                            else => false,
+                        };
+                        if (!is_invariant) {
+                            try code_list.appendSlice(self.allocator, "        ");
+                            try self.generateInstructionSimple(code_list, inst);
+                        }
+                    }
+                }
+            }
+            
+            try writer.writeAll("    }\n");
         }
         
         // 主循环（展开）
