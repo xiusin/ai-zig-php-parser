@@ -2339,8 +2339,33 @@ pub const NativeLinker = struct {
                     }
                 }
                 
-                // 设置目标块的 phi 节点值
-                try self.generatePhiAssignments(writer, func, target, current_block_idx);
+                // 设置目标块的 phi 节点值（内联）
+                const source_block = func.blocks.items[current_block_idx];
+                for (target.instructions.items) |inst| {
+                    if (inst.op == .phi) {
+                        const phi_op = inst.op.phi;
+                        const result_reg = inst.result orelse continue;
+                        for (phi_op.incoming) |incoming| {
+                            if (incoming.block == source_block) {
+                                const result_type = result_reg.type_;
+                                const value_type = incoming.value.type_;
+                                const result_tag = @as(std.meta.Tag(IR.Type), result_type);
+                                const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                                
+                                if (result_tag == value_tag) {
+                                    try writer.print("            reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .php_value and value_tag == .i64) {
+                                    try writer.print("            reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .php_value and value_tag == .f64) {
+                                    try writer.print("            reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                } else {
+                                    try writer.print("            reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
                 
                 try writer.print("                prev_block = current_block;\n                current_block = {d};\n", .{target_idx});
             },
@@ -6828,12 +6853,10 @@ pub const NativeLinker = struct {
 
     /// 生成PHI节点的赋值语句
     /// 在跳转到目标块之前，检查目标块是否有PHI节点，如果有则设置PHI结果
-    fn generatePhiAssignments(self: *Self, writer: anytype, func: *const IR.Function, target_block: *const IR.BasicBlock, source_block_idx: usize) !void {
-        _ = self;
-        // 获取源块指针
+    fn generatePhiAssignments(_: *Self, writer: anytype, func: *const IR.Function, target_block: *const IR.BasicBlock, source_block_idx: usize) !void {
+        // 用于结构化循环的 phi 赋值（20 个空格缩进）
         const source_block = func.blocks.items[source_block_idx];
 
-        // 遍历目标块的指令，查找PHI节点
         for (target_block.instructions.items) |inst| {
             if (inst.op == .phi) {
                 const phi_op = inst.op.phi;
@@ -6842,7 +6865,44 @@ pub const NativeLinker = struct {
                 // 查找来自当前块的incoming值
                 for (phi_op.incoming) |incoming| {
                     if (incoming.block == source_block) {
-                        try writer.print("            reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                        // 检查类型是否需要转换
+                        const result_type = result_reg.type_;
+                        const value_type = incoming.value.type_;
+                        const result_tag = @as(std.meta.Tag(IR.Type), result_type);
+                        const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                        
+                        if (result_tag == value_tag) {
+                            // 类型匹配，直接赋值
+                            try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                        } else {
+                            // 需要类型转换
+                            if (result_tag == .php_value) {
+                                // 转换为 Value
+                                if (value_tag == .i64) {
+                                    try writer.print("                    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                } else if (value_tag == .f64) {
+                                    try writer.print("                    reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                } else if (value_tag == .bool) {
+                                    try writer.print("                    reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                } else {
+                                    try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                                }
+                            } else if (value_tag == .php_value) {
+                                // 从 Value 转换
+                                if (result_tag == .i64) {
+                                    try writer.print("                    reg_{d} = reg_{d}.toInt();\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .f64) {
+                                    try writer.print("                    reg_{d} = reg_{d}.toFloat();\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .bool) {
+                                    try writer.print("                    reg_{d} = reg_{d}.toBool();\n", .{ result_reg.id, incoming.value.id });
+                                } else {
+                                    try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                                }
+                            } else {
+                                // 其他类型转换
+                                try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                            }
+                        }
                         break;
                     }
                 }
