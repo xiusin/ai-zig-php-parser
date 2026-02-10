@@ -1229,9 +1229,21 @@ pub const IRGenerator = struct {
 
         // Generate body
         self.setCurrentBlock(body_block);
+        const saved_current = self.current_block;
         try self.generateStatement(for_data.body);
-        if (!self.isBlockTerminated()) {
-            self.setTerminator(.{ .br = loop_block });
+        
+        // 如果当前块变了（说明 body 包含控制流），需要将新的当前块跳转到 loop
+        if (self.current_block != saved_current) {
+            // Body 包含嵌套循环或其他控制流
+            // 当前块是内层结构的 exit，应该跳转到外层的 loop
+            if (!self.isBlockTerminated()) {
+                self.setTerminator(.{ .br = loop_block });
+            }
+        } else {
+            // Body 是简单语句，检查 body_block 是否终止
+            if (!self.isBlockTerminated()) {
+                self.setTerminator(.{ .br = loop_block });
+            }
         }
 
         // Generate loop expression

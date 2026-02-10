@@ -4549,7 +4549,7 @@ pub const NativeLinker = struct {
         }
 
         // 顺序生成每个循环及其后续块
-        for (cfg.loops.items, 0..) |loop, i| {
+        for (cfg.loops.items, 0..) |loop, _| {
             // 标记循环块为已处理
             try processed.put(loop.header, {});
             for (loop.body_start..loop.body_end + 1) |idx| {
@@ -4891,26 +4891,6 @@ pub const NativeLinker = struct {
         for (body_block.instructions.items) |inst| {
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
-        }
-
-        // 检查 body 块的 terminator，如果跳转到另一个循环，内联那个循环
-        if (body_block.terminator) |term| {
-            if (term == .br) {
-                const target = term.br;
-                // 检查目标是否是另一个循环的 header
-                for (cfg.loops.items) |inner_loop| {
-                    if (inner_loop.header == target) {
-                        // 内联内层循环
-                        try writer.writeAll("        // Inlined inner loop\n");
-                        if (inner_loop.is_for_loop) {
-                            try self.generateForLoopStructuredNew(writer, func, inner_loop, cleanup_regs);
-                        } else {
-                            try self.generateWhileLoopStructuredNew(writer, func, inner_loop, cleanup_regs);
-                        }
-                        break;
-                    }
-                }
-            }
         }
 
         // 生成增量块（如果有且不是 for 循环）
