@@ -4689,6 +4689,7 @@ pub const NativeLinker = struct {
         var code_list = writer.context.self;
         
         const header_block = func.blocks.items[loop.header];
+        const body_block = func.blocks.items[loop.body_start];
         
         var cond_reg_id: ?usize = null;
         if (header_block.terminator) |term| {
@@ -4697,7 +4698,7 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 第一遍：提取循环不变量到循环外
+        // 提取所有循环不变量到循环外（header + body + increment）
         for (header_block.instructions.items) |inst| {
             if (inst.result) |result_reg| {
                 if (cond_reg_id) |cond_id| {
@@ -4705,7 +4706,6 @@ pub const NativeLinker = struct {
                 }
             }
             
-            // 检查是否是常量指令
             const is_invariant = switch (inst.op) {
                 .const_int, .const_float, .const_string, .const_bool, .const_null => true,
                 else => false,
@@ -4714,6 +4714,35 @@ pub const NativeLinker = struct {
             if (is_invariant) {
                 try code_list.appendSlice(self.allocator, "    ");
                 try self.generateInstructionSimple(code_list, inst);
+            }
+        }
+        
+        // 提取循环体的常量
+        for (body_block.instructions.items) |inst| {
+            const is_invariant = switch (inst.op) {
+                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                else => false,
+            };
+            
+            if (is_invariant) {
+                try code_list.appendSlice(self.allocator, "    ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
+        }
+        
+        // 提取增量块的常量
+        if (loop.increment) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            for (inc_block.instructions.items) |inst| {
+                const is_invariant = switch (inst.op) {
+                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                    else => false,
+                };
+                
+                if (is_invariant) {
+                    try code_list.appendSlice(self.allocator, "    ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
             }
         }
         
@@ -4759,12 +4788,19 @@ pub const NativeLinker = struct {
             }
         }
         
-        const body_block = func.blocks.items[loop.body_start];
         try writer.print("        // Body: {s}\n", .{body_block.label});
         
         for (body_block.instructions.items) |inst| {
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
+            // 跳过常量（已外提）
+            const is_invariant = switch (inst.op) {
+                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                else => false,
+            };
+            
+            if (!is_invariant) {
+                try code_list.appendSlice(self.allocator, "        ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
         }
         
         if (loop.increment) |inc_idx| {
@@ -4772,8 +4808,16 @@ pub const NativeLinker = struct {
             try writer.print("        // Increment: {s}\n", .{inc_block.label});
             
             for (inc_block.instructions.items) |inst| {
-                try code_list.appendSlice(self.allocator, "        ");
-                try self.generateInstructionSimple(code_list, inst);
+                // 跳过常量（已外提）
+                const is_invariant = switch (inst.op) {
+                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                    else => false,
+                };
+                
+                if (!is_invariant) {
+                    try code_list.appendSlice(self.allocator, "        ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
             }
         }
         
