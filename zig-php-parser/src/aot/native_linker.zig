@@ -4496,15 +4496,30 @@ pub const NativeLinker = struct {
             return false;
         }
         
-        // 标记已处理的块
-        var processed = try std.ArrayList(bool).initCapacity(self.allocator, func.blocks.items.len);
-        defer processed.deinit(self.allocator);
-        for (0..func.blocks.items.len) |_| {
-            try processed.append(self.allocator, false);
+        // 目前只处理单个循环
+        if (cfg.loops.items.len != 1) {
+            return false;
         }
         
-        // 递归生成代码
-        try self.generateBlocksRecursive(writer, func, cfg, cleanup_regs, &processed, 0, func.blocks.items.len);
+        const loop = cfg.loops.items[0];
+        
+        // 生成循环前的代码
+        for (0..loop.header) |idx| {
+            const block = func.blocks.items[idx];
+            try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+            
+            for (block.instructions.items) |inst| {
+                try writer.writeAll("    ");
+                try self.generateInstruction(writer, inst);
+            }
+        }
+        
+        // 生成循环（循环内部会处理退出块）
+        if (loop.is_for_loop) {
+            try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+        } else {
+            try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+        }
         
         return true;
     }
@@ -4730,8 +4745,6 @@ pub const NativeLinker = struct {
     
     /// 生成结构化 for 循环（新版本）
     fn generateForLoopStructuredNew(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
-        _ = cleanup_regs;
-        
         try writer.writeAll("    // Optimized: structured for loop\n");
         
         // 分析循环变量：查找在 increment 块中被修改的 alloca 寄存器
@@ -4762,20 +4775,35 @@ pub const NativeLinker = struct {
             try self.generateStandardForLoop(writer, func, loop);
         }
         
-        // 查找并生成包含 ret 的退出块（处理嵌套循环）
-        for (func.blocks.items, 0..) |block, idx| {
-            if (block.terminator) |term| {
-                if (term == .ret) {
-                    // 找到包含 ret 的块，生成它
-                    try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-                    
-                    for (block.instructions.items) |inst| {
-                        try writer.writeAll("    ");
-                        try self.generateInstructionSimple(writer.context.self, inst);
+        // 生成退出块
+        if (loop.exit_block) |exit_idx| {
+            for (exit_idx..func.blocks.items.len) |idx| {
+                const block = func.blocks.items[idx];
+                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                
+                for (block.instructions.items) |inst| {
+                    try writer.writeAll("    ");
+                    try self.generateInstruction(writer, inst);
+                }
+                
+                if (block.terminator) |term| {
+                    switch (term) {
+                        .ret => |maybe_reg| {
+                            if (cleanup_regs.len > 0) {
+                                try writer.writeAll("    // Cleanup\n");
+                                for (cleanup_regs) |reg_id| {
+                                    if (!self.shouldReleaseReg(reg_id)) continue;
+                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                }
+                            }
+                            if (maybe_reg) |reg| {
+                                try writer.print("    return reg_{d};\n", .{reg.id});
+                            } else {
+                                try writer.writeAll("    return runtime.Value.initNull();\n");
+                            }
+                        },
+                        else => {},
                     }
-                    
-                    try writer.writeAll("    return runtime.Value.initNull();\n");
-                    break;
                 }
             }
         }
@@ -5685,12 +5713,12 @@ pub const NativeLinker = struct {
     
     /// 循环信息
     const LoopInfo = struct {
-        header: usize,        // 循环头（条件块）
-        body_start: usize,    // 循环体起始块
-        body_end: usize,      // 循环体结束块
-        exit: usize,          // 循环出口块
-        increment: ?usize,    // 增量块（for 循环）
-        is_for_loop: bool,    // 是否是 for 循环
+        header: usize,           // 循环头（条件块）
+        body_start: usize,       // 循环体起始块
+        body_end: usize,         // 循环体结束块
+        exit_block: ?usize,      // 循环出口块
+        increment: ?usize,       // 增量块（for 循环）
+        is_for_loop: bool,       // 是否是 for 循环
     };
     
     /// 尝试生成结构化控制流（最激进的优化）
@@ -5870,7 +5898,7 @@ pub const NativeLinker = struct {
             .header = header,
             .body_start = body_start,
             .body_end = if (increment) |inc| inc else body_start,
-            .exit = exit,
+            .exit_block = exit,
             .increment = increment,
             .is_for_loop = is_for_loop,
         };
@@ -5920,37 +5948,39 @@ pub const NativeLinker = struct {
         }
         
         // 生成 exit 块（循环后的代码）
-        if (loop.exit < func.blocks.items.len) {
-            for (loop.exit..func.blocks.items.len) |idx| {
-                const block = func.blocks.items[idx];
-                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-                
-                for (block.instructions.items) |inst| {
-                    try writer.writeAll("    ");
-                    try self.generateInstruction(writer, inst);
-                }
-                
-                // 处理终止指令
-                if (block.terminator) |term| {
-                    switch (term) {
-                        .ret => |maybe_reg| {
-                            if (cleanup_regs.len > 0) {
-                                try writer.writeAll("    // Cleanup\n");
-                                for (cleanup_regs) |reg_id| {
-                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
-                                    if (!self.shouldReleaseReg(reg_id)) continue;
+        if (loop.exit_block) |exit_idx| {
+            if (exit_idx < func.blocks.items.len) {
+                for (exit_idx..func.blocks.items.len) |idx| {
+                    const block = func.blocks.items[idx];
+                    try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                    
+                    for (block.instructions.items) |inst| {
+                        try writer.writeAll("    ");
+                        try self.generateInstruction(writer, inst);
+                    }
+                    
+                    // 处理终止指令
+                    if (block.terminator) |term| {
+                        switch (term) {
+                            .ret => |maybe_reg| {
+                                if (cleanup_regs.len > 0) {
+                                    try writer.writeAll("    // Cleanup\n");
+                                    for (cleanup_regs) |reg_id| {
+                                        if (!self.shouldReleaseReg(reg_id)) continue;
+                                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    }
                                 }
-                            }
-                            if (maybe_reg) |reg| {
-                                try writer.print("    return reg_{d};\n", .{reg.id});
-                            } else {
-                                try writer.writeAll("    return runtime.Value.initNull();\n");
-                            }
-                        },
-                        else => {
-                            // 其他终止指令，暂不支持
-                            return false;
-                        },
+                                if (maybe_reg) |reg| {
+                                    try writer.print("    return reg_{d};\n", .{reg.id});
+                                } else {
+                                    try writer.writeAll("    return runtime.Value.initNull();\n");
+                                }
+                            },
+                            else => {
+                                // 其他终止指令，暂不支持
+                                return false;
+                            },
+                        }
                     }
                 }
             }
@@ -6821,17 +6851,16 @@ pub const NativeLinker = struct {
     }
 
     /// 查找基本块在函数中的索引
-    fn findBlockIndex(self: *const Self, func: *const IR.Function, target: *const IR.BasicBlock) u32 {
+    fn findBlockIndex(self: *const Self, func: *const IR.Function, target: *const IR.BasicBlock) usize {
         const target_ptr = @intFromPtr(target);
         for (func.blocks.items, 0..) |block, i| {
             const block_ptr = @intFromPtr(block);
             if (block_ptr == target_ptr) {
-                return @intCast(i);
+                return i;
             }
         }
         // 如果找不到，返回0（不应该发生）
         _ = self.config.verbose;
-        // std.debug.print("WARNING: Block not found in function! target={*}\n", .{target});
         return 0;
     }
 
@@ -7565,20 +7594,6 @@ pub const NativeLinker = struct {
                 // 注意：在NativeLinker中，我们实际上通过switch状态机来模拟控制流
                 // 当发生异常时，throw指令会设置状态并break
                 try writer.print("        // catch clause\n", .{});
-            },
-            .throw => |ex_reg| {
-                var ex_buf: [32]u8 = undefined;
-                const ex = try std.fmt.bufPrint(&ex_buf, "reg_{d}", .{ex_reg.id});
-                // 设置异常并返回错误
-                try writer.print("        // throw {s}\n", .{ex});
-                try writer.print("        runtime.setException({s});\n", .{ex});
-                
-                if (self.current_exception_handler) |handler_idx| {
-                    try writer.print("        current_block = {d};\n", .{handler_idx});
-                    try writer.print("        continue;\n", .{});
-                } else {
-                    try writer.print("        return error.RuntimeError;\n", .{});
-                }
             },
             .get_exception => {
                 // 获取当前捕获的异常
