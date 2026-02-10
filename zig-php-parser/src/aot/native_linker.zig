@@ -4685,6 +4685,44 @@ pub const NativeLinker = struct {
         }
     }
     
+    /// 检测并优化增量模式: load → const → add → store → reg += const
+    fn tryOptimizeIncrement(_: *Self, writer: anytype, block: *const IR.BasicBlock) !bool {
+        const insts = block.instructions.items;
+        if (insts.len < 3) return false;
+        
+        var load_reg: ?usize = null;
+        var const_val: ?i64 = null;
+        var add_result: ?usize = null;
+        var target_reg: ?usize = null;
+        
+        for (insts) |inst| {
+            switch (inst.op) {
+                .load => |op| {
+                    if (inst.result) |res| {
+                        load_reg = res.id;
+                        target_reg = op.ptr.id;
+                    }
+                },
+                .const_int => |val| const_val = val,
+                .add => |op| {
+                    if (load_reg != null and const_val != null and op.lhs.id == load_reg.?) {
+                        if (inst.result) |res| add_result = res.id;
+                    }
+                },
+                .store => |op| {
+                    if (add_result != null and target_reg != null and 
+                        op.value.id == add_result.? and op.ptr.id == target_reg.?) {
+                        try writer.print("        reg_{d} += {d};\n", .{target_reg.?, const_val.?});
+                        return true;
+                    }
+                },
+                else => {},
+            }
+        }
+        
+        return false;
+    }
+    
     fn generateStandardForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo) !void {
         var code_list = writer.context.self;
         
@@ -4790,16 +4828,18 @@ pub const NativeLinker = struct {
         
         try writer.print("        // Body: {s}\n", .{body_block.label});
         
-        for (body_block.instructions.items) |inst| {
-            // 跳过常量（已外提）
-            const is_invariant = switch (inst.op) {
-                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
-                else => false,
-            };
-            
-            if (!is_invariant) {
-                try code_list.appendSlice(self.allocator, "        ");
-                try self.generateInstructionSimple(code_list, inst);
+        if (!try self.tryOptimizeIncrement(writer, body_block)) {
+            for (body_block.instructions.items) |inst| {
+                // 跳过常量（已外提）
+                const is_invariant = switch (inst.op) {
+                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                    else => false,
+                };
+                
+                if (!is_invariant) {
+                    try code_list.appendSlice(self.allocator, "        ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
             }
         }
         
@@ -4807,9 +4847,21 @@ pub const NativeLinker = struct {
             const inc_block = func.blocks.items[inc_idx];
             try writer.print("        // Increment: {s}\n", .{inc_block.label});
             
-            for (inc_block.instructions.items) |inst| {
-                // 跳过常量（已外提）
-                const is_invariant = switch (inst.op) {
+            if (!try self.tryOptimizeIncrement(writer, inc_block)) {
+                for (inc_block.instructions.items) |inst| {
+                    // 跳过常量（已外提）
+                    const is_invariant = switch (inst.op) {
+                        .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                        else => false,
+                    };
+                    
+                    if (!is_invariant) {
+                        try code_list.appendSlice(self.allocator, "        ");
+                        try self.generateInstructionSimple(code_list, inst);
+                    }
+                }
+            }
+        }
                     .const_int, .const_float, .const_string, .const_bool, .const_null => true,
                     else => false,
                 };
