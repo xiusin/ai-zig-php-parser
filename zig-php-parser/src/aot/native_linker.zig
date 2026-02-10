@@ -4562,15 +4562,11 @@ pub const NativeLinker = struct {
         _ = cleanup_regs;
         
         try writer.writeAll("    // Optimized: structured while loop\n");
-        try writer.writeAll("    while (true) {\n");
         
         var code_list = writer.context.self;
         
-        // 生成循环头（条件）
         const header_block = func.blocks.items[loop.header];
-        try writer.print("        // Header: {s}\n", .{header_block.label});
         
-        // 找到条件寄存器（最后一条指令的结果）
         var cond_reg_id: ?usize = null;
         if (header_block.terminator) |term| {
             if (term == .cond_br) {
@@ -4578,20 +4574,45 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 生成指令，但跳过条件寄存器的赋值（会内联到 if 语句中）
+        // 第一遍：提取循环不变量到循环外
         for (header_block.instructions.items) |inst| {
-            // 如果这条指令的结果是条件寄存器，跳过（会内联）
             if (inst.result) |result_reg| {
                 if (cond_reg_id) |cond_id| {
-                    if (result_reg.id == cond_id) {
-                        // 跳过条件寄存器的赋值
-                        continue;
-                    }
+                    if (result_reg.id == cond_id) continue;
                 }
             }
             
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
+            const is_invariant = switch (inst.op) {
+                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                else => false,
+            };
+            
+            if (is_invariant) {
+                try code_list.appendSlice(self.allocator, "    ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
+        }
+        
+        try writer.writeAll("    while (true) {\n");
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        // 第二遍：生成非常量指令
+        for (header_block.instructions.items) |inst| {
+            if (inst.result) |result_reg| {
+                if (cond_reg_id) |cond_id| {
+                    if (result_reg.id == cond_id) continue;
+                }
+            }
+            
+            const is_invariant = switch (inst.op) {
+                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                else => false,
+            };
+            
+            if (!is_invariant) {
+                try code_list.appendSlice(self.allocator, "        ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
         }
         
         // 生成条件判断（内联条件表达式）
@@ -4665,12 +4686,9 @@ pub const NativeLinker = struct {
     }
     
     fn generateStandardForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo) !void {
-        try writer.writeAll("    while (true) {\n");
-        
         var code_list = writer.context.self;
         
         const header_block = func.blocks.items[loop.header];
-        try writer.print("        // Header: {s}\n", .{header_block.label});
         
         var cond_reg_id: ?usize = null;
         if (header_block.terminator) |term| {
@@ -4679,17 +4697,47 @@ pub const NativeLinker = struct {
             }
         }
         
+        // 第一遍：提取循环不变量到循环外
         for (header_block.instructions.items) |inst| {
             if (inst.result) |result_reg| {
                 if (cond_reg_id) |cond_id| {
-                    if (result_reg.id == cond_id) {
-                        continue;
-                    }
+                    if (result_reg.id == cond_id) continue;
                 }
             }
             
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
+            // 检查是否是常量指令
+            const is_invariant = switch (inst.op) {
+                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                else => false,
+            };
+            
+            if (is_invariant) {
+                try code_list.appendSlice(self.allocator, "    ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
+        }
+        
+        try writer.writeAll("    while (true) {\n");
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        // 第二遍：生成非常量指令
+        for (header_block.instructions.items) |inst| {
+            if (inst.result) |result_reg| {
+                if (cond_reg_id) |cond_id| {
+                    if (result_reg.id == cond_id) continue;
+                }
+            }
+            
+            // 跳过常量指令（已在循环外）
+            const is_invariant = switch (inst.op) {
+                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                else => false,
+            };
+            
+            if (!is_invariant) {
+                try code_list.appendSlice(self.allocator, "        ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
         }
         
         if (header_block.terminator) |term| {
