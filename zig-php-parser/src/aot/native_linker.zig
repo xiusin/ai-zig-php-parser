@@ -4568,59 +4568,75 @@ pub const NativeLinker = struct {
             }
         }
 
-        // 生成最后的退出块
-        const last_loop = cfg.loops.items[cfg.loops.items.len - 1];
-        if (last_loop.exit_block) |exit_idx| {
-            for (exit_idx..func.blocks.items.len) |idx| {
-                if (processed.contains(idx)) continue;
-                const block = func.blocks.items[idx];
-                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-                for (block.instructions.items) |inst| {
-                    try writer.writeAll("    ");
-                    try self.generateInstruction(writer, inst);
-                }
-                if (block.terminator) |term| {
-                    switch (term) {
-                        .ret => |maybe_reg| {
-                            if (cleanup_regs.len > 0) {
-                                try writer.writeAll("    // Cleanup\n");
-                                for (cleanup_regs) |reg_id| {
-                                    if (!self.shouldReleaseReg(reg_id)) continue;
-                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
-                                }
+        // 生成所有剩余的块（包括退出块）
+        var last_block_idx: ?usize = null;
+        for (func.blocks.items, 0..) |block, idx| {
+            if (processed.contains(idx)) continue;
+            
+            try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+            for (block.instructions.items) |inst| {
+                try writer.writeAll("    ");
+                try self.generateInstruction(writer, inst);
+            }
+            
+            // 只在有 ret terminator 的块生成返回
+            if (block.terminator) |term| {
+                switch (term) {
+                    .ret => |maybe_reg| {
+                        if (cleanup_regs.len > 0) {
+                            try writer.writeAll("    // Cleanup\n");
+                            for (cleanup_regs) |reg_id| {
+                                if (!self.shouldReleaseReg(reg_id)) continue;
+                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                             }
-                            if (maybe_reg) |reg| {
-                                // 类型转换
-                                if (self.current_reg_types) |reg_types| {
-                                    const real_type = reg_types.get(reg.id) orelse reg.type_;
-                                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                                    if (reg_type_tag == .i64) {
-                                        try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
-                                    } else if (reg_type_tag == .f64) {
-                                        try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
-                                    } else if (reg_type_tag == .bool) {
-                                        try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
-                                    } else {
-                                        try writer.print("    return reg_{d};\n", .{reg.id});
-                                    }
+                        }
+                        if (maybe_reg) |reg| {
+                            if (self.current_reg_types) |reg_types| {
+                                const real_type = reg_types.get(reg.id) orelse reg.type_;
+                                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                                if (reg_type_tag == .i64) {
+                                    try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                                } else if (reg_type_tag == .f64) {
+                                    try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                                } else if (reg_type_tag == .bool) {
+                                    try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
                                 } else {
                                     try writer.print("    return reg_{d};\n", .{reg.id});
                                 }
                             } else {
-                                try writer.writeAll("    return runtime.Value.initNull();\n");
+                                try writer.print("    return reg_{d};\n", .{reg.id});
                             }
-                        },
-                        else => {
-                            // 其他 terminator：可能需要跳转或其他处理
-                            // 暂时忽略，但记录警告
-                        },
-                    }
-                } else {
-                    // 没有 terminator：添加默认返回
-                    try writer.writeAll("    return runtime.Value.initNull();\n");
+                        } else {
+                            try writer.writeAll("    return runtime.Value.initNull();\n");
+                        }
+                    },
+                    else => {},
                 }
-                try processed.put(idx, {});
             }
+            
+            try processed.put(idx, {});
+            last_block_idx = idx;
+        }
+        
+        // 如果最后一个块没有 return，添加默认返回
+        if (last_block_idx) |idx| {
+            std.debug.print("Last block: {d}\n", .{idx});
+            const last_block = func.blocks.items[idx];
+            var has_return = false;
+            if (last_block.terminator) |term| {
+                std.debug.print("Last block terminator: {s}\n", .{@tagName(term)});
+                if (term == .ret) {
+                    has_return = true;
+                }
+            } else {
+                std.debug.print("Last block has no terminator\n", .{});
+            }
+            if (!has_return) {
+                std.debug.print("Adding default return\n", .{});
+                try writer.writeAll("    return runtime.Value.initNull();\n");
+            }
+        } else {
+            std.debug.print("No last block\n", .{});
         }
 
         return true;
@@ -5986,9 +6002,6 @@ pub const NativeLinker = struct {
     /// 检测循环（回边分析）
     fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
         // 检测所有可能的循环头：有条件分支且有回边的块
-        var all_loops = try std.ArrayList(LoopInfo).initCapacity(self.allocator, 0);
-        defer all_loops.deinit(self.allocator);
-        
         for (func.blocks.items, 0..) |block, header_idx| {
             const term = block.terminator orelse continue;
             if (term != .cond_br) continue;
@@ -6011,25 +6024,8 @@ pub const NativeLinker = struct {
             if (has_back_edge) {
                 // 分析循环结构
                 if (try self.analyzeLoop(func, cfg, header_idx, back_edge_source)) |loop_info| {
-                    try all_loops.append(self.allocator, loop_info);
+                    try cfg.loops.append(self.allocator, loop_info);
                 }
-            }
-        }
-        
-        // 过滤嵌套循环：只保留最外层循环
-        for (all_loops.items) |loop| {
-            var is_inner = false;
-            for (all_loops.items) |outer| {
-                if (loop.header == outer.header) continue;
-                // 检查 loop 是否在 outer 的 body 内
-                if (loop.header > outer.body_start and 
-                    loop.header <= outer.body_end) {
-                    is_inner = true;
-                    break;
-                }
-            }
-            if (!is_inner) {
-                try cfg.loops.append(self.allocator, loop);
             }
         }
     }
@@ -6095,11 +6091,43 @@ pub const NativeLinker = struct {
                 increment = back_edge_source;
             }
         }
+        
+        // 计算真实的 body_end：包含所有从 body_start 到 back_edge_source 的块
+        // 使用 DFS 找到所有可达的块
+        var visited = std.AutoHashMap(usize, void).init(cfg.allocator);
+        defer visited.deinit();
+        
+        var stack = try std.ArrayList(usize).initCapacity(cfg.allocator, 0);
+        defer stack.deinit(cfg.allocator);
+        try stack.append(cfg.allocator, body_start);
+        
+        var max_block: usize = body_start;
+        
+        while (stack.items.len > 0) {
+            const current = stack.pop();
+            if (visited.contains(current)) continue;
+            if (exit) |exit_block| {
+                if (current == exit_block) continue; // 不进入退出块
+            }
+            if (current > back_edge_source) continue; // 不超过回边源
+            
+            try visited.put(current, {});
+            if (current > max_block) max_block = current;
+            
+            // 添加后继
+            if (cfg.successors.get(current)) |succs| {
+                for (succs.items) |succ| {
+                    if (!visited.contains(succ) and succ != header) { // 不回到 header
+                        try stack.append(cfg.allocator, succ);
+                    }
+                }
+            }
+        }
 
         return LoopInfo{
             .header = header,
             .body_start = body_start,
-            .body_end = back_edge_source,
+            .body_end = max_block,
             .exit_block = exit,
             .increment = increment,
             .is_for_loop = is_for_loop,
