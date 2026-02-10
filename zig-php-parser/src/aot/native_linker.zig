@@ -2962,8 +2962,8 @@ pub const NativeLinker = struct {
                         false;
                     
                     if (ptr_is_optimized_alloca) {
-                        // 跳过生成（复制传播）
-                        // 使用方会直接使用源寄存器
+                        // 优化的 alloca：生成简化的赋值
+                        try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.ptr.id });
                         return;
                     }
                     
@@ -4864,16 +4864,6 @@ pub const NativeLinker = struct {
                         try code_list.appendSlice(self.allocator, "        ");
                         try self.generateInstructionSimple(code_list, inst);
                     }
-                }
-            }
-        }
-                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
-                    else => false,
-                };
-                
-                if (!is_invariant) {
-                    try code_list.appendSlice(self.allocator, "        ");
-                    try self.generateInstructionSimple(code_list, inst);
                 }
             }
         }
