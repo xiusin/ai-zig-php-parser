@@ -5068,6 +5068,25 @@ pub const NativeLinker = struct {
         
         try writer.print("        // Body: {s}\n", .{body_block.label});
         
+        // 检测循环体是否为纯常量赋值（死存储）
+        const body_is_dead_store = blk: {
+            if (unroll_factor == 1) break :blk false;
+            
+            // 检查是否只有 load + store（赋值常量）
+            var has_only_assign = true;
+            for (body_block.instructions.items) |inst| {
+                const is_const = switch (inst.op) {
+                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                    else => false,
+                };
+                if (!is_const and inst.op != .load and inst.op != .store) {
+                    has_only_assign = false;
+                    break;
+                }
+            }
+            break :blk has_only_assign;
+        };
+        
         // 循环体（展开 unroll_factor 次）
         // 优化：如果循环体是简单的 reg += 1，合并为 reg += unroll_factor
         const body_is_simple_inc = blk: {
@@ -5084,7 +5103,21 @@ pub const NativeLinker = struct {
             break :blk has_add;
         };
         
-        if (body_is_simple_inc) {
+        if (body_is_dead_store) {
+            // 死存储：只执行一次赋值
+            if (!try self.tryOptimizeIncrement(writer, body_block)) {
+                for (body_block.instructions.items) |inst| {
+                    const is_invariant = switch (inst.op) {
+                        .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                        else => false,
+                    };
+                    if (!is_invariant) {
+                        try code_list.appendSlice(self.allocator, "        ");
+                        try self.generateInstructionSimple(code_list, inst);
+                    }
+                }
+            }
+        } else if (body_is_simple_inc) {
             // 找到 store 指令的目标寄存器
             for (body_block.instructions.items) |inst| {
                 if (inst.op == .store) {
