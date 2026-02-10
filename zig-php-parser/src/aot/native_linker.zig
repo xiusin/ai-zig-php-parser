@@ -3235,12 +3235,26 @@ pub const NativeLinker = struct {
                     else
                         reg.type_;
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    
+                    // 获取操作数的修正类型
+                    const lhs_corrected = if (self.current_register_types) |types|
+                        types.get(op.lhs.id) orelse op.lhs.type_
+                    else
+                        op.lhs.type_;
+                    const rhs_corrected = if (self.current_register_types) |types|
+                        types.get(op.rhs.id) orelse op.rhs.type_
+                    else
+                        op.rhs.type_;
+                    
+                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                     // 检查操作数类型是否一致且为基本类型
-                    if (type_tag == .bool and lhs_type_tag == .i64 and rhs_type_tag == .i64) {
+                    if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
                         // 两个i64直接比较
+                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} < reg_{d};\n", .{op.lhs.id, op.rhs.id });
+                    } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
+                        // 两个f64直接比较
                         try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} < reg_{d};\n", .{op.lhs.id, op.rhs.id });
                     } else if (lhs_type_tag == .php_value and rhs_type_tag == .php_value) {
                         // 两个Value类型，直接调用运行时函数
@@ -4459,7 +4473,9 @@ pub const NativeLinker = struct {
         
         for (header_block.instructions.items) |inst| {
             try writer.writeAll("        ");
-            try self.generateInstructionSimple(writer.context.self, inst);
+            var code_list = writer.context.self;
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
         }
         
         // 生成条件判断
@@ -4481,7 +4497,9 @@ pub const NativeLinker = struct {
         
         for (body_block.instructions.items) |inst| {
             try writer.writeAll("        ");
-            try self.generateInstructionSimple(writer.context.self, inst);
+            var code_list = writer.context.self;
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
         }
         
         try writer.writeAll("    }\n");
@@ -4500,7 +4518,9 @@ pub const NativeLinker = struct {
         
         for (header_block.instructions.items) |inst| {
             try writer.writeAll("        ");
-            try self.generateInstructionSimple(writer.context.self, inst);
+            var code_list = writer.context.self;
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
         }
         
         // 生成条件判断
@@ -4522,7 +4542,9 @@ pub const NativeLinker = struct {
         
         for (body_block.instructions.items) |inst| {
             try writer.writeAll("        ");
-            try self.generateInstructionSimple(writer.context.self, inst);
+            var code_list = writer.context.self;
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
         }
         
         // 生成增量块
@@ -4532,7 +4554,9 @@ pub const NativeLinker = struct {
             
             for (inc_block.instructions.items) |inst| {
                 try writer.writeAll("        ");
-                try self.generateInstructionSimple(writer.context.self, inst);
+                var code_list = writer.context.self;
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
             }
         }
         
