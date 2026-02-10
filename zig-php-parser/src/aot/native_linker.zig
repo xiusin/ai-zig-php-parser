@@ -1167,17 +1167,17 @@ pub const NativeLinker = struct {
                                 // 需要运行时函数，结果应该是 Value
                                 corrected_type = .php_value;
                                 if (self.config.verbose) {
-                                    std.debug.print("  Type correction: reg_{d} {s} -> php_value (mixed operands)\n", .{reg.id, @tagName(res_tag)});
+                                    // std.debug.print("  Type correction: reg_{d} {s} -> php_value (mixed operands)\n", .{reg.id, @tagName(res_tag)});
                                 }
                             } else if (both_i64 and res_tag != .i64) {
                                 corrected_type = .php_value;
                                 if (self.config.verbose) {
-                                    std.debug.print("  Type correction: reg_{d} {s} -> php_value (i64 mismatch)\n", .{reg.id, @tagName(res_tag)});
+                                    // std.debug.print("  Type correction: reg_{d} {s} -> php_value (i64 mismatch)\n", .{reg.id, @tagName(res_tag)});
                                 }
                             } else if (both_f64 and res_tag != .f64) {
                                 corrected_type = .php_value;
                                 if (self.config.verbose) {
-                                    std.debug.print("  Type correction: reg_{d} {s} -> php_value (f64 mismatch)\n", .{reg.id, @tagName(res_tag)});
+                                    // std.debug.print("  Type correction: reg_{d} {s} -> php_value (f64 mismatch)\n", .{reg.id, @tagName(res_tag)});
                                 }
                             }
                         },
@@ -1187,7 +1187,7 @@ pub const NativeLinker = struct {
                             if (res_tag != .php_value) {
                                 corrected_type = .php_value;
                                 if (self.config.verbose) {
-                                    std.debug.print("  Type correction: reg_{d} {s} -> php_value (call result)\n", .{reg.id, @tagName(res_tag)});
+                                    // std.debug.print("  Type correction: reg_{d} {s} -> php_value (call result)\n", .{reg.id, @tagName(res_tag)});
                                 }
                             }
                         },
@@ -1320,7 +1320,7 @@ pub const NativeLinker = struct {
             try code.appendSlice(self.allocator, "    // Register declarations\n");
             
             if (self.config.verbose) {
-                std.debug.print("  Generating {d} register declarations\n", .{all_registers.count()});
+                // std.debug.print("  Generating {d} register declarations\n", .{all_registers.count()});
             }
 
             var reg_iter = all_registers.iterator();
@@ -1329,7 +1329,7 @@ pub const NativeLinker = struct {
                 const reg_type = entry.value_ptr.*;
                 
                 if (self.config.verbose and reg_id == 16) {
-                    std.debug.print("  reg_16 type: {s}\n", .{@tagName(@as(std.meta.Tag(IR.Type), reg_type))});
+                    // std.debug.print("  reg_16 type: {s}\n", .{@tagName(@as(std.meta.Tag(IR.Type), reg_type))});
                 }
 
                 const is_alloca = alloca_registers.contains(reg_id);
@@ -1955,6 +1955,24 @@ pub const NativeLinker = struct {
 
     /// 生成控制流状态机（用于复杂控制流）
     fn generateControlFlowStateMachine(self: *Self, code: *std.ArrayList(u8), func: *const IR.Function, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void)) !void {
+        // std.debug.print("generateControlFlowStateMachine: current_reg_types={}\n", .{self.current_reg_types != null});
+        
+        // 尝试生成结构化控制流
+        const prev_cleanup_regs = self.current_cleanup_regs;
+        const prev_alloca_regs = self.current_alloca_regs;
+        self.current_cleanup_regs = cleanup_regs;
+        self.current_alloca_regs = alloca_regs;
+        defer {
+            self.current_cleanup_regs = prev_cleanup_regs;
+            self.current_alloca_regs = prev_alloca_regs;
+        }
+        
+        var writer = code.writer(self.allocator);
+        if (try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs)) {
+            return;
+        }
+        
+        // 回退到状态机
         try code.appendSlice(self.allocator, "    // Control flow state machine\n");
         try code.appendSlice(self.allocator, "    var current_block: u32 = 0;\n");
         try code.appendSlice(self.allocator, "    var prev_block: u32 = 0;\n");
@@ -1964,16 +1982,6 @@ pub const NativeLinker = struct {
         // 检查函数是否有返回值
         const func_has_return_value = self.func_return_types.get(func.name) orelse false;
 
-        const prev_cleanup_regs = self.current_cleanup_regs;
-        const prev_alloca_regs = self.current_alloca_regs;
-        self.current_cleanup_regs = cleanup_regs;
-        self.current_alloca_regs = alloca_regs;
-        defer {
-            self.current_cleanup_regs = prev_cleanup_regs;
-            self.current_alloca_regs = prev_alloca_regs;
-        }
-
-        var writer = code.writer(self.allocator);
         for (func.blocks.items, 0..) |block, block_idx| {
             // 设置当前异常处理器
             if (block.exception_handler) |handler| {
@@ -4336,23 +4344,627 @@ pub const NativeLinker = struct {
         try writer.writeAll("    }\n");
     }
 
+    /// 尝试生成结构化控制流（新版本，使用 ArrayList writer）
+    fn tryGenerateStructuredControlFlowNew(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void)) !bool {
+        _ = alloca_regs;
+        
+        // std.debug.print("=== tryGenerateStructuredControlFlowNew: blocks={d} ===\n", .{func.blocks.items.len});
+        
+        // 分析控制流
+        var cfg = ControlFlowAnalysis.init(self.allocator);
+        defer cfg.deinit();
+        
+        // 构建前驱/后继关系
+        try self.buildCFG(func, &cfg);
+        // std.debug.print("CFG built\n", .{});
+        
+        // 检测循环
+        try self.detectLoops(func, &cfg);
+        
+        // 如果没有检测到循环，返回 false
+        if (cfg.loops.items.len == 0) {
+            // std.debug.print("No loops detected, falling back to state machine\n", .{});
+            return false;
+        }
+        
+        // 生成结构化代码
+        const result = try self.generateStructuredCodeNew(writer, func, &cfg, cleanup_regs);
+        // std.debug.print("generateStructuredCodeNew returned: {}\n", .{result});
+        return result;
+    }
+    
+    /// 生成结构化代码（新版本）
+    fn generateStructuredCodeNew(self: *Self, writer: anytype, func: *const IR.Function, cfg: *ControlFlowAnalysis, cleanup_regs: []const usize) !bool {
+        // 如果没有循环，返回 false
+        if (cfg.loops.items.len == 0) {
+            return false;
+        }
+        
+        // 处理多个循环：按顺序生成每个循环
+        // 简化实现：只处理不嵌套的循环
+        
+        var current_block: usize = 0;
+        
+        for (cfg.loops.items) |loop| {
+            // 生成循环前的代码
+            while (current_block < loop.header) {
+                const block = func.blocks.items[current_block];
+                try writer.print("    // Block {d}: {s}\n", .{ current_block, block.label });
+                
+                for (block.instructions.items) |inst| {
+                    try writer.writeAll("    ");
+                    try self.generateInstructionSimple(writer.context.self, inst);
+                }
+                
+                current_block += 1;
+            }
+            
+            // 生成循环
+            if (loop.is_for_loop) {
+                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+            } else {
+                try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+            }
+            
+            // 跳过循环体
+            current_block = loop.exit;
+        }
+        
+        // 生成剩余的代码
+        while (current_block < func.blocks.items.len) {
+            const block = func.blocks.items[current_block];
+            try writer.print("    // Block {d}: {s}\n", .{ current_block, block.label });
+            
+            for (block.instructions.items) |inst| {
+                try writer.writeAll("    ");
+                try self.generateInstructionSimple(writer.context.self, inst);
+            }
+            
+            // 处理终止指令
+            if (block.terminator) |term| {
+                switch (term) {
+                    .ret => |maybe_reg| {
+                        if (cleanup_regs.len > 0) {
+                            try writer.writeAll("    // Cleanup\n");
+                            for (cleanup_regs) |reg_id| {
+                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                            }
+                        }
+                        if (maybe_reg) |reg| {
+                            try writer.print("    return reg_{d};\n", .{reg.id});
+                        } else {
+                            try writer.writeAll("    return runtime.Value.initNull();\n");
+                        }
+                    },
+                    else => {},
+                }
+            }
+            
+            current_block += 1;
+        }
+        
+        return true;
+    }
+    
+    /// 生成结构化 while 循环（新版本）
+    fn generateWhileLoopStructuredNew(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
+        _ = cleanup_regs;
+        
+        try writer.writeAll("    // Optimized: structured while loop\n");
+        try writer.writeAll("    while (true) {\n");
+        
+        // 生成循环头（条件）
+        const header_block = func.blocks.items[loop.header];
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        for (header_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstructionSimple(writer.context.self, inst);
+        }
+        
+        // 生成条件判断
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                const cond_reg = term.cond_br.cond.id;
+                const reg_type = self.current_reg_types.?.get(cond_reg) orelse IR.Type{ .php_value = {} };
+                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                
+                try writer.writeAll("        if (!(");
+                try self.writeBoolExprToWriter(writer, type_tag, cond_reg);
+                try writer.writeAll(")) break;\n");
+            }
+        }
+        
+        // 生成循环体
+        const body_block = func.blocks.items[loop.body_start];
+        try writer.print("        // Body: {s}\n", .{body_block.label});
+        
+        for (body_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstructionSimple(writer.context.self, inst);
+        }
+        
+        try writer.writeAll("    }\n");
+    }
+    
+    /// 生成结构化 for 循环（新版本）
+    fn generateForLoopStructuredNew(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
+        _ = cleanup_regs;
+        
+        try writer.writeAll("    // Optimized: structured for loop\n");
+        try writer.writeAll("    while (true) {\n");
+        
+        // 生成循环头（条件）
+        const header_block = func.blocks.items[loop.header];
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        for (header_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstructionSimple(writer.context.self, inst);
+        }
+        
+        // 生成条件判断
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                const cond_reg = term.cond_br.cond.id;
+                const reg_type = self.current_reg_types.?.get(cond_reg) orelse IR.Type{ .php_value = {} };
+                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                
+                try writer.writeAll("        if (!(");
+                try self.writeBoolExprToWriter(writer, type_tag, cond_reg);
+                try writer.writeAll(")) break;\n");
+            }
+        }
+        
+        // 生成循环体
+        const body_block = func.blocks.items[loop.body_start];
+        try writer.print("        // Body: {s}\n", .{body_block.label});
+        
+        for (body_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstructionSimple(writer.context.self, inst);
+        }
+        
+        // 生成增量块
+        if (loop.increment) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            try writer.print("        // Increment: {s}\n", .{inc_block.label});
+            
+            for (inc_block.instructions.items) |inst| {
+                try writer.writeAll("        ");
+                try self.generateInstructionSimple(writer.context.self, inst);
+            }
+        }
+        
+        try writer.writeAll("    }\n");
+    }
+    
+    /// 写布尔表达式到 writer
+    fn writeBoolExprToWriter(self: *Self, writer: anytype, type_tag: std.meta.Tag(IR.Type), reg_id: usize) !void {
+        _ = self;
+        
+        switch (type_tag) {
+            .i64 => try writer.print("reg_{d} != 0", .{reg_id}),
+            .f64 => try writer.print("reg_{d} != 0.0", .{reg_id}),
+            .bool => try writer.print("reg_{d}", .{reg_id}),
+            .php_value => try writer.print("reg_{d}.toBool()", .{reg_id}),
+            else => try writer.print("reg_{d}.toBool()", .{reg_id}),
+        }
+    }
+    
+    /// 控制流分析结果
+    const ControlFlowAnalysis = struct {
+        allocator: std.mem.Allocator,
+        /// 循环信息
+        loops: std.ArrayList(LoopInfo),
+        /// 支配树（用于确定块的嵌套关系）
+        dominators: std.AutoHashMap(usize, usize),
+        /// 后继块映射
+        successors: std.AutoHashMap(usize, std.ArrayList(usize)),
+        /// 前驱块映射
+        predecessors: std.AutoHashMap(usize, std.ArrayList(usize)),
+        
+        fn init(allocator: std.mem.Allocator) ControlFlowAnalysis {
+            return .{
+                .allocator = allocator,
+                .loops = std.ArrayList(LoopInfo){},
+                .dominators = std.AutoHashMap(usize, usize).init(allocator),
+                .successors = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
+                .predecessors = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
+            };
+        }
+        
+        fn deinit(self: *ControlFlowAnalysis) void {
+            self.loops.deinit(self.allocator);
+            self.dominators.deinit();
+            
+            var succ_iter = self.successors.valueIterator();
+            while (succ_iter.next()) |list| {
+                list.deinit(self.allocator);
+            }
+            self.successors.deinit();
+            
+            var pred_iter = self.predecessors.valueIterator();
+            while (pred_iter.next()) |list| {
+                list.deinit(self.allocator);
+            }
+            self.predecessors.deinit();
+        }
+    };
+    
+    /// 循环信息
+    const LoopInfo = struct {
+        header: usize,        // 循环头（条件块）
+        body_start: usize,    // 循环体起始块
+        body_end: usize,      // 循环体结束块
+        exit: usize,          // 循环出口块
+        increment: ?usize,    // 增量块（for 循环）
+        is_for_loop: bool,    // 是否是 for 循环
+    };
+    
     /// 尝试生成结构化控制流（最激进的优化）
     ///
-    /// 策略：检测循环模式（有回边）并直接生成 while 循环
-    /// 回边：从后面的块跳转到前面的块
+    /// 策略：
+    /// 1. 分析控制流图，构建前驱/后继关系
+    /// 2. 检测循环（回边分析）
+    /// 3. 识别循环类型（for/while）
+    /// 4. 直接生成结构化代码
     ///
     /// 返回true表示成功生成，false表示需要回退到状态机
     fn tryGenerateStructuredControlFlow(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize) !bool {
-        _ = cleanup_regs;
-        _ = writer;
-        _ = self;
-        _ = func;
+        // std.debug.print("=== tryGenerateStructuredControlFlow: blocks={d} ===\n", .{func.blocks.items.len});
         
-        // TODO: 实现循环检测和结构化代码生成
-        // 当前先返回 false，使用状态机
-        return false;
+        // 分析控制流
+        var cfg = ControlFlowAnalysis.init(self.allocator);
+        defer cfg.deinit();
+        
+        // 构建前驱/后继关系
+        try self.buildCFG(func, &cfg);
+        // std.debug.print("CFG built\n", .{});
+        
+        // 检测循环
+        try self.detectLoops(func, &cfg);
+        
+        // 如果没有检测到循环，返回 false
+        if (cfg.loops.items.len == 0) {
+            // std.debug.print("No loops detected, falling back to state machine\n", .{});
+            return false;
+        }
+        
+        // 生成结构化代码
+        const result = try self.generateStructuredCode(writer, func, &cfg, cleanup_regs);
+        // std.debug.print("generateStructuredCode returned: {}\n", .{result});
+        return result;
     }
 
+    /// 构建控制流图（CFG）
+    fn buildCFG(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
+        // std.debug.print("buildCFG: blocks={d}\n", .{func.blocks.items.len});
+        
+        // 第一步：为所有块初始化后继和前驱列表
+        for (0..func.blocks.items.len) |idx| {
+            const succ_list = try std.ArrayList(usize).initCapacity(self.allocator, 0);
+            const pred_list = try std.ArrayList(usize).initCapacity(self.allocator, 0);
+            try cfg.successors.put(idx, succ_list);
+            try cfg.predecessors.put(idx, pred_list);
+        }
+        
+        // 第二步：分析终止指令，添加后继关系
+        for (func.blocks.items, 0..) |block, idx| {
+            // std.debug.print("  Block {d}: {s}, term={}\n", .{ idx, block.label, block.terminator != null });
+            
+            if (block.terminator) |term| {
+                switch (term) {
+                    .br => |target| {
+                        const target_idx = self.findBlockIndex(func, target);
+                        try cfg.successors.getPtr(idx).?.append(self.allocator, target_idx);
+                        try cfg.predecessors.getPtr(target_idx).?.append(self.allocator, idx);
+                    },
+                    .cond_br => |cond_br| {
+                        const then_idx = self.findBlockIndex(func, cond_br.then_block);
+                        const else_idx = self.findBlockIndex(func, cond_br.else_block);
+                        
+                        try cfg.successors.getPtr(idx).?.append(self.allocator, then_idx);
+                        try cfg.successors.getPtr(idx).?.append(self.allocator, else_idx);
+                        
+                        try cfg.predecessors.getPtr(then_idx).?.append(self.allocator, idx);
+                        try cfg.predecessors.getPtr(else_idx).?.append(self.allocator, idx);
+                    },
+                    .switch_ => |switch_data| {
+                        for (switch_data.cases) |case| {
+                            const case_idx = self.findBlockIndex(func, case.block);
+                            try cfg.successors.getPtr(idx).?.append(self.allocator, case_idx);
+                            try cfg.predecessors.getPtr(case_idx).?.append(self.allocator, idx);
+                        }
+                        const default_idx = self.findBlockIndex(func, switch_data.default);
+                        try cfg.successors.getPtr(idx).?.append(self.allocator, default_idx);
+                        try cfg.predecessors.getPtr(default_idx).?.append(self.allocator, idx);
+                    },
+                    .ret, .throw, .unreachable_ => {
+                        // 没有后继
+                    },
+                }
+            } else if (idx + 1 < func.blocks.items.len) {
+                // 没有终止指令，fallthrough 到下一个块
+                try cfg.successors.getPtr(idx).?.append(self.allocator, idx + 1);
+                try cfg.predecessors.getPtr(idx + 1).?.append(self.allocator, idx);
+            }
+        }
+    }
+    
+    /// 检测循环（回边分析）
+    fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
+        // 检测回边：从后面的块跳转到前面的块
+        for (func.blocks.items, 0..) |_, idx| {
+            const successors = cfg.successors.get(idx) orelse continue;
+            
+            for (successors.items) |succ_idx| {
+                // 回边：succ_idx <= idx
+                if (succ_idx <= idx) {
+                    // 找到循环头
+                    const header = succ_idx;
+                    
+                    // std.debug.print("Found back edge: {d} -> {d}\n", .{ idx, header });
+                    
+                    // 分析循环结构
+                    if (try self.analyzeLoop(func, cfg, header, idx)) |loop_info| {
+                        // Detected loop
+                        try cfg.loops.append(self.allocator, loop_info);
+                    }
+                }
+            }
+        }
+        
+        // std.debug.print("Total loops detected: {d}\n", .{cfg.loops.items.len});
+    }
+    
+    /// 分析循环结构
+    fn analyzeLoop(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis, header: usize, back_edge_source: usize) !?LoopInfo {
+        _ = self;
+        
+        // 循环头必须是条件分支
+        const header_block = func.blocks.items[header];
+        const header_term = header_block.terminator orelse return null;
+        
+        if (header_term != .cond_br) {
+            return null;
+        }
+        
+        // 使用地址比较找到 then 和 else 块的索引
+        const then_ptr = @intFromPtr(header_term.cond_br.then_block);
+        const else_ptr = @intFromPtr(header_term.cond_br.else_block);
+        
+        var then_idx: ?usize = null;
+        var else_idx: ?usize = null;
+        
+        for (func.blocks.items, 0..) |block, i| {
+            const block_ptr = @intFromPtr(block);
+            if (block_ptr == then_ptr) {
+                then_idx = i;
+            }
+            if (block_ptr == else_ptr) {
+                else_idx = i;
+            }
+        }
+        
+        if (then_idx == null or else_idx == null) {
+            return null;
+        }
+        
+        // 确定循环体和出口
+        // 循环体应该在循环头之后，出口应该在循环体之后
+        var body_start: usize = 0;
+        var exit: usize = 0;
+        
+        if (then_idx.? > header and then_idx.? <= back_edge_source) {
+            body_start = then_idx.?;
+            exit = else_idx.?;
+        } else if (else_idx.? > header and else_idx.? <= back_edge_source) {
+            body_start = else_idx.?;
+            exit = then_idx.?;
+        } else {
+            return null;
+        }
+        
+        // 检查是否是 for 循环（有增量块）
+        var is_for_loop = false;
+        var increment: ?usize = null;
+        
+        if (back_edge_source > body_start and back_edge_source != body_start) {
+            // 检查 back_edge_source 是否只有一个前驱（循环体）
+            const preds = cfg.predecessors.get(back_edge_source) orelse return null;
+            if (preds.items.len == 1 and preds.items[0] == body_start) {
+                // 这是增量块
+                is_for_loop = true;
+                increment = back_edge_source;
+            }
+        }
+        
+        return LoopInfo{
+            .header = header,
+            .body_start = body_start,
+            .body_end = if (increment) |inc| inc else body_start,
+            .exit = exit,
+            .increment = increment,
+            .is_for_loop = is_for_loop,
+        };
+    }
+    
+    /// 生成结构化代码
+    fn generateStructuredCode(self: *Self, writer: anytype, func: *const IR.Function, cfg: *ControlFlowAnalysis, cleanup_regs: []const usize) !bool {
+        // 目前只处理单个循环的情况
+        if (cfg.loops.items.len != 1) {
+            return false;
+        }
+        
+        const loop = cfg.loops.items[0];
+        
+        // 生成 entry 块（循环前的初始化）
+        if (loop.header > 0) {
+            for (0..loop.header) |idx| {
+                const block = func.blocks.items[idx];
+                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                
+                for (block.instructions.items) |inst| {
+                    try writer.writeAll("    ");
+                    try self.generateInstruction(writer, inst);
+                }
+                
+                // 处理终止指令（如果不是跳转到循环头）
+                if (block.terminator) |term| {
+                    if (term == .br) {
+                        const target_idx = self.findBlockIndex(func, term.br);
+                        if (target_idx != loop.header) {
+                            // 不是跳转到循环头，需要处理
+                            return false;
+                        }
+                    } else {
+                        // 其他终止指令，暂不支持
+                        return false;
+                    }
+                }
+            }
+        }
+        
+        // 生成循环
+        if (loop.is_for_loop) {
+            try self.generateForLoopStructured(writer, func, loop, cleanup_regs);
+        } else {
+            try self.generateWhileLoopStructured(writer, func, loop, cleanup_regs);
+        }
+        
+        // 生成 exit 块（循环后的代码）
+        if (loop.exit < func.blocks.items.len) {
+            for (loop.exit..func.blocks.items.len) |idx| {
+                const block = func.blocks.items[idx];
+                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                
+                for (block.instructions.items) |inst| {
+                    try writer.writeAll("    ");
+                    try self.generateInstruction(writer, inst);
+                }
+                
+                // 处理终止指令
+                if (block.terminator) |term| {
+                    switch (term) {
+                        .ret => |maybe_reg| {
+                            if (cleanup_regs.len > 0) {
+                                try writer.writeAll("    // Cleanup\n");
+                                for (cleanup_regs) |reg_id| {
+                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                }
+                            }
+                            if (maybe_reg) |reg| {
+                                try writer.print("    return reg_{d};\n", .{reg.id});
+                            } else {
+                                try writer.writeAll("    return runtime.Value.initNull();\n");
+                            }
+                        },
+                        else => {
+                            // 其他终止指令，暂不支持
+                            return false;
+                        },
+                    }
+                }
+            }
+        }
+        
+        return true;
+    }
+    
+    /// 生成结构化 while 循环
+    fn generateWhileLoopStructured(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
+        _ = cleanup_regs;
+        
+        try writer.writeAll("    // Optimized: structured while loop\n");
+        try writer.writeAll("    while (true) {\n");
+        
+        // 生成循环头（条件）
+        const header_block = func.blocks.items[loop.header];
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        for (header_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstruction(writer, inst);
+        }
+        
+        // 生成条件判断
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                const cond_reg = term.cond_br.cond.id;
+                const reg_type = self.current_reg_types.?.get(cond_reg) orelse IR.Type{ .php_value = {} };
+                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                
+                try writer.writeAll("        if (!(");
+                try self.writeBoolExpr(writer, type_tag, cond_reg);
+                try writer.writeAll(")) break;\n");
+            }
+        }
+        
+        // 生成循环体
+        const body_block = func.blocks.items[loop.body_start];
+        try writer.print("        // Body: {s}\n", .{body_block.label});
+        
+        for (body_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstruction(writer, inst);
+        }
+        
+        try writer.writeAll("    }\n");
+    }
+    
+    /// 生成结构化 for 循环
+    fn generateForLoopStructured(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
+        _ = cleanup_regs;
+        
+        try writer.writeAll("    // Optimized: structured for loop\n");
+        try writer.writeAll("    while (true) {\n");
+        
+        // 生成循环头（条件）
+        const header_block = func.blocks.items[loop.header];
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        for (header_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstruction(writer, inst);
+        }
+        
+        // 生成条件判断
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                const cond_reg = term.cond_br.cond.id;
+                const reg_type = self.current_reg_types.?.get(cond_reg) orelse IR.Type{ .php_value = {} };
+                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                
+                try writer.writeAll("        if (!(");
+                try self.writeBoolExpr(writer, type_tag, cond_reg);
+                try writer.writeAll(")) break;\n");
+            }
+        }
+        
+        // 生成循环体
+        const body_block = func.blocks.items[loop.body_start];
+        try writer.print("        // Body: {s}\n", .{body_block.label});
+        
+        for (body_block.instructions.items) |inst| {
+            try writer.writeAll("        ");
+            try self.generateInstruction(writer, inst);
+        }
+        
+        // 生成增量块
+        if (loop.increment) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            try writer.print("        // Increment: {s}\n", .{inc_block.label});
+            
+            for (inc_block.instructions.items) |inst| {
+                try writer.writeAll("        ");
+                try self.generateInstruction(writer, inst);
+            }
+        }
+        
+        try writer.writeAll("    }\n");
+    }
+    
     /// 直接生成 while 循环
     fn generateWhileLoopDirect(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize, cond_idx: usize, body_idx: usize, exit_idx: usize) !bool {
         try writer.writeAll("    // Optimized: direct while loop generation\n");
@@ -4532,22 +5144,12 @@ pub const NativeLinker = struct {
     ///
     /// 返回true表示成功生成简单循环，false表示需要使用状态机
     fn tryGenerateSimpleLoop(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize) !bool {
-        // 至少需要3个块：entry + cond + body + exit（while）
-        // 或4个块：entry + cond + body + loop + exit（for）
-        if (func.blocks.items.len < 3) {
-            return false;
-        }
-
-        // 检测while循环模式
-        if (try self.tryGenerateWhileLoop(writer, func, cleanup_regs)) {
-            return true;
-        }
-
-        // 检测for循环模式
-        if (try self.tryGenerateForLoop(writer, func, cleanup_regs)) {
-            return true;
-        }
-
+        _ = self;
+        _ = writer;
+        _ = func;
+        _ = cleanup_regs;
+        
+        // 禁用旧的循环检测，使用新的结构化控制流生成
         return false;
     }
 
@@ -5132,13 +5734,16 @@ pub const NativeLinker = struct {
 
     /// 查找基本块在函数中的索引
     fn findBlockIndex(self: *const Self, func: *const IR.Function, target: *const IR.BasicBlock) u32 {
+        const target_ptr = @intFromPtr(target);
         for (func.blocks.items, 0..) |block, i| {
-            if (block == target) {
+            const block_ptr = @intFromPtr(block);
+            if (block_ptr == target_ptr) {
                 return @intCast(i);
             }
         }
         // 如果找不到，返回0（不应该发生）
         _ = self.config.verbose;
+        // std.debug.print("WARNING: Block not found in function! target={*}\n", .{target});
         return 0;
     }
 
@@ -5974,7 +6579,7 @@ pub const NativeLinker = struct {
         try self.invokeZigCompiler(zig_file_path, output_path);
 
         if (self.config.verbose) {
-            std.debug.print("  Compilation successful: {s}\n", .{output_path});
+            // std.debug.print("  Compilation successful: {s}\n", .{output_path});
         }
     }
 
@@ -6014,10 +6619,7 @@ pub const NativeLinker = struct {
                 self.allocator,
                 f.src,
                 10 * 1024 * 1024,
-            ) catch |err| {
-                if (self.config.verbose) {
-                    std.debug.print("  Warning: Failed to copy {s}: {}\n", .{ f.src, err });
-                }
+            ) catch {
                 continue;
             };
             defer self.allocator.free(content);
@@ -6034,7 +6636,7 @@ pub const NativeLinker = struct {
         }
 
         if (self.config.verbose) {
-            std.debug.print("  Copied runtime libraries to {s}\n", .{temp_dir});
+            // std.debug.print("  Copied runtime libraries to {s}\n", .{temp_dir});
         }
     }
 
@@ -6147,11 +6749,11 @@ pub const NativeLinker = struct {
         }
 
         if (self.config.verbose) {
-            std.debug.print("  Invoking Zig compiler: ", .{});
-            for (args.items) |arg| {
-                std.debug.print("{s} ", .{arg});
+            // std.debug.print("  Invoking Zig compiler: ", .{});
+            for (args.items) |_| {
+                // std.debug.print("{s} ", .{arg});
             }
-            std.debug.print("\n", .{});
+            // std.debug.print("\n", .{});
         }
 
         // 执行编译命令
