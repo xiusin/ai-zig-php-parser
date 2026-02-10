@@ -4767,8 +4767,58 @@ pub const NativeLinker = struct {
             }
         }
         
+        // 检测完全展开：循环上界为常量且 ≤ 32
+        const full_unroll_count: ?usize = blk: {
+            if (loop.increment == null) break :blk null;
+            
+            // 检查条件是否为 i < const
+            var loop_limit: ?i64 = null;
+            if (cond_reg_id) |cond_id| {
+                for (header_block.instructions.items) |inst| {
+                    if (inst.result) |res| {
+                        if (res.id == cond_id and inst.op == .lt) {
+                            const rhs_id = inst.op.lt.rhs.id;
+                            // 查找 rhs 是否为常量
+                            for (header_block.instructions.items) |const_inst| {
+                                if (const_inst.result) |const_res| {
+                                    if (const_res.id == rhs_id and const_inst.op == .const_int) {
+                                        loop_limit = const_inst.op.const_int;
+                                        break;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (loop_limit) |limit| {
+                if (limit > 0 and limit <= 16) {
+                    // 检查循环体是否简单
+                    var body_simple = true;
+                    for (body_block.instructions.items) |inst| {
+                        const is_const = switch (inst.op) {
+                            .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                            else => false,
+                        };
+                        if (!is_const and inst.op != .load and inst.op != .add and inst.op != .store) {
+                            body_simple = false;
+                            break;
+                        }
+                    }
+                    if (body_simple) {
+                        break :blk @intCast(limit);
+                    }
+                }
+            }
+            
+            break :blk null;
+        };
+        
         // 检测循环展开和剥离
         const unroll_factor: usize = blk: {
+            if (full_unroll_count != null) break :blk 1;  // 完全展开时不需要部分展开
             if (loop.increment == null) break :blk 1;
             
             // 检查循环体是否简单
@@ -4807,7 +4857,6 @@ pub const NativeLinker = struct {
             
             break :blk 4;
         };
-        
         const enable_peeling = unroll_factor > 1;
         
         // 提取所有循环不变量到循环外（header + body + increment）
@@ -4857,6 +4906,37 @@ pub const NativeLinker = struct {
                 }
             }
         }
+        
+        // 完全展开小循环
+        if (full_unroll_count) |count| {
+            try writer.print("    // Fully unrolled loop ({d} iterations)\n", .{count});
+            
+            // 找到循环体的目标寄存器
+            var target_reg: ?usize = null;
+            for (body_block.instructions.items) |inst| {
+                if (inst.op == .store) {
+                    target_reg = inst.op.store.ptr.id;
+                    break;
+                }
+            }
+            
+            if (target_reg) |reg| {
+                // 直接生成 reg += count
+                try writer.print("    reg_{d} += {d};\n", .{ reg, count });
+            }
+            
+            // 更新循环变量
+            if (loop.increment) |inc_idx| {
+                const inc_block = func.blocks.items[inc_idx];
+                for (inc_block.instructions.items) |inst| {
+                    if (inst.op == .store) {
+                        const inc_reg = inst.op.store.ptr.id;
+                        try writer.print("    reg_{d} += {d};\n", .{ inc_reg, count });
+                        break;
+                    }
+                }
+            }
+        } else {
         
         // 循环剥离：提取第一次迭代
         if (enable_peeling) {
@@ -5126,6 +5206,7 @@ pub const NativeLinker = struct {
             
             try writer.writeAll("    }\n");
         }
+        }  // 完全展开的 else 分支结束
     }
     
     /// 解析 load 源寄存器（复制传播）
