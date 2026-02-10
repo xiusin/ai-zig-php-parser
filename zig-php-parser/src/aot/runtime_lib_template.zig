@@ -1177,7 +1177,9 @@ pub const PHPArray = struct {
 
         pub fn iterator(self: *const Elements) Iterator {
             if (self.mixed) |*m| {
-                return .{ .elements = self, .mixed_it = m.iterator() };
+                // 修复：m 是 const 指针，需要转换为可变指针
+                const mut_m = @constCast(m);
+                return .{ .elements = self, .mixed_it = mut_m.iterator() };
             }
             return .{ .elements = self };
         }

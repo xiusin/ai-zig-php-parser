@@ -2786,6 +2786,11 @@ pub const NativeLinker = struct {
 
     /// 生成指令（简化版）
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
+        // 🔥 LICM: 跳过已提升的指令
+        if (self.isInstructionHoisted(inst)) {
+            return;
+        }
+        
         const writer = code.writer(self.allocator);
 
         // Add source location comment
