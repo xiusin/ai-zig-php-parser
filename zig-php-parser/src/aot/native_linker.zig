@@ -4765,6 +4765,48 @@ pub const NativeLinker = struct {
             }
         }
         
+        // 检测循环展开：简单循环体 + 增量为 += 1
+        const unroll_factor: usize = blk: {
+            if (loop.increment == null) break :blk 1;
+            
+            // 检查循环体是否简单
+            var body_simple = true;
+            for (body_block.instructions.items) |inst| {
+                const is_const = switch (inst.op) {
+                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                    else => false,
+                };
+                if (!is_const and inst.op != .load and inst.op != .add and inst.op != .store) {
+                    body_simple = false;
+                    break;
+                }
+            }
+            if (!body_simple) break :blk 1;
+            
+            // 检查增量块是否有 += 1 模式（通过 tryOptimizeIncrement 检测）
+            const inc_block = func.blocks.items[loop.increment.?];
+            var has_simple_inc = false;
+            for (inc_block.instructions.items) |inst| {
+                if (inst.op == .add) {
+                    // 检查 rhs 是否为常量 1
+                    for (inc_block.instructions.items) |const_inst| {
+                        if (const_inst.result) |res| {
+                            if (res.id == inst.op.add.rhs.id and const_inst.op == .const_int) {
+                                if (const_inst.op.const_int == 1) {
+                                    has_simple_inc = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (has_simple_inc) break;
+                }
+            }
+            if (!has_simple_inc) break :blk 1;
+            
+            break :blk 4;
+        };
+        
         // 提取所有循环不变量到循环外（header + body + increment）
         for (header_block.instructions.items) |inst| {
             if (inst.result) |result_reg| {
@@ -4813,55 +4855,53 @@ pub const NativeLinker = struct {
             }
         }
         
+        // 主循环（展开）
+        if (unroll_factor > 1) {
+            try writer.writeAll("    // Unrolled main loop\n");
+        }
         try writer.writeAll("    while (true) {\n");
         try writer.print("        // Header: {s}\n", .{header_block.label});
         
-        // 第二遍：生成非常量指令
-        for (header_block.instructions.items) |inst| {
-            if (inst.result) |result_reg| {
-                if (cond_reg_id) |cond_id| {
-                    if (result_reg.id == cond_id) continue;
-                }
-                // 跳过死代码
-                if (dead_regs.contains(result_reg.id)) continue;
-            }
-            
-            // 跳过常量指令（已在循环外）
-            const is_invariant = switch (inst.op) {
-                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
-                else => false,
-            };
-            
-            if (!is_invariant) {
-                try code_list.appendSlice(self.allocator, "        ");
-                try self.generateInstructionSimple(code_list, inst);
-            }
-        }
-        
-        if (header_block.terminator) |term| {
-            if (term == .cond_br) {
-                try writer.writeAll("        if (!(");
-                
-                if (cond_reg_id) |cond_id| {
-                    for (header_block.instructions.items) |inst| {
-                        if (inst.result) |result_reg| {
-                            if (result_reg.id == cond_id) {
-                                try self.writeInlinedConditionExpr(writer, inst);
-                                break;
+        // 条件检查（展开时需要确保至少有 unroll_factor 次迭代）
+        if (unroll_factor > 1) {
+            // 提前检查：确保剩余迭代 >= unroll_factor
+            // 例如：if (!(reg_3 + 3 < reg_5)) break;
+            if (header_block.terminator) |term| {
+                if (term == .cond_br) {
+                    if (cond_reg_id) |cond_id| {
+                        for (header_block.instructions.items) |inst| {
+                            if (inst.result) |result_reg| {
+                                if (result_reg.id == cond_id) {
+                                    // 修改条件：lhs + (unroll_factor - 1) < rhs
+                                    switch (inst.op) {
+                                        .lt => |op| {
+                                            const lhs_resolved = self.resolveLoadSource(op.lhs.id);
+                                            const rhs_resolved = self.resolveLoadSource(op.rhs.id);
+                                            try writer.print("        if (!(reg_{d} + {d} < reg_{d})) break;\n", .{ lhs_resolved, unroll_factor - 1, rhs_resolved });
+                                        },
+                                        else => {
+                                            try writer.writeAll("        if (!(");
+                                            try self.writeInlinedConditionExpr(writer, inst);
+                                            try writer.writeAll(")) break;\n");
+                                        },
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-                
-                try writer.writeAll(")) break;\n");
             }
-        }
-        
-        try writer.print("        // Body: {s}\n", .{body_block.label});
-        
-        if (!try self.tryOptimizeIncrement(writer, body_block)) {
-            for (body_block.instructions.items) |inst| {
-                // 跳过常量（已外提）
+        } else {
+            // 第二遍：生成非常量指令
+            for (header_block.instructions.items) |inst| {
+                if (inst.result) |result_reg| {
+                    if (cond_reg_id) |cond_id| {
+                        if (result_reg.id == cond_id) continue;
+                    }
+                    if (dead_regs.contains(result_reg.id)) continue;
+                }
+                
                 const is_invariant = switch (inst.op) {
                     .const_int, .const_float, .const_string, .const_bool, .const_null => true,
                     else => false,
@@ -4872,15 +4912,34 @@ pub const NativeLinker = struct {
                     try self.generateInstructionSimple(code_list, inst);
                 }
             }
+            
+            if (header_block.terminator) |term| {
+                if (term == .cond_br) {
+                    try writer.writeAll("        if (!(");
+                    
+                    if (cond_reg_id) |cond_id| {
+                        for (header_block.instructions.items) |inst| {
+                            if (inst.result) |result_reg| {
+                                if (result_reg.id == cond_id) {
+                                    try self.writeInlinedConditionExpr(writer, inst);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    try writer.writeAll(")) break;\n");
+                }
+            }
         }
         
-        if (loop.increment) |inc_idx| {
-            const inc_block = func.blocks.items[inc_idx];
-            try writer.print("        // Increment: {s}\n", .{inc_block.label});
-            
-            if (!try self.tryOptimizeIncrement(writer, inc_block)) {
-                for (inc_block.instructions.items) |inst| {
-                    // 跳过常量（已外提）
+        try writer.print("        // Body: {s}\n", .{body_block.label});
+        
+        // 循环体（展开 unroll_factor 次，只执行 body，不执行 increment）
+        var i: usize = 0;
+        while (i < unroll_factor) : (i += 1) {
+            if (!try self.tryOptimizeIncrement(writer, body_block)) {
+                for (body_block.instructions.items) |inst| {
                     const is_invariant = switch (inst.op) {
                         .const_int, .const_float, .const_string, .const_bool, .const_null => true,
                         else => false,
@@ -4894,7 +4953,100 @@ pub const NativeLinker = struct {
             }
         }
         
+        // 增量（一次性增加 unroll_factor）
+        if (loop.increment) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            try writer.print("        // Increment: {s} (x{d})\n", .{ inc_block.label, unroll_factor });
+            
+            if (unroll_factor > 1) {
+                // 找到 store 指令的目标寄存器
+                for (inc_block.instructions.items) |inst| {
+                    if (inst.op == .store) {
+                        const target_reg = inst.op.store.ptr.id;
+                        try writer.print("        reg_{d} += {d};\n", .{ target_reg, unroll_factor });
+                        break;
+                    }
+                }
+            } else {
+                if (!try self.tryOptimizeIncrement(writer, inc_block)) {
+                    for (inc_block.instructions.items) |inst| {
+                        const is_invariant = switch (inst.op) {
+                            .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                            else => false,
+                        };
+                        
+                        if (!is_invariant) {
+                            try code_list.appendSlice(self.allocator, "        ");
+                            try self.generateInstructionSimple(code_list, inst);
+                        }
+                    }
+                }
+            }
+        }
+        
         try writer.writeAll("    }\n");
+        
+        // Epilogue：处理剩余迭代（< unroll_factor）
+        if (unroll_factor > 1) {
+            try writer.writeAll("    // Epilogue: remaining iterations\n");
+            try writer.writeAll("    while (true) {\n");
+            try writer.print("        // Header: {s}\n", .{header_block.label});
+            
+            // 条件检查
+            if (header_block.terminator) |term| {
+                if (term == .cond_br) {
+                    try writer.writeAll("        if (!(");
+                    
+                    if (cond_reg_id) |cond_id| {
+                        for (header_block.instructions.items) |inst| {
+                            if (inst.result) |result_reg| {
+                                if (result_reg.id == cond_id) {
+                                    try self.writeInlinedConditionExpr(writer, inst);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    try writer.writeAll(")) break;\n");
+                }
+            }
+            
+            // 循环体
+            if (!try self.tryOptimizeIncrement(writer, body_block)) {
+                for (body_block.instructions.items) |inst| {
+                    const is_invariant = switch (inst.op) {
+                        .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                        else => false,
+                    };
+                    
+                    if (!is_invariant) {
+                        try code_list.appendSlice(self.allocator, "        ");
+                        try self.generateInstructionSimple(code_list, inst);
+                    }
+                }
+            }
+            
+            // 增量
+            if (loop.increment) |inc_idx| {
+                const inc_block = func.blocks.items[inc_idx];
+                if (!try self.tryOptimizeIncrement(writer, inc_block)) {
+                    for (inc_block.instructions.items) |inst| {
+                        const is_invariant = switch (inst.op) {
+                            .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                            else => false,
+                        };
+                        
+                        if (!is_invariant) {
+                            try code_list.appendSlice(self.allocator, "        ");
+                            try self.generateInstructionSimple(code_list, inst);
+                        }
+                    }
+                }
+            }
+            
+            try writer.writeAll("    }\n");
+        }
     }
     
     /// 解析 load 源寄存器（复制传播）
