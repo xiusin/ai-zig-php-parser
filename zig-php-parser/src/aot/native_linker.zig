@@ -4515,35 +4515,89 @@ pub const NativeLinker = struct {
         return try self.generateStructuredCodeNew(writer, func, &cfg, cleanup_regs);
     }
 
-    /// 生成结构化代码（新版本，支持嵌套循环）
+    /// 生成结构化代码（新版本，支持多循环）
     fn generateStructuredCodeNew(self: *Self, writer: anytype, func: *const IR.Function, cfg: *ControlFlowAnalysis, cleanup_regs: []const usize) !bool {
         if (cfg.loops.items.len == 0) {
             return false;
         }
 
-        // 目前只处理单个循环
-        if (cfg.loops.items.len != 1) {
-            return false;
-        }
+        var processed = std.AutoHashMap(usize, void).init(self.allocator);
+        defer processed.deinit();
 
-        const loop = cfg.loops.items[0];
-
-        // 生成循环前的代码
-        for (0..loop.header) |idx| {
+        // 生成第一个循环前的块
+        const first_loop = cfg.loops.items[0];
+        for (0..first_loop.header) |idx| {
             const block = func.blocks.items[idx];
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-
             for (block.instructions.items) |inst| {
                 try writer.writeAll("    ");
                 try self.generateInstruction(writer, inst);
             }
+            try processed.put(idx, {});
         }
 
-        // 生成循环（循环内部会处理退出块）
-        if (loop.is_for_loop) {
-            try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-        } else {
-            try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+        // 生成每个循环
+        for (cfg.loops.items, 0..) |loop, i| {
+            // 标记循环块为已处理
+            try processed.put(loop.header, {});
+            for (loop.body_start..loop.body_end + 1) |idx| {
+                try processed.put(idx, {});
+            }
+            if (loop.increment) |inc| try processed.put(inc, {});
+
+            // 生成循环间的块
+            if (i > 0) {
+                const prev_exit = cfg.loops.items[i - 1].exit_block orelse loop.header;
+                for (prev_exit..loop.header) |idx| {
+                    if (processed.contains(idx)) continue;
+                    const block = func.blocks.items[idx];
+                    try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                    for (block.instructions.items) |inst| {
+                        try writer.writeAll("    ");
+                        try self.generateInstruction(writer, inst);
+                    }
+                    try processed.put(idx, {});
+                }
+            }
+
+            // 生成循环（不生成退出块）
+            if (loop.is_for_loop) {
+                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+            } else {
+                try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+            }
+        }
+
+        // 生成最后的退出块
+        const last_loop = cfg.loops.items[cfg.loops.items.len - 1];
+        if (last_loop.exit_block) |exit_idx| {
+            for (exit_idx..func.blocks.items.len) |idx| {
+                if (processed.contains(idx)) continue;
+                const block = func.blocks.items[idx];
+                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                for (block.instructions.items) |inst| {
+                    try writer.writeAll("    ");
+                    try self.generateInstruction(writer, inst);
+                }
+                if (block.terminator) |term| {
+                    switch (term) {
+                        .ret => |maybe_reg| {
+                            if (cleanup_regs.len > 0) {
+                                try writer.writeAll("    // Cleanup\n");
+                                for (cleanup_regs) |reg_id| {
+                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                }
+                            }
+                            if (maybe_reg) |reg| {
+                                try writer.print("    return reg_{d};\n", .{reg.id});
+                            } else {
+                                try writer.writeAll("    return runtime.Value.initNull();\n");
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
         }
 
         return true;
@@ -4794,38 +4848,7 @@ pub const NativeLinker = struct {
             try self.generateStandardForLoop(writer, func, loop);
         }
 
-        // 生成退出块
-        if (loop.exit_block) |exit_idx| {
-            for (exit_idx..func.blocks.items.len) |idx| {
-                const block = func.blocks.items[idx];
-                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-
-                for (block.instructions.items) |inst| {
-                    try writer.writeAll("    ");
-                    try self.generateInstruction(writer, inst);
-                }
-
-                if (block.terminator) |term| {
-                    switch (term) {
-                        .ret => |maybe_reg| {
-                            if (cleanup_regs.len > 0) {
-                                try writer.writeAll("    // Cleanup\n");
-                                for (cleanup_regs) |reg_id| {
-                                    if (!self.shouldReleaseReg(reg_id)) continue;
-                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
-                                }
-                            }
-                            if (maybe_reg) |reg| {
-                                try writer.print("    return reg_{d};\n", .{reg.id});
-                            } else {
-                                try writer.writeAll("    return runtime.Value.initNull();\n");
-                            }
-                        },
-                        else => {},
-                    }
-                }
-            }
-        }
+        // 注意：退出块由 generateStructuredCodeNew 统一处理
     }
 
     /// 🔥 代码生成层 LICM：检测并提升循环不变量
