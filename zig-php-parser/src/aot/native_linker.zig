@@ -4570,7 +4570,8 @@ pub const NativeLinker = struct {
                         try writer.writeAll("    ");
                         try self.generateInstruction(writer, inst);
                     }
-                    try processed.put(idx, {});
+                    // 不标记为已处理，让"生成剩余块"统一处理
+                    // try processed.put(idx, {});
                 }
             }
 
@@ -4590,6 +4591,8 @@ pub const NativeLinker = struct {
         std.debug.print("Generating remaining blocks for {s}...\n", .{func.name});
         var has_return = false;
         var block_count: usize = 0;
+        var last_non_alloca_reg: ?usize = null; // 记录最后一个非 alloca 赋值
+        
         for (func.blocks.items, 0..) |block, idx| {
             if (processed.contains(idx)) {
                 std.debug.print("Block {d} already processed\n", .{idx});
@@ -4599,7 +4602,18 @@ pub const NativeLinker = struct {
             std.debug.print("Generating Block {d}\n", .{idx});
             block_count += 1;
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+            
+            // 记录块中的非 alloca 赋值
             for (block.instructions.items) |inst| {
+                if (inst.result) |res| {
+                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(res.id)
+                    else
+                        false;
+                    if (!is_alloca) {
+                        last_non_alloca_reg = res.id;
+                    }
+                }
                 try writer.writeAll("    ");
                 try self.generateInstruction(writer, inst);
             }
@@ -4644,11 +4658,29 @@ pub const NativeLinker = struct {
             try processed.put(idx, {});
         }
         
-        std.debug.print("Generated {d} remaining blocks, has_return: {}\n", .{ block_count, has_return });
+        std.debug.print("Generated {d} remaining blocks, has_return: {}, last_reg: {?d}\n", .{ block_count, has_return, last_non_alloca_reg });
         // 如果没有任何块生成了返回，添加默认返回
         if (!has_return) {
-            std.debug.print("Adding default return\n", .{});
-            try writer.writeAll("    return runtime.Value.initNull();\n");
+            std.debug.print("Adding default return with reg: {?d}\n", .{last_non_alloca_reg});
+            if (last_non_alloca_reg) |reg| {
+                if (self.current_reg_types) |reg_types| {
+                    const real_type = reg_types.get(reg) orelse IR.Type.php_value;
+                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                    if (reg_type_tag == .i64) {
+                        try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg});
+                    } else if (reg_type_tag == .f64) {
+                        try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg});
+                    } else if (reg_type_tag == .bool) {
+                        try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg});
+                    } else {
+                        try writer.print("    return reg_{d};\n", .{reg});
+                    }
+                } else {
+                    try writer.print("    return reg_{d};\n", .{reg});
+                }
+            } else {
+                try writer.writeAll("    return runtime.Value.initNull();\n");
+            }
         }
 
         return true;
@@ -5469,7 +5501,7 @@ pub const NativeLinker = struct {
                         if (cond_reg_id) |cond_id| {
                             if (result_reg.id == cond_id) continue;
                         }
-                        if (dead_regs.contains(result_reg.id)) continue;
+                        // 移除 dead_regs 检查 - 所有指令都需要生成
                     }
 
                     const is_invariant = switch (inst.op) {
