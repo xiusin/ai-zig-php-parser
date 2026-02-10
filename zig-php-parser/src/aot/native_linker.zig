@@ -2006,10 +2006,15 @@ pub const NativeLinker = struct {
         }
 
         var writer = code.writer(self.allocator);
-        if (try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs)) {
+        std.debug.print("Trying structured control flow for {s}...\n", .{func.name});
+        const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
+        std.debug.print("Structured result: {}\n", .{structured_result});
+        if (structured_result) {
+            std.debug.print("Using structured control flow\n", .{});
             return;
         }
 
+        std.debug.print("Falling back to state machine\n", .{});
         // 回退到状态机
         try code.appendSlice(self.allocator, "    // Control flow state machine\n");
         try code.appendSlice(self.allocator, "    var current_block: u32 = 0;\n");
@@ -4500,6 +4505,8 @@ pub const NativeLinker = struct {
     fn tryGenerateStructuredControlFlowNew(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void)) !bool {
         _ = alloca_regs;
 
+        std.debug.print("tryGenerateStructuredControlFlowNew for {s}\n", .{func.name});
+        
         // 分析控制流
         var cfg = ControlFlowAnalysis.init(self.allocator);
         defer cfg.deinit();
@@ -4507,12 +4514,17 @@ pub const NativeLinker = struct {
         try self.buildCFG(func, &cfg);
         try self.detectLoops(func, &cfg);
 
+        std.debug.print("Found {d} loops\n", .{cfg.loops.items.len});
+        
         if (cfg.loops.items.len == 0) {
             return false;
         }
 
         // 生成结构化代码
-        return try self.generateStructuredCodeNew(writer, func, &cfg, cleanup_regs);
+        std.debug.print("Calling generateStructuredCodeNew...\n", .{});
+        const result = try self.generateStructuredCodeNew(writer, func, &cfg, cleanup_regs);
+        std.debug.print("generateStructuredCodeNew returned {}\n", .{result});
+        return result;
     }
 
     /// 生成结构化代码（新版本，支持多循环）
@@ -4537,7 +4549,9 @@ pub const NativeLinker = struct {
         }
 
         // 生成每个循环
+        std.debug.print("Generating {d} loops for {s}...\n", .{ cfg.loops.items.len, func.name });
         for (cfg.loops.items, 0..) |loop, i| {
+            std.debug.print("Loop {d}: header={d} body={d}..{d} exit={?d}\n", .{ i, loop.header, loop.body_start, loop.body_end, loop.exit_block });
             // 标记循环块为已处理
             try processed.put(loop.header, {});
             for (loop.body_start..loop.body_end + 1) |idx| {
@@ -4561,82 +4575,80 @@ pub const NativeLinker = struct {
             }
 
             // 生成循环（不生成退出块）
+            std.debug.print("Generating loop {d}...\n", .{i});
             if (loop.is_for_loop) {
                 try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
             } else {
                 try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
             }
+            std.debug.print("Loop {d} generated\n", .{i});
         }
 
+        std.debug.print("Finished generating loops for {s}\n", .{func.name});
+
         // 生成所有剩余的块（包括退出块）
-        var last_block_idx: ?usize = null;
+        std.debug.print("Generating remaining blocks for {s}...\n", .{func.name});
+        var has_return = false;
+        var block_count: usize = 0;
         for (func.blocks.items, 0..) |block, idx| {
-            if (processed.contains(idx)) continue;
+            if (processed.contains(idx)) {
+                std.debug.print("Block {d} already processed\n", .{idx});
+                continue;
+            }
             
+            std.debug.print("Generating Block {d}\n", .{idx});
+            block_count += 1;
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
             for (block.instructions.items) |inst| {
                 try writer.writeAll("    ");
                 try self.generateInstruction(writer, inst);
             }
             
-            // 只在有 ret terminator 的块生成返回
+            // 检查是否有 ret terminator
             if (block.terminator) |term| {
-                switch (term) {
-                    .ret => |maybe_reg| {
-                        if (cleanup_regs.len > 0) {
-                            try writer.writeAll("    // Cleanup\n");
-                            for (cleanup_regs) |reg_id| {
-                                if (!self.shouldReleaseReg(reg_id)) continue;
-                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
-                            }
+                std.debug.print("Block {d} terminator: {s}\n", .{ idx, @tagName(term) });
+                if (term == .ret) {
+                    has_return = true;
+                    const maybe_reg = term.ret;
+                    if (cleanup_regs.len > 0) {
+                        try writer.writeAll("    // Cleanup\n");
+                        for (cleanup_regs) |reg_id| {
+                            if (!self.shouldReleaseReg(reg_id)) continue;
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                         }
-                        if (maybe_reg) |reg| {
-                            if (self.current_reg_types) |reg_types| {
-                                const real_type = reg_types.get(reg.id) orelse reg.type_;
-                                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                                if (reg_type_tag == .i64) {
-                                    try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
-                                } else if (reg_type_tag == .f64) {
-                                    try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
-                                } else if (reg_type_tag == .bool) {
-                                    try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
-                                } else {
-                                    try writer.print("    return reg_{d};\n", .{reg.id});
-                                }
+                    }
+                    if (maybe_reg) |reg| {
+                        if (self.current_reg_types) |reg_types| {
+                            const real_type = reg_types.get(reg.id) orelse reg.type_;
+                            const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                            if (reg_type_tag == .i64) {
+                                try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg.id});
+                            } else if (reg_type_tag == .f64) {
+                                try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg.id});
+                            } else if (reg_type_tag == .bool) {
+                                try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg.id});
                             } else {
                                 try writer.print("    return reg_{d};\n", .{reg.id});
                             }
                         } else {
-                            try writer.writeAll("    return runtime.Value.initNull();\n");
+                            try writer.print("    return reg_{d};\n", .{reg.id});
                         }
-                    },
-                    else => {},
+                    } else {
+                        try writer.writeAll("    return runtime.Value.initNull();\n");
+                    }
                 }
+            } else {
+                std.debug.print("Block {d} has no terminator\n", .{idx});
             }
             
             try processed.put(idx, {});
-            last_block_idx = idx;
         }
         
-        // 如果最后一个块没有 return，添加默认返回
-        if (last_block_idx) |idx| {
-            std.debug.print("Last block: {d}\n", .{idx});
-            const last_block = func.blocks.items[idx];
-            var has_return = false;
-            if (last_block.terminator) |term| {
-                std.debug.print("Last block terminator: {s}\n", .{@tagName(term)});
-                if (term == .ret) {
-                    has_return = true;
-                }
-            } else {
-                std.debug.print("Last block has no terminator\n", .{});
-            }
-            if (!has_return) {
-                std.debug.print("Adding default return\n", .{});
-                try writer.writeAll("    return runtime.Value.initNull();\n");
-            }
-        } else {
-            std.debug.print("No last block\n", .{});
+        std.debug.print("Generated {d} remaining blocks, has_return: {}\n", .{ block_count, has_return });
+        // 如果没有任何块生成了返回，添加默认返回
+        if (!has_return) {
+            std.debug.print("Adding default return\n", .{});
+            try writer.writeAll("    return runtime.Value.initNull();\n");
         }
 
         return true;
