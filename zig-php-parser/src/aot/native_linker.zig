@@ -296,10 +296,11 @@ pub const NativeLinker = struct {
         }
 
         // 生成函数
-        std.debug.print("Generating {d} functions\n", .{ir_module.functions.items.len});
-        for (ir_module.functions.items) |func| {
-            std.debug.print("Generating function: {s}\n", .{func.name});
+        std.debug.print("=== GENERATING FUNCTIONS: count={d} ===\n", .{ir_module.functions.items.len});
+        for (ir_module.functions.items, 0..) |func, i| {
+            std.debug.print("[{d}] Generating function: {s}\n", .{i, func.name});
             try self.generateFunction(&code, func);
+            std.debug.print("[{d}] Done: {s}\n", .{i, func.name});
         }
 
         var has_select: bool = false;
@@ -1105,7 +1106,8 @@ pub const NativeLinker = struct {
 
     /// 生成函数
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), func: *const IR.Function) !void {
-        std.debug.print("=== generateFunction: {s} ===\n", .{func.name});
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("=== generateFunction: {s} ===\n", .{func.name});
         const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
         self.current_function_has_this = has_this;
 
@@ -1131,7 +1133,7 @@ pub const NativeLinker = struct {
 
         // 生成函数签名
         // 所有函数都是public的，以便相互调用
-        try code.appendSlice(self.allocator, "\npub fn @\"");
+        try code.appendSlice(self.allocator, "\n// MARKER: generateFunction called\npub fn @\"");
         try code.appendSlice(self.allocator, func.name);
         try code.appendSlice(self.allocator, "\"(");
 
