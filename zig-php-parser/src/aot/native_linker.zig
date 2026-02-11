@@ -6071,8 +6071,36 @@ pub const NativeLinker = struct {
     ) anyerror!void {
         std.debug.print("generateForLoopWithChildren: header={d}, children={d}\n", .{ loop.header, loop.children.items.len });
         
-        // 如果没有子循环，使用原始生成逻辑
-        if (loop.children.items.len == 0) {
+        // 检查并生成 init 块（for循环的初始化）
+        if (loop.header > 0) {
+            const prev_block = func.blocks.items[loop.header - 1];
+            if (std.mem.startsWith(u8, prev_block.label, "for_init")) {
+                if (!processed.contains(loop.header - 1)) {
+                    try writer.print("    // Block {d}: {s}\n", .{ loop.header - 1, prev_block.label });
+                    for (prev_block.instructions.items) |inst| {
+                        try writer.writeAll("    ");
+                        try self.generateInstruction(writer, inst);
+                    }
+                    try processed.put(loop.header - 1, {});
+                }
+            }
+        }
+        
+        // 检查body块是否有条件分支（需要完整生成）
+        const body_has_cond = blk: {
+            const body_block = func.blocks.items[loop.body_start];
+            const has_cond = if (body_block.terminator) |term| term == .cond_br else false;
+            std.debug.print("Loop header={d}, body={d}, body_has_cond={}, term={s}\n", .{
+                loop.header,
+                loop.body_start,
+                has_cond,
+                if (body_block.terminator) |t| @tagName(t) else "null"
+            });
+            break :blk has_cond;
+        };
+        
+        // 如果没有子循环且body没有条件分支，使用优化版本
+        if (loop.children.items.len == 0 and !body_has_cond) {
             try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
             return;
         }
@@ -6134,12 +6162,11 @@ pub const NativeLinker = struct {
             try self.generateInstructionSimple(code_list, inst);
         }
         
-        // 检查 body 块是否有条件分支（if 语句）
-        const has_cond_branch = if (body_block.terminator) |term| term == .cond_br else false;
-        std.debug.print("Body block has_cond_branch={}\n", .{has_cond_branch});
+        // 再次检查 body 块的条件分支（用于生成if）
+        std.debug.print("Body block has_cond_branch={}\n", .{body_has_cond});
         
-        if (has_cond_branch) {
-            // body 块有条件分支，需要生成 if 语句
+        if (body_has_cond) {
+            // body 块有条件分支
             const term = body_block.terminator.?.cond_br;
             
             // 找到条件寄存器对应的指令
@@ -6165,19 +6192,46 @@ pub const NativeLinker = struct {
             }
             try writer.writeAll(") {\n");
             
-            // 生成 then 块的指令（包括循环初始化）
+            // 生成 then 块的指令
             const then_block_idx = self.findBlockIndex(func, term.then_block);
             const then_block = func.blocks.items[then_block_idx];
-            for (then_block.instructions.items) |inst| {
-                try code_list.appendSlice(self.allocator, "            ");
-                try self.generateInstructionSimple(code_list, inst);
-            }
             
-            // 在 if 内部生成子循环
-            for (loop.children.items) |child_idx| {
-                const child_loop = all_loops[child_idx];
-                try writer.writeAll("            // Generating nested loop\n");
-                try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+            // 检查then块是否只是break（跳转到exit块）
+            const is_break = blk: {
+                if (then_block.terminator) |then_term| {
+                    if (then_term == .br) {
+                        const target_block = then_term.br;
+                        // 检查目标块的label是否包含"exit"
+                        const is_exit = std.mem.indexOf(u8, target_block.label, "exit") != null;
+                        std.debug.print("then br target={s}, is_exit={}\n", .{target_block.label, is_exit});
+                        break :blk is_exit;
+                    }
+                }
+                break :blk false;
+            };
+            
+            std.debug.print("then_block term={s}, exit={?d}, is_break={}\n", .{
+                if (then_block.terminator) |t| @tagName(t) else "null",
+                loop.exit_block,
+                is_break
+            });
+            
+            if (is_break) {
+                // 只是break，不生成子循环
+                try writer.writeAll("            break;\n");
+            } else {
+                // 生成then块指令
+                for (then_block.instructions.items) |inst| {
+                    try code_list.appendSlice(self.allocator, "            ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
+                
+                // 在 if 内部生成子循环
+                for (loop.children.items) |child_idx| {
+                    const child_loop = all_loops[child_idx];
+                    try writer.writeAll("            // Generating nested loop\n");
+                    try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+                }
             }
             
             try writer.writeAll("        }\n");
