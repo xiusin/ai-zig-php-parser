@@ -128,21 +128,28 @@ pub const PassConfig = struct {
     /// Release-safe configuration (basic optimizations)
     pub fn releaseSafe() PassConfig {
         return .{
-            .dead_code_elimination = false,
-            .constant_propagation = true,  // 保留：字符串concat折叠
-            .sccp = false,
-            .box_unbox_elim = false,
-            .function_inlining = false,
-            .inline_threshold = 10,
+            .dead_code_elimination = true,
+            .constant_propagation = true,
+            .sccp = true,
+            .box_unbox_elim = true,
+            .function_inlining = true,  // 启用内联
+            .inline_threshold = 15,
             .type_specialization = false,
-            .cse = false,
-            .licm = false,
-            .strength_reduction = false,
-            .mem2reg = false,
-            .loop_unroll = false,
-            .cfg_cleanup = false,
-            .rc_elision = false,
-            .max_iterations = 1,
+            .cse = true,
+            .licm = true,
+            .strength_reduction = true,
+            .mem2reg = true,
+            .loop_unroll = true,
+            .cfg_cleanup = true,
+            .rc_elision = true,
+            .max_iterations = 3,
+            // 启用部分高级优化
+            .scalar_replacement = false,
+            .gvn = true,  // 全局值编号
+            .advanced_sccp = false,
+            .slp_vectorization = false,
+            .polyhedral_optimization = false,
+            .loop_vectorization = false,
         };
     }
 
@@ -1849,11 +1856,39 @@ pub const IROptimizer = struct {
     fn eliminateDeadCodeInFunction(self: *Self, func: *Function) !bool {
         var changed = false;
 
-        // Phase 1: Mark all used registers
+        // Phase 1: Mark all used registers (initial pass)
         self.used_registers.clearRetainingCapacity();
         try self.markUsedRegisters(func);
 
-        // Phase 2: Remove instructions with unused results
+        // Phase 2: Recursively mark dependencies
+        var worklist = std.ArrayList(u32).init(self.allocator);
+        defer worklist.deinit();
+        
+        // Add all initially marked registers to worklist
+        var iter = self.used_registers.keyIterator();
+        while (iter.next()) |reg_id| {
+            try worklist.append(reg_id.*);
+        }
+        
+        // Process worklist: mark all registers that produce used values
+        while (worklist.items.len > 0) {
+            const reg_id = worklist.pop();
+            
+            // Find instruction that produces this register
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |inst| {
+                    if (inst.result) |result| {
+                        if (result.id == reg_id) {
+                            // Mark all operands of this instruction
+                            try self.markOperandsRecursive(inst, &worklist);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 3: Remove instructions with unused results
         for (func.blocks.items) |block| {
             var i: usize = 0;
             while (i < block.instructions.items.len) {
@@ -1878,12 +1913,85 @@ pub const IROptimizer = struct {
             }
         }
 
-        // Phase 3: Remove unreachable blocks
+        // Phase 4: Remove unreachable blocks
         if (try self.removeUnreachableBlocks(func)) {
             changed = true;
         }
 
         return changed;
+    }
+    
+    /// Recursively mark operands of an instruction
+    fn markOperandsRecursive(self: *Self, inst: *const Instruction, worklist: *std.ArrayList(u32)) !void {
+        switch (inst.op) {
+            .add, .sub, .mul, .div, .mod, .pow => |op| {
+                if (!self.used_registers.contains(op.lhs.id)) {
+                    try self.used_registers.put(op.lhs.id, {});
+                    try worklist.append(op.lhs.id);
+                }
+                if (!self.used_registers.contains(op.rhs.id)) {
+                    try self.used_registers.put(op.rhs.id, {});
+                    try worklist.append(op.rhs.id);
+                }
+            },
+            .bit_and, .bit_or, .bit_xor, .shl, .shr => |op| {
+                if (!self.used_registers.contains(op.lhs.id)) {
+                    try self.used_registers.put(op.lhs.id, {});
+                    try worklist.append(op.lhs.id);
+                }
+                if (!self.used_registers.contains(op.rhs.id)) {
+                    try self.used_registers.put(op.rhs.id, {});
+                    try worklist.append(op.rhs.id);
+                }
+            },
+            .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| {
+                if (!self.used_registers.contains(op.lhs.id)) {
+                    try self.used_registers.put(op.lhs.id, {});
+                    try worklist.append(op.lhs.id);
+                }
+                if (!self.used_registers.contains(op.rhs.id)) {
+                    try self.used_registers.put(op.rhs.id, {});
+                    try worklist.append(op.rhs.id);
+                }
+            },
+            .and_, .or_, .concat => |op| {
+                if (!self.used_registers.contains(op.lhs.id)) {
+                    try self.used_registers.put(op.lhs.id, {});
+                    try worklist.append(op.lhs.id);
+                }
+                if (!self.used_registers.contains(op.rhs.id)) {
+                    try self.used_registers.put(op.rhs.id, {});
+                    try worklist.append(op.rhs.id);
+                }
+            },
+            .neg, .bit_not, .not, .strlen, .array_count, .clone => |op| {
+                if (!self.used_registers.contains(op.operand.id)) {
+                    try self.used_registers.put(op.operand.id, {});
+                    try worklist.append(op.operand.id);
+                }
+            },
+            .cast => |op| {
+                if (!self.used_registers.contains(op.value.id)) {
+                    try self.used_registers.put(op.value.id, {});
+                    try worklist.append(op.value.id);
+                }
+            },
+            .box => |op| {
+                if (!self.used_registers.contains(op.value.id)) {
+                    try self.used_registers.put(op.value.id, {});
+                    try worklist.append(op.value.id);
+                }
+            },
+            .unbox => |op| {
+                if (!self.used_registers.contains(op.value.id)) {
+                    try self.used_registers.put(op.value.id, {});
+                    try worklist.append(op.value.id);
+                }
+            },
+            else => {
+                // 其他指令已在markRegistersInInstruction中处理
+            },
+        }
     }
 
     fn runRCEllision(self: *Self, module: *Module) !bool {
