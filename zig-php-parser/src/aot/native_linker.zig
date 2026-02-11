@@ -6158,13 +6158,20 @@ pub const NativeLinker = struct {
             if (cond_inst_idx) |idx| {
                 const inst = body_block.instructions.items[idx];
                 if (inst.result) |res| {
-                    // 始终使用 toBool() 确保类型正确
                     try writer.print("reg_{d}.toBool()", .{res.id});
                 }
             } else {
                 try writer.print("reg_{d}.toBool()", .{term.cond.id});
             }
             try writer.writeAll(") {\n");
+            
+            // 生成 then 块的指令（包括循环初始化）
+            const then_block_idx = self.findBlockIndex(func, term.then_block);
+            const then_block = func.blocks.items[then_block_idx];
+            for (then_block.instructions.items) |inst| {
+                try code_list.appendSlice(self.allocator, "            ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
             
             // 在 if 内部生成子循环
             for (loop.children.items) |child_idx| {
