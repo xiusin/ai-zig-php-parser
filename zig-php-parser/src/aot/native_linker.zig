@@ -4559,18 +4559,19 @@ pub const NativeLinker = struct {
 
         // 生成顶层循环
         std.debug.print("Generating {d} top-level loops\n", .{cfg.loops.items.len});
+        var last_return_reg: ?usize = null;
+        
         for (cfg.loops.items) |loop| {
             std.debug.print("Calling generateLoopRecursive for loop header={d}\n", .{loop.header});
             try self.generateLoopRecursive(writer, func, loop, &processed, &block_to_loop, cfg.all_loops.items, cleanup_regs);
             
-            // 生成退出块
+            // 生成退出块（但不生成 return）
             if (loop.exit_block) |exit_idx| {
                 if (!processed.contains(exit_idx)) {
                     const exit_block = func.blocks.items[exit_idx];
                     try writer.print("    // Block {d}: {s}\n", .{ exit_idx, exit_block.label });
                     
-                    // 查找返回值寄存器
-                    var return_reg: ?usize = null;
+                    // 生成指令并记录最后一个返回值
                     for (exit_block.instructions.items) |inst| {
                         try writer.writeAll("    ");
                         try self.generateInstruction(writer, inst);
@@ -4582,40 +4583,36 @@ pub const NativeLinker = struct {
                             else
                                 false;
                             if (!is_alloca) {
-                                return_reg = res.id;
+                                last_return_reg = res.id;
                             }
                         }
-                    }
-                    
-                    // 生成 return
-                    if (return_reg) |reg| {
-                        if (self.current_reg_types) |reg_types| {
-                            const real_type = reg_types.get(reg) orelse IR.Type.php_value;
-                            const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                            if (reg_type_tag == .i64) {
-                                try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg});
-                            } else if (reg_type_tag == .f64) {
-                                try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg});
-                            } else if (reg_type_tag == .bool) {
-                                try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg});
-                            } else {
-                                try writer.print("    return reg_{d};\n", .{reg});
-                            }
-                        } else {
-                            try writer.print("    return reg_{d};\n", .{reg});
-                        }
-                    } else {
-                        try writer.writeAll("    return runtime.Value.initNull();\n");
                     }
                     
                     try processed.put(exit_idx, {});
-                    return true;
                 }
             }
         }
         
-        // 如果没有找到 return，生成默认 return
-        try writer.writeAll("    return runtime.Value.initNull();\n");
+        // 统一生成 return
+        if (last_return_reg) |reg| {
+            if (self.current_reg_types) |reg_types| {
+                const real_type = reg_types.get(reg) orelse IR.Type.php_value;
+                const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                if (reg_type_tag == .i64) {
+                    try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg});
+                } else if (reg_type_tag == .f64) {
+                    try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg});
+                } else if (reg_type_tag == .bool) {
+                    try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg});
+                } else {
+                    try writer.print("    return reg_{d};\n", .{reg});
+                }
+            } else {
+                try writer.print("    return reg_{d};\n", .{reg});
+            }
+        } else {
+            try writer.writeAll("    return runtime.Value.initNull();\n");
+        }
         
         return true;
     }
