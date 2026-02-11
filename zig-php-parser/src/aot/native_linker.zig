@@ -6077,6 +6077,21 @@ pub const NativeLinker = struct {
             return;
         }
         
+        // 检查是否有 init 块（header 的前驱中名为 for_init 的块）
+        if (loop.header > 0) {
+            const prev_block = func.blocks.items[loop.header - 1];
+            if (std.mem.startsWith(u8, prev_block.label, "for_init")) {
+                if (!processed.contains(loop.header - 1)) {
+                    try writer.print("    // Block {d}: {s}\n", .{ loop.header - 1, prev_block.label });
+                    for (prev_block.instructions.items) |inst| {
+                        try writer.writeAll("    ");
+                        try self.generateInstruction(writer, inst);
+                    }
+                    try processed.put(loop.header - 1, {});
+                }
+            }
+        }
+        
         // 有子循环：生成外层循环结构，在 body 中递归生成子循环
         try writer.writeAll("    // Optimized: structured for loop with nested loops\n");
         
