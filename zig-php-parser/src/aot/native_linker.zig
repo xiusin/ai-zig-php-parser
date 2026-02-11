@@ -6134,12 +6134,53 @@ pub const NativeLinker = struct {
             try self.generateInstructionSimple(code_list, inst);
         }
         
-        // 递归生成子循环
-        for (loop.children.items) |child_idx| {
-            const child_loop = all_loops[child_idx];
-            try writer.writeAll("        // Generating nested loop\n");
-            // 子循环需要额外缩进
-            try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+        // 检查 body 块是否有条件分支（if 语句）
+        const has_cond_branch = if (body_block.terminator) |term| term == .cond_br else false;
+        std.debug.print("Body block has_cond_branch={}\n", .{has_cond_branch});
+        
+        if (has_cond_branch) {
+            // body 块有条件分支，需要生成 if 语句
+            const term = body_block.terminator.?.cond_br;
+            
+            // 找到条件寄存器对应的指令
+            var cond_inst_idx: ?usize = null;
+            for (body_block.instructions.items, 0..) |inst, idx| {
+                if (inst.result) |result_reg| {
+                    if (term.cond.id == result_reg.id) {
+                        cond_inst_idx = idx;
+                        break;
+                    }
+                }
+            }
+            
+            // 生成 if 语句
+            try writer.writeAll("        if (");
+            if (cond_inst_idx) |idx| {
+                const inst = body_block.instructions.items[idx];
+                if (inst.result) |res| {
+                    // 始终使用 toBool() 确保类型正确
+                    try writer.print("reg_{d}.toBool()", .{res.id});
+                }
+            } else {
+                try writer.print("reg_{d}.toBool()", .{term.cond.id});
+            }
+            try writer.writeAll(") {\n");
+            
+            // 在 if 内部生成子循环
+            for (loop.children.items) |child_idx| {
+                const child_loop = all_loops[child_idx];
+                try writer.writeAll("            // Generating nested loop\n");
+                try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+            }
+            
+            try writer.writeAll("        }\n");
+        } else {
+            // 没有条件分支，直接生成子循环
+            for (loop.children.items) |child_idx| {
+                const child_loop = all_loops[child_idx];
+                try writer.writeAll("        // Generating nested loop\n");
+                try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+            }
         }
         
         // 生成增量块
