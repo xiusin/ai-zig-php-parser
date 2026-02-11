@@ -226,6 +226,7 @@ pub const NativeLinker = struct {
 
     /// 将 IR 模块转换为 Zig 代码
     pub fn generateZigCode(self: *Self, ir_module: *const IR.Module) ![]const u8 {
+        std.debug.print("=== generateZigCode: {d} functions ===\n", .{ir_module.functions.items.len});
         var code = std.ArrayList(u8){};
         errdefer code.deinit(self.allocator);
 
@@ -295,7 +296,9 @@ pub const NativeLinker = struct {
         }
 
         // 生成函数
+        std.debug.print("Generating {d} functions\n", .{ir_module.functions.items.len});
         for (ir_module.functions.items) |func| {
+            std.debug.print("Generating function: {s}\n", .{func.name});
             try self.generateFunction(&code, func);
         }
 
@@ -1102,6 +1105,7 @@ pub const NativeLinker = struct {
 
     /// 生成函数
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), func: *const IR.Function) !void {
+        std.debug.print("=== generateFunction: {s} ===\n", .{func.name});
         const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
         self.current_function_has_this = has_this;
 
@@ -1350,6 +1354,7 @@ pub const NativeLinker = struct {
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
         // 生成寄存器声明 - 使用简单的方式
+        std.debug.print("About to generate register declarations: count={d}\n", .{all_registers.count()});
         if (all_registers.count() > 0) {
             try code.appendSlice(self.allocator, "    // Register declarations\n");
 
@@ -4519,6 +4524,21 @@ pub const NativeLinker = struct {
         if (cfg.loops.items.len == 0) {
             return false;
         }
+
+        // 生成寄存器声明（从 entry 块的 alloca 指令）
+        const entry_block = func.blocks.items[0];
+        try writer.writeAll("    // Register declarations\n");
+        std.debug.print("Entry block has {d} instructions\n", .{entry_block.instructions.items.len});
+        for (entry_block.instructions.items) |inst| {
+            if (inst.op == .alloca and inst.result != null) {
+                const reg_id = inst.result.?.id;
+                std.debug.print("Found alloca: reg_{d}\n", .{reg_id});
+                try writer.print("    var reg_{d}_storage: runtime.Value = runtime.Value.initNull();\n", .{reg_id});
+                try writer.print("    var reg_{d}: *runtime.Value = &reg_{d}_storage;\n", .{reg_id, reg_id});
+                try writer.print("    _ = &reg_{d};\n", .{reg_id});
+            }
+        }
+        try writer.writeAll("\n");
 
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
