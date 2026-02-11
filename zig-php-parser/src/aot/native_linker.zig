@@ -1176,7 +1176,9 @@ pub const NativeLinker = struct {
         defer cleanup_registers.deinit(self.allocator);
 
         // 收集寄存器定义
-        for (func.blocks.items) |block| {
+        std.debug.print("Collecting registers from {d} blocks\n", .{func.blocks.items.len});
+        for (func.blocks.items, 0..) |block, block_idx| {
+            std.debug.print("Block {d}: {s}, {d} instructions\n", .{block_idx, block.label, block.instructions.items.len});
             for (block.instructions.items) |inst| {
                 // 收集 result 寄存器
                 if (inst.result) |reg| {
@@ -1226,6 +1228,7 @@ pub const NativeLinker = struct {
                     try all_registers.put(reg.id, corrected_type);
                     if (inst.op == .alloca) {
                         try alloca_registers.put(reg.id, {});
+                        std.debug.print("alloca reg_{d}, type={s}\n", .{reg.id, @tagName(@as(std.meta.Tag(IR.Type), corrected_type))});
                     }
 
                     // 检查是否需要释放（字符串、数组等需要分配内存的类型）
@@ -1365,33 +1368,10 @@ pub const NativeLinker = struct {
 
                 const is_alloca = alloca_registers.contains(reg_id);
 
+                std.debug.print("reg_{d}: type={s}, is_alloca={}\n", .{reg_id, @tagName(@as(std.meta.Tag(IR.Type), reg_type)), is_alloca});
+
                 if (is_alloca) {
-                    // 检查 alloca 指向的类型
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
-                    if (type_tag == .ptr) {
-                        const pointee_type = reg_type.ptr;
-                        const pointee_tag = @as(std.meta.Tag(IR.Type), pointee_type.*);
-
-                        // 如果指向简单类型，直接生成该类型的变量
-                        if (pointee_tag == .i64 or pointee_tag == .f64 or pointee_tag == .bool) {
-                            try code.appendSlice(self.allocator, "    var reg_");
-                            try code.writer(self.allocator).print("{d}", .{reg_id});
-                            switch (pointee_tag) {
-                                .i64 => try code.appendSlice(self.allocator, ": i64 = 0;\n"),
-                                .f64 => try code.appendSlice(self.allocator, ": f64 = 0.0;\n"),
-                                .bool => try code.appendSlice(self.allocator, ": bool = false;\n"),
-                                else => unreachable,
-                            }
-                            try code.appendSlice(self.allocator, "    _ = &reg_");
-                            try code.writer(self.allocator).print("{d}", .{reg_id});
-                            try code.appendSlice(self.allocator, ";\n");
-
-                            // 标记为优化的 alloca
-                            try optimized_alloca_regs.put(reg_id, {});
-                            continue;
-                        }
-                    }
-
+                    // alloca 必须保持指针类型，不优化
                     // 默认：alloca指针
                     try code.appendSlice(self.allocator, "    var reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
