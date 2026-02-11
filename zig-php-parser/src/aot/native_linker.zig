@@ -4568,16 +4568,53 @@ pub const NativeLinker = struct {
                 if (!processed.contains(exit_idx)) {
                     const exit_block = func.blocks.items[exit_idx];
                     try writer.print("    // Block {d}: {s}\n", .{ exit_idx, exit_block.label });
+                    
+                    // 查找返回值寄存器
+                    var return_reg: ?usize = null;
                     for (exit_block.instructions.items) |inst| {
                         try writer.writeAll("    ");
                         try self.generateInstruction(writer, inst);
+                        
+                        // 记录最后一个非 alloca 赋值
+                        if (inst.result) |res| {
+                            const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                alloca_regs.contains(res.id)
+                            else
+                                false;
+                            if (!is_alloca) {
+                                return_reg = res.id;
+                            }
+                        }
                     }
+                    
+                    // 生成 return
+                    if (return_reg) |reg| {
+                        if (self.current_reg_types) |reg_types| {
+                            const real_type = reg_types.get(reg) orelse IR.Type.php_value;
+                            const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
+                            if (reg_type_tag == .i64) {
+                                try writer.print("    return runtime.Value.initInt(reg_{d});\n", .{reg});
+                            } else if (reg_type_tag == .f64) {
+                                try writer.print("    return runtime.Value.initFloat(reg_{d});\n", .{reg});
+                            } else if (reg_type_tag == .bool) {
+                                try writer.print("    return runtime.Value.initBool(reg_{d});\n", .{reg});
+                            } else {
+                                try writer.print("    return reg_{d};\n", .{reg});
+                            }
+                        } else {
+                            try writer.print("    return reg_{d};\n", .{reg});
+                        }
+                    } else {
+                        try writer.writeAll("    return runtime.Value.initNull();\n");
+                    }
+                    
                     try processed.put(exit_idx, {});
+                    return true;
                 }
             }
         }
         
-        // 生成 return
+        // 如果没有找到 return，生成默认 return
         try writer.writeAll("    return runtime.Value.initNull();\n");
         
         return true;
@@ -6034,35 +6071,76 @@ pub const NativeLinker = struct {
         block_to_loop: *std.AutoHashMap(usize, usize),
         all_loops: []const LoopInfo,
         cleanup_regs: []const usize,
-    ) !void {
+    ) anyerror!void {
         std.debug.print("generateForLoopWithChildren: header={d}, children={d}\n", .{ loop.header, loop.children.items.len });
         
-        // 如果有子循环，需要特殊处理
-        if (loop.children.items.len > 0) {
-            try writer.writeAll("    // Optimized: structured for loop with nested loops\n");
-            
-            // 生成外层循环的 header 和 body 开始部分
-            const body_block = func.blocks.items[loop.body_start];
-            try writer.print("    // Body: {s} (with nested loops)\n", .{body_block.label});
-            
-            // 生成 body 块的指令
-            for (body_block.instructions.items) |inst| {
-                try writer.writeAll("    ");
-                try self.generateInstruction(writer, inst);
-            }
-            
-            // 递归生成子循环
-            for (loop.children.items) |child_idx| {
-                const child_loop = all_loops[child_idx];
-                try writer.writeAll("    // Generating nested loop\n");
-                try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
-            }
-            
+        // 如果没有子循环，使用原始生成逻辑
+        if (loop.children.items.len == 0) {
+            try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
             return;
         }
         
-        // 否则生成普通的 for 循环
-        try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+        // 有子循环：生成外层循环结构，在 body 中递归生成子循环
+        try writer.writeAll("    // Optimized: structured for loop with nested loops\n");
+        
+        var code_list = writer.context.self;
+        
+        const header_block = func.blocks.items[loop.header];
+        const body_block = func.blocks.items[loop.body_start];
+        
+        // 生成外层循环的 while 结构
+        try writer.writeAll("    while (true) {\n");
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        // 生成 header 指令
+        for (header_block.instructions.items) |inst| {
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
+        }
+        
+        // 生成条件判断
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                try writer.writeAll("        if (!(");
+                // 找到条件寄存器
+                for (header_block.instructions.items) |inst| {
+                    if (inst.result) |result_reg| {
+                        if (term.cond_br.cond.id == result_reg.id) {
+                            try self.writeInlinedConditionExpr(writer, inst);
+                            break;
+                        }
+                    }
+                }
+                try writer.writeAll(")) break;\n");
+            }
+        }
+        
+        // 生成 body 开始部分
+        try writer.print("        // Body: {s} (with nested loops)\n", .{body_block.label});
+        for (body_block.instructions.items) |inst| {
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
+        }
+        
+        // 递归生成子循环
+        for (loop.children.items) |child_idx| {
+            const child_loop = all_loops[child_idx];
+            try writer.writeAll("        // Generating nested loop\n");
+            // 子循环需要额外缩进
+            try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+        }
+        
+        // 生成增量块
+        if (loop.increment) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            try writer.print("        // Increment: {s}\n", .{inc_block.label});
+            for (inc_block.instructions.items) |inst| {
+                try code_list.appendSlice(self.allocator, "        ");
+                try self.generateInstructionSimple(code_list, inst);
+            }
+        }
+        
+        try writer.writeAll("    }\n");
     }
     
     /// 生成 while 循环（支持子循环）
