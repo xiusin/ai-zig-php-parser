@@ -4368,6 +4368,13 @@ pub const NativeLinker = struct {
                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.await_result(reg_{d});\n", .{op.operand.id});
                 }
             },
+            .phi => {
+                // PHI节点在terminator中处理，这里跳过
+                // 生成一个注释说明
+                if (inst.result) |reg| {
+                    try writer.print("    // PHI: reg_{d} (handled in terminator)\n", .{reg.id});
+                }
+            },
             else => {
                 try self.handleUnsupportedOp(inst);
             },
@@ -4813,6 +4820,7 @@ pub const NativeLinker = struct {
                 try writer.writeAll("        if (!(");
 
                 // 内联条件表达式
+                var found_cond = false;
                 if (cond_reg_id) |cond_id| {
                     // 找到生成条件的指令
                     for (header_block.instructions.items) |inst| {
@@ -4820,9 +4828,20 @@ pub const NativeLinker = struct {
                             if (result_reg.id == cond_id) {
                                 // 内联这条指令的表达式
                                 try self.writeInlinedConditionExpr(writer, inst);
+                                found_cond = true;
                                 break;
                             }
                         }
+                    }
+                    
+                    // 如果没找到指令（被优化删除），直接使用寄存器
+                    if (!found_cond) {
+                        const cond_type = if (self.current_reg_types) |types|
+                            types.get(cond_id) orelse IR.Type.bool
+                        else
+                            IR.Type.bool;
+                        const type_tag = @as(std.meta.Tag(IR.Type), cond_type);
+                        try self.writeBoolExpr(writer, type_tag, cond_id);
                     }
                 }
 

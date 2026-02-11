@@ -128,21 +128,21 @@ pub const PassConfig = struct {
     /// Release-safe configuration (basic optimizations)
     pub fn releaseSafe() PassConfig {
         return .{
-            .dead_code_elimination = true,
-            .constant_propagation = true,
-            .sccp = true,
-            .box_unbox_elim = true,
+            .dead_code_elimination = false,
+            .constant_propagation = true,  // 保留：字符串concat折叠
+            .sccp = false,
+            .box_unbox_elim = false,
             .function_inlining = false,
             .inline_threshold = 10,
             .type_specialization = false,
-            .cse = true,
-            .licm = true,
+            .cse = false,
+            .licm = false,
             .strength_reduction = false,
-            .mem2reg = true,
-            .loop_unroll = true,
-            .cfg_cleanup = true,
-            .rc_elision = true,
-            .max_iterations = 2,
+            .mem2reg = false,
+            .loop_unroll = false,
+            .cfg_cleanup = false,
+            .rc_elision = false,
+            .max_iterations = 1,
         };
     }
 
