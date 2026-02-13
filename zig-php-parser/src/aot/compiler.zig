@@ -962,14 +962,6 @@ pub const AOTCompiler = struct {
             return;
         };
 
-        // Skip optimization in debug mode
-        if (self.options.optimize_level == .debug) {
-            if (self.options.verbose) {
-                std.debug.print("  Skipping IR optimization (debug mode)\n", .{});
-            }
-            return;
-        }
-
         if (self.options.verbose) {
             std.debug.print("  Optimizing IR ({s})...\n", .{self.options.optimize_level.toString()});
         }

@@ -117,7 +117,7 @@ pub const PassConfig = struct {
             .cse = false,
             .licm = false,
             .strength_reduction = false,
-            .mem2reg = false,
+            .mem2reg = false,  // 暂时禁用 mem2reg（有 bug）
             .loop_unroll = true,
             .cfg_cleanup = false,
             .rc_elision = false,
@@ -311,6 +311,8 @@ pub const IROptimizer = struct {
     call_graph: std.StringHashMap(FunctionInfo),
     /// Scratch map for type specialization to avoid per-function allocations
     type_known_types: std.AutoHashMap(u32, Type),
+    /// Recursion depth for renameVariables
+    rename_depth: u32 = 0,
 
     const Self = @This();
 
@@ -392,6 +394,8 @@ pub const IROptimizer = struct {
 
     /// Optimize an IR module
     pub fn optimize(self: *Self, module: *Module) !void {
+        std.debug.print("Optimizer: Starting optimization (mem2reg={}, max_iter={})\n", .{ self.config.mem2reg, self.config.max_iterations });
+        
         self.current_module = module;
         defer self.current_module = null;
 
@@ -1436,8 +1440,19 @@ pub const IROptimizer = struct {
 
     /// Promote memory to registers in a single function
     fn promoteMemoryToRegisters(self: *Self, func: *Function) !bool {
+        std.debug.print("mem2reg: Processing function {s}\n", .{func.name});
+        
+        // 超时保护：最多 5 秒
+        var timer = try std.time.Timer.start();
+        const timeout_ns = 5 * std.time.ns_per_s;
+        
         // 0. Rebuild CFG (ensure predecessors/successors are up to date)
         try Analysis.rebuildCFG(func);
+        
+        if (timer.read() > timeout_ns) {
+            std.debug.print("mem2reg: TIMEOUT at CFG rebuild\n", .{});
+            return false;
+        }
 
         // 1. Compute Dominators
         var dt = try Analysis.computeDominators(self.allocator, func);
@@ -1471,16 +1486,25 @@ pub const IROptimizer = struct {
                         if (inst.result) |res| {
                             try reg_to_alloca.put(res.id, inst);
                         }
+                        std.debug.print("mem2reg: Promotable alloca reg_{d}\n", .{inst.result.?.id});
                     } else {
-                        // Alloca rejected
+                        std.debug.print("mem2reg: NOT promotable alloca reg_{d}\n", .{inst.result.?.id});
                     }
                 }
             }
         }
 
         if (promotable_allocas.items.len == 0) return false;
+        
+        std.debug.print("mem2reg: Found {d} promotable allocas\n", .{promotable_allocas.items.len});
+        
+        if (timer.read() > timeout_ns) {
+            std.debug.print("mem2reg: TIMEOUT after finding allocas\n", .{});
+            return false;
+        }
 
         // 3. Collect Defs
+        std.debug.print("mem2reg: Collecting defs...\n", .{});
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
                 switch (inst.op) {
@@ -1502,8 +1526,16 @@ pub const IROptimizer = struct {
                 }
             }
         }
+        
+        std.debug.print("mem2reg: Defs collected\n", .{});
+        
+        if (timer.read() > timeout_ns) {
+            std.debug.print("mem2reg: TIMEOUT after collecting defs\n", .{});
+            return false;
+        }
 
         // 4. Insert Phi Nodes
+        std.debug.print("mem2reg: Inserting phi nodes...\n", .{});
         // Map: Block -> Map: Alloca -> PhiInstruction
         // We need this to quickly find the phi node for a variable in a block during renaming
         var new_phis = std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)).init(self.allocator);
@@ -1543,8 +1575,16 @@ pub const IROptimizer = struct {
                 try phis_in_block.?.put(alloca, phi_inst);
             }
         }
+        
+        std.debug.print("mem2reg: Phi nodes inserted\n", .{});
+        
+        if (timer.read() > timeout_ns) {
+            std.debug.print("mem2reg: TIMEOUT after inserting phi nodes\n", .{});
+            return false;
+        }
 
         // 5. Rename Variables
+        std.debug.print("mem2reg: Renaming variables...\n", .{});
         // Stack of current values for each alloca
         var current_values = std.AutoHashMap(*Instruction, std.ArrayListUnmanaged(Register)).init(self.allocator);
         defer {
@@ -1565,8 +1605,16 @@ pub const IROptimizer = struct {
         if (func.getEntryBlock()) |entry| {
             try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca);
         }
+        
+        std.debug.print("mem2reg: Variables renamed\n", .{});
+        
+        if (timer.read() > timeout_ns) {
+            std.debug.print("mem2reg: TIMEOUT after renaming\n", .{});
+            return false;
+        }
 
         // 6. Cleanup (Remove allocas)
+        std.debug.print("mem2reg: Cleaning up allocas...\n", .{});
         // Stores and loads were marked as NOPs in renameVariables.
         // We just need to remove the allocas themselves.
         for (promotable_allocas.items) |alloca| {
@@ -1680,6 +1728,15 @@ pub const IROptimizer = struct {
         new_phis: *std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)),
         reg_to_alloca: *std.AutoHashMap(u32, *Instruction),
     ) !void {
+        // 防止无限递归
+        const max_depth = 1000;
+        if (self.rename_depth >= max_depth) {
+            std.debug.print("mem2reg: RECURSION LIMIT at depth {d}\n", .{self.rename_depth});
+            return error.RecursionLimit;
+        }
+        self.rename_depth += 1;
+        defer self.rename_depth -= 1;
+        
         // Record stack heights to pop later
         var stack_heights = std.AutoHashMap(*Instruction, usize).init(self.allocator);
         defer stack_heights.deinit();
