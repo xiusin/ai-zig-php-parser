@@ -2373,7 +2373,7 @@ pub const IROptimizer = struct {
                 try self.used_registers.put(op.lhs.id, {});
                 try self.used_registers.put(op.rhs.id, {});
             },
-            .neg, .bit_not, .not, .strlen, .array_count, .clone => |op| {
+            .neg, .bit_not, .not, .strlen, .array_count, .clone, .move => |op| {
                 try self.used_registers.put(op.operand.id, {});
             },
             .retain, .release, .debug_print, .get_type => |op| {

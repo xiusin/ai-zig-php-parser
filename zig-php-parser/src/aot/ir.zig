@@ -1313,6 +1313,7 @@ pub const IRPrinter = struct {
 
             // Type operations
             .cast => |op| try self.print("cast {any} from {any} to {any}", .{ op.value, op.from_type, op.to_type }),
+            .move => |op| try self.print("move {any}", .{op.operand}),
             .type_check => |op| try self.print("type_check {any} is {any}", .{ op.value, op.expected_type }),
             .get_type => |op| try self.print("get_type {any}", .{op.operand}),
 
