@@ -8375,12 +8375,33 @@ pub const NativeLinker = struct {
             },
             .array_set => |op| {
                 var array_buf: [32]u8 = undefined;
-                var key_buf: [32]u8 = undefined;
-                var value_buf: [32]u8 = undefined;
                 const array = try std.fmt.bufPrint(&array_buf, "reg_{d}", .{op.array.id});
-                const key = try std.fmt.bufPrint(&key_buf, "reg_{d}", .{op.key.id});
-                const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
-                try writer.print("        try {s}.asArray().set(runtime.runtime_allocator, runtime.ArrayKey{{ .integer = {s}.toInt() }}, {s});\n", .{ array, key, value });
+                
+                // 根据 key 的类型生成不同的代码
+                try writer.print("        try {s}.asArray().set(runtime.runtime_allocator, ", .{array});
+                
+                const key_type_tag = @as(std.meta.Tag(IR.Type), op.key.type_);
+                if (key_type_tag == .i64) {
+                    try writer.print("runtime.ArrayKey{{ .integer = reg_{d} }}, ", .{op.key.id});
+                } else if (key_type_tag == .php_string or key_type_tag == .php_value) {
+                    try writer.print("runtime.ArrayKey{{ .string = reg_{d}.asString() }}, ", .{op.key.id});
+                } else {
+                    // fallback: 转换为 Value 再用 setByValue
+                    try writer.print("runtime.ArrayKey{{ .integer = reg_{d}.toInt() }}, ", .{op.key.id});
+                }
+                
+                // 智能处理值的类型
+                if (op.value.type_ == .php_value) {
+                    try writer.print("reg_{d});\n", .{op.value.id});
+                } else if (op.value.type_ == .i64) {
+                    try writer.print("runtime.Value.initInt(reg_{d}));\n", .{op.value.id});
+                } else if (op.value.type_ == .f64) {
+                    try writer.print("runtime.Value.initFloat(reg_{d}));\n", .{op.value.id});
+                } else if (op.value.type_ == .bool) {
+                    try writer.print("runtime.Value.initBool(reg_{d}));\n", .{op.value.id});
+                } else {
+                    try writer.print("reg_{d});\n", .{op.value.id});
+                }
             },
             .array_push => |op| {
                 var array_buf: [32]u8 = undefined;
