@@ -5709,6 +5709,17 @@ pub const NativeLinker = struct {
     /// 内联条件表达式（用于结构化循环优化）
     fn writeInlinedConditionExpr(self: *Self, writer: anytype, inst: *const IR.Instruction) !void {
         switch (inst.op) {
+            .cast => |op| {
+                // cast 到 bool：内联为 .asBool()
+                if (op.to_type == .bool) {
+                    try writer.print("reg_{d}.asBool()", .{op.value.id});
+                } else {
+                    // 其他 cast：使用寄存器
+                    if (inst.result) |reg| {
+                        try writer.print("reg_{d}", .{reg.id});
+                    }
+                }
+            },
             .lt => |op| {
                 const lhs_corrected = if (self.current_register_types) |types|
                     types.get(op.lhs.id) orelse op.lhs.type_
