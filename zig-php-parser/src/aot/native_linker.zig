@@ -118,6 +118,7 @@ pub const NativeLinker = struct {
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
+    current_inferred_types: ?*const std.AutoHashMap(usize, IR.Type) = null,  // 类型推断结果
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
 
     const Self = @This();
@@ -130,6 +131,16 @@ pub const NativeLinker = struct {
             }
         }
         return true;
+    }
+    
+    /// 获取寄存器的推断类型（优先使用推断结果）
+    fn getInferredRegType(self: *Self, reg_id: usize, fallback: IR.Type) IR.Type {
+        if (self.current_inferred_types) |types| {
+            if (types.get(reg_id)) |inferred| {
+                return inferred;
+            }
+        }
+        return fallback;
     }
 
     fn handleUnsupportedOp(self: *Self, inst: *const IR.Instruction) !void {
@@ -1180,6 +1191,22 @@ pub const NativeLinker = struct {
         // 收集寄存器信息
         var all_registers = std.AutoHashMap(usize, IR.Type).init(self.allocator);
         defer all_registers.deinit();
+        
+        // 保存类型推断结果到 HashMap
+        var inferred_types = std.AutoHashMap(usize, IR.Type).init(self.allocator);
+        defer inferred_types.deinit();
+        
+        var inferred_reg_iter = type_inference.solver.reg_to_var.iterator();
+        while (inferred_reg_iter.next()) |entry| {
+            const reg_id = entry.key_ptr.*;
+            if (type_inference.getInferredType(reg_id)) |inferred_type| {
+                try inferred_types.put(reg_id, inferred_type);
+            }
+        }
+        
+        std.debug.print("Saved {d} inferred types\n", .{inferred_types.count()});
+        self.current_inferred_types = &inferred_types;
+        defer self.current_inferred_types = null;
 
         var alloca_registers = std.AutoHashMap(usize, void).init(self.allocator);
         defer alloca_registers.deinit();
@@ -3177,43 +3204,24 @@ pub const NativeLinker = struct {
             },
             .add => |op| {
                 if (inst.result) |reg| {
-                    // 获取实际类型（可能被 phi 特化修改）
-                    const result_type = if (self.current_reg_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
-                    const lhs_type = if (self.current_reg_types) |types|
-                        types.get(op.lhs.id) orelse op.lhs.type_
-                    else
-                        op.lhs.type_;
-                    const rhs_type = if (self.current_reg_types) |types|
-                        types.get(op.rhs.id) orelse op.rhs.type_
-                    else
-                        op.rhs.type_;
+                    // 使用类型推断结果（优先）
+                    const lhs_type = self.getInferredRegType(op.lhs.id, op.lhs.type_);
+                    const rhs_type = self.getInferredRegType(op.rhs.id, op.rhs.type_);
+                    const result_type = self.getInferredRegType(reg.id, reg.type_);
                     
-                    const type_tag = @as(std.meta.Tag(IR.Type), result_type);
                     const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
                     const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
+                    const result_tag = @as(std.meta.Tag(IR.Type), result_type);
 
                     // 如果所有操作数都是 i64，生成原生加法
-                    if (lhs_tag == .i64 and rhs_tag == .i64) {
-                        if (type_tag == .i64) {
-                            // i64 + i64 → i64
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
-                        } else {
-                            // i64 + i64 → php_value（需要装箱结果）
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(reg_{d} + reg_{d});\n", .{ op.lhs.id, op.rhs.id });
-                        }
-                    } else if (lhs_tag == .f64 and rhs_tag == .f64) {
-                        if (type_tag == .f64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
-                        } else {
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d} + reg_{d});\n", .{ op.lhs.id, op.rhs.id });
-                        }
+                    if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
+                        // i64 + i64 → i64（原生）
+                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                    } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
+                        // f64 + f64 → f64（原生）
+                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
                     } else {
-                        // 混合类型，使用运行时函数
+                        // 混合类型或 php_value，使用运行时函数
                         try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
                         try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
                         try writer.writeAll(", ");

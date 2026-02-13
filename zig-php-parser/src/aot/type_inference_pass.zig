@@ -71,11 +71,9 @@ pub const TypeInferencePass = struct {
             },
             
             .cast => |op| {
-                const from_tag = @as(std.meta.Tag(IR.Type), op.from_type);
-                if (from_tag != .php_value) {
-                    try self.solver.addConcrete(op.value.id, op.from_type);
-                }
-                try self.solver.addConcrete(result.id, op.to_type);
+                // cast 应该传播源类型，而不是目标类型
+                // 这样可以让后续优化消除不必要的 cast
+                try self.solver.addEquality(result.id, op.value.id);
             },
             
             .move => |op| {
