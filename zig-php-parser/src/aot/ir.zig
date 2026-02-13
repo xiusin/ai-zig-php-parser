@@ -662,6 +662,8 @@ pub const Instruction = struct {
         // ============ Type Operations ============
         /// Type cast
         cast: CastOp,
+        /// Move (copy register value, used to replace redundant casts)
+        move: UnaryOp,
         /// Runtime type check
         type_check: TypeCheckOp,
         /// Get type tag of PHP value

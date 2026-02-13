@@ -417,6 +417,12 @@ pub const IROptimizer = struct {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
+                
+                // 在 mem2reg 后立即运行类型推断和特化
+                if (try self.runTypeInferenceAndSpecialization(module)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyModule(module);
             }
 
             if (self.config.constant_propagation) {
@@ -1419,6 +1425,37 @@ pub const IROptimizer = struct {
             },
             else => {},
         }
+    }
+
+    // ========================================================================
+    // Type Inference and Specialization
+    // ========================================================================
+    
+    /// 运行类型推断和特化
+    fn runTypeInferenceAndSpecialization(self: *Self, module: *Module) !bool {
+        const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
+        const TypeSpecializationPass = @import("type_specialization_pass.zig").TypeSpecializationPass;
+        
+        var changed = false;
+        
+        for (module.functions.items) |func| {
+            // 1. 类型推断
+            var type_inference = TypeInferencePass.init(self.allocator);
+            defer type_inference.deinit();
+            
+            try type_inference.inferTypes(func);
+            
+            // 2. 类型特化
+            var type_specialization = TypeSpecializationPass.init(self.allocator, &type_inference);
+            try type_specialization.specialize(func);
+            
+            if (type_specialization.stats.casts_eliminated > 0 or 
+                type_specialization.stats.ops_specialized > 0) {
+                changed = true;
+            }
+        }
+        
+        return changed;
     }
 
     // ========================================================================
@@ -2526,6 +2563,7 @@ pub const IROptimizer = struct {
             .neg => false,
             .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => false,
             .param, .capture_get, .arg_count, .has_arg => false,
+            .cast, .move => false,
             .cast, .type_check, .get_type => false,
             .box, .unbox => false,
             .phi, .select => false,

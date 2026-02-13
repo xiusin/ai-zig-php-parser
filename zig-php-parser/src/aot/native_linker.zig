@@ -4400,14 +4400,14 @@ pub const NativeLinker = struct {
                         } else {
                             try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asInt();\n", .{op.value.id});
                         }
-                    } else if (op.to_type == .f64) {
+                    } else if (to_tag == .f64) {
                         // 转换到f64
                         if (src_tag == .f64) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
                         } else {
                             try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asFloat();\n", .{op.value.id});
                         }
-                    } else if (op.to_type == .bool) {
+                    } else if (to_tag == .bool) {
                         // 转换到bool
                         if (src_tag == .bool) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
@@ -4418,6 +4418,12 @@ pub const NativeLinker = struct {
                         // 默认：直接赋值
                         try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}; // cast\n", .{op.value.id});
                     }
+                }
+            },
+            .move => |op| {
+                // move: 简单的寄存器复制（用于替换冗余 cast）
+                if (inst.result) |reg| {
+                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
                 }
             },
             // ============ 并发操作指令 ============
