@@ -83,7 +83,7 @@ pub const TypeSpecializationPass = struct {
         }
     }
     
-    /// 绕过比较操作前的不必要 cast
+    /// 绕过比较和算术操作前的不必要 cast
     fn bypassCastsInComparisons(self: *TypeSpecializationPass, func: *IR.Function) !void {
         var cast_sources = std.AutoHashMap(usize, IR.Register).init(self.allocator);
         defer cast_sources.deinit();
@@ -105,7 +105,7 @@ pub const TypeSpecializationPass = struct {
             }
         }
         
-        // 只在比较操作中绕过 cast（算术操作暂时保守）
+        // 在比较和算术操作中绕过 cast
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
                 switch (inst.*.op) {
@@ -115,6 +115,27 @@ pub const TypeSpecializationPass = struct {
                         }
                         if (try self.bypassOperand(&op.rhs, &cast_sources)) {
                             self.stats.casts_eliminated += 1;
+                        }
+                    },
+                    
+                    .add, .sub, .mul, .div, .mod => |*op| {
+                        // 检查结果类型：必须是 i64 才安全穿透
+                        const result = inst.*.result orelse continue;
+                        const result_tag = @as(std.meta.Tag(IR.Type), result.type_);
+                        
+                        std.debug.print("  Arithmetic op: result reg_{d} type={s}\n", 
+                            .{result.id, @tagName(result_tag)});
+                        
+                        if (result_tag == .i64) {
+                            // 结果是 i64，可以安全穿透
+                            if (try self.bypassOperand(&op.lhs, &cast_sources)) {
+                                std.debug.print("    Bypassed lhs cast\n", .{});
+                                self.stats.casts_eliminated += 1;
+                            }
+                            if (try self.bypassOperand(&op.rhs, &cast_sources)) {
+                                std.debug.print("    Bypassed rhs cast\n", .{});
+                                self.stats.casts_eliminated += 1;
+                            }
                         }
                     },
                     

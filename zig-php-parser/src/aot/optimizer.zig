@@ -1446,7 +1446,10 @@ pub const IROptimizer = struct {
             
             try type_inference.inferTypes(func);
             
-            // 2. 类型特化
+            // 2. 将推断的类型写回 IR（在特化之前）
+            try self.applyInferredTypes(func, &type_inference);
+            
+            // 3. 类型特化（使用更新后的 IR 类型）
             var type_specialization = TypeSpecializationPass.init(self.allocator, &type_inference);
             try type_specialization.specialize(func);
             
@@ -1457,6 +1460,31 @@ pub const IROptimizer = struct {
         }
         
         return changed;
+    }
+    
+    /// 将推断的类型写回 IR
+    fn applyInferredTypes(self: *Self, func: *Function, type_inference: *const TypeInferencePass) !void {
+        _ = self;
+        var updated: usize = 0;
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |*inst| {
+                if (inst.*.result) |*result| {
+                    if (type_inference.getInferredType(result.id)) |inferred_type| {
+                        const inferred_tag = @as(std.meta.Tag(IR.Type), inferred_type);
+                        const current_tag = @as(std.meta.Tag(IR.Type), result.type_);
+                        
+                        // 只在推断类型更具体时更新
+                        if (current_tag == .php_value and inferred_tag != .php_value) {
+                            std.debug.print("  Updated reg_{d}: php_value → {s}\n", 
+                                .{result.id, @tagName(inferred_tag)});
+                            result.type_ = inferred_type;
+                            updated += 1;
+                        }
+                    }
+                }
+            }
+        }
+        std.debug.print("applyInferredTypes: Updated {d} register types\n", .{updated});
     }
 
     // ========================================================================
