@@ -2207,6 +2207,11 @@ pub const NativeLinker = struct {
             return writer.print("reg_{d}.*", .{reg_id});
         }
 
+        // 如果修正后的类型已经是 php_value，直接使用
+        if (corrected_type_tag == .php_value) {
+            return writer.print("reg_{d}", .{reg_id});
+        }
+
         if (corrected_type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
         if (corrected_type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
         if (corrected_type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
