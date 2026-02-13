@@ -2003,7 +2003,6 @@ pub const NativeLinker = struct {
         // 回退到状态机
         try code.appendSlice(self.allocator, "    // Control flow state machine\n");
         try code.appendSlice(self.allocator, "    var current_block: u32 = 0;\n");
-        try code.appendSlice(self.allocator, "    var prev_block: u32 = 0;\n");
         try code.appendSlice(self.allocator, "    while (true) {\n");
         try code.appendSlice(self.allocator, "        switch (current_block) {\n");
 
@@ -2369,7 +2368,7 @@ pub const NativeLinker = struct {
                 // 获取条件寄存器的实际类型
                 const reg_type = self.current_reg_types.?.get(br.cond.id) orelse IR.Type{ .php_value = {} };
                 const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
-                try writer.writeAll("                prev_block = current_block;\n                if (");
+                try writer.writeAll("                if (");
                 if (type_tag == .bool) {
                     try writer.print("reg_{d}", .{br.cond.id});
                 } else if (type_tag == .i64) {
@@ -2390,6 +2389,35 @@ pub const NativeLinker = struct {
                 try self.generatePhiAssignments(writer, func, br.else_block, current_block_idx);
 
                 try writer.print("                    current_block = {d};\n                }}\n", .{else_idx});
+            },
+            .switch_ => |sw| {
+                // 生成 switch 语句
+                try writer.print("                switch (reg_{d}.toInt()) {{\n", .{sw.value.id});
+                
+                // 生成 case 分支
+                for (sw.cases) |case| {
+                    const case_value = case.value;
+                    var case_idx: usize = 0;
+                    for (func.blocks.items, 0..) |block, idx| {
+                        if (block == case.block) {
+                            case_idx = idx;
+                            break;
+                        }
+                    }
+                    try writer.print("                    {d} => current_block = {d},\n", .{case_value, case_idx});
+                }
+                
+                // 生成 default 分支
+                var default_idx: usize = 0;
+                for (func.blocks.items, 0..) |block, idx| {
+                    if (block == sw.default) {
+                        default_idx = idx;
+                        break;
+                    }
+                }
+                try writer.print("                    else => current_block = {d},\n", .{default_idx});
+                
+                try writer.writeAll("                }\n");
             },
             .throw => |ex_reg| {
                 try writer.print("                runtime.setException(reg_{d});\n", .{ex_reg.id});

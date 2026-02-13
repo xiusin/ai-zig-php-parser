@@ -1,14 +1,15 @@
 <?php
-// 测试: if-elseif 替代 switch
+// 测试: switch-case
 function test_switch($x) {
-    if ($x == 1) {
-        return "one";
-    } elseif ($x == 2) {
-        return "two";
-    } elseif ($x == 3) {
-        return "three";
-    } else {
-        return "other";
+    switch ($x) {
+        case 1:
+            return "one";
+        case 2:
+            return "two";
+        case 3:
+            return "three";
+        default:
+            return "other";
     }
 }
 
