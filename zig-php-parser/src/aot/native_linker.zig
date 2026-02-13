@@ -6430,8 +6430,17 @@ pub const NativeLinker = struct {
         }
     }
     
-    /// 生成 for 循环（支持子循环）
-    fn generateForLoopWithChildren(
+    // ============================================================================
+    // 旧的嵌套循环代码生成（已废弃，保留用于回溯）
+    // 标记：DEPRECATED_NESTED_LOOP_V1
+    // 废弃原因：PHI 节点处理过于复杂，累加器值传递链断裂
+    // 重写版本：generateForLoopWithChildrenV2
+    // ============================================================================
+    
+    /// 生成 for 循环（支持子循环）- V1 已废弃
+    /// @deprecated 使用新的 generateForLoopWithChildren (V2)
+    /// 此函数已被禁用，如果被调用会产生编译错误
+    fn generateForLoopWithChildren_DEPRECATED_V1(
         self: *Self,
         writer: anytype,
         func: *const IR.Function,
@@ -6440,6 +6449,19 @@ pub const NativeLinker = struct {
         block_to_loop: *std.AutoHashMap(usize, usize),
         all_loops: []const LoopInfo,
         cleanup_regs: []const usize,
+    ) anyerror!void {
+        _ = self;
+        _ = writer;
+        _ = func;
+        _ = loop;
+        _ = processed;
+        _ = block_to_loop;
+        _ = all_loops;
+        _ = cleanup_regs;
+        @compileError("DEPRECATED: Use generateForLoopWithChildren V2 instead");
+    }
+    
+    // 旧函数体已移除，保存在 git tag: before-nested-loop-rewrite
     ) anyerror!void {
         std.debug.print("generateForLoopWithChildren: header={d}, children={d}\n", .{ loop.header, loop.children.items.len });
         
@@ -6676,7 +6698,7 @@ pub const NativeLinker = struct {
                     for (header_block.instructions.items) |header_inst| {
                         if (header_inst.op == .phi) {
                             const header_phi_op = header_inst.op.phi;
-                            if (header_inst.result) |header_phi_reg| {
+                            if (header_inst.result) |_| {
                                 // 查找来自 increment 块的 incoming
                                 if (loop.increment) |inc_idx| {
                                     const inc_block = func.blocks.items[inc_idx];
@@ -6770,6 +6792,267 @@ pub const NativeLinker = struct {
                 
                 if (found_value) |val_reg| {
                     // 使用类型推断结果
+                    const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
+                    const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
+                    
+                    const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                    
+                    if (phi_tag == value_tag) {
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                    } else if (phi_tag == .i64 and value_tag == .php_value) {
+                        try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
+                    } else {
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                    }
+                }
+            }
+        }
+        
+        try writer.writeAll("    }\n");
+    }
+    
+    // ============================================================================
+    // 新的嵌套循环代码生成（V2）
+    // 设计原则：
+    // 1. 显式累加器识别和跟踪
+    // 2. 直接值传递，不依赖复杂 PHI 链
+    // 3. 清晰的父子循环接口
+    // 4. 支持任意深度嵌套
+    // ============================================================================
+    
+    /// 累加器信息
+    const AccumulatorInfo = struct {
+        reg_id: usize,
+        type_: IR.Type,
+        init_reg: ?usize,
+    };
+    
+    /// 分析循环的累加器
+    fn analyzeLoopAccumulators(
+        self: *Self,
+        func: *const IR.Function,
+        loop: LoopInfo,
+    ) !std.ArrayList(AccumulatorInfo) {
+        var accumulators = try std.ArrayList(AccumulatorInfo).initCapacity(self.allocator, 0);
+        
+        const header_block = func.blocks.items[loop.header];
+        
+        // 遍历 header 块的 PHI 节点
+        for (header_block.instructions.items) |inst| {
+            if (inst.op != .phi) continue;
+            
+            const phi_op = inst.op.phi;
+            const result_reg = inst.result orelse continue;
+            
+            if (phi_op.incoming.len < 2) continue;
+            
+            var init_value: ?usize = null;
+            var loop_value: ?usize = null;
+            var is_from_init = false;
+            
+            for (phi_op.incoming) |incoming| {
+                if (std.mem.indexOf(u8, incoming.block.label, "init") != null) {
+                    init_value = incoming.value.id;
+                    is_from_init = true;
+                } else {
+                    loop_value = incoming.value.id;
+                }
+            }
+            
+            // 如果没有 init 块，第一个是初始值
+            if (!is_from_init and phi_op.incoming.len >= 2) {
+                init_value = phi_op.incoming[0].value.id;
+                loop_value = phi_op.incoming[1].value.id;
+            }
+            
+            if (loop_value) |lv| {
+                // 检查是否是累加器（来自算术操作）
+                const is_accumulator = blk: {
+                    for (func.blocks.items) |block| {
+                        for (block.instructions.items) |block_inst| {
+                            if (block_inst.result) |res| {
+                                if (res.id == lv) {
+                                    switch (block_inst.op) {
+                                        .add, .sub, .mul, .div, .mod => break :blk true,
+                                        .phi => break :blk true,  // 可能是嵌套循环的累加器
+                                        else => {},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break :blk false;
+                };
+                
+                if (is_accumulator) {
+                    try accumulators.append(.{
+                        .reg_id = result_reg.id,
+                        .type_ = result_reg.type_,
+                        .init_reg = init_value,
+                    });
+                }
+            }
+        }
+        
+        return accumulators;
+    }
+    
+    /// 生成 for 循环（支持子循环）- V2 新实现
+    fn generateForLoopWithChildren(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        loop: LoopInfo,
+        processed: *std.AutoHashMap(usize, void),
+        block_to_loop: *std.AutoHashMap(usize, usize),
+        all_loops: []const LoopInfo,
+        cleanup_regs: []const usize,
+    ) anyerror!void {
+        std.debug.print("=== V2: generateForLoopWithChildren header={d}, children={d} ===\n", 
+            .{loop.header, loop.children.items.len});
+        
+        // 分析当前循环的累加器
+        var accumulators = try self.analyzeLoopAccumulators(func, loop);
+        defer accumulators.deinit();
+        
+        // 如果没有子循环且 body 没有条件分支，使用优化版本
+        const body_block = func.blocks.items[loop.body_start];
+        const body_has_cond = if (body_block.terminator) |term| term == .cond_br else false;
+        
+        if (loop.children.items.len == 0 and !body_has_cond) {
+            try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+            return;
+        }
+        
+        // 有子循环：使用新的生成策略
+        var code_list = writer.context.self;
+        
+        const header_block = func.blocks.items[loop.header];
+        
+        // 生成外层循环结构
+        try writer.writeAll("    while (true) {\n");
+        try writer.print("        // Header: {s}\n", .{header_block.label});
+        
+        // 生成 header 指令
+        for (header_block.instructions.items) |inst| {
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
+        }
+        
+        // 生成条件判断
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                try writer.writeAll("        if (!(");
+                for (header_block.instructions.items) |inst| {
+                    if (inst.result) |result_reg| {
+                        if (term.cond_br.cond.id == result_reg.id) {
+                            try self.writeInlinedConditionExpr(writer, inst);
+                            break;
+                        }
+                    }
+                }
+                try writer.writeAll(")) break;\n");
+            }
+        }
+        
+        // 生成 body
+        try writer.print("        // Body: {s}\n", .{body_block.label});
+        for (body_block.instructions.items) |inst| {
+            try code_list.appendSlice(self.allocator, "        ");
+            try self.generateInstructionSimple(code_list, inst);
+        }
+        
+        // 生成子循环
+        for (loop.children.items) |child_idx| {
+            const child_loop = all_loops[child_idx];
+            try writer.writeAll("        // Nested loop\n");
+            try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+            
+            // 关键：子循环结束后，将子循环的累加器传递给外层
+            // 分析子循环的累加器
+            var child_accumulators = try self.analyzeLoopAccumulators(func, child_loop);
+            defer child_accumulators.deinit();
+            
+            std.debug.print("Child loop has {d} accumulators\n", .{child_accumulators.items.len});
+            for (child_accumulators.items) |child_acc| {
+                std.debug.print("  Child accumulator: reg_{d}\n", .{child_acc.reg_id});
+            }
+            
+            // 对于外层的每个累加器，检查是否需要从子循环获取值
+            std.debug.print("Outer loop has {d} accumulators\n", .{accumulators.items.len});
+            for (accumulators.items) |acc| {
+                std.debug.print("  Outer accumulator: reg_{d}\n", .{acc.reg_id});
+                // 查找外层累加器的 PHI incoming
+                for (header_block.instructions.items) |inst| {
+                    if (inst.op == .phi and inst.result) |res| {
+                        if (res.id == acc.reg_id) {
+                            const phi_op = inst.op.phi;
+                            std.debug.print("    PHI incoming count: {d}\n", .{phi_op.incoming.len});
+                            // 查找来自 body 或 increment 的 incoming
+                            for (phi_op.incoming) |incoming| {
+                                std.debug.print("      incoming: reg_{d} from {s}\n", 
+                                    .{incoming.value.id, incoming.block.label});
+                                if (incoming.block != header_block) {
+                                    // 这个 incoming 值可能需要从子循环获取
+                                    // 如果子循环有累加器，将其赋值给这个 incoming 值
+                                    if (child_accumulators.items.len > 0) {
+                                        const child_acc = child_accumulators.items[0];  // 使用第一个累加器
+                                        std.debug.print("      → Assigning reg_{d} = reg_{d}\n", 
+                                            .{ incoming.value.id, child_acc.reg_id });
+                                        try writer.print("        reg_{d} = reg_{d};\n", 
+                                            .{ incoming.value.id, child_acc.reg_id });
+                                    }
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 生成 increment 块
+        if (loop.increment) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            try writer.print("        // Increment: {s}\n", .{inc_block.label});
+            for (inc_block.instructions.items) |inst| {
+                if (inst.op != .phi) {  // PHI 在后面统一处理
+                    try code_list.appendSlice(self.allocator, "        ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
+            }
+        }
+        
+        // 更新所有 PHI 节点
+        for (header_block.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                const phi_op = inst.op.phi;
+                const result_reg = inst.result orelse continue;
+                
+                // 找到来自 increment 或 body 的值
+                var update_value: ?usize = null;
+                if (loop.increment) |inc_idx| {
+                    const inc_block = func.blocks.items[inc_idx];
+                    for (phi_op.incoming) |incoming| {
+                        if (incoming.block == inc_block) {
+                            update_value = incoming.value.id;
+                            break;
+                        }
+                    }
+                }
+                
+                if (update_value == null) {
+                    for (phi_op.incoming) |incoming| {
+                        if (incoming.block == body_block) {
+                            update_value = incoming.value.id;
+                            break;
+                        }
+                    }
+                }
+                
+                if (update_value) |val_reg| {
                     const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
                     const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
                     
