@@ -1861,13 +1861,13 @@ pub const IROptimizer = struct {
         try self.markUsedRegisters(func);
 
         // Phase 2: Recursively mark dependencies
-        var worklist = std.ArrayList(u32).init(self.allocator);
-        defer worklist.deinit();
+        var worklist: std.ArrayList(u32) = .empty;
+        defer worklist.deinit(self.allocator);
         
         // Add all initially marked registers to worklist
         var iter = self.used_registers.keyIterator();
         while (iter.next()) |reg_id| {
-            try worklist.append(reg_id.*);
+            try worklist.append(self.allocator, reg_id.*);
         }
         
         // Process worklist: mark all registers that produce used values
@@ -1927,65 +1927,65 @@ pub const IROptimizer = struct {
             .add, .sub, .mul, .div, .mod, .pow => |op| {
                 if (!self.used_registers.contains(op.lhs.id)) {
                     try self.used_registers.put(op.lhs.id, {});
-                    try worklist.append(op.lhs.id);
+                    try worklist.append(self.allocator, op.lhs.id);
                 }
                 if (!self.used_registers.contains(op.rhs.id)) {
                     try self.used_registers.put(op.rhs.id, {});
-                    try worklist.append(op.rhs.id);
+                    try worklist.append(self.allocator, op.rhs.id);
                 }
             },
             .bit_and, .bit_or, .bit_xor, .shl, .shr => |op| {
                 if (!self.used_registers.contains(op.lhs.id)) {
                     try self.used_registers.put(op.lhs.id, {});
-                    try worklist.append(op.lhs.id);
+                    try worklist.append(self.allocator, op.lhs.id);
                 }
                 if (!self.used_registers.contains(op.rhs.id)) {
                     try self.used_registers.put(op.rhs.id, {});
-                    try worklist.append(op.rhs.id);
+                    try worklist.append(self.allocator, op.rhs.id);
                 }
             },
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| {
                 if (!self.used_registers.contains(op.lhs.id)) {
                     try self.used_registers.put(op.lhs.id, {});
-                    try worklist.append(op.lhs.id);
+                    try worklist.append(self.allocator, op.lhs.id);
                 }
                 if (!self.used_registers.contains(op.rhs.id)) {
                     try self.used_registers.put(op.rhs.id, {});
-                    try worklist.append(op.rhs.id);
+                    try worklist.append(self.allocator, op.rhs.id);
                 }
             },
             .and_, .or_, .concat => |op| {
                 if (!self.used_registers.contains(op.lhs.id)) {
                     try self.used_registers.put(op.lhs.id, {});
-                    try worklist.append(op.lhs.id);
+                    try worklist.append(self.allocator, op.lhs.id);
                 }
                 if (!self.used_registers.contains(op.rhs.id)) {
                     try self.used_registers.put(op.rhs.id, {});
-                    try worklist.append(op.rhs.id);
+                    try worklist.append(self.allocator, op.rhs.id);
                 }
             },
             .neg, .bit_not, .not, .strlen, .array_count, .clone => |op| {
                 if (!self.used_registers.contains(op.operand.id)) {
                     try self.used_registers.put(op.operand.id, {});
-                    try worklist.append(op.operand.id);
+                    try worklist.append(self.allocator, op.operand.id);
                 }
             },
             .cast => |op| {
                 if (!self.used_registers.contains(op.value.id)) {
                     try self.used_registers.put(op.value.id, {});
-                    try worklist.append(op.value.id);
+                    try worklist.append(self.allocator, op.value.id);
                 }
             },
             .box => |op| {
                 if (!self.used_registers.contains(op.value.id)) {
                     try self.used_registers.put(op.value.id, {});
-                    try worklist.append(op.value.id);
+                    try worklist.append(self.allocator, op.value.id);
                 }
             },
             .unbox => |op| {
                 if (!self.used_registers.contains(op.value.id)) {
                     try self.used_registers.put(op.value.id, {});
-                    try worklist.append(op.value.id);
+                    try worklist.append(self.allocator, op.value.id);
                 }
             },
             else => {

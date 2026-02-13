@@ -403,9 +403,13 @@ pub const IRGenerator = struct {
         }
 
         // Allocate stack space for the variable
+        // 统一使用 php_value 类型，避免类型不匹配
+        _ = type_; // 忽略传入的类型
+        const alloca_type = Type{ .php_value = {} };
+        
         // 必须在堆上分配Type，因为指针需要在函数返回后仍然有效
         const type_ptr = try self.allocator.create(Type);
-        type_ptr.* = type_;
+        type_ptr.* = alloca_type;
         const ptr_type = Type{ .ptr = type_ptr };
         
         // Always create alloca in the entry block to ensure dominance
@@ -415,7 +419,7 @@ pub const IRGenerator = struct {
         const inst = try self.allocator.create(Instruction);
         inst.* = .{
             .result = result,
-            .op = .{ .alloca = .{ .type_ = type_, .count = 1 } },
+            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1 } },
             .location = self.current_location,
         };
         
@@ -1397,14 +1401,15 @@ pub const IRGenerator = struct {
         const iter_addr = try self.emitWithResult(.{ .call = .{
             .func_name = "php_array_iter_init",
             .args = iter_args,
-            .return_type = .i64, // Using i64 for pointer address
-        } }, .i64);
+            .return_type = .php_value, // 返回 Value 类型
+        } }, .php_value);
 
         // Alloc iterator storage (to update it in increment)
-        const i64_type_ptr = try self.allocator.create(Type);
-        i64_type_ptr.* = Type{ .i64 = {} };
-        const iter_ptr_type = Type{ .ptr = i64_type_ptr };
-        const iter_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .i64, .count = 1 } }, iter_ptr_type);
+        // 统一使用 php_value 类型
+        const php_value_type_ptr = try self.allocator.create(Type);
+        php_value_type_ptr.* = Type{ .php_value = {} };
+        const iter_ptr_type = Type{ .ptr = php_value_type_ptr };
+        const iter_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .php_value, .count = 1 } }, iter_ptr_type);
         
         _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = iter_addr } }, null);
 
