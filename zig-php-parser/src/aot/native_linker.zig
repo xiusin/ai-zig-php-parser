@@ -3609,6 +3609,7 @@ pub const NativeLinker = struct {
                 }
             },
             .call => |op| {
+                std.debug.print("DEBUG: call {s}, has_result={}\n", .{ op.func_name, inst.result != null });
                 // 生成函数调用
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
@@ -3715,9 +3716,13 @@ pub const NativeLinker = struct {
                     // 无返回值寄存器
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
+                        const needs_alloc = self.functionNeedsAllocator(op.func_name);
+                        
+                        // 添加注释标记
+                        try writer.print("    // CALL: {s}, needs_alloc={}, args={}\n", .{ op.func_name, needs_alloc, op.args.len });
 
                         // 检查是否需要 allocator 参数
-                        if (self.functionNeedsAllocator(op.func_name)) {
+                        if (needs_alloc) {
                             if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
                                 if (op.args.len == 0) {
                                     try writer.writeAll("    _ = runtime.Value.initNull();\n");
@@ -3746,6 +3751,11 @@ pub const NativeLinker = struct {
                                 } else {
                                     try writer.writeAll("    _ = runtime.Value.initNull();\n");
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_iter_free")) {
+                                // 特殊处理：php_array_iter_free 需要 allocator
+                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (op.args.len > 0) {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgs(writer, op.args);
