@@ -19,7 +19,7 @@ pub const TypeInferencePass = struct {
         self.solver.deinit();
     }
     
-    pub fn inferTypes(self: *TypeInferencePass, func: *IR.Function) !void {
+    pub fn inferTypes(self: *TypeInferencePass, func: *const IR.Function) !void {
         std.debug.print("type_inference: Analyzing function {s}\n", .{func.name});
         
         // 收集约束
@@ -34,15 +34,15 @@ pub const TypeInferencePass = struct {
             .{self.solver.var_to_type.count()});
     }
     
-    fn collectConstraints(self: *TypeInferencePass, func: *IR.Function) !void {
+    fn collectConstraints(self: *TypeInferencePass, func: *const IR.Function) !void {
         for (func.blocks.items) |block| {
-            for (block.instructions.items) |*inst| {
+            for (block.instructions.items) |inst| {
                 try self.collectInstConstraints(inst.*);
             }
         }
     }
     
-    fn collectInstConstraints(self: *TypeInferencePass, inst: *IR.Instruction) !void {
+    fn collectInstConstraints(self: *TypeInferencePass, inst: IR.Instruction) !void {
         const result = inst.result orelse return;
         
         switch (inst.op) {

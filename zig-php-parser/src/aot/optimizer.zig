@@ -561,6 +561,36 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyModule(module);
             }
         }
+        
+        // 优化完成后，最后一次运行类型推断并保存结果
+        const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
+        std.debug.print("Optimizer: Final type inference pass...\n", .{});
+        
+        for (module.functions.items) |func| {
+            var type_inference = TypeInferencePass.init(self.allocator);
+            defer type_inference.deinit();
+            
+            try type_inference.inferTypes(func);
+            
+            // 保存最终的类型推断结果
+            var func_types = std.AutoHashMap(usize, IR.Type).init(self.allocator);
+            var reg_iter = type_inference.solver.reg_to_var.iterator();
+            while (reg_iter.next()) |entry| {
+                const reg_id = entry.key_ptr.*;
+                if (type_inference.getInferredType(reg_id)) |inferred_type| {
+                    try func_types.put(reg_id, inferred_type);
+                }
+            }
+            
+            // 替换旧的类型推断结果
+            if (module.inferred_types.getPtr(func.name)) |old_types| {
+                old_types.deinit();
+            }
+            try module.inferred_types.put(func.name, func_types);
+            
+            std.debug.print("  Saved {d} inferred types for function {s}\n", 
+                .{func_types.count(), func.name});
+        }
     }
 
     /// Optimize a single function

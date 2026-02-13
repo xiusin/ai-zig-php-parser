@@ -1105,7 +1105,7 @@ pub const NativeLinker = struct {
     }
 
     /// 生成函数
-    fn generateFunction(self: *Self, code: *std.ArrayList(u8), ir_module: *const IR.Module, func: *const IR.Function) !void {
+    fn generateFunction(self: *Self, code: *std.ArrayList(u8), _: *const IR.Module, func: *const IR.Function) !void {
         const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
         self.current_function_has_this = has_this;
 
@@ -1113,6 +1113,15 @@ pub const NativeLinker = struct {
         if (func.name.len == 0 or !std.unicode.utf8ValidateSlice(func.name)) {
             return error.InvalidFunctionName;
         }
+        
+        // 在代码生成时重新进行类型推断
+        const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
+        var type_inference = TypeInferencePass.init(self.allocator);
+        defer type_inference.deinit();
+        
+        try type_inference.inferTypes(func);
+        std.debug.print("Code generation: Inferred {d} types for {s}\n", 
+            .{type_inference.solver.var_to_type.count(), func.name});
 
         // 推断返回类型：检查函数体中是否有返回值
         var has_return_value = false;
@@ -1345,27 +1354,30 @@ pub const NativeLinker = struct {
             }
         }
 
-        // 用类型推断结果覆盖寄存器类型
-        if (ir_module.inferred_types.get(func.name)) |inferred_types| {
-            var iter = inferred_types.iterator();
-            while (iter.next()) |entry| {
-                const reg_id = entry.key_ptr.*;
-                const inferred_type = entry.value_ptr.*;
-                const inferred_tag = @as(std.meta.Tag(IR.Type), inferred_type);
-                
-                // 只在推断类型更具体时覆盖
-                if (inferred_tag != .php_value) {
-                    if (all_registers.getPtr(reg_id)) |current_type| {
-                        const current_tag = @as(std.meta.Tag(IR.Type), current_type.*);
-                        if (current_tag == .php_value) {
-                            current_type.* = inferred_type;
-                            std.debug.print("  Override reg_{d}: php_value → {s}\n", 
-                                .{reg_id, @tagName(inferred_tag)});
-                        }
-                    }
-                }
-            }
-        }
+        // 用代码生成时的类型推断结果覆盖寄存器类型
+        // TODO: 暂时禁用，因为需要配合代码生成时的类型特化
+        // std.debug.print("Applying inferred types: {d} entries\n", 
+        //     .{type_inference.solver.var_to_type.count()});
+        
+        // var inferred_reg_iter = type_inference.solver.reg_to_var.iterator();
+        // while (inferred_reg_iter.next()) |entry| {
+        //     const reg_id = entry.key_ptr.*;
+        //     if (type_inference.getInferredType(reg_id)) |inferred_type| {
+        //         const inferred_tag = @as(std.meta.Tag(IR.Type), inferred_type);
+        //         
+        //         // 只在推断类型更具体时覆盖
+        //         if (inferred_tag != .php_value) {
+        //             if (all_registers.getPtr(reg_id)) |current_type| {
+        //                 const current_tag = @as(std.meta.Tag(IR.Type), current_type.*);
+        //                 if (current_tag == .php_value) {
+        //                     current_type.* = inferred_type;
+        //                     std.debug.print("  Override reg_{d}: php_value → {s}\n", 
+        //                         .{reg_id, @tagName(inferred_tag)});
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
         // 保存到 self，供代码生成时使用
         self.current_register_types = &all_registers;
