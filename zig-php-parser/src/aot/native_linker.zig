@@ -5066,6 +5066,37 @@ pub const NativeLinker = struct {
         // 🔥 LICM 代码生成层优化：检测并提升循环不变量
         try self.hoistLoopInvariantsAtCodegen(writer, func, loop);
 
+        // 🔥 初始化 PHI 节点（从 init 块或第一个 incoming 获取初始值）
+        const header_block = func.blocks.items[loop.header];
+        for (header_block.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                const phi_op = inst.op.phi;
+                if (inst.result) |res| {
+                    if (phi_op.incoming.len == 0) continue;
+                    
+                    // 查找来自 init 或 entry 的 incoming
+                    var init_value: ?usize = null;
+                    for (phi_op.incoming) |incoming| {
+                        const is_init = std.mem.indexOf(u8, incoming.block.label, "init") != null or
+                                       std.mem.indexOf(u8, incoming.block.label, "entry") != null;
+                        if (is_init) {
+                            init_value = incoming.value.id;
+                            break;
+                        }
+                    }
+                    
+                    // 如果没有 init，使用第一个 incoming（通常是初始值）
+                    if (init_value == null) {
+                        init_value = phi_op.incoming[0].value.id;
+                    }
+                    
+                    if (init_value) |val| {
+                        try writer.print("    reg_{d} = reg_{d};\n", .{res.id, val});
+                    }
+                }
+            }
+        }
+
         // 分析循环变量：查找在 increment 块中被修改的 alloca 寄存器
         var loop_var_reg: ?usize = null;
         if (loop.increment) |inc_idx| {
@@ -5709,6 +5740,26 @@ pub const NativeLinker = struct {
             if (unroll_factor > 1) {
                 try writer.writeAll("    // Unrolled main loop\n");
             }
+            
+            // 🔥 初始化 PHI 节点（从 init 块获取初始值）
+            for (header_block.instructions.items) |inst| {
+                if (inst.op == .phi) {
+                    const phi_op = inst.op.phi;
+                    if (inst.result) |res| {
+                        // 查找来自 init 或 entry 的 incoming
+                        for (phi_op.incoming) |incoming| {
+                            const is_init = std.mem.indexOf(u8, incoming.block.label, "init") != null or
+                                           std.mem.indexOf(u8, incoming.block.label, "entry") != null or
+                                           incoming.block.label[0] != 'f';  // 不是 for_ 开头
+                            if (is_init) {
+                                try writer.print("    reg_{d} = reg_{d};\n", .{res.id, incoming.value.id});
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
             try writer.writeAll("    while (true) {\n");
             try writer.print("        // Header: {s}\n", .{header_block.label});
 
@@ -6472,8 +6523,6 @@ pub const NativeLinker = struct {
     ) !std.ArrayList(AccumulatorInfo) {
         var accumulators = try std.ArrayList(AccumulatorInfo).initCapacity(self.allocator, 0);
         
-        std.debug.print("=== analyzeLoopAccumulators: header={d} ===\n", .{loop.header});
-        
         const header_block = func.blocks.items[loop.header];
         
         // 遍历 header 块的 PHI 节点
@@ -6482,8 +6531,6 @@ pub const NativeLinker = struct {
             
             const phi_op = inst.op.phi;
             const result_reg = inst.result orelse continue;
-            
-            std.debug.print("  Found PHI: reg_{d}, incoming={d}\n", .{result_reg.id, phi_op.incoming.len});
             
             if (phi_op.incoming.len < 2) continue;
             
@@ -6507,7 +6554,6 @@ pub const NativeLinker = struct {
             }
             
             if (loop_value) |lv| {
-                std.debug.print("    Checking loop_value=reg_{d} for PHI reg_{d}\n", .{lv, result_reg.id});
                 // 检查是否是循环变量：add 的 rhs 是常量（通常是 1）
                 const is_loop_var = blk: {
                     for (func.blocks.items) |block| {
@@ -6515,8 +6561,6 @@ pub const NativeLinker = struct {
                             if (block_inst.result) |res| {
                                 if (res.id == lv and block_inst.op == .add) {
                                     const add_op = block_inst.op.add;
-                                    std.debug.print("      Found add: lhs=reg_{d}, rhs=reg_{d}\n", 
-                                        .{add_op.lhs.id, add_op.rhs.id});
                                     
                                     // 检查 rhs 是否是常量
                                     for (func.blocks.items) |b| {
@@ -6524,7 +6568,6 @@ pub const NativeLinker = struct {
                                             if (i.result) |r| {
                                                 if (r.id == add_op.rhs.id) {
                                                     if (i.op == .const_int) {
-                                                        std.debug.print("      → Loop variable (rhs is const)\n", .{});
                                                         break :blk true;
                                                     }
                                                 }
@@ -6535,7 +6578,6 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
-                    std.debug.print("      → Accumulator\n", .{});
                     break :blk false;
                 };
                 
@@ -6650,32 +6692,25 @@ pub const NativeLinker = struct {
             var child_accumulators = try self.analyzeLoopAccumulators(func, child_loop);
             defer child_accumulators.deinit(self.allocator);
             
-            std.debug.print("Child loop has {d} accumulators\n", .{child_accumulators.items.len});
             for (child_accumulators.items) |child_acc| {
-                std.debug.print("  Child accumulator: reg_{d}\n", .{child_acc.reg_id});
             }
             
             // 对于外层的每个累加器，检查是否需要从子循环获取值
-            std.debug.print("Outer loop has {d} accumulators\n", .{accumulators.items.len});
             for (accumulators.items) |acc| {
-                std.debug.print("  Outer accumulator: reg_{d}\n", .{acc.reg_id});
                 // 查找外层累加器的 PHI incoming
                 for (header_block.instructions.items) |inst| {
                     if (inst.op == .phi) {
                         if (inst.result) |res| {
                         if (res.id == acc.reg_id) {
                             const phi_op = inst.op.phi;
-                            std.debug.print("    PHI incoming count: {d}\n", .{phi_op.incoming.len});
                             // 查找来自 body 或 increment 的 incoming（非 header）
                             for (phi_op.incoming) |incoming| {
-                                std.debug.print("      incoming: reg_{d} from {s}\n", 
                                     .{incoming.value.id, incoming.block.label});
                                 if (incoming.block != header_block) {
                                     // 这个 incoming 值需要从子循环累加器获取
                                     if (child_accumulators.items.len > 0) {
                                         // 简单策略：使用第一个子累加器（通常只有一个）
                                         const child_acc = child_accumulators.items[0];
-                                        std.debug.print("      → Assigning reg_{d} = reg_{d}\n", 
                                             .{ incoming.value.id, child_acc.reg_id });
                                         try writer.print("        reg_{d} = reg_{d};\n", 
                                             .{ incoming.value.id, child_acc.reg_id });
