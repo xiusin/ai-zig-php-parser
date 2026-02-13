@@ -4881,6 +4881,31 @@ pub const NativeLinker = struct {
         try writer.writeAll("    while (true) {\n");
         try writer.print("        // Header: {s}\n", .{header_block.label});
 
+        // 处理 phi 节点：在循环头部，phi 的值来自前驱块
+        // 第一次进入：来自 init 块
+        // 后续迭代：来自 increment 块
+        // 我们需要在循环体末尾更新 phi 值
+        var phi_updates = std.ArrayListUnmanaged(struct { phi_reg: usize, value_reg: usize }){};
+        defer phi_updates.deinit(self.allocator);
+        
+        for (header_block.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                const phi_op = inst.op.phi;
+                const result_reg = inst.result orelse continue;
+                
+                // 找到来自 increment 块的值（循环回边）
+                if (loop.increment) |inc_idx| {
+                    const inc_block = func.blocks.items[inc_idx];
+                    for (phi_op.incoming) |incoming| {
+                        if (incoming.block == inc_block) {
+                            try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = incoming.value.id });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // 第二遍：生成非常量指令
         for (header_block.instructions.items) |inst| {
             if (inst.result) |result_reg| {
@@ -5207,6 +5232,94 @@ pub const NativeLinker = struct {
 
         const header_block = func.blocks.items[loop.header];
         const body_block = func.blocks.items[loop.body_start];
+
+        // 收集 phi 节点更新信息
+        var phi_updates = std.ArrayListUnmanaged(struct { phi_reg: usize, value_reg: usize }){};
+        defer phi_updates.deinit(self.allocator);
+        
+        for (header_block.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                const phi_op = inst.op.phi;
+                const result_reg = inst.result orelse continue;
+                
+                std.debug.print("Processing phi reg_{d}, incoming count={d}\n", .{ result_reg.id, phi_op.incoming.len });
+                
+                // 找到来自循环内部的值（非初始化块）
+                // 优先级：increment 块 > body 块
+                var found_value: ?usize = null;
+                
+                if (loop.increment) |inc_idx| {
+                    const inc_block = func.blocks.items[inc_idx];
+                    for (phi_op.incoming) |incoming| {
+                        if (incoming.block == inc_block) {
+                            // 验证这个值确实在这个块中定义
+                            var defined_here = false;
+                            for (inc_block.instructions.items) |block_inst| {
+                                if (block_inst.result) |res| {
+                                    if (res.id == incoming.value.id) {
+                                        defined_here = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (defined_here) {
+                                found_value = incoming.value.id;
+                                std.debug.print("  Found in increment block: reg_{d} (verified)\n", .{found_value.?});
+                                break;
+                            } else {
+                                std.debug.print("  WARNING: reg_{d} claimed from increment but not defined there!\n", .{incoming.value.id});
+                            }
+                        }
+                    }
+                }
+                
+                // 如果 increment 块没有，尝试 body 块
+                if (found_value == null) {
+                    for (phi_op.incoming) |incoming| {
+                        if (incoming.block == body_block) {
+                            // 验证
+                            var defined_here = false;
+                            for (body_block.instructions.items) |block_inst| {
+                                if (block_inst.result) |res| {
+                                    if (res.id == incoming.value.id) {
+                                        defined_here = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (defined_here) {
+                                found_value = incoming.value.id;
+                                std.debug.print("  Found in body block: reg_{d} (verified)\n", .{found_value.?});
+                                break;
+                            } else {
+                                std.debug.print("  WARNING: reg_{d} claimed from body but not defined there!\n", .{incoming.value.id});
+                            }
+                        }
+                    }
+                }
+                
+                // 如果还没有，使用简单策略：在 body 块中找到第一个 add 操作
+                if (found_value == null) {
+                    std.debug.print("  Fallback: searching for add in body block\n", .{});
+                    for (body_block.instructions.items) |body_inst| {
+                        if (body_inst.op == .add) {
+                            if (body_inst.result) |res| {
+                                found_value = res.id;
+                                std.debug.print("  -> Found add result: reg_{d}\n", .{found_value.?});
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (found_value) |val_reg| {
+                    std.debug.print("phi: reg_{d} <- reg_{d}\n", .{ result_reg.id, val_reg });
+                    try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = val_reg });
+                }
+            }
+        }
 
         var cond_reg_id: ?usize = null;
         if (header_block.terminator) |term| {
@@ -5713,6 +5826,11 @@ pub const NativeLinker = struct {
                 }
             }
 
+            // 更新 phi 节点的值（在循环末尾）
+            for (phi_updates.items) |update| {
+                try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+            }
+
             try writer.writeAll("    }\n");
 
             // Epilogue：处理剩余迭代（< unroll_factor）
@@ -5772,6 +5890,11 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
+                }
+
+                // 更新 phi 节点的值（在循环末尾）
+                for (phi_updates.items) |update| {
+                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
                 }
 
                 try writer.writeAll("    }\n");
