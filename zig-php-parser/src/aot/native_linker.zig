@@ -6645,31 +6645,51 @@ pub const NativeLinker = struct {
                 const child_loop = all_loops[child_idx];
                 try writer.writeAll("        // Generating nested loop\n");
                 try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
-                
-                // 子循环结束后，将子循环的累加器传递给 increment 块的 PHI
-                // 查找子循环的累加器 PHI
+            }
+            
+            // 关键修复：子循环结束后，立即将子循环的累加器传递给外层需要的寄存器
+            // 简化策略：直接查找外层 header PHI，将子循环累加器赋值给它的 incoming 值
+            for (loop.children.items) |child_idx| {
+                const child_loop = all_loops[child_idx];
                 const child_header = func.blocks.items[child_loop.header];
+                
+                // 找到子循环的累加器（第二个 PHI）
+                var child_accumulator_reg: ?usize = null;
+                var phi_count: usize = 0;
                 for (child_header.instructions.items) |child_inst| {
                     if (child_inst.op == .phi) {
-                        if (child_inst.result) |child_phi_reg| {
-                            // 查找 increment 块中引用这个值的 PHI
-                            if (loop.increment) |inc_idx| {
-                                const inc_block = func.blocks.items[inc_idx];
-                                for (inc_block.instructions.items) |inc_inst| {
-                                    if (inc_inst.op == .phi) {
-                                        const inc_phi_op = inc_inst.op.phi;
-                                        if (inc_inst.result) |inc_phi_reg| {
-                                            // 检查是否有 incoming 来自 body 块
-                                            for (inc_phi_op.incoming) |incoming| {
-                                                if (incoming.block == body_block) {
-                                                    // 将子循环的 PHI 结果赋值给这个 incoming 值
-                                                    try writer.print("        reg_{d} = reg_{d};\n", .{ incoming.value.id, child_phi_reg.id });
-                                                }
-                                            }
+                        if (child_inst.result) |child_result| {
+                            const child_type_tag = @as(std.meta.Tag(IR.Type), child_result.type_);
+                            if (child_type_tag == .i64 or child_type_tag == .php_value) {
+                                phi_count += 1;
+                                if (phi_count == 2) {
+                                    child_accumulator_reg = child_result.id;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if (child_accumulator_reg) |child_acc| {
+                    // 查找外层 header PHI，找到累加器 PHI（通常是第一个）
+                    for (header_block.instructions.items) |header_inst| {
+                        if (header_inst.op == .phi) {
+                            const header_phi_op = header_inst.op.phi;
+                            if (header_inst.result) |header_phi_reg| {
+                                // 查找来自 increment 块的 incoming
+                                if (loop.increment) |inc_idx| {
+                                    const inc_block = func.blocks.items[inc_idx];
+                                    for (header_phi_op.incoming) |incoming| {
+                                        if (incoming.block == inc_block) {
+                                            // 将子循环累加器赋值给这个 incoming 值
+                                            try writer.print("        reg_{d} = reg_{d};\n", .{ incoming.value.id, child_acc });
+                                            break;
                                         }
                                     }
                                 }
                             }
+                            break;  // 只处理第一个 PHI（累加器）
                         }
                     }
                 }
