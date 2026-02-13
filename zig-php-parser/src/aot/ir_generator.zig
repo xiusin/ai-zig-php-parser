@@ -1244,8 +1244,6 @@ pub const IRGenerator = struct {
     fn generateForStmt(self: *Self, node: *const Node) !void {
         const for_data = node.data.for_stmt;
 
-        std.debug.print("\n=== Generating FOR statement ===\n", .{});
-
         // 如果当前块已有指令，创建新块用于 init
         const need_init_block = if (self.current_block) |block| 
             block.instructions.items.len > 0 
@@ -1264,22 +1262,18 @@ pub const IRGenerator = struct {
             try self.generateStatement(init_idx);
         }
 
-        // Create blocks (延迟创建 exit_block)
+        // Create blocks
         const cond_block = try self.createBlock("for_cond");
         const body_block = try self.createBlock("for_body");
         const loop_block = try self.createBlock("for_loop");
-
-        std.debug.print("Created blocks: cond, body, loop (exit delayed)\n", .{});
-
-        // 临时创建 exit_block 用于 loop context（稍后会替换）
-        const temp_exit_block = try self.createBlock("for_exit_temp");
+        const exit_block = try self.createBlock("for_exit");
 
         // Jump to condition from current block
         self.setTerminator(.{ .br = cond_block });
 
-        // Push loop context (使用临时 exit block)
+        // Push loop context
         try self.loop_stack.append(self.allocator, .{
-            .break_block = temp_exit_block,
+            .break_block = exit_block,
             .continue_block = loop_block,
         });
 
@@ -1290,7 +1284,7 @@ pub const IRGenerator = struct {
             self.setTerminator(.{ .cond_br = .{
                 .cond = cond_reg,
                 .then_block = body_block,
-                .else_block = temp_exit_block,
+                .else_block = exit_block,
             } });
         } else {
             // Infinite loop if no condition
@@ -1299,53 +1293,16 @@ pub const IRGenerator = struct {
 
         // Generate body
         self.setCurrentBlock(body_block);
-        
-        // 获取 body_block 的索引用于调试
-        var body_block_idx: usize = 0;
-        for (self.current_function.?.blocks.items, 0..) |blk, i| {
-            if (blk == body_block) {
-                body_block_idx = i;
-                break;
-            }
-        }
-        std.debug.print("Generating body, body_block_idx={d}, terminator_before={}\n", .{ body_block_idx, body_block.terminator != null });
-        
         try self.generateStatement(for_data.body);
         
         // 检查 body_block 是否已终止
         const body_terminated = body_block.terminator != null;
-        std.debug.print("After body, body_terminated={}, terminator={s}\n", .{ body_terminated, if (body_block.terminator) |t| @tagName(t) else "null" });
         
         if (!body_terminated) {
-            std.debug.print("Setting terminator: body_block -> loop_block\n", .{});
             self.setCurrentBlock(body_block);
             self.setTerminator(.{ .br = loop_block });
         } else {
-            // Body 已终止（嵌套循环），当前块是内层 exit，需要跳转到外层 loop
-            std.debug.print("Body block already terminated, setting current block terminator to loop_block\n", .{});
             self.setTerminator(.{ .br = loop_block });
-        }
-
-        // 现在创建真正的 exit_block（在所有嵌套循环之后）
-        const exit_block = try self.createBlock("for_exit");
-        std.debug.print("Created exit_block after body\n", .{});
-        
-        // 替换 temp_exit_block 的引用
-        // 1. 更新 cond_block 的 terminator
-        if (cond_block.terminator) |*term| {
-            if (term.* == .cond_br) {
-                if (term.cond_br.else_block == temp_exit_block) {
-                    term.cond_br.else_block = exit_block;
-                }
-            }
-        }
-        
-        // 2. 更新 loop context
-        if (self.loop_stack.items.len > 0) {
-            const last_idx = self.loop_stack.items.len - 1;
-            if (self.loop_stack.items[last_idx].break_block == temp_exit_block) {
-                self.loop_stack.items[last_idx].break_block = exit_block;
-            }
         }
 
         // Generate loop expression
@@ -1360,7 +1317,6 @@ pub const IRGenerator = struct {
 
         // Continue in exit block
         self.setCurrentBlock(exit_block);
-        std.debug.print("=== FOR statement complete ===\n\n", .{});
     }
 
     /// Generate IR for for-range statement
@@ -1939,10 +1895,7 @@ pub const IRGenerator = struct {
         // 标记函数有多层 break
         if (level > 1) {
             if (self.current_function) |func| {
-                std.debug.print("Setting has_multi_level_break for {s}\n", .{func.name});
                 func.has_multi_level_break = true;
-            } else {
-                std.debug.print("WARNING: current_function is null!\n", .{});
             }
         }
         

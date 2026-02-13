@@ -1991,23 +1991,17 @@ pub const NativeLinker = struct {
         }
 
         var writer = code.writer(self.allocator);
-        std.debug.print("Trying structured control flow for {s}...\n", .{func.name});
         
-        // 如果有多层 break/continue，强制使用状态机
-        if (func.has_multi_level_break) {
-            std.debug.print("Function has multi-level break/continue, using state machine\n", .{});
-            try self.generateControlFlowStateMachine(code, func, cleanup_regs, alloca_regs);
-            return;
+        // 如果有多层 break/continue，直接跳过结构化尝试
+        if (!func.has_multi_level_break) {
+            const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
+            if (structured_result) {
+                return;
+            }
         }
         
-        const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
-        std.debug.print("Structured result: {}\n", .{structured_result});
-        if (structured_result) {
-            std.debug.print("Using structured control flow\n", .{});
-            return;
-        }
-
-        std.debug.print("Falling back to state machine\n", .{});
+        // 生成状态机
+        try code.appendSlice(self.allocator, "    // State machine for complex control flow\n");
         // 回退到状态机
         try code.appendSlice(self.allocator, "    // Control flow state machine\n");
         try code.appendSlice(self.allocator, "    var current_block: u32 = 0;\n");
