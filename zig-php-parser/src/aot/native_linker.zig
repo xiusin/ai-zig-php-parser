@@ -6507,21 +6507,35 @@ pub const NativeLinker = struct {
             }
             
             if (loop_value) |lv| {
-                // 简化：直接检查 loop_value 是否来自 add 且左操作数是 PHI 自身
+                std.debug.print("    Checking loop_value=reg_{d} for PHI reg_{d}\n", .{lv, result_reg.id});
+                // 检查是否是循环变量：add 的 rhs 是常量（通常是 1）
                 const is_loop_var = blk: {
                     for (func.blocks.items) |block| {
-                        for (block.instructions.items) |inst| {
-                            if (inst.result) |res| {
-                                if (res.id == lv and inst.op == .add) {
-                                    const add_op = inst.op.add;
-                                    // 如果 lhs 是 PHI 自身 → 循环变量
-                                    if (add_op.lhs.id == result_reg.id) {
-                                        break :blk true;
+                        for (block.instructions.items) |block_inst| {
+                            if (block_inst.result) |res| {
+                                if (res.id == lv and block_inst.op == .add) {
+                                    const add_op = block_inst.op.add;
+                                    std.debug.print("      Found add: lhs=reg_{d}, rhs=reg_{d}\n", 
+                                        .{add_op.lhs.id, add_op.rhs.id});
+                                    
+                                    // 检查 rhs 是否是常量
+                                    for (func.blocks.items) |b| {
+                                        for (b.instructions.items) |i| {
+                                            if (i.result) |r| {
+                                                if (r.id == add_op.rhs.id) {
+                                                    if (i.op == .const_int) {
+                                                        std.debug.print("      → Loop variable (rhs is const)\n", .{});
+                                                        break :blk true;
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    std.debug.print("      → Accumulator\n", .{});
                     break :blk false;
                 };
                 
@@ -6562,6 +6576,27 @@ pub const NativeLinker = struct {
         const body_has_cond = if (body_block.terminator) |term| term == .cond_br else false;
         
         if (loop.children.items.len == 0 and !body_has_cond) {
+            // 简化路径：无子循环，无条件分支
+            // 但仍需初始化 PHI 节点
+            const header_block = func.blocks.items[loop.header];
+            
+            // 初始化 PHI 节点（从 init 块获取初始值）
+            for (header_block.instructions.items) |inst| {
+                if (inst.op == .phi) {
+                    const phi_op = inst.op.phi;
+                    if (inst.result) |res| {
+                        // 查找来自 init 的 incoming
+                        for (phi_op.incoming) |incoming| {
+                            if (std.mem.indexOf(u8, incoming.block.label, "init") != null or 
+                                incoming.block.label[0] != 'f') {  // 不是 for_ 开头
+                                try writer.print("        reg_{d} = {d};\n", .{res.id, incoming.value.id});
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
             try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
             return;
         }
@@ -6631,24 +6666,24 @@ pub const NativeLinker = struct {
                         if (res.id == acc.reg_id) {
                             const phi_op = inst.op.phi;
                             std.debug.print("    PHI incoming count: {d}\n", .{phi_op.incoming.len});
-                            // 查找来自 body 或 increment 的 incoming
+                            // 查找来自 body 或 increment 的 incoming（非 header）
                             for (phi_op.incoming) |incoming| {
                                 std.debug.print("      incoming: reg_{d} from {s}\n", 
                                     .{incoming.value.id, incoming.block.label});
                                 if (incoming.block != header_block) {
-                                    // 这个 incoming 值可能需要从子循环获取
-                                    // 如果子循环有累加器，将其赋值给这个 incoming 值
+                                    // 这个 incoming 值需要从子循环累加器获取
                                     if (child_accumulators.items.len > 0) {
-                                        const child_acc = child_accumulators.items[0];  // 使用第一个累加器
+                                        // 简单策略：使用第一个子累加器（通常只有一个）
+                                        const child_acc = child_accumulators.items[0];
                                         std.debug.print("      → Assigning reg_{d} = reg_{d}\n", 
                                             .{ incoming.value.id, child_acc.reg_id });
                                         try writer.print("        reg_{d} = reg_{d};\n", 
                                             .{ incoming.value.id, child_acc.reg_id });
                                     }
-                                    break;
+                                    // 不 break，继续处理其他 incoming
                                 }
                             }
-                            break;
+                            break;  // 找到对应的 PHI 后退出
                         }
                     }
                 }
