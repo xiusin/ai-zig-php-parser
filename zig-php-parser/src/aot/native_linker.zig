@@ -4353,9 +4353,10 @@ pub const NativeLinker = struct {
                     // Get the actual type of the source register
                     const src_real_type = self.current_reg_types.?.get(op.value.id) orelse op.value.type_;
                     const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+                    const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
 
                     // 根据目标类型生成不同的转换代码
-                    if (op.to_type == .php_value) {
+                    if (to_tag == .php_value) {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         // 从基本类型转换到php_value
                         if (src_tag == .i64) {
@@ -4365,9 +4366,9 @@ pub const NativeLinker = struct {
                         } else if (src_tag == .bool) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d});\n", .{op.value.id});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}; // cast from {any} to {any}\n", .{ op.value.id, src_tag, op.to_type });
+                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}; // cast from {any} to {any}\n", .{ op.value.id, src_tag, to_tag });
                         }
-                    } else if (op.to_type == .i64) {
+                    } else if (to_tag == .i64) {
                         // 转换到i64
                         if (src_tag == .i64) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
@@ -5828,7 +5829,27 @@ pub const NativeLinker = struct {
 
             // 更新 phi 节点的值（在循环末尾）
             for (phi_updates.items) |update| {
-                try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                // 检查类型是否匹配
+                const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                const value_type = if (self.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                
+                const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                
+                if (phi_tag == value_tag) {
+                    // 类型匹配，直接赋值
+                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                } else if (phi_tag == .i64 and value_tag == .php_value) {
+                    // phi 是 i64，value 是 php_value，需要转换
+                    try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
+                } else if (phi_tag == .f64 and value_tag == .php_value) {
+                    try writer.print("        reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                } else if (phi_tag == .bool and value_tag == .php_value) {
+                    try writer.print("        reg_{d} = reg_{d}.toBool();\n", .{ update.phi_reg, update.value_reg });
+                } else {
+                    // 其他情况，尝试直接赋值
+                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                }
             }
 
             try writer.writeAll("    }\n");
@@ -5894,7 +5915,24 @@ pub const NativeLinker = struct {
 
                 // 更新 phi 节点的值（在循环末尾）
                 for (phi_updates.items) |update| {
-                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    // 检查类型是否匹配
+                    const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                    const value_type = if (self.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                    
+                    const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                    
+                    if (phi_tag == value_tag) {
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .i64 and value_tag == .php_value) {
+                        try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .f64 and value_tag == .php_value) {
+                        try writer.print("        reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .bool and value_tag == .php_value) {
+                        try writer.print("        reg_{d} = reg_{d}.toBool();\n", .{ update.phi_reg, update.value_reg });
+                    } else {
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    }
                 }
 
                 try writer.writeAll("    }\n");

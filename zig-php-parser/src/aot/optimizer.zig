@@ -1613,6 +1613,49 @@ pub const IROptimizer = struct {
             return false;
         }
 
+        // 5.5. 类型特化：根据 incoming 值推断 phi 节点的类型
+        // TODO: 暂时禁用，因为需要在所有使用 phi 的地方添加类型转换
+        if (false) {
+        var it = new_phis.iterator();
+        while (it.next()) |entry| {
+            var phi_map = entry.value_ptr;
+            var phi_it = phi_map.iterator();
+            while (phi_it.next()) |phi_entry| {
+                const phi_inst = phi_entry.value_ptr.*;
+                const phi_op = phi_inst.op.phi;
+                
+                if (phi_op.incoming.len == 0) continue;
+                
+                // 检查所有 incoming 值的类型
+                // 策略：如果有任何 i64，就特化为 i64（php_value 可以转换）
+                var has_i64 = false;
+                var has_f64 = false;
+                var has_bool = false;
+                var has_other = false;
+                
+                for (phi_op.incoming) |inc| {
+                    const inc_type = @as(std.meta.Tag(IR.Type), inc.value.type_);
+                    if (inc_type == .i64) has_i64 = true
+                    else if (inc_type == .f64) has_f64 = true
+                    else if (inc_type == .bool) has_bool = true
+                    else if (inc_type != .php_value) has_other = true;
+                }
+                
+                // 如果有原生类型且没有冲突的其他类型，特化
+                if (has_i64 and !has_f64 and !has_other) {
+                    phi_inst.result.?.type_ = .{ .i64 = {} };
+                    std.debug.print("  Specialized phi reg_{d} to i64\n", .{phi_inst.result.?.id});
+                } else if (has_f64 and !has_i64 and !has_other) {
+                    phi_inst.result.?.type_ = .{ .f64 = {} };
+                    std.debug.print("  Specialized phi reg_{d} to f64\n", .{phi_inst.result.?.id});
+                } else if (has_bool and !has_i64 and !has_f64 and !has_other) {
+                    phi_inst.result.?.type_ = .{ .bool = {} };
+                    std.debug.print("  Specialized phi reg_{d} to bool\n", .{phi_inst.result.?.id});
+                }
+            }
+        }
+        } // end if (false)
+
         // 6. Cleanup (Remove allocas)
         std.debug.print("mem2reg: Cleaning up allocas...\n", .{});
         // Stores and loads were marked as NOPs in renameVariables.
