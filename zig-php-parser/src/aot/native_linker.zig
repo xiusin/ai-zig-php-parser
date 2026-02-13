@@ -6440,6 +6440,8 @@ pub const NativeLinker = struct {
     /// 生成 for 循环（支持子循环）- V1 已废弃
     /// @deprecated 使用新的 generateForLoopWithChildren (V2)
     /// 此函数已被禁用，如果被调用会产生编译错误
+    /// 生成 for 循环（支持子循环）- V1 已废弃
+    /// @deprecated 使用新的 generateForLoopWithChildren (V2)
     fn generateForLoopWithChildren_DEPRECATED_V1(
         self: *Self,
         writer: anytype,
@@ -6450,385 +6452,19 @@ pub const NativeLinker = struct {
         all_loops: []const LoopInfo,
         cleanup_regs: []const usize,
     ) anyerror!void {
-        _ = self;
-        _ = writer;
-        _ = func;
-        _ = loop;
-        _ = processed;
-        _ = block_to_loop;
-        _ = all_loops;
-        _ = cleanup_regs;
+        _ = self; _ = writer; _ = func; _ = loop;
+        _ = processed; _ = block_to_loop; _ = all_loops; _ = cleanup_regs;
         @compileError("DEPRECATED: Use generateForLoopWithChildren V2 instead");
     }
-    
     // 旧函数体已移除，保存在 git tag: before-nested-loop-rewrite
-    ) anyerror!void {
-        std.debug.print("generateForLoopWithChildren: header={d}, children={d}\n", .{ loop.header, loop.children.items.len });
-        
-        // 检查并生成 init 块（for循环的初始化）
-        if (loop.header > 0) {
-            const prev_block = func.blocks.items[loop.header - 1];
-            if (std.mem.startsWith(u8, prev_block.label, "for_init")) {
-                if (!processed.contains(loop.header - 1)) {
-                    try writer.print("    // Block {d}: {s}\n", .{ loop.header - 1, prev_block.label });
-                    for (prev_block.instructions.items) |inst| {
-                        try writer.writeAll("    ");
-                        try self.generateInstruction(writer, inst);
-                    }
-                    try processed.put(loop.header - 1, {});
-                }
-            }
-        }
-        
-        // 检查body块是否有条件分支（需要完整生成）
-        const body_has_cond = blk: {
-            const body_block = func.blocks.items[loop.body_start];
-            const has_cond = if (body_block.terminator) |term| term == .cond_br else false;
-            std.debug.print("Loop header={d}, body={d}, body_has_cond={}, term={s}\n", .{
-                loop.header,
-                loop.body_start,
-                has_cond,
-                if (body_block.terminator) |t| @tagName(t) else "null"
-            });
-            break :blk has_cond;
-        };
-        
-        // 如果没有子循环且body没有条件分支，使用优化版本
-        if (loop.children.items.len == 0 and !body_has_cond) {
-            try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-            return;
-        }
-        
-        // 检查是否有 init 块（header 的前驱中名为 for_init 的块）
-        if (loop.header > 0) {
-            const prev_block = func.blocks.items[loop.header - 1];
-            if (std.mem.startsWith(u8, prev_block.label, "for_init")) {
-                if (!processed.contains(loop.header - 1)) {
-                    try writer.print("    // Block {d}: {s}\n", .{ loop.header - 1, prev_block.label });
-                    for (prev_block.instructions.items) |inst| {
-                        try writer.writeAll("    ");
-                        try self.generateInstruction(writer, inst);
-                    }
-                    try processed.put(loop.header - 1, {});
-                }
-            }
-        }
-        
-        // 有子循环：生成外层循环结构，在 body 中递归生成子循环
-        try writer.writeAll("    // Optimized: structured for loop with nested loops\n");
-        
-        var code_list = writer.context.self;
-        
-        const header_block = func.blocks.items[loop.header];
-        const body_block = func.blocks.items[loop.body_start];
-        
-        // 生成外层循环的 while 结构
-        try writer.writeAll("    while (true) {\n");
-        try writer.print("        // Header: {s}\n", .{header_block.label});
-        
-        // 生成 header 指令
-        for (header_block.instructions.items) |inst| {
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
-        }
-        
-        // 生成条件判断
-        if (header_block.terminator) |term| {
-            if (term == .cond_br) {
-                try writer.writeAll("        if (!(");
-                // 找到条件寄存器
-                for (header_block.instructions.items) |inst| {
-                    if (inst.result) |result_reg| {
-                        if (term.cond_br.cond.id == result_reg.id) {
-                            try self.writeInlinedConditionExpr(writer, inst);
-                            break;
-                        }
-                    }
-                }
-                try writer.writeAll(")) break;\n");
-            }
-        }
-        
-        // 生成 body 开始部分
-        try writer.print("        // Body: {s} (with nested loops)\n", .{body_block.label});
-        for (body_block.instructions.items) |inst| {
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
-        }
-        
-        // 再次检查 body 块的条件分支（用于生成if）
-        std.debug.print("Body block has_cond_branch={}\n", .{body_has_cond});
-        
-        if (body_has_cond) {
-            // body 块有条件分支
-            const term = body_block.terminator.?.cond_br;
-            
-            // 找到条件寄存器对应的指令
-            var cond_inst_idx: ?usize = null;
-            for (body_block.instructions.items, 0..) |inst, idx| {
-                if (inst.result) |result_reg| {
-                    if (term.cond.id == result_reg.id) {
-                        cond_inst_idx = idx;
-                        break;
-                    }
-                }
-            }
-            
-            // 生成 if 语句
-            try writer.writeAll("        if (");
-            if (cond_inst_idx) |idx| {
-                const inst = body_block.instructions.items[idx];
-                if (inst.result) |res| {
-                    try writer.print("reg_{d}.toBool()", .{res.id});
-                }
-            } else {
-                try writer.print("reg_{d}.toBool()", .{term.cond.id});
-            }
-            try writer.writeAll(") {\n");
-            
-            // 生成 then 块的指令
-            const then_block_idx = self.findBlockIndex(func, term.then_block);
-            const then_block = func.blocks.items[then_block_idx];
-            
-            // 检查then块是否只是break（跳转到exit块）
-            const is_break = blk: {
-                if (then_block.terminator) |then_term| {
-                    if (then_term == .br) {
-                        const target_block = then_term.br;
-                        // 检查目标块的label是否包含"exit"
-                        const is_exit = std.mem.indexOf(u8, target_block.label, "exit") != null;
-                        std.debug.print("then br target={s}, is_exit={}\n", .{target_block.label, is_exit});
-                        break :blk is_exit;
-                    }
-                }
-                break :blk false;
-            };
-            
-            const is_continue = blk: {
-                if (then_block.terminator) |then_term| {
-                    if (then_term == .br) {
-                        const target_block = then_term.br;
-                        // 检查是否跳转到 increment 块
-                        if (loop.increment) |inc_idx| {
-                            const inc_block = func.blocks.items[inc_idx];
-                            if (std.mem.eql(u8, target_block.label, inc_block.label)) {
-                                break :blk true;
-                            }
-                        }
-                    }
-                }
-                break :blk false;
-            };
-            
-            std.debug.print("then_block term={s}, exit={?d}, is_break={}, is_continue={}\n", .{
-                if (then_block.terminator) |t| @tagName(t) else "null",
-                loop.exit_block,
-                is_break,
-                is_continue
-            });
-            
-            if (is_break) {
-                // break: 跳出循环
-                try writer.writeAll("            break;\n");
-            } else if (is_continue) {
-                // continue: 跳过 then 块，不生成代码，让它自然执行到 increment
-                // 不生成任何代码
-            } else {
-                // 生成then块指令
-                for (then_block.instructions.items) |inst| {
-                    try code_list.appendSlice(self.allocator, "            ");
-                    try self.generateInstructionSimple(code_list, inst);
-                }
-                
-                // 在 if 内部生成子循环
-                for (loop.children.items) |child_idx| {
-                    const child_loop = all_loops[child_idx];
-                    try writer.writeAll("            // Generating nested loop\n");
-                    try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
-                }
-            }
-            
-            // 生成 else 块（if_merge）
-            if (is_continue) {
-                const else_block_idx = self.findBlockIndex(func, term.else_block);
-                const else_block = func.blocks.items[else_block_idx];
-                
-                try writer.writeAll("        } else {\n");
-                for (else_block.instructions.items) |inst| {
-                    try code_list.appendSlice(self.allocator, "            ");
-                    try self.generateInstructionSimple(code_list, inst);
-                }
-            }
-            
-            try writer.writeAll("        }\n");
-        } else {
-            // 没有条件分支，直接生成子循环
-            for (loop.children.items) |child_idx| {
-                const child_loop = all_loops[child_idx];
-                try writer.writeAll("        // Generating nested loop\n");
-                try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
-            }
-            
-            // 关键修复：子循环结束后，立即将子循环的累加器传递给外层需要的寄存器
-            // 简化策略：直接查找外层 header PHI，将子循环累加器赋值给它的 incoming 值
-            for (loop.children.items) |child_idx| {
-                const child_loop = all_loops[child_idx];
-                const child_header = func.blocks.items[child_loop.header];
-                
-                // 找到子循环的累加器（第二个 PHI）
-                var child_accumulator_reg: ?usize = null;
-                var phi_count: usize = 0;
-                for (child_header.instructions.items) |child_inst| {
-                    if (child_inst.op == .phi) {
-                        if (child_inst.result) |child_result| {
-                            const child_type_tag = @as(std.meta.Tag(IR.Type), child_result.type_);
-                            if (child_type_tag == .i64 or child_type_tag == .php_value) {
-                                phi_count += 1;
-                                if (phi_count == 2) {
-                                    child_accumulator_reg = child_result.id;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                if (child_accumulator_reg) |child_acc| {
-                    // 查找外层 header PHI，找到累加器 PHI（通常是第一个）
-                    for (header_block.instructions.items) |header_inst| {
-                        if (header_inst.op == .phi) {
-                            const header_phi_op = header_inst.op.phi;
-                            if (header_inst.result) |_| {
-                                // 查找来自 increment 块的 incoming
-                                if (loop.increment) |inc_idx| {
-                                    const inc_block = func.blocks.items[inc_idx];
-                                    for (header_phi_op.incoming) |incoming| {
-                                        if (incoming.block == inc_block) {
-                                            // 将子循环累加器赋值给这个 incoming 值
-                                            try writer.print("        reg_{d} = reg_{d};\n", .{ incoming.value.id, child_acc });
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            break;  // 只处理第一个 PHI（累加器）
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 生成增量块
-        if (loop.increment) |inc_idx| {
-            const inc_block = func.blocks.items[inc_idx];
-            try writer.print("        // Increment: {s}\n", .{inc_block.label});
-            
-            // 先处理 increment 块中的 PHI 节点
-            for (inc_block.instructions.items) |inst| {
-                if (inst.op == .phi) {
-                    const phi_op = inst.op.phi;
-                    const result_reg = inst.result orelse continue;
-                    
-                    // 找到来自 body 块或内层循环的值
-                    var found_value: ?usize = null;
-                    for (phi_op.incoming) |incoming| {
-                        // 优先使用非初始化块的值
-                        if (!std.mem.startsWith(u8, incoming.block.label, "for_init")) {
-                            found_value = incoming.value.id;
-                            break;
-                        }
-                    }
-                    
-                    if (found_value) |val_reg| {
-                        const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
-                        const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
-                        
-                        const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
-                        const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-                        
-                        if (phi_tag == value_tag) {
-                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
-                        } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
-                        } else {
-                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
-                        }
-                    }
-                } else {
-                    // 非 PHI 指令正常生成
-                    try code_list.appendSlice(self.allocator, "        ");
-                    try self.generateInstructionSimple(code_list, inst);
-                }
-            }
-        }
-        
-        // 更新 PHI 节点（关键！）
-        for (header_block.instructions.items) |inst| {
-            if (inst.op == .phi) {
-                const phi_op = inst.op.phi;
-                const result_reg = inst.result orelse continue;
-                
-                // 找到来自 increment 块的值（不验证定义位置，因为可能是 PHI）
-                var found_value: ?usize = null;
-                if (loop.increment) |inc_idx| {
-                    const inc_block = func.blocks.items[inc_idx];
-                    for (phi_op.incoming) |incoming| {
-                        if (incoming.block == inc_block) {
-                            found_value = incoming.value.id;
-                            break;
-                        }
-                    }
-                }
-                
-                // 如果没找到，从 body 块找
-                if (found_value == null) {
-                    for (phi_op.incoming) |incoming| {
-                        if (incoming.block == body_block) {
-                            found_value = incoming.value.id;
-                            break;
-                        }
-                    }
-                }
-                
-                if (found_value) |val_reg| {
-                    // 使用类型推断结果
-                    const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
-                    const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
-                    
-                    const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
-                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-                    
-                    if (phi_tag == value_tag) {
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
-                    } else if (phi_tag == .i64 and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
-                    } else {
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
-                    }
-                }
-            }
-        }
-        
-        try writer.writeAll("    }\n");
-    }
-    
-    // ============================================================================
-    // 新的嵌套循环代码生成（V2）
-    // 设计原则：
-    // 1. 显式累加器识别和跟踪
-    // 2. 直接值传递，不依赖复杂 PHI 链
-    // 3. 清晰的父子循环接口
-    // 4. 支持任意深度嵌套
-    // ============================================================================
-    
+
     /// 累加器信息
     const AccumulatorInfo = struct {
         reg_id: usize,
         type_: IR.Type,
         init_reg: ?usize,
     };
-    
-    /// 分析循环的累加器
+
     fn analyzeLoopAccumulators(
         self: *Self,
         func: *const IR.Function,
@@ -6886,7 +6522,7 @@ pub const NativeLinker = struct {
                 };
                 
                 if (is_accumulator) {
-                    try accumulators.append(.{
+                    try accumulators.append(self.allocator, .{
                         .reg_id = result_reg.id,
                         .type_ = result_reg.type_,
                         .init_reg = init_value,
@@ -6914,7 +6550,7 @@ pub const NativeLinker = struct {
         
         // 分析当前循环的累加器
         var accumulators = try self.analyzeLoopAccumulators(func, loop);
-        defer accumulators.deinit();
+        defer accumulators.deinit(self.allocator);
         
         // 如果没有子循环且 body 没有条件分支，使用优化版本
         const body_block = func.blocks.items[loop.body_start];
@@ -6972,7 +6608,7 @@ pub const NativeLinker = struct {
             // 关键：子循环结束后，将子循环的累加器传递给外层
             // 分析子循环的累加器
             var child_accumulators = try self.analyzeLoopAccumulators(func, child_loop);
-            defer child_accumulators.deinit();
+            defer child_accumulators.deinit(self.allocator);
             
             std.debug.print("Child loop has {d} accumulators\n", .{child_accumulators.items.len});
             for (child_accumulators.items) |child_acc| {
@@ -6985,7 +6621,8 @@ pub const NativeLinker = struct {
                 std.debug.print("  Outer accumulator: reg_{d}\n", .{acc.reg_id});
                 // 查找外层累加器的 PHI incoming
                 for (header_block.instructions.items) |inst| {
-                    if (inst.op == .phi and inst.result) |res| {
+                    if (inst.op == .phi) {
+                        if (inst.result) |res| {
                         if (res.id == acc.reg_id) {
                             const phi_op = inst.op.phi;
                             std.debug.print("    PHI incoming count: {d}\n", .{phi_op.incoming.len});
@@ -7071,6 +6708,7 @@ pub const NativeLinker = struct {
         }
         
         try writer.writeAll("    }\n");
+    }
     }
     
     /// 生成 while 循环（支持子循环）
