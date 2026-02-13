@@ -299,7 +299,7 @@ pub const NativeLinker = struct {
         std.debug.print("=== GENERATING FUNCTIONS: count={d} ===\n", .{ir_module.functions.items.len});
         for (ir_module.functions.items, 0..) |func, i| {
             std.debug.print("[{d}] Generating function: {s}\n", .{i, func.name});
-            try self.generateFunction(&code, func);
+            try self.generateFunction(&code, ir_module, func);
             std.debug.print("[{d}] Done: {s}\n", .{i, func.name});
         }
 
@@ -1105,7 +1105,7 @@ pub const NativeLinker = struct {
     }
 
     /// 生成函数
-    fn generateFunction(self: *Self, code: *std.ArrayList(u8), func: *const IR.Function) !void {
+    fn generateFunction(self: *Self, code: *std.ArrayList(u8), ir_module: *const IR.Module, func: *const IR.Function) !void {
         const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
         self.current_function_has_this = has_this;
 
@@ -1341,6 +1341,28 @@ pub const NativeLinker = struct {
                         }
                     },
                     else => {},
+                }
+            }
+        }
+
+        // 用类型推断结果覆盖寄存器类型
+        if (ir_module.inferred_types.get(func.name)) |inferred_types| {
+            var iter = inferred_types.iterator();
+            while (iter.next()) |entry| {
+                const reg_id = entry.key_ptr.*;
+                const inferred_type = entry.value_ptr.*;
+                const inferred_tag = @as(std.meta.Tag(IR.Type), inferred_type);
+                
+                // 只在推断类型更具体时覆盖
+                if (inferred_tag != .php_value) {
+                    if (all_registers.getPtr(reg_id)) |current_type| {
+                        const current_tag = @as(std.meta.Tag(IR.Type), current_type.*);
+                        if (current_tag == .php_value) {
+                            current_type.* = inferred_type;
+                            std.debug.print("  Override reg_{d}: php_value → {s}\n", 
+                                .{reg_id, @tagName(inferred_tag)});
+                        }
+                    }
                 }
             }
         }

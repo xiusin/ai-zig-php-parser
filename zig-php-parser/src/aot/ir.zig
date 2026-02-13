@@ -33,6 +33,8 @@ pub const Module = struct {
     types: std.ArrayListUnmanaged(*TypeDef),
     /// String table for interned strings
     string_table: std.ArrayListUnmanaged([]const u8),
+    /// 类型推断结果：函数名 -> (寄存器ID -> 推断类型)
+    inferred_types: std.StringHashMap(std.AutoHashMap(usize, Type)),
 
     const Self = @This();
 
@@ -46,11 +48,18 @@ pub const Module = struct {
             .globals = .{},
             .types = .{},
             .string_table = .{},
+            .inferred_types = std.StringHashMap(std.AutoHashMap(usize, Type)).init(allocator),
         };
     }
 
     /// Deinitialize and free all resources
     pub fn deinit(self: *Self) void {
+        // 释放类型推断结果
+        var iter = self.inferred_types.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.inferred_types.deinit();
         // Free functions
         for (self.functions.items) |func| {
             func.deinit();
