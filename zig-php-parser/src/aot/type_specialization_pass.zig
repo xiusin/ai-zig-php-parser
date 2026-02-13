@@ -59,9 +59,9 @@ pub const TypeSpecializationPass = struct {
     fn eliminateRedundantCasts(self: *TypeSpecializationPass, func: *IR.Function) !void {
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
-                if (inst.op == .cast) {
-                    const cast_op = inst.op.cast;
-                    const result = inst.result orelse continue;
+                if (inst.*.op == .cast) {
+                    const cast_op = inst.*.op.cast;
+                    const result = inst.*.result orelse continue;
                     
                     // 获取源和目标的推断类型
                     const src_inferred = self.type_inference.getInferredType(cast_op.value.id);
@@ -74,7 +74,7 @@ pub const TypeSpecializationPass = struct {
                         // 如果源和目标类型相同，消除 cast
                         if (src_tag == dst_tag) {
                             // 替换为 move（或直接使用源寄存器）
-                            inst.op = .{ .move = .{ .value = cast_op.value } };
+                            inst.*.op = .{ .move = .{ .operand = cast_op.value } };
                             self.stats.casts_eliminated += 1;
                             std.debug.print("  Eliminated redundant cast: reg_{d}\n", .{result.id});
                         }
@@ -88,27 +88,27 @@ pub const TypeSpecializationPass = struct {
     fn specializeArithmeticOps(self: *TypeSpecializationPass, func: *IR.Function) !void {
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
-                switch (inst.op) {
+                switch (inst.*.op) {
                     .add, .sub, .mul, .div, .mod => |*op| {
-                        const result = inst.result orelse continue;
-                        
-                        // 获取操作数的推断类型
-                        const lhs_type = self.type_inference.getInferredType(op.lhs.id);
-                        const rhs_type = self.type_inference.getInferredType(op.rhs.id);
-                        const result_type = self.type_inference.getInferredType(result.id);
-                        
-                        if (lhs_type != null and rhs_type != null and result_type != null) {
-                            const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type.?);
-                            const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type.?);
-                            const result_tag = @as(std.meta.Tag(IR.Type), result_type.?);
+                        if (inst.*.result) |*result| {
+                            // 获取操作数的推断类型
+                            const lhs_type = self.type_inference.getInferredType(op.lhs.id);
+                            const rhs_type = self.type_inference.getInferredType(op.rhs.id);
+                            const result_type = self.type_inference.getInferredType(result.id);
                             
-                            // 如果所有类型都是 i64 或 f64，更新操作数类型
-                            if (lhs_tag == rhs_tag and lhs_tag == result_tag and 
-                                (lhs_tag == .i64 or lhs_tag == .f64)) {
-                                op.lhs.type_ = lhs_type.?;
-                                op.rhs.type_ = rhs_type.?;
-                                result.type_ = result_type.?;
-                                self.stats.ops_specialized += 1;
+                            if (lhs_type != null and rhs_type != null and result_type != null) {
+                                const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type.?);
+                                const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type.?);
+                                const result_tag = @as(std.meta.Tag(IR.Type), result_type.?);
+                                
+                                // 如果所有类型都是 i64 或 f64，更新操作数类型
+                                if (lhs_tag == rhs_tag and lhs_tag == result_tag and 
+                                    (lhs_tag == .i64 or lhs_tag == .f64)) {
+                                    op.lhs.type_ = lhs_type.?;
+                                    op.rhs.type_ = rhs_type.?;
+                                    result.type_ = result_type.?;
+                                    self.stats.ops_specialized += 1;
+                                }
                             }
                         }
                     },
@@ -122,7 +122,7 @@ pub const TypeSpecializationPass = struct {
     fn updateInstructionTypes(self: *TypeSpecializationPass, func: *IR.Function) !void {
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
-                if (inst.result) |*result| {
+                if (inst.*.result) |*result| {
                     if (self.type_inference.getInferredType(result.id)) |inferred| {
                         const old_tag = @as(std.meta.Tag(IR.Type), result.type_);
                         const new_tag = @as(std.meta.Tag(IR.Type), inferred);

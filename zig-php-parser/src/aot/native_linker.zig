@@ -4423,7 +4423,7 @@ pub const NativeLinker = struct {
             .move => |op| {
                 // move: 简单的寄存器复制（用于替换冗余 cast）
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
+                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.operand.id});
                 }
             },
             // ============ 并发操作指令 ============

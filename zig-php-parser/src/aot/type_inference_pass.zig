@@ -41,7 +41,7 @@ pub const TypeInferencePass = struct {
         
         var it = self.constraints.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.allowed.deinit();
+            entry.value_ptr.allowed.deinit(self.allocator);
         }
         self.constraints.deinit();
     }

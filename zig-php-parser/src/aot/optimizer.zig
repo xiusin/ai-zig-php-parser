@@ -121,7 +121,7 @@ pub const PassConfig = struct {
             .loop_unroll = true,
             .cfg_cleanup = false,
             .rc_elision = false,
-            .max_iterations = 1,
+            .max_iterations = 2,  // 增加到 2 以支持类型推断
         };
     }
 
@@ -417,13 +417,14 @@ pub const IROptimizer = struct {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
-                
-                // 在 mem2reg 后立即运行类型推断和特化
-                if (try self.runTypeInferenceAndSpecialization(module)) {
-                    changed = true;
-                }
-                if (self.verify_ir) try self.verifyModule(module);
             }
+            
+            // 类型推断和特化（在 mem2reg 后运行）
+            std.debug.print("Optimizer: Running type inference and specialization...\n", .{});
+            if (try self.runTypeInferenceAndSpecialization(module)) {
+                changed = true;
+            }
+            if (self.verify_ir) try self.verifyModule(module);
 
             if (self.config.constant_propagation) {
                 if (try self.runConstantPropagation(module)) {
@@ -2563,8 +2564,7 @@ pub const IROptimizer = struct {
             .neg => false,
             .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => false,
             .param, .capture_get, .arg_count, .has_arg => false,
-            .cast, .move => false,
-            .cast, .type_check, .get_type => false,
+            .cast, .move, .type_check, .get_type => false,
             .box, .unbox => false,
             .phi, .select => false,
             .alloca => false,
