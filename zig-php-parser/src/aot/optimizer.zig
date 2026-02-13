@@ -1654,7 +1654,26 @@ pub const IROptimizer = struct {
             }
         }
 
-        // 6. Cleanup (Remove allocas)
+        // 6. 类型传播：从 phi 节点传播类型到使用者
+        std.debug.print("mem2reg: DEBUG - Before type propagation\n", .{});
+        // 收集所有 phi 指令
+        var all_phi_insts = std.AutoHashMap(*IR.Instruction, void).init(self.allocator);
+        defer all_phi_insts.deinit();
+        
+        std.debug.print("mem2reg: Collecting phi instructions...\n", .{});
+        var block_it = new_phis.iterator();
+        while (block_it.next()) |entry| {
+            var phi_it = entry.value_ptr.iterator();
+            while (phi_it.next()) |phi_entry| {
+                try all_phi_insts.put(phi_entry.value_ptr.*, {});
+                std.debug.print("  Found phi: {any}\n", .{phi_entry.value_ptr.*.result});
+            }
+        }
+        std.debug.print("mem2reg: Collected {d} phi instructions\n", .{all_phi_insts.count()});
+        
+        try self.propagateTypesFromPhis(func, &all_phi_insts);
+
+        // 7. Cleanup (Remove allocas)
         std.debug.print("mem2reg: Cleaning up allocas...\n", .{});
         // Stores and loads were marked as NOPs in renameVariables.
         // We just need to remove the allocas themselves.
@@ -1664,6 +1683,125 @@ pub const IROptimizer = struct {
         }
 
         return true;
+    }
+
+    /// 类型传播：从 phi 节点传播类型到所有使用者
+    fn propagateTypesFromPhis(self: *Self, func: *IR.Function, phis: *const std.AutoHashMap(*IR.Instruction, void)) !void {
+        std.debug.print("mem2reg: Propagating types from phi nodes...\n", .{});
+        
+        // 工作列表：需要传播类型的寄存器
+        var worklist = std.ArrayList(usize).initCapacity(self.allocator, 0) catch unreachable;
+        defer worklist.deinit(self.allocator);
+        
+        // 初始化：所有特化的 phi 节点
+        var it = phis.iterator();
+        while (it.next()) |entry| {
+            const phi_inst = entry.key_ptr.*;
+            if (phi_inst.result) |result| {
+                const result_tag = @as(std.meta.Tag(IR.Type), result.type_);
+                // 只传播原生类型（i64/f64/bool）
+                if (result_tag == .i64 or result_tag == .f64 or result_tag == .bool) {
+                    try worklist.append(self.allocator, result.id);
+                    std.debug.print("  Starting propagation from phi reg_{d} ({any})\n", .{result.id, result_tag});
+                }
+            }
+        }
+        
+        // 传播循环
+        var processed = std.AutoHashMap(usize, void).init(self.allocator);
+        defer processed.deinit();
+        
+        while (worklist.items.len > 0) {
+            const reg_id = worklist.pop() orelse continue;
+            if (processed.contains(reg_id)) continue;
+            try processed.put(reg_id, {});
+            
+            // 找到这个寄存器的定义指令
+            var def_inst: ?*IR.Instruction = null;
+            var def_type: IR.Type = .{ .php_value = {} };
+            
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |*inst| {
+                    if (inst.*.result) |result| {
+                        if (result.id == reg_id) {
+                            def_inst = inst.*;
+                            def_type = result.type_;
+                            break;
+                        }
+                    }
+                }
+                if (def_inst != null) break;
+            }
+            
+            if (def_inst == null) continue;
+            const def_tag = @as(std.meta.Tag(IR.Type), def_type);
+            if (def_tag != .i64 and def_tag != .f64 and def_tag != .bool) continue;
+            
+            // 遍历所有使用这个寄存器的指令
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |*inst| {
+                    const propagated = try self.propagateTypeToInstruction(inst, reg_id, def_type, &worklist);
+                    if (propagated) |new_reg| {
+                        std.debug.print("  Propagated {any} from reg_{d} to reg_{d}\n", .{def_tag, reg_id, new_reg});
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 传播类型到单个指令，返回新的需要传播的寄存器
+    fn propagateTypeToInstruction(
+        self: *Self,
+        inst: **IR.Instruction,
+        source_reg: usize,
+        source_type: IR.Type,
+        worklist: *std.ArrayList(usize)
+    ) !?usize {
+        const source_tag = @as(std.meta.Tag(IR.Type), source_type);
+        
+        switch (inst.*.*.op) {
+            .add, .sub, .mul, .div, .mod => |*op| {
+                // 如果操作数是 source_reg 且都是同类型，结果也特化
+                const lhs_match = op.lhs.id == source_reg;
+                const rhs_match = op.rhs.id == source_reg;
+                
+                if (lhs_match or rhs_match) {
+                    const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    const rhs_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    
+                    // 如果两个操作数都是同类型的原生类型，结果也特化
+                    if (lhs_tag == source_tag and rhs_tag == source_tag) {
+                        if (inst.*.*.result) |*result| {
+                            const old_tag = @as(std.meta.Tag(IR.Type), result.type_);
+                            if (old_tag == .php_value) {
+                                result.type_ = source_type;
+                                try worklist.append(self.allocator, result.id);
+                                return result.id;
+                            }
+                        }
+                    }
+                }
+            },
+            .cast => |*op| {
+                // 如果 cast 的源是 source_reg，更新 from_type
+                if (op.value.id == source_reg) {
+                    op.from_type = source_type;
+                    op.value.type_ = source_type;
+                }
+            },
+            .lt, .le, .gt, .ge, .eq, .ne => |*op| {
+                // 更新比较操作的操作数类型
+                if (op.lhs.id == source_reg) {
+                    op.lhs.type_ = source_type;
+                }
+                if (op.rhs.id == source_reg) {
+                    op.rhs.type_ = source_type;
+                }
+            },
+            else => {},
+        }
+        
+        return null;
     }
 
     /// Compute Iterated Dominance Frontier
