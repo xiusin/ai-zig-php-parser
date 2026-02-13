@@ -8149,30 +8149,44 @@ pub const NativeLinker = struct {
             // 比较运算指令
             // ========================================================================
             .eq => |op| {
-                var lhs_buf: [32]u8 = undefined;
-                var rhs_buf: [32]u8 = undefined;
-                const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
-                const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
+                if (inst.result) |reg| {
+                    const lhs_type = if (self.current_reg_types) |types|
+                        types.get(op.lhs.id) orelse op.lhs.type_
+                    else
+                        op.lhs.type_;
+                    const rhs_type = if (self.current_reg_types) |types|
+                        types.get(op.rhs.id) orelse op.rhs.type_
+                    else
+                        op.rhs.type_;
+                    const result_type = if (self.current_reg_types) |types|
+                        types.get(reg.id) orelse reg.type_
+                    else
+                        reg.type_;
 
-                // 根据操作数类型和结果类型生成不同的代码
-                if (op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
-                    // 两个i64直接比较
-                    try writer.print("        {s} = {s} == {s};\n", .{ result_reg.?, lhs, rhs });
-                } else if (inst.result) |reg| {
-                    const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                    const rhs_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    if (reg.type_ == .bool) {
-                        try writer.print("        {s} = (try runtime.php_eq(", .{result_reg.?});
-                        try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_tag, op.rhs.id);
-                        try writer.writeAll(")).toBool();\n");
+                    const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
+                    const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
+                    const result_tag = @as(std.meta.Tag(IR.Type), result_type);
+
+                    if (lhs_tag == .i64 and rhs_tag == .i64) {
+                        if (result_tag == .bool) {
+                            try writer.print("        {s} = reg_{d} == reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                        } else {
+                            try writer.print("        {s} = runtime.Value.initBool(reg_{d} == reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                        }
                     } else {
-                        try writer.print("        {s} = try runtime.php_eq(", .{result_reg.?});
-                        try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
+                        if (result_tag == .bool) {
+                            try writer.print("        {s} = (try runtime.php_eq(", .{result_reg.?});
+                            try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
+                            try writer.writeAll(", ");
+                            try self.writePhpValueExpr(writer, rhs_tag, op.rhs.id);
+                            try writer.writeAll(")).toBool();\n");
+                        } else {
+                            try writer.print("        {s} = try runtime.php_eq(", .{result_reg.?});
+                            try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
+                            try writer.writeAll(", ");
+                            try self.writePhpValueExpr(writer, rhs_tag, op.rhs.id);
+                            try writer.writeAll(");\n");
+                        }
                     }
                 }
             },
@@ -8184,18 +8198,33 @@ pub const NativeLinker = struct {
                 try writer.print("        {s} = try runtime.php_ne({s}, {s});\n", .{ result_reg.?, lhs, rhs });
             },
             .lt => |op| {
-                var lhs_buf: [32]u8 = undefined;
-                var rhs_buf: [32]u8 = undefined;
-                const lhs = try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
-                const rhs = try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
-                // 根据结果寄存器类型和操作数类型生成不同的代码
                 if (inst.result) |reg| {
-                    if (reg.type_ == .bool and op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
-                        // 直接i64比较，返回bool（内部计算用）
-                        try writer.print("        {s} = {s} < {s};\n", .{ result_reg.?, lhs, rhs });
+                    // 获取修正后的类型
+                    const lhs_type = if (self.current_reg_types) |types|
+                        types.get(op.lhs.id) orelse op.lhs.type_
+                    else
+                        op.lhs.type_;
+                    const rhs_type = if (self.current_reg_types) |types|
+                        types.get(op.rhs.id) orelse op.rhs.type_
+                    else
+                        op.rhs.type_;
+                    const result_type = if (self.current_reg_types) |types|
+                        types.get(reg.id) orelse reg.type_
+                    else
+                        reg.type_;
+
+                    const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
+                    const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
+                    const result_tag = @as(std.meta.Tag(IR.Type), result_type);
+
+                    if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .bool) {
+                        try writer.print("        {s} = reg_{d} < reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                     } else {
-                        // 使用运行时函数（运行时边界）
-                        try writer.print("        {s} = try runtime.php_lt({s}, {s});\n", .{ result_reg.?, lhs, rhs });
+                        try writer.print("        {s} = try runtime.php_lt(", .{result_reg.?});
+                        try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_tag, op.rhs.id);
+                        try writer.writeAll(");\n");
                     }
                 }
             },
