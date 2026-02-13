@@ -1614,8 +1614,7 @@ pub const IROptimizer = struct {
         }
 
         // 5.5. 类型特化：根据 incoming 值推断 phi 节点的类型
-        // TODO: 暂时禁用，因为需要在所有使用 phi 的地方添加类型转换
-        if (false) {
+        std.debug.print("mem2reg: Specializing phi types...\n", .{});
         var it = new_phis.iterator();
         while (it.next()) |entry| {
             var phi_map = entry.value_ptr;
@@ -1654,7 +1653,6 @@ pub const IROptimizer = struct {
                 }
             }
         }
-        } // end if (false)
 
         // 6. Cleanup (Remove allocas)
         std.debug.print("mem2reg: Cleaning up allocas...\n", .{});

@@ -3143,18 +3143,43 @@ pub const NativeLinker = struct {
             },
             .add => |op| {
                 if (inst.result) |reg| {
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                    const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                    const rhs_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    // 获取实际类型（可能被 phi 特化修改）
+                    const result_type = if (self.current_reg_types) |types|
+                        types.get(reg.id) orelse reg.type_
+                    else
+                        reg.type_;
+                    const lhs_type = if (self.current_reg_types) |types|
+                        types.get(op.lhs.id) orelse op.lhs.type_
+                    else
+                        op.lhs.type_;
+                    const rhs_type = if (self.current_reg_types) |types|
+                        types.get(op.rhs.id) orelse op.rhs.type_
+                    else
+                        op.rhs.type_;
+                    
+                    const type_tag = @as(std.meta.Tag(IR.Type), result_type);
+                    const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
+                    const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
 
-                    if (type_tag == .i64 and lhs_tag == .i64 and rhs_tag == .i64) {
-                        // 直接i64加法
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
-                    } else if (type_tag == .f64 and lhs_tag == .f64 and rhs_tag == .f64) {
-                        // 直接f64加法
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                    // 如果所有操作数都是 i64，生成原生加法
+                    if (lhs_tag == .i64 and rhs_tag == .i64) {
+                        if (type_tag == .i64) {
+                            // i64 + i64 → i64
+                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                        } else {
+                            // i64 + i64 → php_value（需要装箱结果）
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(reg_{d} + reg_{d});\n", .{ op.lhs.id, op.rhs.id });
+                        }
+                    } else if (lhs_tag == .f64 and rhs_tag == .f64) {
+                        if (type_tag == .f64) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                        } else {
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d} + reg_{d});\n", .{ op.lhs.id, op.rhs.id });
+                        }
                     } else {
-                        // 需要使用运行时函数
+                        // 混合类型，使用运行时函数
                         try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
                         try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
                         try writer.writeAll(", ");
@@ -8718,30 +8743,51 @@ pub const NativeLinker = struct {
             .cast => |op| {
                 var value_buf: [32]u8 = undefined;
                 const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
+                
+                // 获取源寄存器的实际类型（可能被 phi 特化修改）
+                const src_real_type = if (self.current_register_types) |types|
+                    types.get(op.value.id) orelse op.value.type_
+                else
+                    op.value.type_;
+                const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+                const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
+                
                 // 根据目标类型生成不同的转换代码
-                if (op.to_type == .php_value) {
+                if (to_tag == .php_value) {
                     // 从基本类型转换到php_value
-                    if (op.from_type == .i64) {
+                    if (src_tag == .i64) {
                         try writer.print("        {s} = runtime.Value.initInt({s});\n", .{ result_reg.?, value });
-                    } else if (op.from_type == .f64) {
+                    } else if (src_tag == .f64) {
                         try writer.print("        {s} = runtime.Value.initFloat({s});\n", .{ result_reg.?, value });
-                    } else if (op.from_type == .bool) {
+                    } else if (src_tag == .bool) {
                         try writer.print("        {s} = runtime.Value.initBool({s});\n", .{ result_reg.?, value });
                     } else {
-                        try writer.print("        {s} = {s}; // cast from {any} to {any}\n", .{ result_reg.?, value, op.from_type, op.to_type });
+                        try writer.print("        {s} = {s};\n", .{ result_reg.?, value });
                     }
-                } else if (op.to_type == .i64) {
+                } else if (to_tag == .i64) {
                     // 转换到i64
-                    try writer.print("        {s} = {s}.toInt();\n", .{ result_reg.?, value });
-                } else if (op.to_type == .f64) {
+                    if (src_tag == .i64) {
+                        try writer.print("        {s} = {s};\n", .{ result_reg.?, value });
+                    } else {
+                        try writer.print("        {s} = {s}.asInt();\n", .{ result_reg.?, value });
+                    }
+                } else if (to_tag == .f64) {
                     // 转换到f64
-                    try writer.print("        {s} = {s}.toFloat();\n", .{ result_reg.?, value });
-                } else if (op.to_type == .bool) {
+                    if (src_tag == .f64) {
+                        try writer.print("        {s} = {s};\n", .{ result_reg.?, value });
+                    } else {
+                        try writer.print("        {s} = {s}.asFloat();\n", .{ result_reg.?, value });
+                    }
+                } else if (to_tag == .bool) {
                     // 转换到bool
-                    try writer.print("        {s} = {s}.toBool();\n", .{ result_reg.?, value });
+                    if (src_tag == .bool) {
+                        try writer.print("        {s} = {s};\n", .{ result_reg.?, value });
+                    } else {
+                        try writer.print("        {s} = {s}.asBool();\n", .{ result_reg.?, value });
+                    }
                 } else {
                     // 默认：直接赋值
-                    try writer.print("        {s} = {s}; // cast\n", .{ result_reg.?, value });
+                    try writer.print("        {s} = {s};\n", .{ result_reg.?, value });
                 }
             },
 
