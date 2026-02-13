@@ -88,6 +88,7 @@ pub const TypeSpecializationPass = struct {
         var cast_sources = std.AutoHashMap(usize, IR.Register).init(self.allocator);
         defer cast_sources.deinit();
         
+        // 收集所有 i64 → php_value 的 cast
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
                 if (inst.*.op == .cast) {
@@ -104,30 +105,40 @@ pub const TypeSpecializationPass = struct {
             }
         }
         
+        // 只在比较操作中绕过 cast（算术操作暂时保守）
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
                 switch (inst.*.op) {
                     .lt, .le, .gt, .ge, .eq, .ne => |*op| {
-                        const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                        const rhs_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                        
-                        if (lhs_tag == .php_value and rhs_tag == .i64) {
-                            if (cast_sources.get(op.lhs.id)) |source| {
-                                op.lhs = source;
-                                self.stats.casts_eliminated += 1;
-                            }
+                        if (try self.bypassOperand(&op.lhs, &cast_sources)) {
+                            self.stats.casts_eliminated += 1;
                         }
-                        else if (lhs_tag == .i64 and rhs_tag == .php_value) {
-                            if (cast_sources.get(op.rhs.id)) |source| {
-                                op.rhs = source;
-                                self.stats.casts_eliminated += 1;
-                            }
+                        if (try self.bypassOperand(&op.rhs, &cast_sources)) {
+                            self.stats.casts_eliminated += 1;
                         }
                     },
+                    
                     else => {},
                 }
             }
         }
+    }
+    
+    /// 尝试绕过操作数的 cast
+    fn bypassOperand(
+        self: *TypeSpecializationPass,
+        operand: *IR.Register,
+        cast_sources: *const std.AutoHashMap(usize, IR.Register),
+    ) !bool {
+        _ = self;
+        const tag = @as(std.meta.Tag(IR.Type), operand.type_);
+        if (tag == .php_value) {
+            if (cast_sources.get(operand.id)) |source| {
+                operand.* = source;
+                return true;
+            }
+        }
+        return false;
     }
     
     /// 特化算术操作
