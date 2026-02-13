@@ -1424,16 +1424,19 @@ pub const IRGenerator = struct {
 
         // Condition check: php_array_iter_valid(iter)
         self.setCurrentBlock(cond_block);
-        const curr_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        const curr_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
         
         const valid_args = try self.allocator.alloc(Register, 1);
         valid_args[0] = curr_iter;
         
-        const cond_reg = try self.emitWithResult(.{ .call = .{
+        const valid_val = try self.emitWithResult(.{ .call = .{
             .func_name = "php_array_iter_valid",
             .args = valid_args,
-            .return_type = .bool,
-        } }, .bool);
+            .return_type = .php_value,
+        } }, .php_value);
+        
+        // 转换为 bool
+        const cond_reg = try self.emitWithResult(.{ .cast = .{ .value = valid_val, .from_type = .php_value, .to_type = .bool } }, .bool);
         
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
@@ -1444,7 +1447,7 @@ pub const IRGenerator = struct {
         // Body
         self.setCurrentBlock(body_block);
         // Load iter again (SSA)
-        const body_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        const body_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
 
         // Get key if needed
         if (foreach_data.key) |key_idx| {
@@ -1494,7 +1497,7 @@ pub const IRGenerator = struct {
 
         // Increment block: increment iterator
         self.setCurrentBlock(increment_block);
-        const inc_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        const inc_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
         
         const next_args = try self.allocator.alloc(Register, 1);
         next_args[0] = inc_iter;
@@ -1502,8 +1505,8 @@ pub const IRGenerator = struct {
         const next_iter = try self.emitWithResult(.{ .call = .{
             .func_name = "php_array_iter_next",
             .args = next_args,
-            .return_type = .i64,
-        } }, .i64);
+            .return_type = .php_value,
+        } }, .php_value);
         _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = next_iter } }, null);
         
         self.setTerminator(.{ .br = cond_block });
@@ -1513,7 +1516,7 @@ pub const IRGenerator = struct {
         self.setCurrentBlock(exit_block);
         
         // Cleanup iterator
-        const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .i64 } }, .i64);
+        const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
         
         const free_args = try self.allocator.alloc(Register, 1);
         free_args[0] = exit_iter;
