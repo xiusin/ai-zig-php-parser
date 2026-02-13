@@ -6472,6 +6472,8 @@ pub const NativeLinker = struct {
     ) !std.ArrayList(AccumulatorInfo) {
         var accumulators = try std.ArrayList(AccumulatorInfo).initCapacity(self.allocator, 0);
         
+        std.debug.print("=== analyzeLoopAccumulators: header={d} ===\n", .{loop.header});
+        
         const header_block = func.blocks.items[loop.header];
         
         // 遍历 header 块的 PHI 节点
@@ -6480,6 +6482,8 @@ pub const NativeLinker = struct {
             
             const phi_op = inst.op.phi;
             const result_reg = inst.result orelse continue;
+            
+            std.debug.print("  Found PHI: reg_{d}, incoming={d}\n", .{result_reg.id, phi_op.incoming.len});
             
             if (phi_op.incoming.len < 2) continue;
             
@@ -6503,16 +6507,16 @@ pub const NativeLinker = struct {
             }
             
             if (loop_value) |lv| {
-                // 检查是否是累加器（来自算术操作）
-                const is_accumulator = blk: {
+                // 简化：直接检查 loop_value 是否来自 add 且左操作数是 PHI 自身
+                const is_loop_var = blk: {
                     for (func.blocks.items) |block| {
-                        for (block.instructions.items) |block_inst| {
-                            if (block_inst.result) |res| {
-                                if (res.id == lv) {
-                                    switch (block_inst.op) {
-                                        .add, .sub, .mul, .div, .mod => break :blk true,
-                                        .phi => break :blk true,  // 可能是嵌套循环的累加器
-                                        else => {},
+                        for (block.instructions.items) |inst| {
+                            if (inst.result) |res| {
+                                if (res.id == lv and inst.op == .add) {
+                                    const add_op = inst.op.add;
+                                    // 如果 lhs 是 PHI 自身 → 循环变量
+                                    if (add_op.lhs.id == result_reg.id) {
+                                        break :blk true;
                                     }
                                 }
                             }
@@ -6521,7 +6525,8 @@ pub const NativeLinker = struct {
                     break :blk false;
                 };
                 
-                if (is_accumulator) {
+                // 如果不是循环变量，就是累加器
+                if (!is_loop_var) {
                     try accumulators.append(self.allocator, .{
                         .reg_id = result_reg.id,
                         .type_ = result_reg.type_,
