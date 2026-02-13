@@ -279,6 +279,7 @@ pub const Parser = struct {
             },
             .k_if => self.parseIf(),
             .k_while => self.parseWhile(),
+            .k_do => self.parseDoWhile(),
             .k_for => self.parseFor(),
             .k_foreach => self.parseForeach(),
             .k_try => self.parseTry(),
@@ -939,6 +940,17 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
         const body = try self.parseStatement();
         return self.createNode(.{ .tag = .while_stmt, .main_token = token, .data = .{ .while_stmt = .{ .condition = cond, .body = body } } });
+    }
+
+    fn parseDoWhile(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_do);
+        const body = try self.parseStatement();
+        _ = try self.eat(.k_while);
+        _ = try self.eat(.l_paren);
+        const cond = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
+        _ = try self.eat(.semicolon);
+        return self.createNode(.{ .tag = .do_while_stmt, .main_token = token, .data = .{ .do_while_stmt = .{ .condition = cond, .body = body } } });
     }
 
     fn parseForeach(self: *Parser) anyerror!ast.Node.Index {

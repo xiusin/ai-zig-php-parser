@@ -539,6 +539,7 @@ pub const IRGenerator = struct {
             .trait_decl => try self.generateTraitDecl(node),
             .if_stmt => try self.generateIfStmt(node),
             .while_stmt => try self.generateWhileStmt(node),
+            .do_while_stmt => try self.generateDoWhileStmt(node),
             .for_stmt => try self.generateForStmt(node),
             .for_range_stmt => try self.generateForRangeStmt(node),
             .foreach_stmt => try self.generateForeachStmt(node),
@@ -1201,6 +1202,41 @@ pub const IRGenerator = struct {
         _ = self.loop_stack.pop();
 
         // Continue in exit block
+        self.setCurrentBlock(exit_block);
+    }
+
+    fn generateDoWhileStmt(self: *Self, node: *const Node) !void {
+        const do_while_data = node.data.do_while_stmt;
+
+        const body_block = try self.createBlock("do_while_body");
+        const cond_block = try self.createBlock("do_while_cond");
+        const exit_block = try self.createBlock("do_while_exit");
+
+        // Jump to body first (do-while always executes once)
+        self.setTerminator(.{ .br = body_block });
+
+        try self.loop_stack.append(self.allocator, .{
+            .break_block = exit_block,
+            .continue_block = cond_block,
+        });
+
+        // Generate body
+        self.setCurrentBlock(body_block);
+        try self.generateStatement(do_while_data.body);
+        if (!self.isBlockTerminated()) {
+            self.setTerminator(.{ .br = cond_block });
+        }
+
+        // Generate condition
+        self.setCurrentBlock(cond_block);
+        const cond_reg = try self.generateExpression(do_while_data.condition);
+        self.setTerminator(.{ .cond_br = .{
+            .cond = cond_reg,
+            .then_block = body_block,
+            .else_block = exit_block,
+        } });
+
+        _ = self.loop_stack.pop();
         self.setCurrentBlock(exit_block);
     }
 
