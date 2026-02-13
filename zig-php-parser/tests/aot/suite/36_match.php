@@ -1,15 +1,12 @@
 <?php
-// 测试: if-elseif 替代 match
+// 测试: match 表达式
 function test_match($x) {
-    if ($x === 1) {
-        return "one";
-    } elseif ($x === 2) {
-        return "two";
-    } elseif ($x === 3) {
-        return "three";
-    } else {
-        return "other";
-    }
+    return match ($x) {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        default => "other"
+    };
 }
 
 echo test_match(2) . "\n";

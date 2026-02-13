@@ -2003,6 +2003,7 @@ pub const NativeLinker = struct {
         // 回退到状态机
         try code.appendSlice(self.allocator, "    // Control flow state machine\n");
         try code.appendSlice(self.allocator, "    var current_block: u32 = 0;\n");
+        try code.appendSlice(self.allocator, "    var prev_block: u32 = 0;\n");
         try code.appendSlice(self.allocator, "    while (true) {\n");
         try code.appendSlice(self.allocator, "        switch (current_block) {\n");
 
@@ -2383,15 +2384,16 @@ pub const NativeLinker = struct {
                 // 设置 then 分支的 phi 值
                 try self.generatePhiAssignments(writer, func, br.then_block, current_block_idx);
 
-                try writer.print("                    current_block = {d};\n                }} else {{\n", .{then_idx});
+                try writer.print("                    prev_block = current_block;\n                    current_block = {d};\n                }} else {{\n", .{then_idx});
 
                 // 设置 else 分支的 phi 值
                 try self.generatePhiAssignments(writer, func, br.else_block, current_block_idx);
 
-                try writer.print("                    current_block = {d};\n                }}\n", .{else_idx});
+                try writer.print("                    prev_block = current_block;\n                    current_block = {d};\n                }}\n", .{else_idx});
             },
             .switch_ => |sw| {
                 // 生成 switch 语句
+                try writer.writeAll("                prev_block = current_block;\n");
                 try writer.print("                switch (reg_{d}.toInt()) {{\n", .{sw.value.id});
                 
                 // 生成 case 分支

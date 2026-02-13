@@ -3526,59 +3526,83 @@ pub const IRGenerator = struct {
     fn generateMatchExpr(self: *Self, node: *const Node) !Register {
         const match_data = node.data.match_expr;
 
-        // Generate subject expression
         const subject_reg = try self.generateExpression(match_data.expression);
-
-        // Create blocks for each arm and merge
         const merge_block = try self.createBlock("match_merge");
-        var arm_blocks = std.ArrayListUnmanaged(*BasicBlock){};
-        defer arm_blocks.deinit(self.allocator);
 
-        for (match_data.arms) |_| {
-            const arm_block = try self.createBlock("match_arm");
-            try arm_blocks.append(self.allocator, arm_block);
-        }
-
-        // Generate arms
         var phi_incoming = std.ArrayListUnmanaged(Instruction.PhiIncoming){};
         defer phi_incoming.deinit(self.allocator);
 
+        // 创建检查块和 arm 块
+        var check_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+        defer check_blocks.deinit(self.allocator);
+        var arm_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+        defer arm_blocks.deinit(self.allocator);
+        
+        for (0..match_data.arms.len) |_| {
+            try check_blocks.append(self.allocator, try self.createBlock("match_check"));
+            try arm_blocks.append(self.allocator, try self.createBlock("match_arm"));
+        }
+        
+        // default arm 块
+        var default_block: ?*BasicBlock = null;
+        if (match_data.default) |_| {
+            default_block = try self.createBlock("match_default");
+        }
+
+        // 跳转到第一个检查
+        self.setTerminator(.{ .br = check_blocks.items[0] });
+
+        // 生成条件检查链
         for (match_data.arms, 0..) |arm_idx, i| {
             const arm_node = self.getNode(arm_idx) orelse continue;
             if (arm_node.tag != .match_arm) continue;
-
             const arm_data = arm_node.data.match_arm;
+            
+            const check_block = check_blocks.items[i];
             const arm_block = arm_blocks.items[i];
-            const next_block = if (i + 1 < arm_blocks.items.len) arm_blocks.items[i + 1] else merge_block;
+            
+            // 在检查块中生成条件
+            self.setCurrentBlock(check_block);
+            const cond_reg = try self.generateExpression(arm_data.conditions[0]);
+            const match_reg = try self.emitWithResult(.{ .identical = .{
+                .lhs = subject_reg,
+                .rhs = cond_reg,
+            } }, .bool);
 
-            // Check conditions
-            if (arm_data.conditions.len > 0) {
-                for (arm_data.conditions) |cond_idx| {
-                    const cond_reg = try self.generateExpression(cond_idx);
-                    const match_reg = try self.emitWithResult(.{ .identical = .{
-                        .lhs = subject_reg,
-                        .rhs = cond_reg,
-                    } }, .bool);
+            // 下一个检查或 default
+            const next_block = if (i + 1 < check_blocks.items.len)
+                check_blocks.items[i + 1]
+            else if (default_block) |db|
+                db
+            else
+                merge_block;
 
-                    self.setTerminator(.{ .cond_br = .{
-                        .cond = match_reg,
-                        .then_block = arm_block,
-                        .else_block = next_block,
-                    } });
-                }
-            } else {
-                // Default arm
-                self.setTerminator(.{ .br = arm_block });
-            }
+            self.setTerminator(.{ .cond_br = .{
+                .cond = match_reg,
+                .then_block = arm_block,
+                .else_block = next_block,
+            } });
 
-            // Generate arm body
+            // 生成 arm 体
             self.setCurrentBlock(arm_block);
             const result_reg = try self.generateExpression(arm_data.body);
             try phi_incoming.append(self.allocator, .{ .value = result_reg, .block = arm_block });
             self.setTerminator(.{ .br = merge_block });
         }
 
-        // Merge with phi
+        // 生成 default arm
+        if (match_data.default) |default_idx| {
+            const default_node = self.getNode(default_idx) orelse return error.InvalidNode;
+            if (default_node.tag != .match_arm) return error.InvalidNode;
+            const default_data = default_node.data.match_arm;
+            
+            self.setCurrentBlock(default_block.?);
+            const result_reg = try self.generateExpression(default_data.body);
+            try phi_incoming.append(self.allocator, .{ .value = result_reg, .block = default_block.? });
+            self.setTerminator(.{ .br = merge_block });
+        }
+
+        // Merge
         self.setCurrentBlock(merge_block);
         if (phi_incoming.items.len > 0) {
             const incoming = try self.allocator.dupe(Instruction.PhiIncoming, phi_incoming.items);
