@@ -78,10 +78,18 @@ pub const TypeInferencePass = struct {
                             try self.inferred_types.put(result.id, .{ .bool = {} });
                         },
                         .phi => {
-                            // phi 节点的类型已经被 mem2reg 特化
                             const result_tag = @as(std.meta.Tag(IR.Type), result.type_);
                             if (result_tag != .php_value) {
                                 try self.inferred_types.put(result.id, result.type_);
+                            }
+                        },
+                        .cast => |cast_op| {
+                            // cast 的结果类型就是目标类型
+                            try self.inferred_types.put(result.id, cast_op.to_type);
+                            // 同时记录源的类型
+                            const src_tag = @as(std.meta.Tag(IR.Type), cast_op.from_type);
+                            if (src_tag != .php_value) {
+                                try self.inferred_types.put(cast_op.value.id, cast_op.from_type);
                             }
                         },
                         else => {},

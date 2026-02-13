@@ -45,10 +45,13 @@ pub const TypeSpecializationPass = struct {
         // 1. 消除冗余 cast
         try self.eliminateRedundantCasts(func);
         
-        // 2. 特化算术操作
+        // 2. 绕过比较操作前的不必要 cast
+        try self.bypassCastsInComparisons(func);
+        
+        // 3. 特化算术操作
         try self.specializeArithmeticOps(func);
         
-        // 3. 更新指令类型
+        // 4. 更新指令类型
         try self.updateInstructionTypes(func);
         
         std.debug.print("type_specialization: Stats - casts_eliminated={d}, ops_specialized={d}\n", 
@@ -63,7 +66,6 @@ pub const TypeSpecializationPass = struct {
                     const cast_op = inst.*.op.cast;
                     const result = inst.*.result orelse continue;
                     
-                    // 获取源和目标的推断类型
                     const src_inferred = self.type_inference.getInferredType(cast_op.value.id);
                     const dst_inferred = self.type_inference.getInferredType(result.id);
                     
@@ -71,14 +73,58 @@ pub const TypeSpecializationPass = struct {
                         const src_tag = @as(std.meta.Tag(IR.Type), src_inferred.?);
                         const dst_tag = @as(std.meta.Tag(IR.Type), dst_inferred.?);
                         
-                        // 如果源和目标类型相同，消除 cast
                         if (src_tag == dst_tag) {
-                            // 替换为 move（或直接使用源寄存器）
                             inst.*.op = .{ .move = .{ .operand = cast_op.value } };
                             self.stats.casts_eliminated += 1;
-                            std.debug.print("  Eliminated redundant cast: reg_{d}\n", .{result.id});
                         }
                     }
+                }
+            }
+        }
+    }
+    
+    /// 绕过比较操作前的不必要 cast
+    fn bypassCastsInComparisons(self: *TypeSpecializationPass, func: *IR.Function) !void {
+        var cast_sources = std.AutoHashMap(usize, IR.Register).init(self.allocator);
+        defer cast_sources.deinit();
+        
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |*inst| {
+                if (inst.*.op == .cast) {
+                    const cast_op = inst.*.op.cast;
+                    if (inst.*.result) |result| {
+                        const from_tag = @as(std.meta.Tag(IR.Type), cast_op.from_type);
+                        const to_tag = @as(std.meta.Tag(IR.Type), cast_op.to_type);
+                        
+                        if (from_tag == .i64 and to_tag == .php_value) {
+                            try cast_sources.put(result.id, cast_op.value);
+                        }
+                    }
+                }
+            }
+        }
+        
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |*inst| {
+                switch (inst.*.op) {
+                    .lt, .le, .gt, .ge, .eq, .ne => |*op| {
+                        const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                        const rhs_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                        
+                        if (lhs_tag == .php_value and rhs_tag == .i64) {
+                            if (cast_sources.get(op.lhs.id)) |source| {
+                                op.lhs = source;
+                                self.stats.casts_eliminated += 1;
+                            }
+                        }
+                        else if (lhs_tag == .i64 and rhs_tag == .php_value) {
+                            if (cast_sources.get(op.rhs.id)) |source| {
+                                op.rhs = source;
+                                self.stats.casts_eliminated += 1;
+                            }
+                        }
+                    },
+                    else => {},
                 }
             }
         }
@@ -91,7 +137,6 @@ pub const TypeSpecializationPass = struct {
                 switch (inst.*.op) {
                     .add, .sub, .mul, .div, .mod => |*op| {
                         if (inst.*.result) |*result| {
-                            // 获取操作数的推断类型
                             const lhs_type = self.type_inference.getInferredType(op.lhs.id);
                             const rhs_type = self.type_inference.getInferredType(op.rhs.id);
                             const result_type = self.type_inference.getInferredType(result.id);
@@ -101,7 +146,6 @@ pub const TypeSpecializationPass = struct {
                                 const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type.?);
                                 const result_tag = @as(std.meta.Tag(IR.Type), result_type.?);
                                 
-                                // 如果所有类型都是 i64 或 f64，更新操作数类型
                                 if (lhs_tag == rhs_tag and lhs_tag == result_tag and 
                                     (lhs_tag == .i64 or lhs_tag == .f64)) {
                                     op.lhs.type_ = lhs_type.?;
@@ -109,6 +153,21 @@ pub const TypeSpecializationPass = struct {
                                     result.type_ = result_type.?;
                                     self.stats.ops_specialized += 1;
                                 }
+                            }
+                        }
+                    },
+                    .lt, .le, .gt, .ge, .eq, .ne => |*op| {
+                        const lhs_type = self.type_inference.getInferredType(op.lhs.id);
+                        const rhs_type = self.type_inference.getInferredType(op.rhs.id);
+                        
+                        if (lhs_type != null and rhs_type != null) {
+                            const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type.?);
+                            const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type.?);
+                            
+                            if (lhs_tag == rhs_tag and (lhs_tag == .i64 or lhs_tag == .f64)) {
+                                op.lhs.type_ = lhs_type.?;
+                                op.rhs.type_ = rhs_type.?;
+                                self.stats.ops_specialized += 1;
                             }
                         }
                     },
