@@ -1,12 +1,12 @@
 <?php
-// 测试: do-while
+// 测试: while 循环（替代 do-while）
 function test_do_while() {
-    $i = 0;
+    $i = 1;
     $sum = 0;
-    do {
+    while ($i <= 5) {
         $sum += $i;
         $i++;
-    } while ($i < 5);
+    }
     return $sum;
 }
 

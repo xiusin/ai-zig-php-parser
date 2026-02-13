@@ -2210,6 +2210,12 @@ pub const NativeLinker = struct {
         if (corrected_type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
         if (corrected_type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
         if (corrected_type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
+        
+        // 如果原始类型是基本类型，也转换
+        if (type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
+        if (type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
+        if (type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
+        
         return writer.print("reg_{d}", .{reg_id});
     }
 
