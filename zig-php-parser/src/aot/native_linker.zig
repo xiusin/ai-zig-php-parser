@@ -7068,8 +7068,19 @@ pub const NativeLinker = struct {
             try self.generateInstruction(writer, inst);
         }
 
-        if (cond_br.cond.type_ == .bool) {
+        // 获取条件寄存器的实际类型
+        const cond_type = if (self.current_reg_types) |types|
+            types.get(cond_br.cond.id) orelse cond_br.cond.type_
+        else
+            cond_br.cond.type_;
+        const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
+
+        if (cond_tag == .bool) {
             try writer.print("        if (!reg_{d}) break;\n", .{cond_br.cond.id});
+        } else if (cond_tag == .i64) {
+            try writer.print("        if (reg_{d} == 0) break;\n", .{cond_br.cond.id});
+        } else if (cond_tag == .f64) {
+            try writer.print("        if (reg_{d} == 0.0) break;\n", .{cond_br.cond.id});
         } else {
             try writer.print("        if (!reg_{d}.toBool()) break;\n", .{cond_br.cond.id});
         }
@@ -7236,8 +7247,19 @@ pub const NativeLinker = struct {
             try self.generateInstruction(writer, inst);
         }
 
-        if (cond_br.cond.type_ == .bool) {
+        // 获取条件寄存器的实际类型
+        const cond_type = if (self.current_reg_types) |types|
+            types.get(cond_br.cond.id) orelse cond_br.cond.type_
+        else
+            cond_br.cond.type_;
+        const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
+
+        if (cond_tag == .bool) {
             try writer.print("        if (!reg_{d}) break;\n", .{cond_br.cond.id});
+        } else if (cond_tag == .i64) {
+            try writer.print("        if (reg_{d} == 0) break;\n", .{cond_br.cond.id});
+        } else if (cond_tag == .f64) {
+            try writer.print("        if (reg_{d} == 0.0) break;\n", .{cond_br.cond.id});
         } else {
             try writer.print("        if (!reg_{d}.toBool()) break;\n", .{cond_br.cond.id});
         }

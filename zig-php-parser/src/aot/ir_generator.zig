@@ -1924,18 +1924,44 @@ pub const IRGenerator = struct {
 
     /// Generate IR for break statement
     fn generateBreakStmt(self: *Self, node: *const Node) !void {
-        _ = node;
-        if (self.loop_stack.items.len > 0) {
-            const ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
+        const break_data = node.data.break_stmt;
+        
+        // 获取 break 层级（默认 1）
+        var level: usize = 1;
+        if (break_data.level) |level_node_idx| {
+            const level_node = self.getNode(level_node_idx) orelse return error.InvalidNode;
+            if (level_node.tag == .literal_int) {
+                const lit_data = level_node.data.literal_int;
+                level = @intCast(lit_data.value);
+            }
+        }
+        
+        // 从循环栈中获取目标循环
+        if (self.loop_stack.items.len >= level) {
+            const target_idx = self.loop_stack.items.len - level;
+            const ctx = self.loop_stack.items[target_idx];
             self.setTerminator(.{ .br = ctx.break_block });
         }
     }
 
     /// Generate IR for continue statement
     fn generateContinueStmt(self: *Self, node: *const Node) !void {
-        _ = node;
-        if (self.loop_stack.items.len > 0) {
-            const ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
+        const continue_data = node.data.continue_stmt;
+        
+        // 获取 continue 层级（默认 1）
+        var level: usize = 1;
+        if (continue_data.level) |level_node_idx| {
+            const level_node = self.getNode(level_node_idx) orelse return error.InvalidNode;
+            if (level_node.tag == .literal_int) {
+                const lit_data = level_node.data.literal_int;
+                level = @intCast(lit_data.value);
+            }
+        }
+        
+        // 从循环栈中获取目标循环
+        if (self.loop_stack.items.len >= level) {
+            const target_idx = self.loop_stack.items.len - level;
+            const ctx = self.loop_stack.items[target_idx];
             self.setTerminator(.{ .br = ctx.continue_block });
         }
     }
