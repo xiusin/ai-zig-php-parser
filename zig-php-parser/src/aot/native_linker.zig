@@ -1992,6 +1992,14 @@ pub const NativeLinker = struct {
 
         var writer = code.writer(self.allocator);
         std.debug.print("Trying structured control flow for {s}...\n", .{func.name});
+        
+        // 如果有多层 break/continue，强制使用状态机
+        if (func.has_multi_level_break) {
+            std.debug.print("Function has multi-level break/continue, using state machine\n", .{});
+            try self.generateControlFlowStateMachine(code, func, cleanup_regs, alloca_regs);
+            return;
+        }
+        
         const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
         std.debug.print("Structured result: {}\n", .{structured_result});
         if (structured_result) {
@@ -2182,6 +2190,43 @@ pub const NativeLinker = struct {
         try writer.print(format_str, args);
     }
 
+    /// 统一的条件表达式生成
+    /// 根据寄存器的实际类型生成正确的条件判断代码
+    fn writeConditionExpr(
+        self: *Self,
+        writer: anytype,
+        reg_id: usize,
+        ir_type: IR.Type,
+    ) !void {
+        // 获取修正后的类型
+        const actual_type = if (self.current_reg_types) |types|
+            types.get(reg_id) orelse ir_type
+        else
+            ir_type;
+        
+        const type_tag = @as(std.meta.Tag(IR.Type), actual_type);
+        
+        // 根据类型生成条件表达式
+        switch (type_tag) {
+            .bool => try writer.print("reg_{d}", .{reg_id}),
+            .i64 => try writer.print("(reg_{d} != 0)", .{reg_id}),
+            .f64 => try writer.print("(reg_{d} != 0.0)", .{reg_id}),
+            else => {
+                // 检查是否是 alloca
+                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                    alloca_regs.contains(reg_id)
+                else
+                    false;
+                
+                if (is_alloca) {
+                    try writer.print("reg_{d}.*.toBool()", .{reg_id});
+                } else {
+                    try writer.print("reg_{d}.toBool()", .{reg_id});
+                }
+            },
+        }
+    }
+
     fn writePhpValueExpr(
         self: *Self,
         writer: anytype,
@@ -2366,19 +2411,8 @@ pub const NativeLinker = struct {
                     if (block == br.else_block) else_idx = idx;
                 }
 
-                // 获取条件寄存器的实际类型
-                const reg_type = self.current_reg_types.?.get(br.cond.id) orelse IR.Type{ .php_value = {} };
-                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
                 try writer.writeAll("                if (");
-                if (type_tag == .bool) {
-                    try writer.print("reg_{d}", .{br.cond.id});
-                } else if (type_tag == .i64) {
-                    try writer.print("(reg_{d} != 0)", .{br.cond.id});
-                } else if (type_tag == .f64) {
-                    try writer.print("(reg_{d} != 0.0)", .{br.cond.id});
-                } else {
-                    try writer.print("reg_{d}.toBool()", .{br.cond.id});
-                }
+                try self.writeConditionExpr(writer, br.cond.id, br.cond.type_);
                 try writer.writeAll(") {\n");
 
                 // 设置 then 分支的 phi 值
@@ -7068,22 +7102,10 @@ pub const NativeLinker = struct {
             try self.generateInstruction(writer, inst);
         }
 
-        // 获取条件寄存器的实际类型
-        const cond_type = if (self.current_reg_types) |types|
-            types.get(cond_br.cond.id) orelse cond_br.cond.type_
-        else
-            cond_br.cond.type_;
-        const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
-
-        if (cond_tag == .bool) {
-            try writer.print("        if (!reg_{d}) break;\n", .{cond_br.cond.id});
-        } else if (cond_tag == .i64) {
-            try writer.print("        if (reg_{d} == 0) break;\n", .{cond_br.cond.id});
-        } else if (cond_tag == .f64) {
-            try writer.print("        if (reg_{d} == 0.0) break;\n", .{cond_br.cond.id});
-        } else {
-            try writer.print("        if (!reg_{d}.toBool()) break;\n", .{cond_br.cond.id});
-        }
+        // 生成循环条件判断（取反，不满足则 break）
+        try writer.writeAll("        if (!(");
+        try self.writeConditionExpr(writer, cond_br.cond.id, cond_br.cond.type_);
+        try writer.writeAll(")) break;\n");
 
         // 生成body块的指令
         try writer.writeAll("        // Loop body\n");
@@ -7247,22 +7269,10 @@ pub const NativeLinker = struct {
             try self.generateInstruction(writer, inst);
         }
 
-        // 获取条件寄存器的实际类型
-        const cond_type = if (self.current_reg_types) |types|
-            types.get(cond_br.cond.id) orelse cond_br.cond.type_
-        else
-            cond_br.cond.type_;
-        const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
-
-        if (cond_tag == .bool) {
-            try writer.print("        if (!reg_{d}) break;\n", .{cond_br.cond.id});
-        } else if (cond_tag == .i64) {
-            try writer.print("        if (reg_{d} == 0) break;\n", .{cond_br.cond.id});
-        } else if (cond_tag == .f64) {
-            try writer.print("        if (reg_{d} == 0.0) break;\n", .{cond_br.cond.id});
-        } else {
-            try writer.print("        if (!reg_{d}.toBool()) break;\n", .{cond_br.cond.id});
-        }
+        // 生成循环条件判断（取反，不满足则 break）
+        try writer.writeAll("        if (!(");
+        try self.writeConditionExpr(writer, cond_br.cond.id, cond_br.cond.type_);
+        try writer.writeAll(")) break;\n");
 
         // 生成body块的指令
         try writer.writeAll("        // Loop body\n");
@@ -7408,20 +7418,10 @@ pub const NativeLinker = struct {
             try self.generateInstruction(writer, inst);
         }
 
-        // 获取条件寄存器的实际类型
-        const reg_type = self.current_reg_types.?.get(cond_br.cond.id) orelse IR.Type{ .php_value = {} };
-        const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
-
-        // 根据条件寄存器的类型生成不同的代码
-        if (type_tag == .bool) {
-            try writer.print("    if (reg_{d}) {{\n", .{cond_br.cond.id});
-        } else if (type_tag == .i64) {
-            try writer.print("    if (reg_{d} != 0) {{\n", .{cond_br.cond.id});
-        } else if (type_tag == .f64) {
-            try writer.print("    if (reg_{d} != 0.0) {{\n", .{cond_br.cond.id});
-        } else {
-            try writer.print("    if (reg_{d}.toBool()) {{\n", .{cond_br.cond.id});
-        }
+        // 生成条件判断
+        try writer.writeAll("    if (");
+        try self.writeConditionExpr(writer, cond_br.cond.id, cond_br.cond.type_);
+        try writer.writeAll(") {\n");
 
         // 生成then块
         try writer.writeAll("        // Then branch\n");

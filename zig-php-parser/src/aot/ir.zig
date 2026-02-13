@@ -214,6 +214,8 @@ pub const Function = struct {
     location: SourceLocation,
     /// Next register ID for SSA
     next_register_id: u32,
+    /// Whether this function has multi-level break/continue (requires state machine)
+    has_multi_level_break: bool = false,
 
     const Self = @This();
 

@@ -1936,6 +1936,16 @@ pub const IRGenerator = struct {
             }
         }
         
+        // 标记函数有多层 break
+        if (level > 1) {
+            if (self.current_function) |func| {
+                std.debug.print("Setting has_multi_level_break for {s}\n", .{func.name});
+                func.has_multi_level_break = true;
+            } else {
+                std.debug.print("WARNING: current_function is null!\n", .{});
+            }
+        }
+        
         // 从循环栈中获取目标循环
         if (self.loop_stack.items.len >= level) {
             const target_idx = self.loop_stack.items.len - level;
@@ -1955,6 +1965,13 @@ pub const IRGenerator = struct {
             if (level_node.tag == .literal_int) {
                 const lit_data = level_node.data.literal_int;
                 level = @intCast(lit_data.value);
+            }
+        }
+        
+        // 标记函数有多层 continue
+        if (level > 1) {
+            if (self.current_function) |func| {
+                func.has_multi_level_break = true;
             }
         }
         
