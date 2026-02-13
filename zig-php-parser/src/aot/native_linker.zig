@@ -6645,6 +6645,34 @@ pub const NativeLinker = struct {
                 const child_loop = all_loops[child_idx];
                 try writer.writeAll("        // Generating nested loop\n");
                 try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+                
+                // 子循环结束后，将子循环的累加器传递给 increment 块的 PHI
+                // 查找子循环的累加器 PHI
+                const child_header = func.blocks.items[child_loop.header];
+                for (child_header.instructions.items) |child_inst| {
+                    if (child_inst.op == .phi) {
+                        if (child_inst.result) |child_phi_reg| {
+                            // 查找 increment 块中引用这个值的 PHI
+                            if (loop.increment) |inc_idx| {
+                                const inc_block = func.blocks.items[inc_idx];
+                                for (inc_block.instructions.items) |inc_inst| {
+                                    if (inc_inst.op == .phi) {
+                                        const inc_phi_op = inc_inst.op.phi;
+                                        if (inc_inst.result) |inc_phi_reg| {
+                                            // 检查是否有 incoming 来自 body 块
+                                            for (inc_phi_op.incoming) |incoming| {
+                                                if (incoming.block == body_block) {
+                                                    // 将子循环的 PHI 结果赋值给这个 incoming 值
+                                                    try writer.print("        reg_{d} = reg_{d};\n", .{ incoming.value.id, child_phi_reg.id });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -6652,9 +6680,90 @@ pub const NativeLinker = struct {
         if (loop.increment) |inc_idx| {
             const inc_block = func.blocks.items[inc_idx];
             try writer.print("        // Increment: {s}\n", .{inc_block.label});
+            
+            // 先处理 increment 块中的 PHI 节点
             for (inc_block.instructions.items) |inst| {
-                try code_list.appendSlice(self.allocator, "        ");
-                try self.generateInstructionSimple(code_list, inst);
+                if (inst.op == .phi) {
+                    const phi_op = inst.op.phi;
+                    const result_reg = inst.result orelse continue;
+                    
+                    // 找到来自 body 块或内层循环的值
+                    var found_value: ?usize = null;
+                    for (phi_op.incoming) |incoming| {
+                        // 优先使用非初始化块的值
+                        if (!std.mem.startsWith(u8, incoming.block.label, "for_init")) {
+                            found_value = incoming.value.id;
+                            break;
+                        }
+                    }
+                    
+                    if (found_value) |val_reg| {
+                        const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
+                        const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
+                        
+                        const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                        const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                        
+                        if (phi_tag == value_tag) {
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                        } else if (phi_tag == .i64 and value_tag == .php_value) {
+                            try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
+                        } else {
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                        }
+                    }
+                } else {
+                    // 非 PHI 指令正常生成
+                    try code_list.appendSlice(self.allocator, "        ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
+            }
+        }
+        
+        // 更新 PHI 节点（关键！）
+        for (header_block.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                const phi_op = inst.op.phi;
+                const result_reg = inst.result orelse continue;
+                
+                // 找到来自 increment 块的值（不验证定义位置，因为可能是 PHI）
+                var found_value: ?usize = null;
+                if (loop.increment) |inc_idx| {
+                    const inc_block = func.blocks.items[inc_idx];
+                    for (phi_op.incoming) |incoming| {
+                        if (incoming.block == inc_block) {
+                            found_value = incoming.value.id;
+                            break;
+                        }
+                    }
+                }
+                
+                // 如果没找到，从 body 块找
+                if (found_value == null) {
+                    for (phi_op.incoming) |incoming| {
+                        if (incoming.block == body_block) {
+                            found_value = incoming.value.id;
+                            break;
+                        }
+                    }
+                }
+                
+                if (found_value) |val_reg| {
+                    // 使用类型推断结果
+                    const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
+                    const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
+                    
+                    const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                    
+                    if (phi_tag == value_tag) {
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                    } else if (phi_tag == .i64 and value_tag == .php_value) {
+                        try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
+                    } else {
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                    }
+                }
             }
         }
         
