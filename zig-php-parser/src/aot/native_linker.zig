@@ -1992,8 +1992,17 @@ pub const NativeLinker = struct {
 
         var writer = code.writer(self.allocator);
         
-        // 如果有多层 break/continue，直接跳过结构化尝试
-        if (!func.has_multi_level_break) {
+        // 检查是否有 do-while 循环（通过块名判断）
+        var has_do_while = false;
+        for (func.blocks.items) |block| {
+            if (std.mem.indexOf(u8, block.label, "do_while") != null) {
+                has_do_while = true;
+                break;
+            }
+        }
+        
+        // 如果有多层 break/continue 或 do-while，直接跳过结构化尝试
+        if (!func.has_multi_level_break and !has_do_while) {
             const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
             if (structured_result) {
                 return;
