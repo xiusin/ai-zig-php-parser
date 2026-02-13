@@ -4730,7 +4730,7 @@ pub const NativeLinker = struct {
         
         for (cfg.loops.items) |loop| {
             std.debug.print("Calling generateLoopRecursive for loop header={d}\n", .{loop.header});
-            try self.generateLoopRecursive(writer, func, loop, &processed, &block_to_loop, cfg.all_loops.items, cleanup_regs);
+            try self.generateLoopRecursive(writer, func, loop, &processed, &block_to_loop, cfg.all_loops.items, cleanup_regs, 0);
             
             // 生成退出块（但不生成 return）
             if (loop.exit_block) |exit_idx| {
@@ -6464,8 +6464,9 @@ pub const NativeLinker = struct {
         block_to_loop: *std.AutoHashMap(usize, usize),
         all_loops: []const LoopInfo,
         cleanup_regs: []const usize,
+        depth: usize,
     ) !void {
-        std.debug.print("generateLoopRecursive: header={d}, is_for={}, children={d}\n", .{ loop.header, loop.is_for_loop, loop.children.items.len });
+        std.debug.print("generateLoopRecursive: header={d}, is_for={}, children={d}, depth={d}\n", .{ loop.header, loop.is_for_loop, loop.children.items.len, depth });
         
         // 标记循环块为已处理
         try processed.put(loop.header, {});
@@ -6474,7 +6475,7 @@ pub const NativeLinker = struct {
         // 生成循环结构
         if (loop.is_for_loop) {
             std.debug.print("  -> calling generateForLoopWithChildren\n", .{});
-            try self.generateForLoopWithChildren(writer, func, loop, processed, block_to_loop, all_loops, cleanup_regs);
+            try self.generateForLoopWithChildren(writer, func, loop, processed, block_to_loop, all_loops, cleanup_regs, depth);
         } else {
             std.debug.print("  -> calling generateWhileLoopWithChildren\n", .{});
             try self.generateWhileLoopWithChildren(writer, func, loop, processed, block_to_loop, all_loops, cleanup_regs);
@@ -6605,9 +6606,20 @@ pub const NativeLinker = struct {
         block_to_loop: *std.AutoHashMap(usize, usize),
         all_loops: []const LoopInfo,
         cleanup_regs: []const usize,
+        depth: usize,
     ) anyerror!void {
-        std.debug.print("=== V2: generateForLoopWithChildren header={d}, children={d} ===\n", 
-            .{loop.header, loop.children.items.len});
+        // TODO: 使用 depth 生成动态缩进
+        // var indent_buf: [256]u8 = undefined;
+        // var indent_len: usize = 0;
+        // var d: usize = 0;
+        // while (d <= depth) : (d += 1) {
+        //     @memcpy(indent_buf[indent_len..][0..4], "    ");
+        //     indent_len += 4;
+        // }
+        // const base_indent = indent_buf[0..indent_len];
+        
+        std.debug.print("=== V2: generateForLoopWithChildren header={d}, children={d}, depth={d} ===\n", 
+            .{loop.header, loop.children.items.len, depth});
         
         // 分析当前循环的累加器
         var accumulators = try self.analyzeLoopAccumulators(func, loop);
@@ -6685,15 +6697,12 @@ pub const NativeLinker = struct {
         for (loop.children.items) |child_idx| {
             const child_loop = all_loops[child_idx];
             try writer.writeAll("        // Nested loop\n");
-            try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+            try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs, depth + 1);
             
             // 关键：子循环结束后，将子循环的累加器传递给外层
             // 分析子循环的累加器
             var child_accumulators = try self.analyzeLoopAccumulators(func, child_loop);
             defer child_accumulators.deinit(self.allocator);
-            
-            for (child_accumulators.items) |child_acc| {
-            }
             
             // 对于外层的每个累加器，检查是否需要从子循环获取值
             for (accumulators.items) |acc| {
@@ -6705,13 +6714,11 @@ pub const NativeLinker = struct {
                             const phi_op = inst.op.phi;
                             // 查找来自 body 或 increment 的 incoming（非 header）
                             for (phi_op.incoming) |incoming| {
-                                    .{incoming.value.id, incoming.block.label});
                                 if (incoming.block != header_block) {
                                     // 这个 incoming 值需要从子循环累加器获取
                                     if (child_accumulators.items.len > 0) {
                                         // 简单策略：使用第一个子累加器（通常只有一个）
                                         const child_acc = child_accumulators.items[0];
-                                            .{ incoming.value.id, child_acc.reg_id });
                                         try writer.print("        reg_{d} = reg_{d};\n", 
                                             .{ incoming.value.id, child_acc.reg_id });
                                     }
