@@ -5051,7 +5051,7 @@ pub const NativeLinker = struct {
     }
 
     /// 检测并优化增量模式: load → const → add → store → reg += const
-    fn tryOptimizeIncrement(_: *Self, writer: anytype, block: *const IR.BasicBlock) !bool {
+    fn tryOptimizeIncrement(self: *Self, writer: anytype, block: *const IR.BasicBlock) !bool {
         const insts = block.instructions.items;
         if (insts.len < 3) return false;
 
@@ -5078,7 +5078,19 @@ pub const NativeLinker = struct {
                     if (add_result != null and target_reg != null and
                         op.value.id == add_result.? and op.ptr.id == target_reg.?)
                     {
-                        try writer.print("        reg_{d} += {d};\n", .{ target_reg.?, const_val.? });
+                        // 检查 target_reg 是否是 alloca
+                        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                            alloca_regs.contains(target_reg.?)
+                        else
+                            false;
+                        
+                        if (is_alloca) {
+                            // alloca: 生成 load → add → store
+                            try writer.print("        reg_{d}.* = runtime.Value.initInt(reg_{d}.*.asInt() + {d});\n", .{ target_reg.?, target_reg.?, const_val.? });
+                        } else {
+                            // 非 alloca: 直接 +=
+                            try writer.print("        reg_{d} += {d};\n", .{ target_reg.?, const_val.? });
+                        }
                         return true;
                     }
                 },
@@ -5572,7 +5584,17 @@ pub const NativeLinker = struct {
                     for (inc_block.instructions.items) |inst| {
                         if (inst.op == .store) {
                             const target_reg = inst.op.store.ptr.id;
-                            try writer.print("        reg_{d} += {d};\n", .{ target_reg, unroll_factor });
+                            // 检查是否是 alloca
+                            const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                alloca_regs.contains(target_reg)
+                            else
+                                false;
+                            
+                            if (is_alloca) {
+                                try writer.print("        reg_{d}.* = runtime.Value.initInt(reg_{d}.*.asInt() + {d});\n", .{ target_reg, target_reg, unroll_factor });
+                            } else {
+                                try writer.print("        reg_{d} += {d};\n", .{ target_reg, unroll_factor });
+                            }
                             break;
                         }
                     }
