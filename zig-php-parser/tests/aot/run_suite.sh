@@ -7,6 +7,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 SUITE_DIR="$SCRIPT_DIR/suite"
 COMPILER="$PROJECT_ROOT/zig-out/bin/php-interpreter"
+TIMEOUT="$SCRIPT_DIR/timeout.sh"
+
+# 超时设置（秒）
+COMPILE_TIMEOUT=30
+RUN_TIMEOUT=5
 
 # 颜色输出
 RED='\033[0;31m'
@@ -21,6 +26,7 @@ total=0
 echo "=== AOT 测试套件 ==="
 echo "编译器: $COMPILER"
 echo "测试目录: $SUITE_DIR"
+echo "编译超时: ${COMPILE_TIMEOUT}s, 运行超时: ${RUN_TIMEOUT}s"
 echo ""
 
 # 清理旧的编译产物
@@ -37,19 +43,23 @@ for test_file in "$SUITE_DIR"/*.php; do
     
     echo -n "[$total] $test_name ... "
     
-    # 1. 用 PHP 运行获取期望输出
-    expected=$(php "$test_file" 2>&1)
+    # 1. 用 PHP 运行获取期望输出（带超时）
+    if ! expected=$("$TIMEOUT" $RUN_TIMEOUT php "$test_file" 2>&1); then
+        echo -e "${RED}FAIL${NC} (PHP 超时)"
+        failed=$((failed + 1))
+        continue
+    fi
     php_exit=$?
     
-    # 2. AOT 编译
-    if ! "$COMPILER" --compile "$test_file" > /dev/null 2>&1; then
-        echo -e "${RED}FAIL${NC} (编译失败)"
+    # 2. AOT 编译（带超时）
+    if ! "$TIMEOUT" $COMPILE_TIMEOUT "$COMPILER" --compile "$test_file" > /dev/null 2>&1; then
+        echo -e "${RED}FAIL${NC} (编译失败或超时)"
         failed=$((failed + 1))
-        "$COMPILER" --compile "$test_file" 2>&1 | tail -5
+        "$TIMEOUT" $COMPILE_TIMEOUT "$COMPILER" --compile "$test_file" 2>&1 | tail -5
         continue
     fi
     
-    # 3. 运行编译后的程序
+    # 3. 运行编译后的程序（带超时）
     exe_name="$PROJECT_ROOT/$test_name"
     if [ ! -f "$exe_name" ]; then
         echo -e "${RED}FAIL${NC} (可执行文件不存在)"
@@ -57,7 +67,12 @@ for test_file in "$SUITE_DIR"/*.php; do
         continue
     fi
     
-    actual=$("$exe_name" 2>&1)
+    if ! actual=$("$TIMEOUT" $RUN_TIMEOUT "$exe_name" 2>&1); then
+        echo -e "${RED}FAIL${NC} (运行超时)"
+        failed=$((failed + 1))
+        rm -f "$exe_name"
+        continue
+    fi
     aot_exit=$?
     
     # 4. 比较输出

@@ -6250,15 +6250,35 @@ pub const NativeLinker = struct {
                 break :blk false;
             };
             
-            std.debug.print("then_block term={s}, exit={?d}, is_break={}\n", .{
+            const is_continue = blk: {
+                if (then_block.terminator) |then_term| {
+                    if (then_term == .br) {
+                        const target_block = then_term.br;
+                        // 检查是否跳转到 increment 块
+                        if (loop.increment) |inc_idx| {
+                            const inc_block = func.blocks.items[inc_idx];
+                            if (std.mem.eql(u8, target_block.label, inc_block.label)) {
+                                break :blk true;
+                            }
+                        }
+                    }
+                }
+                break :blk false;
+            };
+            
+            std.debug.print("then_block term={s}, exit={?d}, is_break={}, is_continue={}\n", .{
                 if (then_block.terminator) |t| @tagName(t) else "null",
                 loop.exit_block,
-                is_break
+                is_break,
+                is_continue
             });
             
             if (is_break) {
-                // 只是break，不生成子循环
+                // break: 跳出循环
                 try writer.writeAll("            break;\n");
+            } else if (is_continue) {
+                // continue: 跳过 then 块，不生成代码，让它自然执行到 increment
+                // 不生成任何代码
             } else {
                 // 生成then块指令
                 for (then_block.instructions.items) |inst| {
@@ -6271,6 +6291,18 @@ pub const NativeLinker = struct {
                     const child_loop = all_loops[child_idx];
                     try writer.writeAll("            // Generating nested loop\n");
                     try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs);
+                }
+            }
+            
+            // 生成 else 块（if_merge）
+            if (is_continue) {
+                const else_block_idx = self.findBlockIndex(func, term.else_block);
+                const else_block = func.blocks.items[else_block_idx];
+                
+                try writer.writeAll("        } else {\n");
+                for (else_block.instructions.items) |inst| {
+                    try code_list.appendSlice(self.allocator, "            ");
+                    try self.generateInstructionSimple(code_list, inst);
                 }
             }
             
