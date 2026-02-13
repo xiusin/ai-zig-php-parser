@@ -1992,25 +1992,37 @@ pub const NativeLinker = struct {
 
         var writer = code.writer(self.allocator);
         
-        // 检查是否有 do-while、switch 或 match（通过块名判断）
+        // 检查是否有特殊控制流（通过块名或指令判断）
         var has_do_while = false;
         var has_switch = false;
         var has_match = false;
+        var has_recursive_call = false;
+        var has_foreach = false;
+        
         for (func.blocks.items) |block| {
-            if (std.mem.indexOf(u8, block.label, "do_while") != null) {
-                has_do_while = true;
+            if (std.mem.indexOf(u8, block.label, "do_while") != null) has_do_while = true;
+            if (std.mem.indexOf(u8, block.label, "switch") != null) has_switch = true;
+            if (std.mem.indexOf(u8, block.label, "match") != null) has_match = true;
+            if (std.mem.indexOf(u8, block.label, "foreach") != null) has_foreach = true;
+            
+            // 检查是否有递归调用
+            for (block.instructions.items) |inst| {
+                if (inst.op == .call) {
+                    const call_data = inst.op.call;
+                    if (std.mem.eql(u8, call_data.func_name, func.name)) {
+                        has_recursive_call = true;
+                        break;
+                    }
+                }
             }
-            if (std.mem.indexOf(u8, block.label, "switch") != null) {
-                has_switch = true;
-            }
-            if (std.mem.indexOf(u8, block.label, "match") != null) {
-                has_match = true;
-            }
-            if (has_do_while and has_switch and has_match) break;
+            
+            if (has_do_while and has_switch and has_match and has_recursive_call and has_foreach) break;
         }
         
-        // 如果有多层 break/continue、do-while、switch 或 match，直接跳过结构化尝试
-        if (!func.has_multi_level_break and !has_do_while and !has_switch and !has_match) {
+        // 如果有特殊控制流，直接跳过结构化尝试
+        // foreach 嵌套在其他循环中时也使用状态机（结构化生成器无法正确处理）
+        const has_nested_foreach = has_foreach and func.blocks.items.len > 10;  // 简单启发式
+        if (!func.has_multi_level_break and !has_do_while and !has_switch and !has_match and !has_recursive_call and !has_nested_foreach) {
             const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
             if (structured_result) {
                 return;
