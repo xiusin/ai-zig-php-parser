@@ -306,6 +306,39 @@ pub const Parameter = struct {
     is_reference: bool,
 };
 
+/// 循环元数据 - 为循环块提供显式的结构化引用
+/// 替代基于 label 字符串匹配的隐式推断
+pub const LoopMetadata = struct {
+    /// 循环头块（包含条件判断）
+    header: ?*BasicBlock = null,
+    /// 循环体入口块
+    body: ?*BasicBlock = null,
+    /// 循环回边块（latch，包含递增逻辑）
+    latch: ?*BasicBlock = null,
+    /// 循环出口块
+    exit: ?*BasicBlock = null,
+    /// 循环嵌套深度（0 = 非循环，1 = 最外层）
+    depth: u32 = 0,
+    /// 该块在循环中的角色
+    role: Role = .none,
+    /// 父循环的 header（用于嵌套循环回溯）
+    parent_header: ?*BasicBlock = null,
+
+    pub const Role = enum {
+        none,
+        header,
+        body,
+        latch,
+        exit,
+        init,
+    };
+
+    /// 检查此块是否属于某个循环
+    pub fn isInLoop(self: *const LoopMetadata) bool {
+        return self.depth > 0;
+    }
+};
+
 /// A basic block - a sequence of instructions with single entry/exit
 pub const BasicBlock = struct {
     allocator: Allocator,
@@ -323,6 +356,8 @@ pub const BasicBlock = struct {
     successors: std.ArrayListUnmanaged(*BasicBlock),
     /// Exception handler block (if any)
     exception_handler: ?*BasicBlock,
+    /// 循环元数据（由 analysis pass 填充）
+    loop_metadata: LoopMetadata = .{},
 
     const Self = @This();
 
@@ -337,6 +372,7 @@ pub const BasicBlock = struct {
             .predecessors = .{},
             .successors = .{},
             .exception_handler = null,
+            .loop_metadata = .{},
         };
     }
 

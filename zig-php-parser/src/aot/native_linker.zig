@@ -118,7 +118,7 @@ pub const NativeLinker = struct {
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
-    current_inferred_types: ?*const std.AutoHashMap(usize, IR.Type) = null,  // 类型推断结果
+    current_inferred_types: ?*const std.AutoHashMap(usize, IR.Type) = null, // 类型推断结果
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
 
     const Self = @This();
@@ -132,15 +132,65 @@ pub const NativeLinker = struct {
         }
         return true;
     }
-    
+
+    /// 类型推断统计（用于诊断和质量门禁）
+    var type_infer_hit_count: usize = 0;
+    var type_infer_fallback_count: usize = 0;
+
     /// 获取寄存器的推断类型（优先使用推断结果）
+    /// strict_mode = true 时，fallback 到 php_value 会触发诊断警告
     fn getInferredRegType(self: *Self, reg_id: usize, fallback: IR.Type) IR.Type {
+        return self.getInferredRegTypeEx(reg_id, fallback, false);
+    }
+
+    /// 严格模式类型推断：推断失败时报告诊断警告
+    fn getInferredRegTypeStrict(self: *Self, reg_id: usize, fallback: IR.Type) IR.Type {
+        return self.getInferredRegTypeEx(reg_id, fallback, true);
+    }
+
+    /// 类型推断核心实现
+    fn getInferredRegTypeEx(
+        self: *Self,
+        reg_id: usize,
+        fallback: IR.Type,
+        strict: bool,
+    ) IR.Type {
         if (self.current_inferred_types) |types| {
             if (types.get(reg_id)) |inferred| {
+                type_infer_hit_count += 1;
                 return inferred;
             }
         }
+        type_infer_fallback_count += 1;
+        // 严格模式：fallback 到 php_value 时发出警告
+        if (strict) {
+            const fallback_tag = @as(
+                std.meta.Tag(IR.Type),
+                fallback,
+            );
+            if (fallback_tag == .php_value) {
+                std.debug.print(
+                    "[STRICT_TYPE] reg_{d} 推断失败，退化为 php_value\n",
+                    .{reg_id},
+                );
+            }
+        }
         return fallback;
+    }
+
+    /// 重置类型推断统计
+    fn resetTypeInferStats() void {
+        type_infer_hit_count = 0;
+        type_infer_fallback_count = 0;
+    }
+
+    /// 获取类型推断命中率
+    fn getTypeInferHitRate() f64 {
+        const total = type_infer_hit_count +
+            type_infer_fallback_count;
+        if (total == 0) return 1.0;
+        return @as(f64, @floatFromInt(type_infer_hit_count)) /
+            @as(f64, @floatFromInt(total));
     }
 
     fn handleUnsupportedOp(self: *Self, inst: *const IR.Instruction) !void {
@@ -287,7 +337,7 @@ pub const NativeLinker = struct {
                 try writer.writeAll("\",\n");
             }
             try writer.writeAll("};\n\n");
-            
+
             // 静态字符串池：运行时初始化一次（懒加载）
             try writer.writeAll("// 静态字符串池（运行时初始化一次）\n");
             try writer.writeAll("var static_strings: [string_table.len]*runtime.PHPString = undefined;\n");
@@ -309,9 +359,9 @@ pub const NativeLinker = struct {
         // 生成函数
         std.debug.print("=== GENERATING FUNCTIONS: count={d} ===\n", .{ir_module.functions.items.len});
         for (ir_module.functions.items, 0..) |func, i| {
-            std.debug.print("[{d}] Generating function: {s}\n", .{i, func.name});
+            std.debug.print("[{d}] Generating function: {s}\n", .{ i, func.name });
             try self.generateFunction(&code, ir_module, func);
-            std.debug.print("[{d}] Done: {s}\n", .{i, func.name});
+            std.debug.print("[{d}] Done: {s}\n", .{ i, func.name });
         }
 
         var has_select: bool = false;
@@ -1124,15 +1174,14 @@ pub const NativeLinker = struct {
         if (func.name.len == 0 or !std.unicode.utf8ValidateSlice(func.name)) {
             return error.InvalidFunctionName;
         }
-        
+
         // 在代码生成时重新进行类型推断
         const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
         var type_inference = TypeInferencePass.init(self.allocator);
         defer type_inference.deinit();
-        
+
         try type_inference.inferTypes(func);
-        std.debug.print("Code generation: Inferred {d} types for {s}\n", 
-            .{type_inference.solver.var_to_type.count(), func.name});
+        std.debug.print("Code generation: Inferred {d} types for {s}\n", .{ type_inference.solver.var_to_type.count(), func.name });
 
         // 推断返回类型：检查函数体中是否有返回值
         var has_return_value = false;
@@ -1191,11 +1240,11 @@ pub const NativeLinker = struct {
         // 收集寄存器信息
         var all_registers = std.AutoHashMap(usize, IR.Type).init(self.allocator);
         defer all_registers.deinit();
-        
+
         // 保存类型推断结果到 HashMap
         var inferred_types = std.AutoHashMap(usize, IR.Type).init(self.allocator);
         defer inferred_types.deinit();
-        
+
         var inferred_reg_iter = type_inference.solver.reg_to_var.iterator();
         while (inferred_reg_iter.next()) |entry| {
             const reg_id = entry.key_ptr.*;
@@ -1203,7 +1252,7 @@ pub const NativeLinker = struct {
                 try inferred_types.put(reg_id, inferred_type);
             }
         }
-        
+
         std.debug.print("Saved {d} inferred types\n", .{inferred_types.count()});
         self.current_inferred_types = &inferred_types;
         defer self.current_inferred_types = null;
@@ -1218,7 +1267,7 @@ pub const NativeLinker = struct {
         // 收集寄存器定义
         std.debug.print("Collecting registers from {d} blocks\n", .{func.blocks.items.len});
         for (func.blocks.items, 0..) |block, block_idx| {
-            std.debug.print("Block {d}: {s}, {d} instructions\n", .{block_idx, block.label, block.instructions.items.len});
+            std.debug.print("Block {d}: {s}, {d} instructions\n", .{ block_idx, block.label, block.instructions.items.len });
             for (block.instructions.items) |inst| {
                 // 收集 result 寄存器
                 if (inst.result) |reg| {
@@ -1268,7 +1317,7 @@ pub const NativeLinker = struct {
                     try all_registers.put(reg.id, corrected_type);
                     if (inst.op == .alloca) {
                         try alloca_registers.put(reg.id, {});
-                        std.debug.print("alloca reg_{d}, type={s}\n", .{reg.id, @tagName(@as(std.meta.Tag(IR.Type), corrected_type))});
+                        std.debug.print("alloca reg_{d}, type={s}\n", .{ reg.id, @tagName(@as(std.meta.Tag(IR.Type), corrected_type)) });
                     }
 
                     // 检查是否需要释放（字符串、数组等需要分配内存的类型）
@@ -1383,22 +1432,22 @@ pub const NativeLinker = struct {
 
         // 用代码生成时的类型推断结果覆盖寄存器类型
         // TODO: 暂时禁用，因为需要配合代码生成时的类型特化
-        // std.debug.print("Applying inferred types: {d} entries\n", 
+        // std.debug.print("Applying inferred types: {d} entries\n",
         //     .{type_inference.solver.var_to_type.count()});
-        
+
         // var inferred_reg_iter = type_inference.solver.reg_to_var.iterator();
         // while (inferred_reg_iter.next()) |entry| {
         //     const reg_id = entry.key_ptr.*;
         //     if (type_inference.getInferredType(reg_id)) |inferred_type| {
         //         const inferred_tag = @as(std.meta.Tag(IR.Type), inferred_type);
-        //         
+        //
         //         // 只在推断类型更具体时覆盖
         //         if (inferred_tag != .php_value) {
         //             if (all_registers.getPtr(reg_id)) |current_type| {
         //                 const current_tag = @as(std.meta.Tag(IR.Type), current_type.*);
         //                 if (current_tag == .php_value) {
         //                     current_type.* = inferred_type;
-        //                     std.debug.print("  Override reg_{d}: php_value → {s}\n", 
+        //                     std.debug.print("  Override reg_{d}: php_value → {s}\n",
         //                         .{reg_id, @tagName(inferred_tag)});
         //                 }
         //             }
@@ -1434,7 +1483,7 @@ pub const NativeLinker = struct {
 
                 const is_alloca = alloca_registers.contains(reg_id);
 
-                std.debug.print("reg_{d}: type={s}, is_alloca={}\n", .{reg_id, @tagName(@as(std.meta.Tag(IR.Type), reg_type)), is_alloca});
+                std.debug.print("reg_{d}: type={s}, is_alloca={}\n", .{ reg_id, @tagName(@as(std.meta.Tag(IR.Type), reg_type)), is_alloca });
 
                 if (is_alloca) {
                     // alloca 必须保持指针类型，不优化
@@ -2052,20 +2101,20 @@ pub const NativeLinker = struct {
         }
 
         var writer = code.writer(self.allocator);
-        
+
         // 检查是否有特殊控制流（通过块名或指令判断）
         var has_do_while = false;
         var has_switch = false;
         var has_match = false;
         var has_recursive_call = false;
         var has_foreach = false;
-        
+
         for (func.blocks.items) |block| {
             if (std.mem.indexOf(u8, block.label, "do_while") != null) has_do_while = true;
             if (std.mem.indexOf(u8, block.label, "switch") != null) has_switch = true;
             if (std.mem.indexOf(u8, block.label, "match") != null) has_match = true;
             if (std.mem.indexOf(u8, block.label, "foreach") != null) has_foreach = true;
-            
+
             // 检查是否有递归调用
             for (block.instructions.items) |inst| {
                 if (inst.op == .call) {
@@ -2076,20 +2125,20 @@ pub const NativeLinker = struct {
                     }
                 }
             }
-            
+
             if (has_do_while and has_switch and has_match and has_recursive_call and has_foreach) break;
         }
-        
+
         // 如果有特殊控制流，直接跳过结构化尝试
         // foreach 嵌套在其他循环中时也使用状态机（结构化生成器无法正确处理）
-        const has_nested_foreach = has_foreach and func.blocks.items.len > 10;  // 简单启发式
+        const has_nested_foreach = has_foreach and func.blocks.items.len > 10; // 简单启发式
         if (!func.has_multi_level_break and !has_do_while and !has_switch and !has_match and !has_recursive_call and !has_nested_foreach) {
             const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
             if (structured_result) {
                 return;
             }
         }
-        
+
         // 生成状态机
         try code.appendSlice(self.allocator, "    // State machine for complex control flow\n");
         // 回退到状态机
@@ -2287,9 +2336,9 @@ pub const NativeLinker = struct {
             types.get(reg_id) orelse ir_type
         else
             ir_type;
-        
+
         const type_tag = @as(std.meta.Tag(IR.Type), actual_type);
-        
+
         // 根据类型生成条件表达式
         switch (type_tag) {
             .bool => try writer.print("reg_{d}", .{reg_id}),
@@ -2301,7 +2350,7 @@ pub const NativeLinker = struct {
                     alloca_regs.contains(reg_id)
                 else
                     false;
-                
+
                 if (is_alloca) {
                     try writer.print("reg_{d}.*.toBool()", .{reg_id});
                 } else {
@@ -2344,12 +2393,12 @@ pub const NativeLinker = struct {
         if (corrected_type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
         if (corrected_type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
         if (corrected_type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
-        
+
         // 如果原始类型是基本类型，也转换
         if (type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
         if (type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
         if (type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
-        
+
         return writer.print("reg_{d}", .{reg_id});
     }
 
@@ -2513,7 +2562,7 @@ pub const NativeLinker = struct {
                 // 生成 switch 语句
                 try writer.writeAll("                prev_block = current_block;\n");
                 try writer.print("                switch (reg_{d}.toInt()) {{\n", .{sw.value.id});
-                
+
                 // 生成 case 分支
                 for (sw.cases) |case| {
                     const case_value = case.value;
@@ -2524,9 +2573,9 @@ pub const NativeLinker = struct {
                             break;
                         }
                     }
-                    try writer.print("                    {d} => current_block = {d},\n", .{case_value, case_idx});
+                    try writer.print("                    {d} => current_block = {d},\n", .{ case_value, case_idx });
                 }
-                
+
                 // 生成 default 分支
                 var default_idx: usize = 0;
                 for (func.blocks.items, 0..) |block, idx| {
@@ -2536,7 +2585,7 @@ pub const NativeLinker = struct {
                     }
                 }
                 try writer.print("                    else => current_block = {d},\n", .{default_idx});
-                
+
                 try writer.writeAll("                }\n");
             },
             .throw => |ex_reg| {
@@ -2939,7 +2988,7 @@ pub const NativeLinker = struct {
         if (self.isInstructionHoisted(inst)) {
             return;
         }
-        
+
         const writer = code.writer(self.allocator);
 
         // Add source location comment
@@ -3208,7 +3257,7 @@ pub const NativeLinker = struct {
                     const lhs_type = self.getInferredRegType(op.lhs.id, op.lhs.type_);
                     const rhs_type = self.getInferredRegType(op.rhs.id, op.rhs.type_);
                     const result_type = self.getInferredRegType(reg.id, reg.type_);
-                    
+
                     const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
                     const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
                     const result_tag = @as(std.meta.Tag(IR.Type), result_type);
@@ -4671,7 +4720,7 @@ pub const NativeLinker = struct {
         _ = alloca_regs;
 
         std.debug.print("tryGenerateStructuredControlFlowNew for {s}\n", .{func.name});
-        
+
         // 分析控制流
         var cfg = ControlFlowAnalysis.init(self.allocator);
         defer cfg.deinit();
@@ -4680,7 +4729,7 @@ pub const NativeLinker = struct {
         try self.detectLoops(func, &cfg);
 
         std.debug.print("Found {d} loops\n", .{cfg.loops.items.len});
-        
+
         if (cfg.loops.items.len == 0) {
             return false;
         }
@@ -4702,11 +4751,11 @@ pub const NativeLinker = struct {
 
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
-        
+
         // 构建块到循环的映射（用于检测子循环）
-        var block_to_loop = std.AutoHashMap(usize, usize).init(self.allocator);  // block_idx -> loop_idx in all_loops
+        var block_to_loop = std.AutoHashMap(usize, usize).init(self.allocator); // block_idx -> loop_idx in all_loops
         defer block_to_loop.deinit();
-        
+
         // 为每个循环的 header 建立映射
         for (cfg.all_loops.items, 0..) |loop, i| {
             try block_to_loop.put(loop.header, i);
@@ -4727,22 +4776,22 @@ pub const NativeLinker = struct {
         // 生成顶层循环
         std.debug.print("Generating {d} top-level loops\n", .{cfg.loops.items.len});
         var last_return_reg: ?usize = null;
-        
+
         for (cfg.loops.items) |loop| {
             std.debug.print("Calling generateLoopRecursive for loop header={d}\n", .{loop.header});
             try self.generateLoopRecursive(writer, func, loop, &processed, &block_to_loop, cfg.all_loops.items, cleanup_regs, 0);
-            
+
             // 生成退出块（但不生成 return）
             if (loop.exit_block) |exit_idx| {
                 if (!processed.contains(exit_idx)) {
                     const exit_block = func.blocks.items[exit_idx];
                     try writer.print("    // Block {d}: {s}\n", .{ exit_idx, exit_block.label });
-                    
+
                     // 生成指令并记录最后一个返回值
                     for (exit_block.instructions.items) |inst| {
                         try writer.writeAll("    ");
                         try self.generateInstruction(writer, inst);
-                        
+
                         // 记录最后一个非 alloca 赋值
                         if (inst.result) |res| {
                             const is_alloca = if (self.current_alloca_regs) |alloca_regs|
@@ -4754,12 +4803,12 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
-                    
+
                     try processed.put(exit_idx, {});
                 }
             }
         }
-        
+
         // 统一生成 return
         if (last_return_reg) |reg| {
             if (self.current_reg_types) |reg_types| {
@@ -4780,7 +4829,7 @@ pub const NativeLinker = struct {
         } else {
             try writer.writeAll("    return runtime.Value.initNull();\n");
         }
-        
+
         return true;
     }
 
@@ -4961,12 +5010,12 @@ pub const NativeLinker = struct {
         // 我们需要在循环体末尾更新 phi 值
         var phi_updates = std.ArrayListUnmanaged(struct { phi_reg: usize, value_reg: usize }){};
         defer phi_updates.deinit(self.allocator);
-        
+
         for (header_block.instructions.items) |inst| {
             if (inst.op == .phi) {
                 const phi_op = inst.op.phi;
                 const result_reg = inst.result orelse continue;
-                
+
                 // 找到来自 increment 块的值（循环回边）
                 if (loop.increment) |inc_idx| {
                     const inc_block = func.blocks.items[inc_idx];
@@ -5018,7 +5067,7 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
-                    
+
                     // 如果没找到指令（被优化删除），直接使用寄存器
                     if (!found_cond) {
                         const cond_type = if (self.current_reg_types) |types|
@@ -5073,25 +5122,23 @@ pub const NativeLinker = struct {
                 const phi_op = inst.op.phi;
                 if (inst.result) |res| {
                     if (phi_op.incoming.len == 0) continue;
-                    
-                    // 查找来自 init 或 entry 的 incoming
+
+                    // 查找循环外来源的 incoming（基于 LoopMetadata）
                     var init_value: ?usize = null;
                     for (phi_op.incoming) |incoming| {
-                        const is_init = std.mem.indexOf(u8, incoming.block.label, "init") != null or
-                                       std.mem.indexOf(u8, incoming.block.label, "entry") != null;
-                        if (is_init) {
+                        if (isInitBlock(incoming.block, loop)) {
                             init_value = incoming.value.id;
                             break;
                         }
                     }
-                    
-                    // 如果没有 init，使用第一个 incoming（通常是初始值）
+
+                    // 回退：使用第一个 incoming
                     if (init_value == null) {
                         init_value = phi_op.incoming[0].value.id;
                     }
-                    
+
                     if (init_value) |val| {
-                        try writer.print("    reg_{d} = reg_{d};\n", .{res.id, val});
+                        try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, val });
                     }
                 }
             }
@@ -5178,37 +5225,37 @@ pub const NativeLinker = struct {
         var hoisted_count: usize = 0;
         for (loop_blocks.items) |block_idx| {
             const block = func.blocks.items[block_idx];
-            
+
             var i: usize = 0;
             while (i < block.instructions.items.len) : (i += 1) {
                 const inst = block.instructions.items[i];
-                
+
                 // 检测模式：load + call(纯函数)
                 if (inst.op == .load) {
                     const load_ptr = inst.op.load.ptr.id;
                     const load_result = inst.result orelse continue;
-                    
+
                     // 检查地址是否循环不变（不在 modified_addrs 中）
                     if (modified_addrs.contains(load_ptr)) {
                         continue;
                     }
-                    
+
                     // 查找使用 load 结果的 call
                     if (i + 1 < block.instructions.items.len) {
                         const next_inst = block.instructions.items[i + 1];
                         if (next_inst.op == .call) {
                             const call_op = next_inst.op.call;
-                            
+
                             // 检查是否是纯函数
                             if (!pure_functions.has(call_op.func_name)) {
                                 continue;
                             }
-                            
+
                             // 检查参数是否是 load 的结果
                             if (call_op.args.len > 0 and call_op.args[0].id == load_result.id) {
                                 // 🎯 找到可提升的序列！生成提升后的代码（在循环前）
                                 try writer.writeAll("    // LICM: hoisted loop-invariant call\n");
-                                
+
                                 // 生成 load
                                 const suffix = self.getRegSuffix(load_result.id);
                                 if (self.regMayHeap(load_result.id)) {
@@ -5217,7 +5264,7 @@ pub const NativeLinker = struct {
                                 try writer.print("    reg_{d}{s} = ", .{ load_result.id, suffix });
                                 try self.generateLoadValue(writer, inst.op.load.ptr);
                                 try writer.writeAll(";\n");
-                                
+
                                 // 生成 call
                                 if (next_inst.result) |call_result| {
                                     const call_suffix = self.getRegSuffix(call_result.id);
@@ -5236,12 +5283,12 @@ pub const NativeLinker = struct {
                                         try writer.print(", reg_{d}", .{arg.id});
                                     }
                                     try writer.writeAll(");\n");
-                                    
+
                                     // 标记这两条指令为已提升（在循环体生成时跳过）
                                     try self.markInstructionHoisted(inst);
                                     try self.markInstructionHoisted(next_inst);
                                 }
-                                
+
                                 hoisted_count += 1;
                                 i += 1; // 跳过 call 指令
                             }
@@ -5311,7 +5358,7 @@ pub const NativeLinker = struct {
                             alloca_regs.contains(target_reg.?)
                         else
                             false;
-                        
+
                         if (is_alloca) {
                             // alloca: 生成 load → add → store
                             try writer.print("        reg_{d}.* = runtime.Value.initInt(reg_{d}.*.asInt() + {d});\n", .{ target_reg.?, target_reg.?, const_val.? });
@@ -5341,18 +5388,18 @@ pub const NativeLinker = struct {
         // 收集 phi 节点更新信息
         var phi_updates = std.ArrayListUnmanaged(struct { phi_reg: usize, value_reg: usize }){};
         defer phi_updates.deinit(self.allocator);
-        
+
         for (header_block.instructions.items) |inst| {
             if (inst.op == .phi) {
                 const phi_op = inst.op.phi;
                 const result_reg = inst.result orelse continue;
-                
+
                 std.debug.print("Processing phi reg_{d}, incoming count={d}\n", .{ result_reg.id, phi_op.incoming.len });
-                
+
                 // 找到来自循环内部的值（非初始化块）
                 // 优先级：increment 块 > body 块
                 var found_value: ?usize = null;
-                
+
                 if (loop.increment) |inc_idx| {
                     const inc_block = func.blocks.items[inc_idx];
                     for (phi_op.incoming) |incoming| {
@@ -5367,7 +5414,7 @@ pub const NativeLinker = struct {
                                     }
                                 }
                             }
-                            
+
                             if (defined_here) {
                                 found_value = incoming.value.id;
                                 std.debug.print("  Found in increment block: reg_{d} (verified)\n", .{found_value.?});
@@ -5378,7 +5425,7 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
-                
+
                 // 如果 increment 块没有，尝试 body 块
                 if (found_value == null) {
                     for (phi_op.incoming) |incoming| {
@@ -5393,7 +5440,7 @@ pub const NativeLinker = struct {
                                     }
                                 }
                             }
-                            
+
                             if (defined_here) {
                                 found_value = incoming.value.id;
                                 std.debug.print("  Found in body block: reg_{d} (verified)\n", .{found_value.?});
@@ -5404,7 +5451,7 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
-                
+
                 // 如果还没有，使用简单策略：在 body 块中找到第一个 add 操作
                 if (found_value == null) {
                     std.debug.print("  Fallback: searching for add in body block\n", .{});
@@ -5418,7 +5465,7 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
-                
+
                 if (found_value) |val_reg| {
                     std.debug.print("phi: reg_{d} <- reg_{d}\n", .{ result_reg.id, val_reg });
                     try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = val_reg });
@@ -5538,19 +5585,19 @@ pub const NativeLinker = struct {
         // 数学化简：sum += 1 循环 → sum += N
         if (math_simplify) |ms| {
             try writer.print("    // Mathematical simplification: sum += N\n", .{});
-            
+
             // 检查是否是优化的 alloca
             const target_is_opt_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
                 opt_regs.contains(ms.target_reg)
             else
                 false;
-            
+
             // 检查类型并生成正确的代码
             const ms_target_type = if (self.current_reg_types) |rt| rt.get(ms.target_reg) orelse IR.Type.php_value else IR.Type.php_value;
             const ms_count_type = if (self.current_reg_types) |rt| rt.get(ms.loop_count_reg) orelse IR.Type.i64 else IR.Type.i64;
             const ms_target_tag = @as(std.meta.Tag(IR.Type), ms_target_type);
             const ms_count_tag = @as(std.meta.Tag(IR.Type), ms_count_type);
-            
+
             // 如果是优化的 alloca，强制为 i64
             if (target_is_opt_alloca or ms_target_tag == .i64) {
                 if (ms_count_tag == .i64) {
@@ -5577,19 +5624,19 @@ pub const NativeLinker = struct {
                 for (inc_block.instructions.items) |inst| {
                     if (inst.op == .store) {
                         const inc_reg = inst.op.store.ptr.id;
-                        
+
                         // 获取两个寄存器的类型
                         const inc_type = if (self.current_reg_types) |rt| rt.get(inc_reg) orelse IR.Type.php_value else IR.Type.php_value;
                         const count_type = if (self.current_reg_types) |rt| rt.get(ms.loop_count_reg) orelse IR.Type.i64 else IR.Type.i64;
                         const inc_tag = @as(std.meta.Tag(IR.Type), inc_type);
                         const count_tag = @as(std.meta.Tag(IR.Type), count_type);
-                        
+
                         // 检查是否是优化的 alloca
                         const is_optimized_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
                             opt_regs.contains(inc_reg)
                         else
                             false;
-                        
+
                         // 生成赋值
                         if (is_optimized_alloca or inc_tag == .i64) {
                             // 目标是 i64
@@ -5740,26 +5787,23 @@ pub const NativeLinker = struct {
             if (unroll_factor > 1) {
                 try writer.writeAll("    // Unrolled main loop\n");
             }
-            
+
             // 🔥 初始化 PHI 节点（从 init 块获取初始值）
             for (header_block.instructions.items) |inst| {
                 if (inst.op == .phi) {
                     const phi_op = inst.op.phi;
                     if (inst.result) |res| {
-                        // 查找来自 init 或 entry 的 incoming
+                        // 查找循环外来源的 incoming（基于 LoopMetadata）
                         for (phi_op.incoming) |incoming| {
-                            const is_init = std.mem.indexOf(u8, incoming.block.label, "init") != null or
-                                           std.mem.indexOf(u8, incoming.block.label, "entry") != null or
-                                           incoming.block.label[0] != 'f';  // 不是 for_ 开头
-                            if (is_init) {
-                                try writer.print("    reg_{d} = reg_{d};\n", .{res.id, incoming.value.id});
+                            if (isInitBlock(incoming.block, loop)) {
+                                try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, incoming.value.id });
                                 break;
                             }
                         }
                     }
                 }
             }
-            
+
             try writer.writeAll("    while (true) {\n");
             try writer.print("        // Header: {s}\n", .{header_block.label});
 
@@ -5925,7 +5969,7 @@ pub const NativeLinker = struct {
                                 alloca_regs.contains(target_reg)
                             else
                                 false;
-                            
+
                             if (is_alloca) {
                                 try writer.print("        reg_{d}.* = runtime.Value.initInt(reg_{d}.*.asInt() + {d});\n", .{ target_reg, target_reg, unroll_factor });
                             } else {
@@ -5956,10 +6000,10 @@ pub const NativeLinker = struct {
                 // 检查类型是否匹配
                 const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
                 const value_type = if (self.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
-                
+
                 const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                 const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-                
+
                 if (phi_tag == value_tag) {
                     // 类型匹配，直接赋值
                     try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
@@ -6042,10 +6086,10 @@ pub const NativeLinker = struct {
                     // 检查类型是否匹配
                     const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
                     const value_type = if (self.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
-                    
+
                     const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                     const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-                    
+
                     if (phi_tag == value_tag) {
                         try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .i64 and value_tag == .php_value) {
@@ -6324,10 +6368,10 @@ pub const NativeLinker = struct {
         exit_block: ?usize, // 循环出口块
         increment: ?usize, // 增量块（for 循环）
         is_for_loop: bool, // 是否是 for 循环
-        parent: ?usize = null,  // 父循环索引
-        children: std.ArrayList(usize),  // 子循环索引列表
-        blocks: std.AutoHashMap(usize, void),  // 所有属于此循环的块
-        
+        parent: ?usize = null, // 父循环索引
+        children: std.ArrayList(usize), // 子循环索引列表
+        blocks: std.AutoHashMap(usize, void), // 所有属于此循环的块
+
         pub fn init(allocator: Allocator) !LoopInfo {
             return .{
                 .header = 0,
@@ -6341,12 +6385,12 @@ pub const NativeLinker = struct {
                 .blocks = std.AutoHashMap(usize, void).init(allocator),
             };
         }
-        
+
         pub fn deinit(self: *LoopInfo, allocator: Allocator) void {
             self.children.deinit(allocator);
             self.blocks.deinit();
         }
-        
+
         pub fn contains(self: *const LoopInfo, block_idx: usize) bool {
             return self.blocks.contains(block_idx);
         }
@@ -6453,7 +6497,7 @@ pub const NativeLinker = struct {
             // 这里简化：只收集顶层循环，子循环通过 children 索引访问
         }
     }
-    
+
     /// 递归生成循环（包括子循环）
     fn generateLoopRecursive(
         self: *Self,
@@ -6467,11 +6511,11 @@ pub const NativeLinker = struct {
         depth: usize,
     ) !void {
         std.debug.print("generateLoopRecursive: header={d}, is_for={}, children={d}, depth={d}\n", .{ loop.header, loop.is_for_loop, loop.children.items.len, depth });
-        
+
         // 标记循环块为已处理
         try processed.put(loop.header, {});
         if (loop.increment) |inc| try processed.put(inc, {});
-        
+
         // 生成循环结构
         if (loop.is_for_loop) {
             std.debug.print("  -> calling generateForLoopWithChildren\n", .{});
@@ -6481,14 +6525,14 @@ pub const NativeLinker = struct {
             try self.generateWhileLoopWithChildren(writer, func, loop, processed, block_to_loop, all_loops, cleanup_regs);
         }
     }
-    
+
     // ============================================================================
     // 旧的嵌套循环代码生成（已废弃，保留用于回溯）
     // 标记：DEPRECATED_NESTED_LOOP_V1
     // 废弃原因：PHI 节点处理过于复杂，累加器值传递链断裂
     // 重写版本：generateForLoopWithChildrenV2
     // ============================================================================
-    
+
     /// 生成 for 循环（支持子循环）- V1 已废弃
     /// @deprecated 使用新的 generateForLoopWithChildren (V2)
     /// 此函数已被禁用，如果被调用会产生编译错误
@@ -6504,8 +6548,14 @@ pub const NativeLinker = struct {
         all_loops: []const LoopInfo,
         cleanup_regs: []const usize,
     ) anyerror!void {
-        _ = self; _ = writer; _ = func; _ = loop;
-        _ = processed; _ = block_to_loop; _ = all_loops; _ = cleanup_regs;
+        _ = self;
+        _ = writer;
+        _ = func;
+        _ = loop;
+        _ = processed;
+        _ = block_to_loop;
+        _ = all_loops;
+        _ = cleanup_regs;
         @compileError("DEPRECATED: Use generateForLoopWithChildren V2 instead");
     }
     // 旧函数体已移除，保存在 git tag: before-nested-loop-rewrite
@@ -6517,73 +6567,86 @@ pub const NativeLinker = struct {
         init_reg: ?usize,
     };
 
+    /// 判断一个 PHI incoming 块是否为循环外初始值来源
+    /// 优先使用 LoopMetadata.role，回退到循环块包含检查
+    fn isInitBlock(
+        incoming_block: *const IR.BasicBlock,
+        loop: LoopInfo,
+    ) bool {
+        // 优先：基于 LoopMetadata 判断
+        const role = incoming_block.loop_metadata.role;
+        if (role == .init or role == .none) return true;
+        // 回退：不在循环块集合中的即为 init
+        return !loop.contains(incoming_block.index);
+    }
+
+    /// 查找寄存器的定义指令
+    fn findRegDef(
+        func: *const IR.Function,
+        reg_id: usize,
+    ) ?*const IR.Instruction {
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |r| {
+                    if (r.id == reg_id) return inst;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// 检查寄存器是否是循环归纳变量（递增常量步长）
+    fn isInductionVar(
+        func: *const IR.Function,
+        loop_value_reg: usize,
+    ) bool {
+        const def = findRegDef(func, loop_value_reg) orelse
+            return false;
+        if (def.op != .add) return false;
+        const rhs_def = findRegDef(
+            func,
+            def.op.add.rhs.id,
+        ) orelse return false;
+        return rhs_def.op == .const_int;
+    }
+
     fn analyzeLoopAccumulators(
         self: *Self,
         func: *const IR.Function,
         loop: LoopInfo,
     ) !std.ArrayList(AccumulatorInfo) {
-        var accumulators = try std.ArrayList(AccumulatorInfo).initCapacity(self.allocator, 0);
-        
+        var accumulators = try std.ArrayList(AccumulatorInfo)
+            .initCapacity(self.allocator, 0);
+
         const header_block = func.blocks.items[loop.header];
-        
-        // 遍历 header 块的 PHI 节点
+
         for (header_block.instructions.items) |inst| {
             if (inst.op != .phi) continue;
-            
             const phi_op = inst.op.phi;
             const result_reg = inst.result orelse continue;
-            
             if (phi_op.incoming.len < 2) continue;
-            
+
             var init_value: ?usize = null;
             var loop_value: ?usize = null;
-            var is_from_init = false;
-            
+
             for (phi_op.incoming) |incoming| {
-                if (std.mem.indexOf(u8, incoming.block.label, "init") != null) {
+                if (isInitBlock(incoming.block, loop)) {
                     init_value = incoming.value.id;
-                    is_from_init = true;
                 } else {
                     loop_value = incoming.value.id;
                 }
             }
-            
-            // 如果没有 init 块，第一个是初始值
-            if (!is_from_init and phi_op.incoming.len >= 2) {
+
+            // 回退：如果仍未区分，首项为 init
+            if (init_value == null and loop_value == null and
+                phi_op.incoming.len >= 2)
+            {
                 init_value = phi_op.incoming[0].value.id;
                 loop_value = phi_op.incoming[1].value.id;
             }
-            
+
             if (loop_value) |lv| {
-                // 检查是否是循环变量：add 的 rhs 是常量（通常是 1）
-                const is_loop_var = blk: {
-                    for (func.blocks.items) |block| {
-                        for (block.instructions.items) |block_inst| {
-                            if (block_inst.result) |res| {
-                                if (res.id == lv and block_inst.op == .add) {
-                                    const add_op = block_inst.op.add;
-                                    
-                                    // 检查 rhs 是否是常量
-                                    for (func.blocks.items) |b| {
-                                        for (b.instructions.items) |i| {
-                                            if (i.result) |r| {
-                                                if (r.id == add_op.rhs.id) {
-                                                    if (i.op == .const_int) {
-                                                        break :blk true;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    break :blk false;
-                };
-                
-                // 如果不是循环变量，就是累加器
-                if (!is_loop_var) {
+                if (!isInductionVar(func, lv)) {
                     try accumulators.append(self.allocator, .{
                         .reg_id = result_reg.id,
                         .type_ = result_reg.type_,
@@ -6592,10 +6655,10 @@ pub const NativeLinker = struct {
                 }
             }
         }
-        
+
         return accumulators;
     }
-    
+
     /// 生成 for 循环（支持子循环）- V2 新实现
     fn generateForLoopWithChildren(
         self: *Self,
@@ -6617,59 +6680,56 @@ pub const NativeLinker = struct {
         //     indent_len += 4;
         // }
         // const base_indent = indent_buf[0..indent_len];
-        
-        std.debug.print("=== V2: generateForLoopWithChildren header={d}, children={d}, depth={d} ===\n", 
-            .{loop.header, loop.children.items.len, depth});
-        
+
+        std.debug.print("=== V2: generateForLoopWithChildren header={d}, children={d}, depth={d} ===\n", .{ loop.header, loop.children.items.len, depth });
+
         // 分析当前循环的累加器
         var accumulators = try self.analyzeLoopAccumulators(func, loop);
         defer accumulators.deinit(self.allocator);
-        
+
         // 如果没有子循环且 body 没有条件分支，使用优化版本
         const body_block = func.blocks.items[loop.body_start];
         const body_has_cond = if (body_block.terminator) |term| term == .cond_br else false;
-        
+
         if (loop.children.items.len == 0 and !body_has_cond) {
             // 简化路径：无子循环，无条件分支
             // 但仍需初始化 PHI 节点
             const header_block = func.blocks.items[loop.header];
-            
-            // 初始化 PHI 节点（从 init 块获取初始值）
+
+            // 初始化 PHI 节点（从循环外块获取初始值）
             for (header_block.instructions.items) |inst| {
                 if (inst.op == .phi) {
                     const phi_op = inst.op.phi;
                     if (inst.result) |res| {
-                        // 查找来自 init 的 incoming
                         for (phi_op.incoming) |incoming| {
-                            if (std.mem.indexOf(u8, incoming.block.label, "init") != null or 
-                                incoming.block.label[0] != 'f') {  // 不是 for_ 开头
-                                try writer.print("        reg_{d} = {d};\n", .{res.id, incoming.value.id});
+                            if (isInitBlock(incoming.block, loop)) {
+                                try writer.print("        reg_{d} = {d};\n", .{ res.id, incoming.value.id });
                                 break;
                             }
                         }
                     }
                 }
             }
-            
+
             try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
             return;
         }
-        
+
         // 有子循环：使用新的生成策略
         var code_list = writer.context.self;
-        
+
         const header_block = func.blocks.items[loop.header];
-        
+
         // 生成外层循环结构
         try writer.writeAll("    while (true) {\n");
         try writer.print("        // Header: {s}\n", .{header_block.label});
-        
+
         // 生成 header 指令
         for (header_block.instructions.items) |inst| {
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
-        
+
         // 生成条件判断
         if (header_block.terminator) |term| {
             if (term == .cond_br) {
@@ -6685,114 +6745,113 @@ pub const NativeLinker = struct {
                 try writer.writeAll(")) break;\n");
             }
         }
-        
+
         // 生成 body
         try writer.print("        // Body: {s}\n", .{body_block.label});
         for (body_block.instructions.items) |inst| {
             try code_list.appendSlice(self.allocator, "        ");
             try self.generateInstructionSimple(code_list, inst);
         }
-        
+
         // 生成子循环
         for (loop.children.items) |child_idx| {
             const child_loop = all_loops[child_idx];
             try writer.writeAll("        // Nested loop\n");
             try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs, depth + 1);
-            
+
             // 关键：子循环结束后，将子循环的累加器传递给外层
             // 分析子循环的累加器
             var child_accumulators = try self.analyzeLoopAccumulators(func, child_loop);
             defer child_accumulators.deinit(self.allocator);
-            
+
             // 对于外层的每个累加器，检查是否需要从子循环获取值
             for (accumulators.items) |acc| {
                 // 查找外层累加器的 PHI incoming
                 for (header_block.instructions.items) |inst| {
                     if (inst.op == .phi) {
                         if (inst.result) |res| {
-                        if (res.id == acc.reg_id) {
-                            const phi_op = inst.op.phi;
-                            // 查找来自 body 或 increment 的 incoming（非 header）
-                            for (phi_op.incoming) |incoming| {
-                                if (incoming.block != header_block) {
-                                    // 这个 incoming 值需要从子循环累加器获取
-                                    if (child_accumulators.items.len > 0) {
-                                        // 简单策略：使用第一个子累加器（通常只有一个）
-                                        const child_acc = child_accumulators.items[0];
-                                        try writer.print("        reg_{d} = reg_{d};\n", 
-                                            .{ incoming.value.id, child_acc.reg_id });
+                            if (res.id == acc.reg_id) {
+                                const phi_op = inst.op.phi;
+                                // 查找来自 body 或 increment 的 incoming（非 header）
+                                for (phi_op.incoming) |incoming| {
+                                    if (incoming.block != header_block) {
+                                        // 这个 incoming 值需要从子循环累加器获取
+                                        if (child_accumulators.items.len > 0) {
+                                            // 简单策略：使用第一个子累加器（通常只有一个）
+                                            const child_acc = child_accumulators.items[0];
+                                            try writer.print("        reg_{d} = reg_{d};\n", .{ incoming.value.id, child_acc.reg_id });
+                                        }
+                                        // 不 break，继续处理其他 incoming
                                     }
-                                    // 不 break，继续处理其他 incoming
                                 }
+                                break; // 找到对应的 PHI 后退出
                             }
-                            break;  // 找到对应的 PHI 后退出
                         }
                     }
                 }
             }
-        }
-        
-        // 生成 increment 块
-        if (loop.increment) |inc_idx| {
-            const inc_block = func.blocks.items[inc_idx];
-            try writer.print("        // Increment: {s}\n", .{inc_block.label});
-            for (inc_block.instructions.items) |inst| {
-                if (inst.op != .phi) {  // PHI 在后面统一处理
-                    try code_list.appendSlice(self.allocator, "        ");
-                    try self.generateInstructionSimple(code_list, inst);
-                }
-            }
-        }
-        
-        // 更新所有 PHI 节点
-        for (header_block.instructions.items) |inst| {
-            if (inst.op == .phi) {
-                const phi_op = inst.op.phi;
-                const result_reg = inst.result orelse continue;
-                
-                // 找到来自 increment 或 body 的值
-                var update_value: ?usize = null;
-                if (loop.increment) |inc_idx| {
-                    const inc_block = func.blocks.items[inc_idx];
-                    for (phi_op.incoming) |incoming| {
-                        if (incoming.block == inc_block) {
-                            update_value = incoming.value.id;
-                            break;
-                        }
-                    }
-                }
-                
-                if (update_value == null) {
-                    for (phi_op.incoming) |incoming| {
-                        if (incoming.block == body_block) {
-                            update_value = incoming.value.id;
-                            break;
-                        }
-                    }
-                }
-                
-                if (update_value) |val_reg| {
-                    const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
-                    const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
-                    
-                    const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
-                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-                    
-                    if (phi_tag == value_tag) {
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
-                    } else if (phi_tag == .i64 and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
-                    } else {
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+
+            // 生成 increment 块
+            if (loop.increment) |inc_idx| {
+                const inc_block = func.blocks.items[inc_idx];
+                try writer.print("        // Increment: {s}\n", .{inc_block.label});
+                for (inc_block.instructions.items) |inst| {
+                    if (inst.op != .phi) { // PHI 在后面统一处理
+                        try code_list.appendSlice(self.allocator, "        ");
+                        try self.generateInstructionSimple(code_list, inst);
                     }
                 }
             }
+
+            // 更新所有 PHI 节点
+            for (header_block.instructions.items) |inst| {
+                if (inst.op == .phi) {
+                    const phi_op = inst.op.phi;
+                    const result_reg = inst.result orelse continue;
+
+                    // 找到来自 increment 或 body 的值
+                    var update_value: ?usize = null;
+                    if (loop.increment) |inc_idx| {
+                        const inc_block = func.blocks.items[inc_idx];
+                        for (phi_op.incoming) |incoming| {
+                            if (incoming.block == inc_block) {
+                                update_value = incoming.value.id;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (update_value == null) {
+                        for (phi_op.incoming) |incoming| {
+                            if (incoming.block == body_block) {
+                                update_value = incoming.value.id;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (update_value) |val_reg| {
+                        const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
+                        const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
+
+                        const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                        const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+
+                        if (phi_tag == value_tag) {
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                        } else if (phi_tag == .i64 and value_tag == .php_value) {
+                            try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
+                        } else {
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                        }
+                    }
+                }
+            }
+
+            try writer.writeAll("    }\n");
         }
-        
-        try writer.writeAll("    }\n");
     }
-    }
-    
+
     /// 生成 while 循环（支持子循环）
     fn generateWhileLoopWithChildren(
         self: *Self,
@@ -6807,7 +6866,7 @@ pub const NativeLinker = struct {
         _ = all_loops;
         _ = block_to_loop;
         _ = processed;
-        
+
         // 简化实现：先生成基本的 while 循环
         try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
     }
@@ -6821,16 +6880,16 @@ pub const NativeLinker = struct {
             }
             raw_loops.deinit(self.allocator);
         }
-        
+
         for (func.blocks.items, 0..) |block, header_idx| {
             const term = block.terminator orelse continue;
             if (term != .cond_br) continue;
 
             const preds = cfg.predecessors.get(header_idx) orelse continue;
-            
+
             var has_back_edge = false;
             var back_edge_source: usize = 0;
-            
+
             for (preds.items) |pred_idx| {
                 if (pred_idx >= header_idx) {
                     has_back_edge = true;
@@ -6845,7 +6904,7 @@ pub const NativeLinker = struct {
                 }
             }
         }
-        
+
         // 第二步：计算每个循环包含的所有块（使用 DFS）
         std.debug.print("Computing loop blocks...\n", .{});
         for (raw_loops.items, 0..) |*loop, i| {
@@ -6853,10 +6912,10 @@ pub const NativeLinker = struct {
             try self.computeLoopBlocks(func, cfg, loop);
             std.debug.print("Loop {d}: blocks count={d}\n", .{ i, loop.blocks.count() });
         }
-        
+
         // 第三步：构建循环嵌套树（基于块包含关系）
         try self.buildLoopNestingTree(&raw_loops);
-        
+
         // 第四步：保存所有循环到 cfg.all_loops
         for (raw_loops.items) |loop| {
             var copied_loop = loop;
@@ -6869,7 +6928,7 @@ pub const NativeLinker = struct {
             }
             try cfg.all_loops.append(self.allocator, copied_loop);
         }
-        
+
         // 第五步：只保留顶层循环到 cfg.loops
         for (raw_loops.items) |loop| {
             if (loop.parent == null) {
@@ -6886,33 +6945,32 @@ pub const NativeLinker = struct {
             }
         }
     }
-    
+
     /// 计算循环包含的所有块（DFS 从 header 到 exit）
     fn computeLoopBlocks(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis, loop: *LoopInfo) !void {
-        
         var visited = std.AutoHashMap(usize, void).init(cfg.allocator);
         defer visited.deinit();
-        
+
         var stack = try std.ArrayList(usize).initCapacity(cfg.allocator, 0);
         defer stack.deinit(cfg.allocator);
-        
+
         try stack.append(cfg.allocator, loop.header);
         try loop.blocks.put(loop.header, {});
-        
+
         while (stack.items.len > 0) {
             const current = stack.pop() orelse break;
             if (visited.contains(current)) continue;
             try visited.put(current, {});
-            
+
             // 不要越过 exit 块
             if (loop.exit_block) |exit| {
                 if (current == exit) continue;
             }
-            
+
             // 遍历后继
             const block = func.blocks.items[current];
             const term = block.terminator orelse continue;
-            
+
             switch (term) {
                 .br => |target| {
                     const target_idx = self.tryFindBlockIndex(func, target);
@@ -6926,7 +6984,7 @@ pub const NativeLinker = struct {
                 .cond_br => |cond| {
                     const then_idx = self.tryFindBlockIndex(func, cond.then_block);
                     const else_idx = self.tryFindBlockIndex(func, cond.else_block);
-                    
+
                     if (then_idx) |idx| {
                         if (!visited.contains(idx)) {
                             try stack.append(cfg.allocator, idx);
@@ -6944,22 +7002,22 @@ pub const NativeLinker = struct {
             }
         }
     }
-    
+
     /// 构建循环嵌套树（基于块包含关系）
     fn buildLoopNestingTree(self: *Self, loops: *std.ArrayList(LoopInfo)) !void {
-        
+
         // 对于每个循环，找到它的最内层父循环
         for (loops.items, 0..) |*loop, i| {
             var parent_idx: ?usize = null;
             var min_blocks: usize = std.math.maxInt(usize);
-            
+
             std.debug.print("Checking loop {d} (header={d}, blocks={d})\n", .{ i, loop.header, loop.blocks.count() });
-            
+
             for (loops.items, 0..) |*other, j| {
                 if (i == j) continue;
-                
+
                 std.debug.print("  vs loop {d} (header={d}, blocks={d}): contains header? {}\n", .{ j, other.header, other.blocks.count(), other.contains(loop.header) });
-                
+
                 // 如果 other 包含 loop 的 header，且 other 的块数更少（更内层）
                 if (other.contains(loop.header) and other.blocks.count() < min_blocks) {
                     parent_idx = j;
@@ -6967,7 +7025,7 @@ pub const NativeLinker = struct {
                     std.debug.print("    -> potential parent\n", .{});
                 }
             }
-            
+
             if (parent_idx) |p| {
                 loop.parent = p;
                 try loops.items[p].children.append(self.allocator, i);
@@ -7033,7 +7091,7 @@ pub const NativeLinker = struct {
             is_for_loop = true;
             increment = back_edge_source;
         }
-        
+
         const body_end = if (exit > body_start) exit - 1 else back_edge_source;
 
         var loop = try LoopInfo.init(self.allocator);
@@ -7043,7 +7101,7 @@ pub const NativeLinker = struct {
         loop.exit_block = exit;
         loop.increment = increment;
         loop.is_for_loop = is_for_loop;
-        
+
         return loop;
     }
 
@@ -8028,7 +8086,7 @@ pub const NativeLinker = struct {
         }
         std.debug.panic("Block not found in function", .{});
     }
-    
+
     fn tryFindBlockIndex(self: *const Self, func: *const IR.Function, target: *const IR.BasicBlock) ?usize {
         _ = self;
         const target_ptr = @intFromPtr(target);
@@ -8740,7 +8798,7 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
-                        
+
                         try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
@@ -8787,7 +8845,7 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
-                        
+
                         try writer.print("        _ = try runtime.{s}(", .{runtime_name});
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
@@ -8851,10 +8909,10 @@ pub const NativeLinker = struct {
             .array_set => |op| {
                 var array_buf: [32]u8 = undefined;
                 const array = try std.fmt.bufPrint(&array_buf, "reg_{d}", .{op.array.id});
-                
+
                 // 根据 key 的类型生成不同的代码
                 try writer.print("        try {s}.asArray().set(runtime.runtime_allocator, ", .{array});
-                
+
                 const key_type_tag = @as(std.meta.Tag(IR.Type), op.key.type_);
                 if (key_type_tag == .i64) {
                     try writer.print("runtime.ArrayKey{{ .integer = reg_{d} }}, ", .{op.key.id});
@@ -8864,7 +8922,7 @@ pub const NativeLinker = struct {
                     // fallback: 转换为 Value 再用 setByValue
                     try writer.print("runtime.ArrayKey{{ .integer = reg_{d}.toInt() }}, ", .{op.key.id});
                 }
-                
+
                 // 智能处理值的类型
                 if (op.value.type_ == .php_value) {
                     try writer.print("reg_{d});\n", .{op.value.id});
@@ -8923,7 +8981,7 @@ pub const NativeLinker = struct {
             .cast => |op| {
                 var value_buf: [32]u8 = undefined;
                 const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
-                
+
                 // 获取源寄存器的实际类型（可能被 phi 特化修改）
                 const src_real_type = if (self.current_register_types) |types|
                     types.get(op.value.id) orelse op.value.type_
@@ -8931,7 +8989,7 @@ pub const NativeLinker = struct {
                     op.value.type_;
                 const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
                 const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
-                
+
                 // 根据目标类型生成不同的转换代码
                 if (to_tag == .php_value) {
                     // 从基本类型转换到php_value

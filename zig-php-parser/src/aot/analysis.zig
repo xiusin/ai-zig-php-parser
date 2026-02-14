@@ -52,7 +52,7 @@ pub const DominatorTree = struct {
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.idoms);
-        
+
         for (self.frontiers) |*list| {
             list.deinit(self.allocator);
         }
@@ -62,14 +62,14 @@ pub const DominatorTree = struct {
             list.deinit(self.allocator);
         }
         self.allocator.free(self.children);
-        
+
         self.allocator.free(self.levels);
     }
 
     /// Check if block `a` dominates block `b`
     pub fn dominates(self: *const Self, a: *BasicBlock, b: *BasicBlock) bool {
         if (a == b) return true;
-        
+
         // If a is deeper than b, it cannot dominate b
         if (self.levels[a.index] >= self.levels[b.index]) return false;
 
@@ -80,7 +80,7 @@ pub const DominatorTree = struct {
             if (self.levels[idom.index] < self.levels[a.index]) return false;
             current = idom;
         }
-        
+
         return false;
     }
 
@@ -99,40 +99,40 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
     if (num_blocks == 0) return dt;
 
     const entry_block = func.blocks.items[0];
-    
+
     // 1. Compute Reverse Post-Order (RPO)
     var rpo = try std.ArrayListUnmanaged(*BasicBlock).initCapacity(allocator, num_blocks);
     defer rpo.deinit(allocator);
-    
+
     var visited = try std.DynamicBitSet.initEmpty(allocator, num_blocks);
     defer visited.deinit();
-    
+
     try computeRPO(allocator, entry_block, &rpo, &visited);
-    
+
     // We need to reverse the result of post-order traversal to get RPO
     std.mem.reverse(*BasicBlock, rpo.items);
-    
+
     // Create map from block to RPO index for fast comparison
     var rpo_indices = try allocator.alloc(usize, num_blocks);
     defer allocator.free(rpo_indices);
-    
+
     for (rpo.items, 0..) |block, i| {
         rpo_indices[block.index] = i;
     }
 
     // 2. Compute Immediate Dominators (Iterative Algorithm)
     dt.idoms[entry_block.index] = entry_block;
-    
+
     var changed = true;
     while (changed) {
         changed = false;
-        
+
         // Iterate all blocks in RPO, except start node
         for (rpo.items) |block| {
             if (block == entry_block) continue;
-            
+
             var new_idom: ?*BasicBlock = null;
-            
+
             // Find first processed predecessor
             for (block.predecessors.items) |pred| {
                 if (dt.idoms[pred.index] != null) {
@@ -140,17 +140,17 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
                     break;
                 }
             }
-            
+
             if (new_idom) |first_processed| {
                 var temp_idom = first_processed;
-                
+
                 // Intersect with other processed predecessors
                 for (block.predecessors.items) |pred| {
                     if (pred != temp_idom and dt.idoms[pred.index] != null) {
                         temp_idom = intersect(temp_idom, pred, dt.idoms, rpo_indices);
                     }
                 }
-                
+
                 if (dt.idoms[block.index] != temp_idom) {
                     dt.idoms[block.index] = temp_idom;
                     changed = true;
@@ -158,7 +158,7 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
             }
         }
     }
-    
+
     // Correct entry block's idom to be null (it has no dominator)
     dt.idoms[entry_block.index] = null;
 
@@ -168,7 +168,7 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
             dt.levels[block.index] = 0;
             continue;
         }
-        
+
         if (dt.idoms[block.index]) |idom| {
             try dt.children[idom.index].append(allocator, block);
             // We'll compute levels in a separate pass or just assume valid order
@@ -176,19 +176,19 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
             // But we can do a BFS/DFS on the tree later.
         }
     }
-    
+
     // Compute levels using BFS on the dominator tree
     var queue = std.ArrayListUnmanaged(*BasicBlock){};
     defer queue.deinit(allocator);
-    
+
     try queue.append(allocator, entry_block);
     dt.levels[entry_block.index] = 0;
-    
+
     var head: usize = 0;
     while (head < queue.items.len) {
         const current = queue.items[head];
         head += 1;
-        
+
         const current_level = dt.levels[current.index];
         for (dt.children[current.index].items) |child| {
             dt.levels[child.index] = current_level + 1;
@@ -214,7 +214,7 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
                     if (!found) {
                         try dt.frontiers[runner.index].append(allocator, block);
                     }
-                    
+
                     if (dt.idoms[runner.index]) |next_runner| {
                         runner = next_runner;
                     } else {
@@ -231,13 +231,13 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
 /// Helper for RPO traversal (actually computes Post-Order)
 fn computeRPO(allocator: Allocator, block: *BasicBlock, list: *std.ArrayListUnmanaged(*BasicBlock), visited: *std.DynamicBitSet) !void {
     visited.set(block.index);
-    
+
     for (block.successors.items) |succ| {
         if (!visited.isSet(succ.index)) {
             try computeRPO(allocator, succ, list, visited);
         }
     }
-    
+
     try list.append(allocator, block);
 }
 
@@ -245,7 +245,7 @@ fn computeRPO(allocator: Allocator, block: *BasicBlock, list: *std.ArrayListUnma
 fn intersect(b1: *BasicBlock, b2: *BasicBlock, idoms: []?*BasicBlock, rpo_indices: []usize) *BasicBlock {
     var finger1 = b1;
     var finger2 = b2;
-    
+
     while (finger1 != finger2) {
         while (rpo_indices[finger1.index] > rpo_indices[finger2.index]) {
             if (idoms[finger1.index]) |next| {
@@ -262,7 +262,7 @@ fn intersect(b1: *BasicBlock, b2: *BasicBlock, idoms: []?*BasicBlock, rpo_indice
             }
         }
     }
-    
+
     return finger1;
 }
 
@@ -396,7 +396,7 @@ pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const Domi
             // Check if successor dominates predecessor (back edge)
             if (dt.dominates(succ, block)) {
                 // Found loop header `succ` and back edge `block -> succ`
-                
+
                 // Get or create loop for this header
                 var loop_ptr: *Loop = undefined;
                 if (info.loop_map.get(succ)) |existing| {
@@ -420,14 +420,14 @@ pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const Domi
 
     // 2. Build loop hierarchy (nesting)
     // If loop A's header is in loop B, then A is nested in B (unless they share header)
-    // If they share header, they are merged or one is part of another. 
+    // If they share header, they are merged or one is part of another.
     // In our logic above, one header = one loop struct.
     // So we just check if loop A's header is contained in loop B's blocks.
-    
+
     // We need to iterate carefully. Let's collect all loops first.
     var all_loops = std.ArrayListUnmanaged(*Loop){};
     defer all_loops.deinit(allocator);
-    
+
     var it = info.loop_map.iterator();
     while (it.next()) |entry| {
         try all_loops.append(allocator, entry.value_ptr.*);
@@ -435,16 +435,16 @@ pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const Domi
 
     // Sort loops by size (number of blocks) - usually inner loops are smaller?
     // Or just strictly check containment.
-    
+
     for (all_loops.items) |loop| {
         var parent_candidate: ?*Loop = null;
-        
+
         // Find the "nearest" enclosing loop
         // A loop L1 is nested in L2 if L1.header is in L2.blocks AND L1.header != L2.header
-        
+
         for (all_loops.items) |potential_parent| {
             if (loop == potential_parent) continue;
-            
+
             if (potential_parent.contains(loop.header)) {
                 // Found a container. Is it the tightest one?
                 // If we already have a parent, check if potential_parent is nested in current parent
@@ -458,7 +458,7 @@ pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const Domi
                 }
             }
         }
-        
+
         if (parent_candidate) |parent| {
             loop.parent = parent;
             try parent.sub_loops.append(allocator, loop);
@@ -471,13 +471,102 @@ pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const Domi
     return info;
 }
 
+/// 填充 BasicBlock 的 LoopMetadata（由 computeLoops 结果驱动）
+/// 遍历所有检测到的循环，为每个块设置其在循环中的角色和深度
+/// @ownership NON-OWNING (allocator)
+pub fn populateLoopMetadata(func: *Function, loop_info: *const LoopInfo) void {
+    // 先重置所有块的 loop_metadata
+    for (func.blocks.items) |block| {
+        block.loop_metadata = .{};
+    }
+
+    // 递归填充每一层循环
+    for (loop_info.loops.items) |loop| {
+        populateLoopMetadataRecursive(loop, 1, null);
+    }
+}
+
+/// 递归填充循环元数据
+fn populateLoopMetadataRecursive(
+    loop: *const Loop,
+    depth: u32,
+    parent_header: ?*BasicBlock,
+) void {
+    const header = loop.header;
+
+    // 标记 header
+    header.loop_metadata.role = .header;
+    header.loop_metadata.depth = depth;
+    header.loop_metadata.header = header;
+    header.loop_metadata.parent_header = parent_header;
+
+    // 识别 latch（回边源）和 exit（非循环后继）
+    for (loop.blocks.items) |block| {
+        // 设置基础深度（如果未被子循环覆盖）
+        if (block.loop_metadata.depth < depth) {
+            block.loop_metadata.depth = depth;
+            block.loop_metadata.header = header;
+            block.loop_metadata.parent_header = parent_header;
+        }
+
+        // 检查是否是 latch（后继包含 header）
+        for (block.successors.items) |succ| {
+            if (succ == header and block != header) {
+                block.loop_metadata.role = .latch;
+                block.loop_metadata.latch = block;
+                header.loop_metadata.latch = block;
+            }
+        }
+
+        // 如果 header 有条件分支，exit 是不在循环中的后继
+        if (block == header) {
+            if (block.terminator) |term| {
+                switch (term) {
+                    .cond_br => |cb| {
+                        if (!loop.contains(cb.then_block)) {
+                            header.loop_metadata.exit = cb.then_block;
+                            cb.then_block.loop_metadata.role = .exit;
+                        }
+                        if (!loop.contains(cb.else_block)) {
+                            header.loop_metadata.exit = cb.else_block;
+                            cb.else_block.loop_metadata.role = .exit;
+                        }
+                        // body 是循环内的后继
+                        if (loop.contains(cb.then_block) and
+                            cb.then_block != header)
+                        {
+                            header.loop_metadata.body = cb.then_block;
+                            if (cb.then_block.loop_metadata.role == .none) {
+                                cb.then_block.loop_metadata.role = .body;
+                            }
+                        } else if (loop.contains(cb.else_block) and
+                            cb.else_block != header)
+                        {
+                            header.loop_metadata.body = cb.else_block;
+                            if (cb.else_block.loop_metadata.role == .none) {
+                                cb.else_block.loop_metadata.role = .body;
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    // 递归处理子循环（子循环深度更大，覆盖父循环设置）
+    for (loop.sub_loops.items) |sub_loop| {
+        populateLoopMetadataRecursive(sub_loop, depth + 1, header);
+    }
+}
+
 /// Helper to add blocks to a loop (Reverse DFS from back-edge source)
 fn addLoopBlocks(allocator: Allocator, loop: *Loop, back_edge_source: *BasicBlock, header: *BasicBlock) !void {
     // If header is not in loop yet, add it
     if (!loop.contains(header)) {
         try loop.blocks.append(allocator, header);
     }
-    
+
     // If back_edge_source is header (self-loop), we are done
     if (back_edge_source == header) return;
 
@@ -494,7 +583,7 @@ fn addLoopBlocks(allocator: Allocator, loop: *Loop, back_edge_source: *BasicBloc
         const block = worklist.pop().?;
         for (block.predecessors.items) |pred| {
             if (pred == header) continue; // Don't go past header
-            
+
             if (!loop.contains(pred)) {
                 try loop.blocks.append(allocator, pred);
                 try worklist.append(allocator, pred);

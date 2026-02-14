@@ -317,8 +317,29 @@ pub const Scope = struct {
         }
         return false;
     }
-};
 
+    /// 获取当前作用域的循环嵌套深度
+    /// 沿 parent 链计数 kind == .loop 的作用域数量
+    pub fn getLoopDepth(self: *const Self) u32 {
+        var depth: u32 = 0;
+        var cur: ?*const Self = self;
+        while (cur) |s| {
+            if (s.kind == .loop) depth += 1;
+            cur = if (s.parent) |p| @ptrCast(p) else null;
+        }
+        return depth;
+    }
+
+    /// 查找最近的循环作用域
+    pub fn findEnclosingLoop(self: *const Self) ?*const Self {
+        var cur: ?*const Self = self;
+        while (cur) |s| {
+            if (s.kind == .loop) return s;
+            cur = if (s.parent) |p| @ptrCast(p) else null;
+        }
+        return null;
+    }
+};
 
 /// Symbol table managing all scopes
 pub const SymbolTable = struct {
