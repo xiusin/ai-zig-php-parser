@@ -2372,29 +2372,41 @@ pub const NativeLinker = struct {
         else
             false;
 
-        // 使用修正后的类型（如果可用）
-        const corrected_type_tag = if (self.current_register_types) |types| blk: {
+        // alloca 寄存器总是 *runtime.Value，需要解引用
+        if (is_alloca) {
+            return writer.print("reg_{d}.*", .{reg_id});
+        }
+
+        // 优先使用推断类型（来自 TypeInferencePass）
+        const inferred_tag: ?std.meta.Tag(IR.Type) = if (self.current_inferred_types) |itypes| blk: {
+            if (itypes.get(reg_id)) |inferred| {
+                break :blk @as(std.meta.Tag(IR.Type), inferred);
+            }
+            break :blk null;
+        } else null;
+
+        // 其次使用寄存器声明类型
+        const register_tag: std.meta.Tag(IR.Type) = if (self.current_register_types) |types| blk: {
             if (types.get(reg_id)) |corrected_type| {
                 break :blk @as(std.meta.Tag(IR.Type), corrected_type);
             }
             break :blk type_tag;
         } else type_tag;
 
-        // alloca 寄存器总是 *runtime.Value，需要解引用
-        if (is_alloca) {
-            return writer.print("reg_{d}.*", .{reg_id});
-        }
+        // 最终有效类型：推断类型 > 寄存器类型 > 参数类型
+        const effective_tag = inferred_tag orelse register_tag;
 
-        // 如果修正后的类型已经是 php_value，直接使用
-        if (corrected_type_tag == .php_value) {
+        // 如果有效类型已经是 php_value，直接使用
+        if (effective_tag == .php_value) {
             return writer.print("reg_{d}", .{reg_id});
         }
 
-        if (corrected_type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
-        if (corrected_type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
-        if (corrected_type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
+        // 标量类型需要包装为 Value
+        if (effective_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
+        if (effective_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
+        if (effective_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
 
-        // 如果原始类型是基本类型，也转换
+        // 回退：原始类型是基本类型也转换
         if (type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
         if (type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
         if (type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
@@ -2414,22 +2426,31 @@ pub const NativeLinker = struct {
         else
             false;
 
-        // 使用修正后的类型
-        const corrected_type_tag = if (self.current_register_types) |types| blk: {
+        // alloca 寄存器总是 *runtime.Value，需要解引用
+        if (is_alloca) {
+            return writer.print("reg_{d}.*.toBool()", .{reg_id});
+        }
+
+        // 优先使用推断类型
+        const inferred_tag: ?std.meta.Tag(IR.Type) = if (self.current_inferred_types) |itypes| blk: {
+            if (itypes.get(reg_id)) |inferred| {
+                break :blk @as(std.meta.Tag(IR.Type), inferred);
+            }
+            break :blk null;
+        } else null;
+
+        const register_tag: std.meta.Tag(IR.Type) = if (self.current_register_types) |types| blk: {
             if (types.get(reg_id)) |corrected_type| {
                 break :blk @as(std.meta.Tag(IR.Type), corrected_type);
             }
             break :blk type_tag;
         } else type_tag;
 
-        // alloca 寄存器总是 *runtime.Value，需要解引用
-        if (is_alloca) {
-            return writer.print("reg_{d}.*.toBool()", .{reg_id});
-        }
+        const effective_tag = inferred_tag orelse register_tag;
 
-        if (corrected_type_tag == .bool) return writer.print("reg_{d}", .{reg_id});
-        if (corrected_type_tag == .i64) return writer.print("(reg_{d} != 0)", .{reg_id});
-        if (corrected_type_tag == .f64) return writer.print("(reg_{d} != 0.0)", .{reg_id});
+        if (effective_tag == .bool) return writer.print("reg_{d}", .{reg_id});
+        if (effective_tag == .i64) return writer.print("(reg_{d} != 0)", .{reg_id});
+        if (effective_tag == .f64) return writer.print("(reg_{d} != 0.0)", .{reg_id});
         return writer.print("reg_{d}.toBool()", .{reg_id});
     }
 
@@ -4788,9 +4809,10 @@ pub const NativeLinker = struct {
                     try writer.print("    // Block {d}: {s}\n", .{ exit_idx, exit_block.label });
 
                     // 生成指令并记录最后一个返回值
+                    var exit_inst_list = writer.context.self;
                     for (exit_block.instructions.items) |inst| {
-                        try writer.writeAll("    ");
-                        try self.generateInstruction(writer, inst);
+                        try exit_inst_list.appendSlice(self.allocator, "    ");
+                        try self.generateInstructionSimple(exit_inst_list, inst);
 
                         // 记录最后一个非 alloca 赋值
                         if (inst.result) |res| {
@@ -4804,12 +4826,157 @@ pub const NativeLinker = struct {
                         }
                     }
 
+                    // 处理 exit block 的终止指令（if/else 等）
+                    if (exit_block.terminator) |term| {
+                        var exit_code_list = writer.context.self;
+                        switch (term) {
+                            .cond_br => |cb| {
+                                // 获取寄存器的实际声明类型
+                                const decl_type: std.meta.Tag(IR.Type) = if (self.current_reg_types) |rt|
+                                    @as(std.meta.Tag(IR.Type), rt.get(cb.cond.id) orelse IR.Type.php_value)
+                                else
+                                    .php_value;
+                                if (decl_type == .bool) {
+                                    try writer.print("    if (reg_{d}) {{\n", .{cb.cond.id});
+                                } else if (decl_type == .i64) {
+                                    try writer.print("    if (reg_{d} != 0) {{\n", .{cb.cond.id});
+                                } else {
+                                    try writer.print("    if (reg_{d}.toBool()) {{\n", .{cb.cond.id});
+                                }
+                                // 生成 then 块
+                                const then_idx = @as(usize, cb.then_block.index);
+                                const then_blk = func.blocks.items[then_idx];
+                                for (then_blk.instructions.items) |inst| {
+                                    try exit_code_list.appendSlice(self.allocator, "        ");
+                                    try self.generateInstructionSimple(exit_code_list, inst);
+                                }
+                                try processed.put(then_idx, {});
+                                try writer.writeAll("    } else {\n");
+                                // 生成 else 块
+                                const else_idx = @as(usize, cb.else_block.index);
+                                const else_blk = func.blocks.items[else_idx];
+                                for (else_blk.instructions.items) |inst| {
+                                    try exit_code_list.appendSlice(self.allocator, "        ");
+                                    try self.generateInstructionSimple(exit_code_list, inst);
+                                }
+                                try processed.put(else_idx, {});
+                                try writer.writeAll("    }\n");
+                                // 标记 merge 块为已处理
+                                if (then_blk.terminator) |t_term| {
+                                    if (t_term == .br) {
+                                        const merge_idx = @as(usize, t_term.br.index);
+                                        try processed.put(merge_idx, {});
+                                    }
+                                }
+                            },
+                            .ret => |ret_val| {
+                                if (ret_val) |reg| {
+                                    last_return_reg = reg.id;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+
                     try processed.put(exit_idx, {});
                 }
             }
         }
 
-        // 统一生成 return
+        // 收集循环后剩余的未处理块（if/else/merge 等）
+        // 计算所有循环的 exit 块集合（用于排除假循环）
+        var false_loop_blocks = std.AutoHashMap(usize, void).init(self.allocator);
+        defer false_loop_blocks.deinit();
+        for (cfg.loops.items) |lp| {
+            const lp_header = func.blocks.items[lp.header];
+            if (lp_header.terminator) |term| {
+                if (term == .cond_br) {
+                    const exit_idx = @as(usize, term.cond_br.else_block.index);
+                    // 标记以 exit 块为 header 的假循环的所有块
+                    for (cfg.all_loops.items) |sub_lp| {
+                        if (sub_lp.header == exit_idx) {
+                            var blk_it = sub_lp.blocks.iterator();
+                            while (blk_it.next()) |entry| {
+                                try false_loop_blocks.put(entry.key_ptr.*, {});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        var remaining_blocks = try std.ArrayList(usize).initCapacity(self.allocator, 0);
+        defer remaining_blocks.deinit(self.allocator);
+        for (0..func.blocks.items.len) |idx| {
+            if (processed.contains(idx)) continue;
+            const block = func.blocks.items[idx];
+            if (std.mem.indexOf(u8, block.label, "_unroll_") != null) continue;
+
+            // 跳过属于真实循环的块（已由循环生成器处理）
+            var in_real_loop = false;
+            for (cfg.all_loops.items) |lp| {
+                if (lp.blocks.contains(idx) and !false_loop_blocks.contains(idx)) {
+                    in_real_loop = true;
+                    break;
+                }
+            }
+            if (in_real_loop) continue;
+
+            try remaining_blocks.append(self.allocator, idx);
+        }
+
+        // 内联生成剩余块（if/else/merge 等）
+        if (remaining_blocks.items.len > 0) {
+            var code_list = writer.context.self;
+            for (remaining_blocks.items) |idx| {
+                const block = func.blocks.items[idx];
+                try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
+                for (block.instructions.items) |inst| {
+                    try code_list.appendSlice(self.allocator, "    ");
+                    try self.generateInstructionSimple(code_list, inst);
+                }
+                // 处理终止指令
+                if (block.terminator) |term| {
+                    switch (term) {
+                        .ret => |ret_val| {
+                            if (ret_val) |reg| {
+                                last_return_reg = reg.id;
+                            }
+                        },
+                        .cond_br => |cb| {
+                            const cond_type = self.getInferredRegType(cb.cond.id, cb.cond.type_);
+                            const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
+                            if (cond_tag == .bool) {
+                                try writer.print("    if (reg_{d}) {{\n", .{cb.cond.id});
+                            } else if (cond_tag == .i64) {
+                                try writer.print("    if (reg_{d} != 0) {{\n", .{cb.cond.id});
+                            } else {
+                                try writer.print("    if (reg_{d}.toBool()) {{\n", .{cb.cond.id});
+                            }
+                            // 生成 then 块内联
+                            const then_idx = @as(usize, cb.then_block.index);
+                            const then_block = func.blocks.items[then_idx];
+                            for (then_block.instructions.items) |inst| {
+                                try code_list.appendSlice(self.allocator, "        ");
+                                try self.generateInstructionSimple(code_list, inst);
+                            }
+                            try writer.writeAll("    } else {\n");
+                            // 生成 else 块内联
+                            const else_idx = @as(usize, cb.else_block.index);
+                            const else_block = func.blocks.items[else_idx];
+                            for (else_block.instructions.items) |inst| {
+                                try code_list.appendSlice(self.allocator, "        ");
+                                try self.generateInstructionSimple(code_list, inst);
+                            }
+                            try writer.writeAll("    }\n");
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        // 所有块已处理，统一生成 return
         if (last_return_reg) |reg| {
             if (self.current_reg_types) |reg_types| {
                 const real_type = reg_types.get(reg) orelse IR.Type.php_value;
@@ -6720,6 +6887,21 @@ pub const NativeLinker = struct {
 
         const header_block = func.blocks.items[loop.header];
 
+        // 初始化 PHI 寄存器（从 init 块 incoming 获取初始值）
+        for (header_block.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                const phi_op = inst.op.phi;
+                if (inst.result) |res| {
+                    for (phi_op.incoming) |incoming| {
+                        if (isInitBlock(incoming.block, loop)) {
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, incoming.value.id });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // 生成外层循环结构
         try writer.writeAll("    while (true) {\n");
         try writer.print("        // Header: {s}\n", .{header_block.label});
@@ -6753,9 +6935,27 @@ pub const NativeLinker = struct {
             try self.generateInstructionSimple(code_list, inst);
         }
 
+        // 计算当前循环的 exit 块索引（cond_br 的 false target）
+        // 用于过滤被误识别为子循环的 exit 块
+        const exit_block_idx: ?usize = if (header_block.terminator) |term| blk: {
+            if (term == .cond_br) {
+                break :blk @as(usize, term.cond_br.else_block.index);
+            }
+            break :blk null;
+        } else null;
+
         // 生成子循环
         for (loop.children.items) |child_idx| {
             const child_loop = all_loops[child_idx];
+
+            // 跳过被误识别为循环的 exit 块（unroll 假阳性）
+            if (exit_block_idx) |exit_idx| {
+                if (child_loop.header == exit_idx) {
+                    std.debug.print("  [SKIP] child loop header={d} is exit block, skipping\n", .{child_loop.header});
+                    continue;
+                }
+            }
+
             try writer.writeAll("        // Nested loop\n");
             try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs, depth + 1);
 
@@ -6831,18 +7031,21 @@ pub const NativeLinker = struct {
                     }
 
                     if (update_value) |val_reg| {
+                        // 解析展开块寄存器：当 val_reg 定义在 _unroll_* 块中时，
+                        // 追踪到原始块中的等价寄存器
+                        const resolved_reg = self.resolveUnrolledReg(func, val_reg, loop);
                         const phi_type = self.getInferredRegType(result_reg.id, result_reg.type_);
-                        const value_type = self.getInferredRegType(val_reg, IR.Type.php_value);
+                        const value_type = self.getInferredRegType(resolved_reg, IR.Type.php_value);
 
                         const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                         const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
                         if (phi_tag == value_tag) {
-                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, resolved_reg });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, val_reg });
+                            try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, resolved_reg });
                         } else {
-                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, val_reg });
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, resolved_reg });
                         }
                     }
                 }
@@ -6850,6 +7053,122 @@ pub const NativeLinker = struct {
 
             try writer.writeAll("    }\n");
         }
+    }
+
+    /// 从展开块标签中提取原始块名
+    /// 格式：_unroll_N_<original_label> → <original_label>
+    fn findOriginalBlockLabel(unroll_label: []const u8) ?[]const u8 {
+        // 查找 "_unroll_" 前缀
+        const prefix = "_unroll_";
+        if (!std.mem.startsWith(u8, unroll_label, prefix)) return null;
+        const after_prefix = unroll_label[prefix.len..];
+        // 跳过数字 N
+        var i: usize = 0;
+        while (i < after_prefix.len and after_prefix[i] >= '0' and after_prefix[i] <= '9') : (i += 1) {}
+        // 跳过下划线分隔符
+        if (i < after_prefix.len and after_prefix[i] == '_') {
+            return after_prefix[i + 1 ..];
+        }
+        return null;
+    }
+
+    /// 解析展开块中的寄存器到原始块中的等价寄存器
+    /// 当 IR 优化器展开循环（_unroll_*）后，PHI incoming 可能引用展开块中的寄存器，
+    /// 但代码生成器只处理原始块。此函数追踪定义链回到已处理块。
+    fn resolveUnrolledReg(
+        self: *Self,
+        func: *const IR.Function,
+        reg_id: usize,
+        loop: LoopInfo,
+    ) usize {
+        _ = self;
+        // 查找 reg_id 的定义块
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst_item| {
+                if (inst_item.result) |res| {
+                    if (res.id == reg_id) {
+                        // 检查定义块是否是展开块（_unroll_* 前缀）
+                        if (std.mem.indexOf(u8, block.label, "_unroll_") != null) {
+                            // 在展开块中定义——追踪到原始块等价寄存器
+                            if (inst_item.op == .phi) {
+                                // PHI 节点：找到原始块名，匹配原始块中同位置的 PHI
+                                const unroll_label = block.label;
+                                // 提取原始块名：_unroll_N_<original_label>
+                                if (findOriginalBlockLabel(unroll_label)) |orig_label| {
+                                    // 在原始块中找到同位置的 PHI
+                                    for (func.blocks.items) |orig_block| {
+                                        if (std.mem.eql(u8, orig_block.label, orig_label)) {
+                                            // 匹配 PHI 位置
+                                            var phi_idx: usize = 0;
+                                            var target_phi_idx: usize = 0;
+                                            // 计算当前 PHI 在展开块中的位置
+                                            for (block.instructions.items) |blk_inst| {
+                                                if (blk_inst.op == .phi) {
+                                                    if (blk_inst.result) |br_res| {
+                                                        if (br_res.id == reg_id) {
+                                                            target_phi_idx = phi_idx;
+                                                            break;
+                                                        }
+                                                    }
+                                                    phi_idx += 1;
+                                                }
+                                            }
+                                            // 在原始块中找同位置的 PHI
+                                            var orig_phi_idx: usize = 0;
+                                            for (orig_block.instructions.items) |oi| {
+                                                if (oi.op == .phi) {
+                                                    if (orig_phi_idx == target_phi_idx) {
+                                                        if (oi.result) |orig_res| {
+                                                            return orig_res.id;
+                                                        }
+                                                    }
+                                                    orig_phi_idx += 1;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            } else if (inst_item.op == .move) {
+                                // move 指令：追踪源寄存器
+                                return resolveUnrolledRegStatic(func, inst_item.op.move.operand.id, loop);
+                            }
+                            // 其他指令类型：检查是否在 increment 块中
+                            if (loop.increment) |inc_idx| {
+                                if (block.index == inc_idx) {
+                                    return reg_id; // increment 块已被生成，直接使用
+                                }
+                            }
+                        }
+                        return reg_id; // 非展开块，直接返回
+                    }
+                }
+            }
+        }
+        return reg_id; // 未找到定义，原样返回
+    }
+
+    /// 静态版本的展开寄存器解析（用于递归）
+    fn resolveUnrolledRegStatic(
+        func: *const IR.Function,
+        reg_id: usize,
+        loop: LoopInfo,
+    ) usize {
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst_item| {
+                if (inst_item.result) |res| {
+                    if (res.id == reg_id) {
+                        if (std.mem.indexOf(u8, block.label, "_unroll_") != null) {
+                            if (inst_item.op == .move) {
+                                return resolveUnrolledRegStatic(func, inst_item.op.move.operand.id, loop);
+                            }
+                        }
+                        return reg_id;
+                    }
+                }
+            }
+        }
+        return reg_id;
     }
 
     /// 生成 while 循环（支持子循环）

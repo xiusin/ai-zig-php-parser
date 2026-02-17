@@ -7,3 +7,4 @@ ai_*.md
 zig-php-parser/.venv-*
 zig-php-parser/ci/*
 zig-php-parser/.perf_reports/*
+*.kiro
