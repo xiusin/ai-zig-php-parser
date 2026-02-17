@@ -4944,11 +4944,14 @@ pub const NativeLinker = struct {
                             }
                         },
                         .cond_br => |cb| {
-                            const cond_type = self.getInferredRegType(cb.cond.id, cb.cond.type_);
-                            const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
-                            if (cond_tag == .bool) {
+                            // 获取寄存器的实际声明类型
+                            const decl_type: std.meta.Tag(IR.Type) = if (self.current_reg_types) |rt|
+                                @as(std.meta.Tag(IR.Type), rt.get(cb.cond.id) orelse IR.Type.php_value)
+                            else
+                                .php_value;
+                            if (decl_type == .bool) {
                                 try writer.print("    if (reg_{d}) {{\n", .{cb.cond.id});
-                            } else if (cond_tag == .i64) {
+                            } else if (decl_type == .i64) {
                                 try writer.print("    if (reg_{d} != 0) {{\n", .{cb.cond.id});
                             } else {
                                 try writer.print("    if (reg_{d}.toBool()) {{\n", .{cb.cond.id});
