@@ -5566,31 +5566,59 @@ pub const NativeLinker = struct {
 
                 std.debug.print("Processing phi reg_{d}, incoming count={d}\n", .{ result_reg.id, phi_op.incoming.len });
 
-                // 直接使用 PHI incoming 值（mem2reg 已经正确设置）
-                // 找到来自循环内部的值（非初始化块）
-                var found_value: ?usize = null;
+                // 策略：在实际生成的块中查找更新，避免使用被展开破坏的 PHI incoming
+                var update_reg: ?usize = null;
 
-                for (phi_op.incoming) |incoming| {
-                    std.debug.print("  Checking incoming: reg_{d} from block_{d} (role={s})\n", .{ incoming.value.id, incoming.block.index, @tagName(incoming.block.loop_metadata.role) });
-
-                    // 跳过初始化块的 incoming
-                    if (isInitBlock(incoming.block, loop)) {
-                        std.debug.print("    -> Skipping init block\n", .{});
-                        continue;
+                // 1. 在 body 块中查找（累加器更新）
+                for (body_block.instructions.items) |body_inst| {
+                    if (body_inst.result) |body_result| {
+                        switch (body_inst.op) {
+                            .add => |op| {
+                                if (op.lhs.id == result_reg.id) {
+                                    update_reg = body_result.id;
+                                    std.debug.print("  Found update in body: reg_{d} = reg_{d} + ...\n", .{ body_result.id, op.lhs.id });
+                                    break;
+                                }
+                            },
+                            else => {},
+                        }
                     }
-
-                    // 使用来自循环内部的 incoming 值（这是 mem2reg 设置的正确累加器更新值）
-                    found_value = incoming.value.id;
-                    std.debug.print("    -> Using as loop update value\n", .{});
-                    break;
                 }
 
-                if (found_value) |val_reg| {
-                    // 解析展开块寄存器：当 val_reg 定义在 _unroll_* 块中时，
-                    // 追踪到原始块中的等价寄存器（修复 BUG2）
-                    const resolved_reg = self.resolveUnrolledReg(func, val_reg, loop);
-                    std.debug.print("phi: reg_{d} <- reg_{d} (resolved from reg_{d})\n", .{ result_reg.id, resolved_reg, val_reg });
-                    try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = resolved_reg });
+                // 2. 如果在 body 块未找到，在 increment 块查找（循环变量）
+                if (update_reg == null and loop.increment != null) {
+                    const inc_block = func.blocks.items[loop.increment.?];
+                    const is_unroll = std.mem.indexOf(u8, inc_block.label, "_unroll_") != null;
+                    if (!is_unroll) {
+                        for (inc_block.instructions.items) |inc_inst| {
+                            if (inc_inst.result) |inc_result| {
+                                switch (inc_inst.op) {
+                                    .add => |op| {
+                                        if (op.lhs.id == result_reg.id) {
+                                            update_reg = inc_result.id;
+                                            std.debug.print("  Found update in increment: reg_{d} = reg_{d} + ...\n", .{ inc_result.id, op.lhs.id });
+                                            break;
+                                        }
+                                    },
+                                    else => {},
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (update_reg) |ureg| {
+                    std.debug.print("phi: reg_{d} <- reg_{d}\n", .{ result_reg.id, ureg });
+                    try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = ureg });
+                } else {
+                    std.debug.print("  Warning: No update found for phi reg_{d}, using fallback\n", .{result_reg.id});
+                    for (phi_op.incoming) |incoming| {
+                        if (!isInitBlock(incoming.block, loop)) {
+                            const resolved_reg = self.resolveUnrolledReg(func, incoming.value.id, loop);
+                            try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = resolved_reg });
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -6828,7 +6856,7 @@ pub const NativeLinker = struct {
                     if (inst.result) |res| {
                         for (phi_op.incoming) |incoming| {
                             if (isInitBlock(incoming.block, loop)) {
-                                try writer.print("        reg_{d} = {d};\n", .{ res.id, incoming.value.id });
+                                try writer.print("        reg_{d} = reg_{d};\n", .{ res.id, incoming.value.id });
                                 break;
                             }
                         }
