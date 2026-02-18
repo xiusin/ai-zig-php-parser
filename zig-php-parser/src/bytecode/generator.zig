@@ -318,6 +318,7 @@ pub const BytecodeGenerator = struct {
             .break_stmt => try self.visitBreak(index),
             .continue_stmt => try self.visitContinue(index),
             .assignment => try self.visitAssignment(index),
+            .compound_assignment => try self.visitCompoundAssignment(index),
             .binary_expr => try self.visitBinaryExpr(index),
             .unary_expr => try self.visitUnaryExpr(index),
             .literal_int => try self.visitLiteralInt(index),
@@ -341,6 +342,53 @@ pub const BytecodeGenerator = struct {
             .postfix_expr => try self.visitPostfixExpr(index),
             else => {},
         }
+    }
+
+    /// 访问复合赋值语句（+=, -=, *=, /=, %=, .=）
+    fn visitCompoundAssignment(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const compound_data = node.data.compound_assignment;
+        const target_node = self.getNode(compound_data.target);
+
+        // 目前先支持变量目标：$a += $b
+        if (target_node.tag != .variable) {
+            return;
+        }
+
+        // 1) 读取左值
+        const var_name = self.getString(target_node.data.variable.name);
+        const slot = try self.getOrCreateLocal(var_name);
+        try self.emit(.push_local, slot, 0);
+        self.pushStack();
+
+        // 2) 计算右值
+        try self.visitNode(compound_data.value);
+
+        // 3) 执行运算
+        const opcode: OpCode = switch (compound_data.op) {
+            .plus_equal => .add_int,
+            .minus_equal => .sub_int,
+            .asterisk_equal => .mul_int,
+            .slash_equal => .div_int,
+            .percent_equal => .mod_int,
+            .dot_equal => .concat,
+            else => .nop,
+        };
+
+        if (opcode == .nop) {
+            // 不支持的复合操作符，保持与现有字节码生成兼容
+            return;
+        }
+
+        try self.emit(opcode, 0, 0);
+        // 二元运算：弹出2个，压入1个 => 栈深 -1
+        self.popStack();
+
+        // 4) 写回变量，同时保留表达式值在栈顶
+        try self.emit(.dup, 0, 0);
+        self.pushStack();
+        try self.emit(.store_local, slot, 0);
+        self.popStack();
     }
 
     /// 访问根节点 - 遍历所有顶层语句

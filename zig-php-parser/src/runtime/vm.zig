@@ -10076,7 +10076,7 @@ pub const VM = struct {
                                     const ret = val;
                                     self.return_value = null;
                                     return ret;
-                }
+                                }
                                 return Value.initNull();
                             }
                             return err;
