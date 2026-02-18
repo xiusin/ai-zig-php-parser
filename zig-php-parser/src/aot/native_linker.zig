@@ -5566,79 +5566,31 @@ pub const NativeLinker = struct {
 
                 std.debug.print("Processing phi reg_{d}, incoming count={d}\n", .{ result_reg.id, phi_op.incoming.len });
 
+                // 直接使用 PHI incoming 值（mem2reg 已经正确设置）
                 // 找到来自循环内部的值（非初始化块）
-                // 优先级：increment 块 > body 块
                 var found_value: ?usize = null;
 
-                if (loop.increment) |inc_idx| {
-                    const inc_block = func.blocks.items[inc_idx];
-                    for (phi_op.incoming) |incoming| {
-                        if (incoming.block == inc_block) {
-                            // 验证这个值确实在这个块中定义
-                            var defined_here = false;
-                            for (inc_block.instructions.items) |block_inst| {
-                                if (block_inst.result) |res| {
-                                    if (res.id == incoming.value.id) {
-                                        defined_here = true;
-                                        break;
-                                    }
-                                }
-                            }
+                for (phi_op.incoming) |incoming| {
+                    std.debug.print("  Checking incoming: reg_{d} from block_{d} (role={s})\n", .{ incoming.value.id, incoming.block.index, @tagName(incoming.block.loop_metadata.role) });
 
-                            if (defined_here) {
-                                found_value = incoming.value.id;
-                                std.debug.print("  Found in increment block: reg_{d} (verified)\n", .{found_value.?});
-                                break;
-                            } else {
-                                std.debug.print("  WARNING: reg_{d} claimed from increment but not defined there!\n", .{incoming.value.id});
-                            }
-                        }
+                    // 跳过初始化块的 incoming
+                    if (isInitBlock(incoming.block, loop)) {
+                        std.debug.print("    -> Skipping init block\n", .{});
+                        continue;
                     }
-                }
 
-                // 如果 increment 块没有，尝试 body 块
-                if (found_value == null) {
-                    for (phi_op.incoming) |incoming| {
-                        if (incoming.block == body_block) {
-                            // 验证
-                            var defined_here = false;
-                            for (body_block.instructions.items) |block_inst| {
-                                if (block_inst.result) |res| {
-                                    if (res.id == incoming.value.id) {
-                                        defined_here = true;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (defined_here) {
-                                found_value = incoming.value.id;
-                                std.debug.print("  Found in body block: reg_{d} (verified)\n", .{found_value.?});
-                                break;
-                            } else {
-                                std.debug.print("  WARNING: reg_{d} claimed from body but not defined there!\n", .{incoming.value.id});
-                            }
-                        }
-                    }
-                }
-
-                // 如果还没有，使用简单策略：在 body 块中找到第一个 add 操作
-                if (found_value == null) {
-                    std.debug.print("  Fallback: searching for add in body block\n", .{});
-                    for (body_block.instructions.items) |body_inst| {
-                        if (body_inst.op == .add) {
-                            if (body_inst.result) |res| {
-                                found_value = res.id;
-                                std.debug.print("  -> Found add result: reg_{d}\n", .{found_value.?});
-                                break;
-                            }
-                        }
-                    }
+                    // 使用来自循环内部的 incoming 值（这是 mem2reg 设置的正确累加器更新值）
+                    found_value = incoming.value.id;
+                    std.debug.print("    -> Using as loop update value\n", .{});
+                    break;
                 }
 
                 if (found_value) |val_reg| {
-                    std.debug.print("phi: reg_{d} <- reg_{d}\n", .{ result_reg.id, val_reg });
-                    try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = val_reg });
+                    // 解析展开块寄存器：当 val_reg 定义在 _unroll_* 块中时，
+                    // 追踪到原始块中的等价寄存器（修复 BUG2）
+                    const resolved_reg = self.resolveUnrolledReg(func, val_reg, loop);
+                    std.debug.print("phi: reg_{d} <- reg_{d} (resolved from reg_{d})\n", .{ result_reg.id, resolved_reg, val_reg });
+                    try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = resolved_reg });
                 }
             }
         }
@@ -6745,8 +6697,11 @@ pub const NativeLinker = struct {
     ) bool {
         // 优先：基于 LoopMetadata 判断
         const role = incoming_block.loop_metadata.role;
-        if (role == .init or role == .none) return true;
-        // 回退：不在循环块集合中的即为 init
+        if (role == .init) return true;
+        if (role == .header or role == .body or role == .latch or role == .exit) return false;
+
+        // 回退：role == .none 时，检查是否在循环块集合中
+        // 不在循环块集合中的即为 init
         return !loop.contains(incoming_block.index);
     }
 
@@ -7012,6 +6967,14 @@ pub const NativeLinker = struct {
                     const phi_op = inst.op.phi;
                     const result_reg = inst.result orelse continue;
 
+                    std.debug.print("  PHI reg_{d}: checking incoming for update\n", .{result_reg.id});
+                    if (loop.increment) |inc_idx| {
+                        std.debug.print("    increment block index: {d}\n", .{inc_idx});
+                    }
+                    for (phi_op.incoming) |incoming| {
+                        std.debug.print("    incoming: reg_{d} from block_{d}\n", .{ incoming.value.id, incoming.block.index });
+                    }
+
                     // 找到来自 increment 或 body 的值
                     var update_value: ?usize = null;
                     if (loop.increment) |inc_idx| {
@@ -7019,6 +6982,7 @@ pub const NativeLinker = struct {
                         for (phi_op.incoming) |incoming| {
                             if (incoming.block == inc_block) {
                                 update_value = incoming.value.id;
+                                std.debug.print("    -> Found update from increment: reg_{d}\n", .{update_value.?});
                                 break;
                             }
                         }
@@ -7075,36 +7039,70 @@ pub const NativeLinker = struct {
         return null;
     }
 
-    /// 解析展开块中的寄存器到原始块中的等价寄存器
+    /// 解析展开块中的寄存器到原始块中的等价寄存器（深度增强版）
     /// 当 IR 优化器展开循环（_unroll_*）后，PHI incoming 可能引用展开块中的寄存器，
     /// 但代码生成器只处理原始块。此函数追踪定义链回到已处理块。
+    ///
+    /// 增强功能：
+    /// - 支持 PHI 节点的位置匹配
+    /// - 支持 move 指令的源寄存器追踪
+    /// - 支持 add/sub/mul/div 等运算指令的操作数追踪
+    /// - 递归解析操作数链，直到找到原始块寄存器
+    /// - 循环检测和深度限制，防止无限递归
     fn resolveUnrolledReg(
         self: *Self,
         func: *const IR.Function,
         reg_id: usize,
         loop: LoopInfo,
     ) usize {
-        _ = self;
-        // 查找 reg_id 的定义块
+        // 使用访问集合防止循环
+        var visited = std.AutoHashMap(usize, void).init(self.allocator);
+        defer visited.deinit();
+
+        return self.resolveUnrolledRegWithDepth(func, reg_id, loop, &visited, 0) catch reg_id;
+    }
+
+    /// 带深度限制的递归解析函数
+    fn resolveUnrolledRegWithDepth(
+        self: *Self,
+        func: *const IR.Function,
+        reg_id: usize,
+        loop: LoopInfo,
+        visited: *std.AutoHashMap(usize, void),
+        depth: usize,
+    ) std.mem.Allocator.Error!usize {
+        // 深度限制：防止无限递归
+        const max_depth = 50;
+        if (depth >= max_depth) {
+            std.debug.print("resolveUnrolledReg: max depth reached for reg_{d}\n", .{reg_id});
+            return reg_id;
+        }
+
+        // 循环检测：如果已访问过此寄存器，直接返回
+        if (visited.contains(reg_id)) {
+            return reg_id;
+        }
+        try visited.put(reg_id, {});
+
+        // 查找 reg_id 的定义块和指令
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst_item| {
                 if (inst_item.result) |res| {
                     if (res.id == reg_id) {
                         // 检查定义块是否是展开块（_unroll_* 前缀）
-                        if (std.mem.indexOf(u8, block.label, "_unroll_") != null) {
-                            // 在展开块中定义——追踪到原始块等价寄存器
+                        const is_unroll_block = std.mem.indexOf(u8, block.label, "_unroll_") != null;
+
+                        if (is_unroll_block) {
+                            std.debug.print("resolveUnrolledReg: reg_{d} defined in unroll block {s}\n", .{ reg_id, block.label });
+
+                            // 策略 1: PHI 节点 - 通过位置匹配找到原始块的 PHI
                             if (inst_item.op == .phi) {
-                                // PHI 节点：找到原始块名，匹配原始块中同位置的 PHI
                                 const unroll_label = block.label;
-                                // 提取原始块名：_unroll_N_<original_label>
                                 if (findOriginalBlockLabel(unroll_label)) |orig_label| {
-                                    // 在原始块中找到同位置的 PHI
                                     for (func.blocks.items) |orig_block| {
                                         if (std.mem.eql(u8, orig_block.label, orig_label)) {
-                                            // 匹配 PHI 位置
                                             var phi_idx: usize = 0;
                                             var target_phi_idx: usize = 0;
-                                            // 计算当前 PHI 在展开块中的位置
                                             for (block.instructions.items) |blk_inst| {
                                                 if (blk_inst.op == .phi) {
                                                     if (blk_inst.result) |br_res| {
@@ -7116,12 +7114,12 @@ pub const NativeLinker = struct {
                                                     phi_idx += 1;
                                                 }
                                             }
-                                            // 在原始块中找同位置的 PHI
                                             var orig_phi_idx: usize = 0;
                                             for (orig_block.instructions.items) |oi| {
                                                 if (oi.op == .phi) {
                                                     if (orig_phi_idx == target_phi_idx) {
                                                         if (oi.result) |orig_res| {
+                                                            std.debug.print("  -> Resolved PHI: reg_{d} -> reg_{d}\n", .{ reg_id, orig_res.id });
                                                             return orig_res.id;
                                                         }
                                                     }
@@ -7132,38 +7130,144 @@ pub const NativeLinker = struct {
                                         }
                                     }
                                 }
-                            } else if (inst_item.op == .move) {
-                                // move 指令：追踪源寄存器
-                                return resolveUnrolledRegStatic(func, inst_item.op.move.operand.id, loop);
                             }
-                            // 其他指令类型：检查是否在 increment 块中
-                            if (loop.increment) |inc_idx| {
-                                if (block.index == inc_idx) {
-                                    return reg_id; // increment 块已被生成，直接使用
+
+                            // 策略 2: 对于展开块，通过指令位置匹配找到原始块的对应寄存器
+                            const unroll_label = block.label;
+                            if (findOriginalBlockLabel(unroll_label)) |orig_label| {
+                                for (func.blocks.items) |orig_block| {
+                                    if (std.mem.eql(u8, orig_block.label, orig_label)) {
+                                        // 找到原始块，计算当前指令在展开块中的位置
+                                        var inst_idx: usize = 0;
+                                        var target_inst_idx: usize = 0;
+                                        for (block.instructions.items, 0..) |blk_inst, idx| {
+                                            if (blk_inst.result) |blk_res| {
+                                                if (blk_res.id == reg_id) {
+                                                    target_inst_idx = inst_idx;
+                                                    std.debug.print("  Found at instruction index {d} in unroll block\n", .{idx});
+                                                    break;
+                                                }
+                                            }
+                                            if (blk_inst.op != .phi) inst_idx += 1;
+                                        }
+
+                                        // 在原始块中找同位置的指令（跳过 PHI）
+                                        var orig_inst_idx: usize = 0;
+                                        for (orig_block.instructions.items) |orig_inst| {
+                                            if (orig_inst.op != .phi) {
+                                                if (orig_inst_idx == target_inst_idx) {
+                                                    if (orig_inst.result) |orig_res| {
+                                                        std.debug.print("  -> Resolved by position: reg_{d} -> reg_{d}\n", .{ reg_id, orig_res.id });
+                                                        return orig_res.id;
+                                                    }
+                                                }
+                                                orig_inst_idx += 1;
+                                            }
+                                        }
+                                        break;
+                                    }
                                 }
                             }
+
+                            // 策略 3: 追踪指令的操作数（递归解析）
+                            // 对于运算指令（add/sub/mul等），尝试解析其操作数
+                            const resolved = try self.resolveInstructionOperands(func, inst_item, loop, visited, depth + 1);
+                            if (resolved != reg_id) {
+                                std.debug.print("  -> Resolved operand: reg_{d} -> reg_{d}\n", .{ reg_id, resolved });
+                                return resolved;
+                            }
                         }
-                        return reg_id; // 非展开块，直接返回
+
+                        // 非展开块，直接返回
+                        return reg_id;
                     }
                 }
             }
         }
-        return reg_id; // 未找到定义，原样返回
+
+        // 未找到定义，原样返回
+        return reg_id;
     }
 
-    /// 静态版本的展开寄存器解析（用于递归）
+    /// 解析指令的操作数，尝试找到原始块的寄存器
+    /// 支持 move、add、sub、mul、div 等指令
+    fn resolveInstructionOperands(
+        self: *Self,
+        func: *const IR.Function,
+        inst: *const IR.Instruction,
+        loop: LoopInfo,
+        visited: *std.AutoHashMap(usize, void),
+        depth: usize,
+    ) std.mem.Allocator.Error!usize {
+        const inst_result = inst.result orelse return inst.result.?.id;
+
+        switch (inst.op) {
+            .move => |op| {
+                // move 指令：直接追踪源寄存器
+                return try self.resolveUnrolledRegWithDepth(func, op.operand.id, loop, visited, depth);
+            },
+            .add => |op| {
+                // add 指令：优先追踪 lhs（通常是累加器）
+                const lhs_resolved = try self.resolveUnrolledRegWithDepth(func, op.lhs.id, loop, visited, depth);
+                if (lhs_resolved != op.lhs.id) {
+                    return lhs_resolved;
+                }
+                // 如果 lhs 无法解析，尝试 rhs
+                const rhs_resolved = try self.resolveUnrolledRegWithDepth(func, op.rhs.id, loop, visited, depth);
+                if (rhs_resolved != op.rhs.id) {
+                    return rhs_resolved;
+                }
+            },
+            .sub => |op| {
+                const lhs_resolved = try self.resolveUnrolledRegWithDepth(func, op.lhs.id, loop, visited, depth);
+                if (lhs_resolved != op.lhs.id) {
+                    return lhs_resolved;
+                }
+            },
+            .mul => |op| {
+                const lhs_resolved = try self.resolveUnrolledRegWithDepth(func, op.lhs.id, loop, visited, depth);
+                if (lhs_resolved != op.lhs.id) {
+                    return lhs_resolved;
+                }
+                const rhs_resolved = try self.resolveUnrolledRegWithDepth(func, op.rhs.id, loop, visited, depth);
+                if (rhs_resolved != op.rhs.id) {
+                    return rhs_resolved;
+                }
+            },
+            .div => |op| {
+                const lhs_resolved = try self.resolveUnrolledRegWithDepth(func, op.lhs.id, loop, visited, depth);
+                if (lhs_resolved != op.lhs.id) {
+                    return lhs_resolved;
+                }
+            },
+            .cast => |op| {
+                // cast 指令：追踪源值
+                return try self.resolveUnrolledRegWithDepth(func, op.value.id, loop, visited, depth);
+            },
+            else => {
+                // 其他指令类型：无法解析，返回原值
+            },
+        }
+
+        return inst_result.id;
+    }
+
+    /// 静态版本的展开寄存器解析（已废弃，保留用于兼容性）
+    /// 新代码应使用 resolveUnrolledReg
     fn resolveUnrolledRegStatic(
         func: *const IR.Function,
         reg_id: usize,
         loop: LoopInfo,
     ) usize {
+        _ = loop;
+        // 简化版本：只处理 move 指令的一层追踪
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst_item| {
                 if (inst_item.result) |res| {
                     if (res.id == reg_id) {
                         if (std.mem.indexOf(u8, block.label, "_unroll_") != null) {
                             if (inst_item.op == .move) {
-                                return resolveUnrolledRegStatic(func, inst_item.op.move.operand.id, loop);
+                                return inst_item.op.move.operand.id;
                             }
                         }
                         return reg_id;

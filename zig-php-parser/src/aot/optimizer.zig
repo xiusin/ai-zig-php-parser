@@ -117,11 +117,11 @@ pub const PassConfig = struct {
             .cse = false,
             .licm = false,
             .strength_reduction = false,
-            .mem2reg = true,  // 重新启用 mem2reg
+            .mem2reg = true, // 重新启用 mem2reg
             .loop_unroll = true,
             .cfg_cleanup = false,
             .rc_elision = false,
-            .max_iterations = 2,  // 增加到 2 以支持类型推断
+            .max_iterations = 2, // 增加到 2 以支持类型推断
         };
     }
 
@@ -132,7 +132,7 @@ pub const PassConfig = struct {
             .constant_propagation = true,
             .sccp = true,
             .box_unbox_elim = true,
-            .function_inlining = true,  // 启用内联
+            .function_inlining = true, // 启用内联
             .inline_threshold = 15,
             .type_specialization = false,
             .cse = true,
@@ -145,7 +145,7 @@ pub const PassConfig = struct {
             .max_iterations = 3,
             // 启用部分高级优化
             .scalar_replacement = false,
-            .gvn = true,  // 全局值编号
+            .gvn = true, // 全局值编号
             .advanced_sccp = false,
             .slp_vectorization = false,
             .polyhedral_optimization = false,
@@ -395,7 +395,7 @@ pub const IROptimizer = struct {
     /// Optimize an IR module
     pub fn optimize(self: *Self, module: *Module) !void {
         std.debug.print("Optimizer: Starting optimization (mem2reg={}, max_iter={})\n", .{ self.config.mem2reg, self.config.max_iterations });
-        
+
         self.current_module = module;
         defer self.current_module = null;
 
@@ -418,7 +418,7 @@ pub const IROptimizer = struct {
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
-            
+
             // 类型推断和特化（在 mem2reg 后运行）
             std.debug.print("Optimizer: Running type inference and specialization...\n", .{});
             if (try self.runTypeInferenceAndSpecialization(module)) {
@@ -561,17 +561,17 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyModule(module);
             }
         }
-        
+
         // 优化完成后，最后一次运行类型推断并保存结果
         const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
         std.debug.print("Optimizer: Final type inference pass...\n", .{});
-        
+
         for (module.functions.items) |func| {
             var type_inference = TypeInferencePass.init(self.allocator);
             defer type_inference.deinit();
-            
+
             try type_inference.inferTypes(func);
-            
+
             // 保存最终的类型推断结果
             var func_types = std.AutoHashMap(usize, IR.Type).init(self.allocator);
             var reg_iter = type_inference.solver.reg_to_var.iterator();
@@ -581,15 +581,14 @@ pub const IROptimizer = struct {
                     try func_types.put(reg_id, inferred_type);
                 }
             }
-            
+
             // 替换旧的类型推断结果
             if (module.inferred_types.getPtr(func.name)) |old_types| {
                 old_types.deinit();
             }
             try module.inferred_types.put(func.name, func_types);
-            
-            std.debug.print("  Saved {d} inferred types for function {s}\n", 
-                .{func_types.count(), func.name});
+
+            std.debug.print("  Saved {d} inferred types for function {s}\n", .{ func_types.count(), func.name });
         }
     }
 
@@ -1461,21 +1460,21 @@ pub const IROptimizer = struct {
     // ========================================================================
     // Type Inference and Specialization
     // ========================================================================
-    
+
     /// 运行类型推断和特化
     fn runTypeInferenceAndSpecialization(self: *Self, module: *Module) !bool {
         const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
         const TypeSpecializationPass = @import("type_specialization_pass.zig").TypeSpecializationPass;
-        
+
         var changed = false;
-        
+
         for (module.functions.items) |func| {
             // 1. 类型推断
             var type_inference = TypeInferencePass.init(self.allocator);
             defer type_inference.deinit();
-            
+
             try type_inference.inferTypes(func);
-            
+
             // 2. 保存类型推断结果到模块
             var func_types = std.AutoHashMap(usize, IR.Type).init(self.allocator);
             var reg_iter = type_inference.solver.reg_to_var.iterator();
@@ -1486,17 +1485,18 @@ pub const IROptimizer = struct {
                 }
             }
             try module.inferred_types.put(func.name, func_types);
-            
+
             // 3. 类型特化
             var type_specialization = TypeSpecializationPass.init(self.allocator, &type_inference);
             try type_specialization.specialize(func);
-            
-            if (type_specialization.stats.casts_eliminated > 0 or 
-                type_specialization.stats.ops_specialized > 0) {
+
+            if (type_specialization.stats.casts_eliminated > 0 or
+                type_specialization.stats.ops_specialized > 0)
+            {
                 changed = true;
             }
         }
-        
+
         return changed;
     }
 
@@ -1520,14 +1520,14 @@ pub const IROptimizer = struct {
     /// Promote memory to registers in a single function
     fn promoteMemoryToRegisters(self: *Self, func: *Function) !bool {
         std.debug.print("mem2reg: Processing function {s}\n", .{func.name});
-        
+
         // 超时保护：最多 5 秒
         var timer = try std.time.Timer.start();
         const timeout_ns = 5 * std.time.ns_per_s;
-        
+
         // 0. Rebuild CFG (ensure predecessors/successors are up to date)
         try Analysis.rebuildCFG(func);
-        
+
         if (timer.read() > timeout_ns) {
             std.debug.print("mem2reg: TIMEOUT at CFG rebuild\n", .{});
             return false;
@@ -1574,9 +1574,9 @@ pub const IROptimizer = struct {
         }
 
         if (promotable_allocas.items.len == 0) return false;
-        
+
         std.debug.print("mem2reg: Found {d} promotable allocas\n", .{promotable_allocas.items.len});
-        
+
         if (timer.read() > timeout_ns) {
             std.debug.print("mem2reg: TIMEOUT after finding allocas\n", .{});
             return false;
@@ -1605,9 +1605,9 @@ pub const IROptimizer = struct {
                 }
             }
         }
-        
+
         std.debug.print("mem2reg: Defs collected\n", .{});
-        
+
         if (timer.read() > timeout_ns) {
             std.debug.print("mem2reg: TIMEOUT after collecting defs\n", .{});
             return false;
@@ -1654,9 +1654,9 @@ pub const IROptimizer = struct {
                 try phis_in_block.?.put(alloca, phi_inst);
             }
         }
-        
+
         std.debug.print("mem2reg: Phi nodes inserted\n", .{});
-        
+
         if (timer.read() > timeout_ns) {
             std.debug.print("mem2reg: TIMEOUT after inserting phi nodes\n", .{});
             return false;
@@ -1674,6 +1674,11 @@ pub const IROptimizer = struct {
             current_values.deinit();
         }
 
+        // 寄存器重命名映射：OldRegID -> NewRegID
+        // 用于修复加法链累加器传递问题（BUG2）
+        var reg_rename_map = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer reg_rename_map.deinit();
+
         // Initialize stacks with undefined/null or initial value?
         // Allocas are uninitialized. We can use a special "undef" value or just rely on correctness.
         // For strictness, we can create an undef register.
@@ -1682,11 +1687,18 @@ pub const IROptimizer = struct {
         // We'll assume valid code or handle it.
 
         if (func.getEntryBlock()) |entry| {
-            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca);
+            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map);
         }
-        
+
         std.debug.print("mem2reg: Variables renamed\n", .{});
-        
+
+        // 6. 应用寄存器重命名：更新所有指令的操作数
+        if (reg_rename_map.count() > 0) {
+            std.debug.print("mem2reg: Applying register renaming ({d} mappings)...\n", .{reg_rename_map.count()});
+            try self.applyRegisterRenaming(func, &reg_rename_map);
+            std.debug.print("mem2reg: Register renaming applied\n", .{});
+        }
+
         if (timer.read() > timeout_ns) {
             std.debug.print("mem2reg: TIMEOUT after renaming\n", .{});
             return false;
@@ -1694,6 +1706,26 @@ pub const IROptimizer = struct {
 
         // 5.5. 类型特化：根据 incoming 值推断 phi 节点的类型
         std.debug.print("mem2reg: Specializing phi types...\n", .{});
+
+        // DEBUG: 输出所有 PHI 节点的 incoming 值
+        std.debug.print("mem2reg: DEBUG - PHI incoming values:\n", .{});
+        var debug_it = new_phis.iterator();
+        while (debug_it.next()) |debug_entry| {
+            var debug_phi_map = debug_entry.value_ptr;
+            var debug_phi_it = debug_phi_map.iterator();
+            while (debug_phi_it.next()) |debug_phi_entry| {
+                const debug_phi_inst = debug_phi_entry.value_ptr.*;
+                if (debug_phi_inst.result) |phi_res| {
+                    std.debug.print("  PHI reg_{d}: incoming = [", .{phi_res.id});
+                    for (debug_phi_inst.op.phi.incoming, 0..) |inc, i| {
+                        if (i > 0) std.debug.print(", ", .{});
+                        std.debug.print("reg_{d} from block_{d}", .{ inc.value.id, inc.block.index });
+                    }
+                    std.debug.print("]\n", .{});
+                }
+            }
+        }
+
         var it = new_phis.iterator();
         while (it.next()) |entry| {
             var phi_map = entry.value_ptr;
@@ -1701,24 +1733,21 @@ pub const IROptimizer = struct {
             while (phi_it.next()) |phi_entry| {
                 const phi_inst = phi_entry.value_ptr.*;
                 const phi_op = phi_inst.op.phi;
-                
+
                 if (phi_op.incoming.len == 0) continue;
-                
+
                 // 检查所有 incoming 值的类型
                 // 策略：如果有任何 i64，就特化为 i64（php_value 可以转换）
                 var has_i64 = false;
                 var has_f64 = false;
                 var has_bool = false;
                 var has_other = false;
-                
+
                 for (phi_op.incoming) |inc| {
                     const inc_type = @as(std.meta.Tag(IR.Type), inc.value.type_);
-                    if (inc_type == .i64) has_i64 = true
-                    else if (inc_type == .f64) has_f64 = true
-                    else if (inc_type == .bool) has_bool = true
-                    else if (inc_type != .php_value) has_other = true;
+                    if (inc_type == .i64) has_i64 = true else if (inc_type == .f64) has_f64 = true else if (inc_type == .bool) has_bool = true else if (inc_type != .php_value) has_other = true;
                 }
-                
+
                 // 如果有原生类型且没有冲突的其他类型，特化
                 if (has_i64 and !has_f64 and !has_other) {
                     phi_inst.result.?.type_ = .{ .i64 = {} };
@@ -1738,7 +1767,7 @@ pub const IROptimizer = struct {
         // 收集所有 phi 指令
         var all_phi_insts = std.AutoHashMap(*IR.Instruction, void).init(self.allocator);
         defer all_phi_insts.deinit();
-        
+
         std.debug.print("mem2reg: Collecting phi instructions...\n", .{});
         var block_it = new_phis.iterator();
         while (block_it.next()) |entry| {
@@ -1749,7 +1778,7 @@ pub const IROptimizer = struct {
             }
         }
         std.debug.print("mem2reg: Collected {d} phi instructions\n", .{all_phi_insts.count()});
-        
+
         try self.propagateTypesFromPhis(func, &all_phi_insts);
 
         // 7. Cleanup (Remove allocas)
@@ -1767,11 +1796,11 @@ pub const IROptimizer = struct {
     /// 类型传播：从 phi 节点传播类型到所有使用者
     fn propagateTypesFromPhis(self: *Self, func: *IR.Function, phis: *const std.AutoHashMap(*IR.Instruction, void)) !void {
         std.debug.print("mem2reg: Propagating types from phi nodes...\n", .{});
-        
+
         // 工作列表：需要传播类型的寄存器
         var worklist = std.ArrayList(usize).initCapacity(self.allocator, 0) catch unreachable;
         defer worklist.deinit(self.allocator);
-        
+
         // 初始化：所有特化的 phi 节点
         var it = phis.iterator();
         while (it.next()) |entry| {
@@ -1781,24 +1810,24 @@ pub const IROptimizer = struct {
                 // 只传播原生类型（i64/f64/bool）
                 if (result_tag == .i64 or result_tag == .f64 or result_tag == .bool) {
                     try worklist.append(self.allocator, result.id);
-                    std.debug.print("  Starting propagation from phi reg_{d} ({any})\n", .{result.id, result_tag});
+                    std.debug.print("  Starting propagation from phi reg_{d} ({any})\n", .{ result.id, result_tag });
                 }
             }
         }
-        
+
         // 传播循环
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed.deinit();
-        
+
         while (worklist.items.len > 0) {
             const reg_id = worklist.pop() orelse continue;
             if (processed.contains(reg_id)) continue;
             try processed.put(reg_id, {});
-            
+
             // 找到这个寄存器的定义指令
             var def_inst: ?*IR.Instruction = null;
             var def_type: IR.Type = .{ .php_value = {} };
-            
+
             for (func.blocks.items) |block| {
                 for (block.instructions.items) |*inst| {
                     if (inst.*.result) |result| {
@@ -1811,43 +1840,37 @@ pub const IROptimizer = struct {
                 }
                 if (def_inst != null) break;
             }
-            
+
             if (def_inst == null) continue;
             const def_tag = @as(std.meta.Tag(IR.Type), def_type);
             if (def_tag != .i64 and def_tag != .f64 and def_tag != .bool) continue;
-            
+
             // 遍历所有使用这个寄存器的指令
             for (func.blocks.items) |block| {
                 for (block.instructions.items) |*inst| {
                     const propagated = try self.propagateTypeToInstruction(inst, reg_id, def_type, &worklist);
                     if (propagated) |new_reg| {
-                        std.debug.print("  Propagated {any} from reg_{d} to reg_{d}\n", .{def_tag, reg_id, new_reg});
+                        std.debug.print("  Propagated {any} from reg_{d} to reg_{d}\n", .{ def_tag, reg_id, new_reg });
                     }
                 }
             }
         }
     }
-    
+
     /// 传播类型到单个指令，返回新的需要传播的寄存器
-    fn propagateTypeToInstruction(
-        self: *Self,
-        inst: **IR.Instruction,
-        source_reg: usize,
-        source_type: IR.Type,
-        worklist: *std.ArrayList(usize)
-    ) !?usize {
+    fn propagateTypeToInstruction(self: *Self, inst: **IR.Instruction, source_reg: usize, source_type: IR.Type, worklist: *std.ArrayList(usize)) !?usize {
         const source_tag = @as(std.meta.Tag(IR.Type), source_type);
-        
+
         switch (inst.*.*.op) {
             .add, .sub, .mul, .div, .mod => |*op| {
                 // 如果操作数是 source_reg 且都是同类型，结果也特化
                 const lhs_match = op.lhs.id == source_reg;
                 const rhs_match = op.rhs.id == source_reg;
-                
+
                 if (lhs_match or rhs_match) {
                     const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    
+
                     // 如果两个操作数都是同类型的原生类型，结果也特化
                     if (lhs_tag == source_tag and rhs_tag == source_tag) {
                         if (inst.*.*.result) |*result| {
@@ -1879,7 +1902,7 @@ pub const IROptimizer = struct {
             },
             else => {},
         }
-        
+
         return null;
     }
 
@@ -1985,6 +2008,7 @@ pub const IROptimizer = struct {
         current_values: *std.AutoHashMap(*Instruction, std.ArrayListUnmanaged(Register)),
         new_phis: *std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)),
         reg_to_alloca: *std.AutoHashMap(u32, *Instruction),
+        reg_rename_map: *std.AutoHashMap(u32, u32),
     ) !void {
         // 防止无限递归
         const max_depth = 1000;
@@ -1994,7 +2018,7 @@ pub const IROptimizer = struct {
         }
         self.rename_depth += 1;
         defer self.rename_depth -= 1;
-        
+
         // Record stack heights to pop later
         var stack_heights = std.AutoHashMap(*Instruction, usize).init(self.allocator);
         defer stack_heights.deinit();
@@ -2031,42 +2055,15 @@ pub const IROptimizer = struct {
                         if (current_values.getPtr(alloca)) |stack| {
                             if (stack.items.len > 0) {
                                 const val = stack.items[stack.items.len - 1];
-                                // We can't easily replace all uses of inst.result without use-def chains.
-                                // But since we are iterating, we can't update future instructions yet.
-                                // Wait, in SSA construction, we usually update uses.
-                                // But here we don't have use lists.
-                                // So we cheat: We make this load a "copy" or "move" (identity cast)
-                                // or simply replace the instruction in place with a specialized "alias" op?
-                                // No, standard way is to map the old register ID to the new register ID (val.id).
-                                // BUT, we don't have a global map for that here.
-                                //
-                                // Alternative: Modify the instruction to be a `cast` or similar from val to result.
-                                // Then Copy Propagation will clean it up.
-                                //
-                                // Better: Update `inst.result`'s ID to match `val.id`? No, registers must be unique-ish.
-                                //
-                                // Correct way: We need a map of "Renames": OldReg -> NewReg.
-                                // And when we see a use of OldReg, we use NewReg.
-                                // But `renameVariables` visits definitions.
-                                //
-                                // Ah, the standard algorithm assumes we can update uses.
-                                // Since we don't have use-lists, we must carry a map "OldReg -> NewReg" and apply it to operands.
-                                // But we are only visiting blocks once.
-                                //
-                                // Wait, the stack `current_values` GIVES us the new register for an alloca.
-                                // When we see a load `r1 = load alloca`, we want `r1` to be an alias for `stack.top()`.
-                                // We can change the load to `r1 = bitcast stack.top()`.
-                                // Or better: `r1` IS the register we want to replace.
-                                // But `r1` is defined here.
-                                //
-                                // We can change `inst.op` to `.bit_or { .lhs = val, .rhs = val }` (nop move)
-                                // or `.cast` or `.select`.
-                                //
-                                // Let's use a new op `copy` or just `add val, 0` or similar.
-                                // Or reuse `cast` with same type.
+
+                                // 记录寄存器重命名映射：load 的结果寄存器应该被替换为栈顶值
+                                if (inst.result) |res| {
+                                    try reg_rename_map.put(res.id, val.id);
+                                    std.debug.print("  Rename: reg_{d} -> reg_{d}\n", .{ res.id, val.id });
+                                }
+
+                                // 将 load 转换为 cast（后续会被优化掉）
                                 inst.op = .{ .cast = .{ .value = val, .from_type = val.type_, .to_type = op.type_ } };
-                                // And later Copy Propagation / DCE removes it.
-                                // This avoids needing to update all users of `inst.result` immediately.
                             }
                         }
                     }
@@ -2134,7 +2131,7 @@ pub const IROptimizer = struct {
         // 4. Recurse
         if (dt.children[block.index].items.len > 0) {
             for (dt.children[block.index].items) |child| {
-                try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca);
+                try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map);
             }
         }
 
@@ -2147,6 +2144,218 @@ pub const IROptimizer = struct {
             if (current_values.getPtr(alloca)) |stack| {
                 stack.shrinkRetainingCapacity(height);
             }
+        }
+    }
+
+    /// 应用寄存器重命名：遍历所有指令，更新操作数中的寄存器引用
+    /// 用于修复 mem2reg 后的寄存器引用错误（BUG2）
+    fn applyRegisterRenaming(
+        self: *Self,
+        func: *Function,
+        reg_rename_map: *const std.AutoHashMap(u32, u32),
+    ) !void {
+        for (func.blocks.items) |block| {
+            // 更新指令操作数
+            for (block.instructions.items) |inst| {
+                try self.renameInstructionOperands(inst, reg_rename_map);
+            }
+
+            // 更新终止指令操作数
+            if (block.terminator) |term| {
+                switch (term) {
+                    .ret => |ret_val| {
+                        if (ret_val) |reg| {
+                            if (reg_rename_map.get(reg.id)) |new_id| {
+                                var new_reg = reg;
+                                new_reg.id = new_id;
+                                block.terminator = .{ .ret = new_reg };
+                            }
+                        }
+                    },
+                    .cond_br => |cb| {
+                        if (reg_rename_map.get(cb.cond.id)) |new_id| {
+                            var new_cond = cb.cond;
+                            new_cond.id = new_id;
+                            block.terminator = .{ .cond_br = .{
+                                .cond = new_cond,
+                                .then_block = cb.then_block,
+                                .else_block = cb.else_block,
+                            } };
+                        }
+                    },
+                    .switch_ => |sw| {
+                        if (reg_rename_map.get(sw.value.id)) |new_id| {
+                            var new_val = sw.value;
+                            new_val.id = new_id;
+                            block.terminator = .{ .switch_ = .{
+                                .value = new_val,
+                                .cases = sw.cases,
+                                .default = sw.default,
+                            } };
+                        }
+                    },
+                    .throw => |throw_reg| {
+                        if (reg_rename_map.get(throw_reg.id)) |new_id| {
+                            var new_reg = throw_reg;
+                            new_reg.id = new_id;
+                            block.terminator = .{ .throw = new_reg };
+                        }
+                    },
+                    .br, .unreachable_ => {},
+                }
+            }
+        }
+    }
+
+    /// 重命名单个指令的操作数
+    fn renameInstructionOperands(
+        self: *Self,
+        inst: *Instruction,
+        reg_rename_map: *const std.AutoHashMap(u32, u32),
+    ) !void {
+        switch (inst.op) {
+            .add => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .sub => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .mul => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .div => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .mod => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .eq => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .ne => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .lt => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .le => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .gt => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .ge => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .bit_and => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .bit_or => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .bit_xor => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .shl => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .shr => |*op| {
+                if (reg_rename_map.get(op.lhs.id)) |new_id| op.lhs.id = new_id;
+                if (reg_rename_map.get(op.rhs.id)) |new_id| op.rhs.id = new_id;
+            },
+            .cast => |*op| {
+                if (reg_rename_map.get(op.value.id)) |new_id| op.value.id = new_id;
+            },
+            .load => |*op| {
+                if (reg_rename_map.get(op.ptr.id)) |new_id| op.ptr.id = new_id;
+            },
+            .store => |*op| {
+                if (reg_rename_map.get(op.ptr.id)) |new_id| op.ptr.id = new_id;
+                if (reg_rename_map.get(op.value.id)) |new_id| op.value.id = new_id;
+            },
+            .phi => |phi_op| {
+                // 更新 PHI incoming 值（需要重新分配数组）
+                const old_incoming = phi_op.incoming;
+                if (old_incoming.len > 0) {
+                    const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len);
+                    for (old_incoming, 0..) |inc, i| {
+                        var new_val = inc.value;
+                        if (reg_rename_map.get(inc.value.id)) |new_id| {
+                            new_val.id = new_id;
+                        }
+                        new_incoming[i] = .{
+                            .value = new_val,
+                            .block = inc.block,
+                        };
+                    }
+                    if (old_incoming.len > 0) self.allocator.free(old_incoming);
+                    inst.op = .{ .phi = .{ .incoming = new_incoming } };
+                }
+            },
+            .call => |op| {
+                // CallOp 使用 func_name 字符串，不需要重命名函数名
+                // 但需要重命名参数寄存器
+                const old_args = op.args;
+                if (old_args.len > 0) {
+                    var needs_rename = false;
+                    for (old_args) |arg| {
+                        if (reg_rename_map.contains(arg.id)) {
+                            needs_rename = true;
+                            break;
+                        }
+                    }
+                    if (needs_rename) {
+                        const new_args = try self.allocator.alloc(IR.Register, old_args.len);
+                        for (old_args, 0..) |arg, i| {
+                            var new_arg = arg;
+                            if (reg_rename_map.get(arg.id)) |new_id| {
+                                new_arg.id = new_id;
+                            }
+                            new_args[i] = new_arg;
+                        }
+                        if (old_args.len > 0) self.allocator.free(old_args);
+                        inst.op = .{ .call = .{
+                            .func_name = op.func_name,
+                            .args = new_args,
+                            .return_type = op.return_type,
+                        } };
+                    }
+                }
+            },
+            .array_get => |*op| {
+                if (reg_rename_map.get(op.array.id)) |new_id| op.array.id = new_id;
+                if (reg_rename_map.get(op.key.id)) |new_id| op.key.id = new_id;
+            },
+            .array_set => |*op| {
+                if (reg_rename_map.get(op.array.id)) |new_id| op.array.id = new_id;
+                if (reg_rename_map.get(op.key.id)) |new_id| op.key.id = new_id;
+                if (reg_rename_map.get(op.value.id)) |new_id| op.value.id = new_id;
+            },
+            .property_get => |*op| {
+                if (reg_rename_map.get(op.object.id)) |new_id| op.object.id = new_id;
+            },
+            .property_set => |*op| {
+                if (reg_rename_map.get(op.object.id)) |new_id| op.object.id = new_id;
+                if (reg_rename_map.get(op.value.id)) |new_id| op.value.id = new_id;
+            },
+            else => {
+                // 其他指令类型暂不处理
+            },
         }
     }
 
@@ -2178,17 +2387,17 @@ pub const IROptimizer = struct {
         // Phase 2: Recursively mark dependencies
         var worklist: std.ArrayList(u32) = .empty;
         defer worklist.deinit(self.allocator);
-        
+
         // Add all initially marked registers to worklist
         var iter = self.used_registers.keyIterator();
         while (iter.next()) |reg_id| {
             try worklist.append(self.allocator, reg_id.*);
         }
-        
+
         // Process worklist: mark all registers that produce used values
         while (worklist.items.len > 0) {
             const reg_id = worklist.pop();
-            
+
             // Find instruction that produces this register
             for (func.blocks.items) |block| {
                 for (block.instructions.items) |inst| {
@@ -2235,7 +2444,7 @@ pub const IROptimizer = struct {
 
         return changed;
     }
-    
+
     /// Recursively mark operands of an instruction
     fn markOperandsRecursive(self: *Self, inst: *const Instruction, worklist: *std.ArrayList(u32)) !void {
         switch (inst.op) {
