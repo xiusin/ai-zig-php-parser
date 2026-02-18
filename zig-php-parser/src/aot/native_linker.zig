@@ -5555,6 +5555,14 @@ pub const NativeLinker = struct {
         const header_block = func.blocks.items[loop.header];
         const body_block = func.blocks.items[loop.body_start];
 
+        // 先获取条件寄存器 ID（用于识别循环变量）
+        var cond_reg_id: ?usize = null;
+        if (header_block.terminator) |term| {
+            if (term == .cond_br) {
+                cond_reg_id = term.cond_br.cond.id;
+            }
+        }
+
         // 收集 phi 节点更新信息
         var phi_updates = std.ArrayListUnmanaged(struct { phi_reg: usize, value_reg: usize }){};
         defer phi_updates.deinit(self.allocator);
@@ -5611,22 +5619,44 @@ pub const NativeLinker = struct {
                     std.debug.print("phi: reg_{d} <- reg_{d}\n", .{ result_reg.id, ureg });
                     try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = ureg });
                 } else {
-                    std.debug.print("  Warning: No update found for phi reg_{d}, using fallback\n", .{result_reg.id});
-                    for (phi_op.incoming) |incoming| {
-                        if (!isInitBlock(incoming.block, loop)) {
-                            const resolved_reg = self.resolveUnrolledReg(func, incoming.value.id, loop);
-                            try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = resolved_reg });
-                            break;
+                    // 未找到更新指令，可能是循环变量（$i++）
+                    // 检查是否在条件判断中使用（循环变量的特征）
+                    var is_loop_var = false;
+                    if (cond_reg_id) |cond_id| {
+                        for (header_block.instructions.items) |cond_inst| {
+                            if (cond_inst.result) |cond_result| {
+                                if (cond_result.id == cond_id) {
+                                    switch (cond_inst.op) {
+                                        .lt, .le, .gt, .ge => |op| {
+                                            if (op.lhs.id == result_reg.id or op.rhs.id == result_reg.id) {
+                                                is_loop_var = true;
+                                                break;
+                                            }
+                                        },
+                                        else => {},
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (is_loop_var) {
+                        // 循环变量：生成简单自增 reg = reg + 1
+                        std.debug.print("  Loop variable detected: reg_{d}, generating simple increment\n", .{result_reg.id});
+                        // 使用特殊标记表示需要生成 reg = reg + 1
+                        try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = result_reg.id });
+                    } else {
+                        // 其他情况：使用 fallback
+                        std.debug.print("  Warning: No update found for phi reg_{d}, using fallback\n", .{result_reg.id});
+                        for (phi_op.incoming) |incoming| {
+                            if (!isInitBlock(incoming.block, loop)) {
+                                const resolved_reg = self.resolveUnrolledReg(func, incoming.value.id, loop);
+                                try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = resolved_reg });
+                                break;
+                            }
                         }
                     }
                 }
-            }
-        }
-
-        var cond_reg_id: ?usize = null;
-        if (header_block.terminator) |term| {
-            if (term == .cond_br) {
-                cond_reg_id = term.cond_br.cond.id;
             }
         }
 
@@ -6147,6 +6177,12 @@ pub const NativeLinker = struct {
 
             // 更新 phi 节点的值（在循环末尾）
             for (phi_updates.items) |update| {
+                // 特殊情况：循环变量简单自增（phi_reg == value_reg）
+                if (update.phi_reg == update.value_reg) {
+                    try writer.print("        reg_{d} = reg_{d} + 1;\n", .{ update.phi_reg, update.phi_reg });
+                    continue;
+                }
+
                 // 检查类型是否匹配
                 const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
                 const value_type = if (self.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
@@ -7687,54 +7723,9 @@ pub const NativeLinker = struct {
 
     /// 生成结构化 for 循环
     fn generateForLoopStructured(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
+        // 复用 generateStandardForLoop 的完整逻辑（包括 PHI 更新修复）
+        try self.generateStandardForLoop(writer, func, loop);
         _ = cleanup_regs;
-
-        try writer.writeAll("    // Optimized: structured for loop\n");
-        try writer.writeAll("    while (true) {\n");
-
-        // 生成循环头（条件）
-        const header_block = func.blocks.items[loop.header];
-        try writer.print("        // Header: {s}\n", .{header_block.label});
-
-        for (header_block.instructions.items) |inst| {
-            try writer.writeAll("        ");
-            try self.generateInstruction(writer, inst);
-        }
-
-        // 生成条件判断
-        if (header_block.terminator) |term| {
-            if (term == .cond_br) {
-                const cond_reg = term.cond_br.cond.id;
-                const reg_type = self.current_reg_types.?.get(cond_reg) orelse IR.Type{ .php_value = {} };
-                const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
-
-                try writer.writeAll("        if (!(");
-                try self.writeBoolExpr(writer, type_tag, cond_reg);
-                try writer.writeAll(")) break;\n");
-            }
-        }
-
-        // 生成循环体
-        const body_block = func.blocks.items[loop.body_start];
-        try writer.print("        // Body: {s}\n", .{body_block.label});
-
-        for (body_block.instructions.items) |inst| {
-            try writer.writeAll("        ");
-            try self.generateInstruction(writer, inst);
-        }
-
-        // 生成增量块
-        if (loop.increment) |inc_idx| {
-            const inc_block = func.blocks.items[inc_idx];
-            try writer.print("        // Increment: {s}\n", .{inc_block.label});
-
-            for (inc_block.instructions.items) |inst| {
-                try writer.writeAll("        ");
-                try self.generateInstruction(writer, inst);
-            }
-        }
-
-        try writer.writeAll("    }\n");
     }
 
     /// 直接生成 while 循环
