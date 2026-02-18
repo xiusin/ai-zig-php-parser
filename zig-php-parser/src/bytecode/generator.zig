@@ -257,6 +257,13 @@ pub const BytecodeGenerator = struct {
         return idx;
     }
 
+    /// 获取一个编译期临时局部槽位
+    fn getTempLocalSlot(self: *BytecodeGenerator, prefix: []const u8) !u16 {
+        const name = try std.fmt.allocPrint(self.allocator, "__tmp_{s}_{d}", .{ prefix, self.local_count });
+        defer self.allocator.free(name);
+        return self.getOrCreateLocal(name);
+    }
+
     /// 压栈计数
     fn pushStack(self: *BytecodeGenerator) void {
         self.current_stack += 1;
@@ -350,21 +357,7 @@ pub const BytecodeGenerator = struct {
         const compound_data = node.data.compound_assignment;
         const target_node = self.getNode(compound_data.target);
 
-        // 目前先支持变量目标：$a += $b
-        if (target_node.tag != .variable) {
-            return;
-        }
-
-        // 1) 读取左值
-        const var_name = self.getString(target_node.data.variable.name);
-        const slot = try self.getOrCreateLocal(var_name);
-        try self.emit(.push_local, slot, 0);
-        self.pushStack();
-
-        // 2) 计算右值
-        try self.visitNode(compound_data.value);
-
-        // 3) 执行运算
+        // 1) 执行运算
         const opcode: OpCode = switch (compound_data.op) {
             .plus_equal => .add_int,
             .minus_equal => .sub_int,
@@ -380,15 +373,132 @@ pub const BytecodeGenerator = struct {
             return;
         }
 
-        try self.emit(opcode, 0, 0);
-        // 二元运算：弹出2个，压入1个 => 栈深 -1
-        self.popStack();
+        switch (target_node.tag) {
+            .variable => {
+                // 2) 读取左值
+                const var_name = self.getString(target_node.data.variable.name);
+                const slot = try self.getOrCreateLocal(var_name);
+                try self.emit(.push_local, slot, 0);
+                self.pushStack();
 
-        // 4) 写回变量，同时保留表达式值在栈顶
-        try self.emit(.dup, 0, 0);
-        self.pushStack();
-        try self.emit(.store_local, slot, 0);
-        self.popStack();
+                // 3) 计算右值
+                try self.visitNode(compound_data.value);
+
+                // 4) 运算并写回（保留表达式值）
+                try self.emit(opcode, 0, 0);
+                self.popStack(); // 二元运算净 -1
+                try self.emit(.dup, 0, 0);
+                self.pushStack();
+                try self.emit(.store_local, slot, 0);
+                self.popStack();
+            },
+            .array_access => {
+                const access_data = target_node.data.array_access;
+
+                const arr_slot = try self.getTempLocalSlot("arr_compound");
+                const idx_slot = try self.getTempLocalSlot("idx_compound");
+
+                // 2) 准备 array/index，并保存副本用于回写
+                try self.visitNode(access_data.target); // [arr]
+                if (access_data.index) |idx| {
+                    try self.visitNode(idx); // [arr, idx]
+                } else {
+                    try self.emit(.push_null, 0, 0); // [arr, null]
+                    self.pushStack();
+                }
+
+                try self.emit(.dup, 0, 0); // [arr, idx, idx]
+                self.pushStack();
+                try self.emit(.store_local, idx_slot, 0); // [arr, idx]
+                self.popStack();
+
+                try self.emit(.swap, 0, 0); // [idx, arr]
+                try self.emit(.dup, 0, 0); // [idx, arr, arr]
+                self.pushStack();
+                try self.emit(.store_local, arr_slot, 0); // [idx, arr]
+                self.popStack();
+                try self.emit(.swap, 0, 0); // [arr, idx]
+
+                // 3) 读取当前元素值
+                try self.emit(.array_get, 0, 0); // [cur]
+                self.popStack(); // array_get: 净 -1
+
+                // 4) 计算右值并执行运算
+                try self.visitNode(compound_data.value); // [cur, rhs]
+                try self.emit(opcode, 0, 0); // [new]
+                self.popStack(); // 二元运算净 -1
+
+                // 5) 回写数组元素，并保留表达式值
+                try self.emit(.dup, 0, 0); // [new, new]
+                self.pushStack();
+
+                try self.emit(.push_local, arr_slot, 0); // [new, new, arr]
+                self.pushStack();
+                try self.emit(.swap, 0, 0); // [new, arr, new]
+                try self.emit(.push_local, idx_slot, 0); // [new, arr, new, idx]
+                self.pushStack();
+                try self.emit(.swap, 0, 0); // [new, arr, idx, new]
+                try self.emit(.array_set, 0, 0); // [new, arr]
+                self.popStack();
+                self.popStack(); // array_set 净 -2
+                try self.emit(.pop, 0, 0); // [new]
+                self.popStack();
+            },
+            .property_access => {
+                const prop_data = target_node.data.property_access;
+
+                // 标量替换路径：字段被替换为局部槽位
+                const base_node = self.getNode(prop_data.target);
+                if (base_node.tag == .variable) {
+                    const prop_name = self.getString(prop_data.property_name);
+                    if (self.getScalarFieldSlot(prop_data.target, prop_name)) |field_slot| {
+                        try self.emit(.push_local, field_slot, 0);
+                        self.pushStack();
+                        try self.visitNode(compound_data.value);
+                        try self.emit(opcode, 0, 0);
+                        self.popStack();
+                        try self.emit(.dup, 0, 0);
+                        self.pushStack();
+                        try self.emit(.store_local, field_slot, 0);
+                        self.popStack();
+                        return;
+                    }
+                }
+
+                const obj_slot = try self.getTempLocalSlot("obj_compound");
+
+                // 2) 获取对象并保存副本用于 set_prop
+                try self.visitNode(prop_data.target); // [obj]
+                try self.emit(.dup, 0, 0); // [obj, obj]
+                self.pushStack();
+                try self.emit(.store_local, obj_slot, 0); // [obj]
+                self.popStack();
+
+                // 3) 读取当前属性值
+                const prop_name = self.getString(prop_data.property_name);
+                const prop_name_const = try self.addConstant(.{ .string_val = prop_name });
+                try self.emit(.get_prop, prop_name_const, 0); // [cur]
+
+                // 4) 计算右值并执行运算
+                try self.visitNode(compound_data.value); // [cur, rhs]
+                try self.emit(opcode, 0, 0); // [new]
+                self.popStack();
+
+                // 5) 回写属性并保留表达式值
+                try self.emit(.dup, 0, 0); // [new, new]
+                self.pushStack();
+                try self.emit(.push_local, obj_slot, 0); // [new, new, obj]
+                self.pushStack();
+                try self.emit(.swap, 0, 0); // [new, obj, new]
+                try self.emit(.set_prop, prop_name_const, 0); // [new, obj]
+                self.popStack();
+                try self.emit(.pop, 0, 0); // [new]
+                self.popStack();
+            },
+            else => {
+                return;
+            },
+        }
     }
 
     /// 访问根节点 - 遍历所有顶层语句

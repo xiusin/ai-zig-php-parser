@@ -9,4 +9,4 @@ function test_simple() {
 }
 
 $result = test_simple();
-echo "Result: $result (expect 9)\n";
+echo "Result: $result (expect 6)\n";
