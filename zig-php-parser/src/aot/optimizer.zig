@@ -118,7 +118,7 @@ pub const PassConfig = struct {
             .licm = false,
             .strength_reduction = false,
             .mem2reg = true, // 重新启用 mem2reg
-            .loop_unroll = true,
+            .loop_unroll = false,
             .cfg_cleanup = false,
             .rc_elision = false,
             .max_iterations = 2, // 增加到 2 以支持类型推断
@@ -139,7 +139,7 @@ pub const PassConfig = struct {
             .licm = true,
             .strength_reduction = true,
             .mem2reg = true,
-            .loop_unroll = true,
+            .loop_unroll = false,
             .cfg_cleanup = true,
             .rc_elision = true,
             .max_iterations = 3,
@@ -167,7 +167,7 @@ pub const PassConfig = struct {
             .licm = true,
             .strength_reduction = true,
             .mem2reg = true,
-            .loop_unroll = true,
+            .loop_unroll = false,
             .cfg_cleanup = true,
             .rc_elision = true,
             .max_iterations = 5,
@@ -834,18 +834,6 @@ pub const IROptimizer = struct {
             }
         }
 
-        // Loop Unrolling（在 LICM 之后）
-        // We only unroll innermost loops (no sub-loops) for now to keep it simple.
-        if (self.config.loop_unroll and loop.sub_loops.items.len == 0) {
-            if (try self.unrollLoop(func, loop, dt)) {
-                self.stats.loops_unrolled += 1;
-                changed = true;
-                // If unrolled, the loop structure changes significantly.
-                // We might need to stop further optimizations on this loop struct.
-                return true;
-            }
-        }
-
         return changed;
     }
 
@@ -1131,13 +1119,10 @@ pub const IROptimizer = struct {
 
     /// Run Loop Unrolling on the entire module
     fn runLoopUnroll(self: *Self, module: *Module) !bool {
-        var changed = false;
-        for (module.functions.items) |func| {
-            if (try self.runLoopUnrollInFunction(func)) {
-                changed = true;
-            }
-        }
-        return changed;
+        _ = self;
+        _ = module;
+        // 准确性优先：暂时禁用 IR 层循环展开
+        return false;
     }
 
     /// Run Loop Unrolling on a function
