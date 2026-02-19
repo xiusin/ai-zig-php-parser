@@ -1173,6 +1173,11 @@ pub const IROptimizer = struct {
     fn unrollLoop(self: *Self, func: *Function, loop: *Analysis.Loop, dt: *const Analysis.DominatorTree) !bool {
         _ = dt;
 
+        // 准确性优先：嵌套循环暂不展开，避免 PHI incoming 被跨层重写
+        if (loop.sub_loops.items.len > 0) {
+            return false;
+        }
+
         // 1. Analyze loop to check if it's a candidate
         // We verify it has a single latch that conditionally branches to header (do-while style)
         // OR we can handle standard while loops if we are careful.

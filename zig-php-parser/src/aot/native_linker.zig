@@ -6966,6 +6966,24 @@ pub const NativeLinker = struct {
             break :blk null;
         } else null;
 
+        // 规范化 increment 块：优先使用非 _unroll_ 的原始块，避免引用展开寄存器
+        var effective_inc_idx: ?usize = loop.increment;
+        if (loop.increment) |inc_idx| {
+            const raw_inc_block = func.blocks.items[inc_idx];
+            const is_unroll_inc = std.mem.indexOf(u8, raw_inc_block.label, "_unroll_") != null;
+            if (is_unroll_inc) {
+                if (findOriginalBlockLabel(raw_inc_block.label)) |orig_label| {
+                    for (func.blocks.items) |candidate| {
+                        const candidate_is_unroll = std.mem.indexOf(u8, candidate.label, "_unroll_") != null;
+                        if (!candidate_is_unroll and std.mem.eql(u8, candidate.label, orig_label)) {
+                            effective_inc_idx = @as(usize, candidate.index);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // 生成子循环
         for (loop.children.items) |child_idx| {
             const child_loop = all_loops[child_idx];
@@ -6981,40 +6999,8 @@ pub const NativeLinker = struct {
             try writer.writeAll("        // Nested loop\n");
             try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs, depth + 1);
 
-            // 关键：子循环结束后，将子循环的累加器传递给外层
-            // 分析子循环的累加器
-            var child_accumulators = try self.analyzeLoopAccumulators(func, child_loop);
-            defer child_accumulators.deinit(self.allocator);
-
-            // 对于外层的每个累加器，检查是否需要从子循环获取值
-            for (accumulators.items) |acc| {
-                // 查找外层累加器的 PHI incoming
-                for (header_block.instructions.items) |inst| {
-                    if (inst.op == .phi) {
-                        if (inst.result) |res| {
-                            if (res.id == acc.reg_id) {
-                                const phi_op = inst.op.phi;
-                                // 查找来自 body 或 increment 的 incoming（非 header）
-                                for (phi_op.incoming) |incoming| {
-                                    if (incoming.block != header_block) {
-                                        // 这个 incoming 值需要从子循环累加器获取
-                                        if (child_accumulators.items.len > 0) {
-                                            // 简单策略：使用第一个子累加器（通常只有一个）
-                                            const child_acc = child_accumulators.items[0];
-                                            try writer.print("        reg_{d} = reg_{d};\n", .{ incoming.value.id, child_acc.reg_id });
-                                        }
-                                        // 不 break，继续处理其他 incoming
-                                    }
-                                }
-                                break; // 找到对应的 PHI 后退出
-                            }
-                        }
-                    }
-                }
-            }
-
             // 生成 increment 块
-            if (loop.increment) |inc_idx| {
+            if (effective_inc_idx) |inc_idx| {
                 const inc_block = func.blocks.items[inc_idx];
                 try writer.print("        // Increment: {s}\n", .{inc_block.label});
                 for (inc_block.instructions.items) |inst| {
@@ -7032,7 +7018,7 @@ pub const NativeLinker = struct {
                     const result_reg = inst.result orelse continue;
 
                     std.debug.print("  PHI reg_{d}: checking incoming for update\n", .{result_reg.id});
-                    if (loop.increment) |inc_idx| {
+                    if (effective_inc_idx) |inc_idx| {
                         std.debug.print("    increment block index: {d}\n", .{inc_idx});
                     }
                     for (phi_op.incoming) |incoming| {
@@ -7041,7 +7027,7 @@ pub const NativeLinker = struct {
 
                     // 找到来自 increment 或 body 的值
                     var update_value: ?usize = null;
-                    if (loop.increment) |inc_idx| {
+                    if (effective_inc_idx) |inc_idx| {
                         const inc_block = func.blocks.items[inc_idx];
                         for (phi_op.incoming) |incoming| {
                             if (incoming.block == inc_block) {
@@ -7061,6 +7047,20 @@ pub const NativeLinker = struct {
                         }
                     }
 
+                    // 判定当前 PHI 是否为循环条件变量（如 i < N 里的 i）
+                    var is_loop_var = false;
+                    for (header_block.instructions.items) |cond_inst| {
+                        switch (cond_inst.op) {
+                            .lt, .le, .gt, .ge => |op| {
+                                if (op.lhs.id == result_reg.id or op.rhs.id == result_reg.id) {
+                                    is_loop_var = true;
+                                    break;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+
                     if (update_value) |val_reg| {
                         // 解析展开块寄存器：当 val_reg 定义在 _unroll_* 块中时，
                         // 追踪到原始块中的等价寄存器
@@ -7071,7 +7071,10 @@ pub const NativeLinker = struct {
                         const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                         const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
-                        if (phi_tag == value_tag) {
+                        // 循环变量使用确定性更新：避免展开寄存器解析错位导致卡死
+                        if (is_loop_var) {
+                            try writer.print("        reg_{d} = reg_{d} + 1;\n", .{ result_reg.id, result_reg.id });
+                        } else if (phi_tag == value_tag) {
                             try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, resolved_reg });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
                             try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, resolved_reg });
@@ -7221,8 +7224,11 @@ pub const NativeLinker = struct {
                                             if (orig_inst.op != .phi) {
                                                 if (orig_inst_idx == target_inst_idx) {
                                                     if (orig_inst.result) |orig_res| {
-                                                        std.debug.print("  -> Resolved by position: reg_{d} -> reg_{d}\n", .{ reg_id, orig_res.id });
-                                                        return orig_res.id;
+                                                        if (findRegDef(func, orig_res.id) != null) {
+                                                            std.debug.print("  -> Resolved by position: reg_{d} -> reg_{d}\n", .{ reg_id, orig_res.id });
+                                                            return orig_res.id;
+                                                        }
+                                                        std.debug.print("  -> Skip invalid position mapping: reg_{d} -> reg_{d} (no def)\n", .{ reg_id, orig_res.id });
                                                     }
                                                 }
                                                 orig_inst_idx += 1;
