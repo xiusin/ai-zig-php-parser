@@ -516,12 +516,26 @@ pub const NativeLinker = struct {
             \\
             \\pub fn main() !void {
             \\    const allocator = std.heap.page_allocator;
-            \\    
+            \\
             \\    runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
             \\
             \\    // 初始化静态字符串池（一次性开销）
             \\    initStaticStrings();
+            \\
+            \\    var alloc_stats_enabled: bool = false;
+            \\    if (std.process.getEnvVarOwned(allocator, "ZIGPHP_ALLOC_STATS")) |v| {
+            \\        alloc_stats_enabled = true;
+            \\        allocator.free(v);
+            \\    } else |_| {}
+            \\
+            \\    defer if (alloc_stats_enabled) {
+            \\        const s = runtime.getAllocStats();
+            \\        std.debug.print(
+            \\            "ALLOC_STATS alloc_bytes={d} alloc_count={d} free_bytes={d} free_count={d} live_bytes={d} live_allocs={d} peak_live_bytes={d} peak_live_allocs={d} php_string_live_objects={d} php_string_live_bytes={d} php_array_live_objects={d} php_object_live_objects={d}\\n",
+            \\            .{ s.alloc_bytes, s.alloc_count, s.free_bytes, s.free_count, s.live_bytes, s.live_allocs, s.peak_live_bytes, s.peak_live_allocs, s.php_string_live_objects, s.php_string_live_bytes, s.php_array_live_objects, s.php_object_live_objects },
+            \\        );
+            \\    };
             \\
             \\    var profiling_enabled: bool = false;
             \\    if (std.process.getEnvVarOwned(allocator, "ZIGPHP_PROFILE")) |v| {
@@ -572,13 +586,13 @@ pub const NativeLinker = struct {
             \\        runtime.profiler.setGlobalProfiler(null);
             \\        profiler.deinit();
             \\    };
-            \\    
+            \\
             \\    // 注册所有类
             \\    registerAllClasses(allocator) catch {};
             \\    // 注册所有函数
             \\    registerAllFunctions() catch {};
             \\    defer runtime.cleanupAllClasses();
-            \\    
+            \\
             \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
             \\    _ = runtime.php_go_wait_all(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch {};
             \\}
