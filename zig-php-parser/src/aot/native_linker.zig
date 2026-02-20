@@ -2393,8 +2393,12 @@ pub const NativeLinker = struct {
             break :blk type_tag;
         } else type_tag;
 
-        // 最终有效类型：推断类型 > 寄存器类型 > 参数类型
-        const effective_tag = inferred_tag orelse register_tag;
+        // 最终有效类型：寄存器纠正类型为 php_value 时优先级最高（防止推断把 Value 误当标量）。
+        // 其他情况仍按：推断类型 > 寄存器类型 > 参数类型。
+        const effective_tag: std.meta.Tag(IR.Type) = if (register_tag == .php_value)
+            .php_value
+        else
+            (inferred_tag orelse register_tag);
 
         // 如果有效类型已经是 php_value，直接使用
         if (effective_tag == .php_value) {
@@ -3274,14 +3278,38 @@ pub const NativeLinker = struct {
             },
             .add => |op| {
                 if (inst.result) |reg| {
-                    // 使用类型推断结果（优先）
-                    const lhs_type = self.getInferredRegType(op.lhs.id, op.lhs.type_);
-                    const rhs_type = self.getInferredRegType(op.rhs.id, op.rhs.type_);
-                    const result_type = self.getInferredRegType(reg.id, reg.type_);
+                    // 使用类型推断结果（优先）。但在混合运算场景里，类型约束的反向传播
+                    // 可能把 runtime.Value 错推为 f64/i64，因此这里优先以“寄存器收集阶段”
+                    // 的纠正类型作为 fallback，避免生成不合法的原生算术表达式。
+                    const lhs_fallback = if (self.current_register_types) |types|
+                        (types.get(op.lhs.id) orelse op.lhs.type_)
+                    else
+                        op.lhs.type_;
+                    const rhs_fallback = if (self.current_register_types) |types|
+                        (types.get(op.rhs.id) orelse op.rhs.type_)
+                    else
+                        op.rhs.type_;
+                    const result_fallback = if (self.current_register_types) |types|
+                        (types.get(reg.id) orelse reg.type_)
+                    else
+                        reg.type_;
+
+                    var lhs_type = self.getInferredRegType(op.lhs.id, lhs_fallback);
+                    var rhs_type = self.getInferredRegType(op.rhs.id, rhs_fallback);
+                    var result_type = self.getInferredRegType(reg.id, result_fallback);
+
+                    // 混合运算保护：如果寄存器收集阶段已纠正为 php_value，
+                    // 则禁止被推断结果覆盖为基本类型，避免生成 f64/i64 与 runtime.Value 的原生运算。
+                    if (@as(std.meta.Tag(IR.Type), lhs_fallback) == .php_value) lhs_type = lhs_fallback;
+                    if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) rhs_type = rhs_fallback;
+                    if (@as(std.meta.Tag(IR.Type), result_fallback) == .php_value) result_type = result_fallback;
 
                     const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
                     const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
                     const result_tag = @as(std.meta.Tag(IR.Type), result_type);
+
+                    const lhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), lhs_fallback) == .php_value) .php_value else lhs_tag;
+                    const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
 
                     // 如果所有操作数都是 i64，生成原生加法
                     if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
@@ -3292,11 +3320,43 @@ pub const NativeLinker = struct {
                         try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
                     } else {
                         // 混合类型或 php_value，使用运行时函数
-                        try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
+                        switch (result_tag) {
+                            .php_value => {
+                                try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
+                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                try writer.writeAll(", ");
+                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                try writer.writeAll(");\n");
+                            },
+                            .i64 => {
+                                try writer.print("    reg_{d} = (try runtime.php_add(", .{reg.id});
+                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                try writer.writeAll(", ");
+                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                try writer.writeAll(")).asInt();\n");
+                            },
+                            .f64 => {
+                                try writer.print("    reg_{d} = (try runtime.php_add(", .{reg.id});
+                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                try writer.writeAll(", ");
+                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                try writer.writeAll(")).asFloat();\n");
+                            },
+                            .bool => {
+                                try writer.print("    reg_{d} = (try runtime.php_add(", .{reg.id});
+                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                try writer.writeAll(", ");
+                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                try writer.writeAll(")).asBool();\n");
+                            },
+                            else => {
+                                try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
+                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                try writer.writeAll(", ");
+                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                try writer.writeAll(");\n");
+                            },
+                        }
                     }
                 }
             },
@@ -5552,6 +5612,185 @@ pub const NativeLinker = struct {
 
         var code_list = writer.context.self;
 
+        const PhiUpdate = struct { phi_reg: usize, value_reg: usize };
+
+        // 在标准循环内递归生成循环体控制流（cond_br / br），用于 break/continue 场景。
+        // 仅用于循环内部的块，避免遗漏 if_then/if_merge 等块导致语义缺失。
+        const LoopBodyIndent = struct {
+            fn writeIndent(dst: *std.ArrayList(u8), allocator: std.mem.Allocator, depth: usize) !void {
+                var i: usize = 0;
+                while (i < depth) : (i += 1) {
+                    try dst.appendSlice(allocator, "    ");
+                }
+            }
+        };
+
+        const SelfPtr = *Self;
+        const generateLoopBodyFromBlock = struct {
+            fn emitIncAndPhi(
+                self_: SelfPtr,
+                writer_: anytype,
+                code_: *std.ArrayList(u8),
+                func_: *const IR.Function,
+                loop_: LoopInfo,
+                phi_updates_: []const PhiUpdate,
+                depth: usize,
+            ) anyerror!void {
+                if (loop_.increment) |inc_idx| {
+                    const inc_block = func_.blocks.items[inc_idx];
+                    for (inc_block.instructions.items) |inst| {
+                        if (inst.op == .phi) continue;
+                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                        try self_.generateInstructionSimple(code_, inst);
+                    }
+                }
+
+                for (phi_updates_) |update| {
+                    if (update.phi_reg == update.value_reg) {
+                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                        try writer_.print("reg_{d} = reg_{d} + 1;\n", .{ update.phi_reg, update.phi_reg });
+                        continue;
+                    }
+
+                    const phi_type = if (self_.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                    const value_type = if (self_.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                    const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+
+                    try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                    if (phi_tag == value_tag) {
+                        try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .i64 and value_tag == .php_value) {
+                        try writer_.print("reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .f64 and value_tag == .php_value) {
+                        try writer_.print("reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                    } else {
+                        try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    }
+                }
+            }
+
+            fn go(
+                self_: SelfPtr,
+                writer_: anytype,
+                code_: *std.ArrayList(u8),
+                func_: *const IR.Function,
+                loop_: LoopInfo,
+                phi_updates_: []const PhiUpdate,
+                block_idx: usize,
+                visited: *std.AutoHashMap(usize, void),
+                depth: usize,
+            ) anyerror!void {
+                if (visited.contains(block_idx)) return;
+                try visited.put(block_idx, {});
+
+                const block = func_.blocks.items[block_idx];
+
+                for (block.instructions.items) |inst| {
+                    if (inst.op == .phi) continue;
+                    try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                    try self_.generateInstructionSimple(code_, inst);
+                }
+
+                const term_opt = block.terminator;
+                if (term_opt == null) return;
+
+                switch (term_opt.?) {
+                    .br => |br| {
+                        const target = @as(usize, br.index);
+                        if (loop_.increment) |inc| {
+                            if (target == inc or target == loop_.header) {
+                                try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth);
+                                try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                try writer_.writeAll("continue;\n");
+                                return;
+                            }
+                        }
+                        if (loop_.exit_block) |exit_idx| {
+                            if (target == exit_idx) {
+                                try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                try writer_.writeAll("break;\n");
+                                return;
+                            }
+                        }
+                        if (loop_.blocks.contains(target)) {
+                            try go(self_, writer_, code_, func_, loop_, phi_updates_, target, visited, depth);
+                        }
+                    },
+                    .cond_br => |cbr| {
+                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                        try writer_.writeAll("if (");
+
+                        // 尽量内联条件表达式，否则回退到 toBool
+                        var inlined = false;
+                        for (block.instructions.items) |inst| {
+                            if (inst.result) |rr| {
+                                if (rr.id == cbr.cond.id) {
+                                    try self_.writeInlinedConditionExpr(writer_, inst);
+                                    inlined = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!inlined) {
+                            const cond_type = self_.getInferredRegType(cbr.cond.id, cbr.cond.type_);
+                            const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
+                            try self_.writeBoolExpr(writer_, cond_tag, cbr.cond.id);
+                        }
+
+                        try writer_.writeAll(") {\n");
+
+                        const then_target = @as(usize, cbr.then_block.index);
+                        if (loop_.increment) |inc| {
+                            if (then_target == inc or then_target == loop_.header) {
+                                try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth + 1);
+                                try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
+                                try writer_.writeAll("continue;\n");
+                            } else if (loop_.exit_block) |exit_idx| {
+                                if (then_target == exit_idx) {
+                                    try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
+                                    try writer_.writeAll("break;\n");
+                                } else if (loop_.blocks.contains(then_target)) {
+                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1);
+                                }
+                            } else if (loop_.blocks.contains(then_target)) {
+                                try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1);
+                            }
+                        } else if (loop_.blocks.contains(then_target)) {
+                            try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1);
+                        }
+
+                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                        try writer_.writeAll("} else {\n");
+
+                        const else_target = @as(usize, cbr.else_block.index);
+                        if (loop_.increment) |inc2| {
+                            if (else_target == inc2 or else_target == loop_.header) {
+                                try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth + 1);
+                                try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
+                                try writer_.writeAll("continue;\n");
+                            } else if (loop_.exit_block) |exit_idx2| {
+                                if (else_target == exit_idx2) {
+                                    try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
+                                    try writer_.writeAll("break;\n");
+                                } else if (loop_.blocks.contains(else_target)) {
+                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1);
+                                }
+                            } else if (loop_.blocks.contains(else_target)) {
+                                try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1);
+                            }
+                        } else if (loop_.blocks.contains(else_target)) {
+                            try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1);
+                        }
+
+                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                        try writer_.writeAll("}\n");
+                    },
+                    else => {},
+                }
+            }
+        }.go;
+
         const header_block = func.blocks.items[loop.header];
         const body_block = func.blocks.items[loop.body_start];
 
@@ -5564,7 +5803,7 @@ pub const NativeLinker = struct {
         }
 
         // 收集 phi 节点更新信息
-        var phi_updates = std.ArrayListUnmanaged(struct { phi_reg: usize, value_reg: usize }){};
+        var phi_updates = std.ArrayListUnmanaged(PhiUpdate){};
         defer phi_updates.deinit(self.allocator);
 
         for (header_block.instructions.items) |inst| {
@@ -5577,20 +5816,34 @@ pub const NativeLinker = struct {
                 // 策略：在实际生成的块中查找更新，避免使用被展开破坏的 PHI incoming
                 var update_reg: ?usize = null;
 
-                // 1. 在 body 块中查找（累加器更新）
-                for (body_block.instructions.items) |body_inst| {
-                    if (body_inst.result) |body_result| {
-                        switch (body_inst.op) {
-                            .add => |op| {
-                                if (op.lhs.id == result_reg.id) {
-                                    update_reg = body_result.id;
-                                    std.debug.print("  Found update in body: reg_{d} = reg_{d} + ...\n", .{ body_result.id, op.lhs.id });
-                                    break;
-                                }
-                            },
-                            else => {},
+                // 1. 在当前循环的所有块中查找（累加器更新可能在 if/else 分支块里）
+                // 注意：只扫 loop.blocks，避免跨出循环范围。
+                var blk_iter = loop.blocks.keyIterator();
+                while (blk_iter.next()) |blk_idx_ptr| {
+                    const blk_idx = blk_idx_ptr.*;
+                    // 跳过 header 本身（这里主要找 body/子块中的更新）
+                    if (blk_idx == loop.header) continue;
+
+                    const scan_block = func.blocks.items[blk_idx];
+                    for (scan_block.instructions.items) |scan_inst| {
+                        if (scan_inst.result) |scan_res| {
+                            switch (scan_inst.op) {
+                                .add => |op| {
+                                    if (op.lhs.id == result_reg.id) {
+                                        update_reg = scan_res.id;
+                                        std.debug.print(
+                                            "  Found update in loop block {d}: reg_{d} = reg_{d} + ...\n",
+                                            .{ blk_idx, scan_res.id, op.lhs.id },
+                                        );
+                                        break;
+                                    }
+                                },
+                                else => {},
+                            }
                         }
                     }
+
+                    if (update_reg != null) break;
                 }
 
                 // 2. 如果在 body 块未找到，在 increment 块查找（循环变量）
@@ -6116,59 +6369,78 @@ pub const NativeLinker = struct {
                     }
                 }
             } else {
+                var used_recursive_body = false;
                 var i: usize = 0;
                 while (i < unroll_factor) : (i += 1) {
                     if (!try self.tryOptimizeIncrement(writer, body_block)) {
-                        for (body_block.instructions.items) |inst| {
-                            const is_invariant = switch (inst.op) {
-                                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
-                                else => false,
-                            };
+                        if (body_block.terminator != null and
+                            (body_block.terminator.? == .cond_br or body_block.terminator.? == .br))
+                        {
+                            var visited = std.AutoHashMap(usize, void).init(self.allocator);
+                            defer visited.deinit();
+                            try generateLoopBodyFromBlock(self, writer, code_list, func, loop, phi_updates.items, loop.body_start, &visited, 2);
+                            used_recursive_body = true;
+                        } else {
+                            for (body_block.instructions.items) |inst| {
+                                const is_invariant = switch (inst.op) {
+                                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                                    else => false,
+                                };
 
-                            if (!is_invariant) {
-                                try code_list.appendSlice(self.allocator, "        ");
-                                try self.generateInstructionSimple(code_list, inst);
+                                if (!is_invariant) {
+                                    try code_list.appendSlice(self.allocator, "        ");
+                                    try self.generateInstructionSimple(code_list, inst);
+                                }
                             }
                         }
                     }
+                }
+
+                // 递归结构化生成会在分支内提前执行 increment + PHI 更新并 continue/break。
+                // 因此这里跳过统一的循环尾部增量与 PHI 更新块，避免 continue 后残留语句触发 unreachable。
+                if (used_recursive_body) {
+                    // 直接进入后续 while 循环迭代（由分支内的 continue/break 控制）
+                    // 注意：下面的 increment 与 phi 更新块将被条件跳过。
                 }
             }
 
             // 增量（一次性增加 unroll_factor）
             if (loop.increment) |inc_idx| {
-                const inc_block = func.blocks.items[inc_idx];
-                try writer.print("        // Increment: {s} (x{d})\n", .{ inc_block.label, unroll_factor });
+                if (!(body_block.terminator != null and (body_block.terminator.? == .cond_br or body_block.terminator.? == .br))) {
+                    const inc_block = func.blocks.items[inc_idx];
+                    try writer.print("        // Increment: {s} (x{d})\n", .{ inc_block.label, unroll_factor });
 
-                if (unroll_factor > 1) {
-                    // 找到 store 指令的目标寄存器
-                    for (inc_block.instructions.items) |inst| {
-                        if (inst.op == .store) {
-                            const target_reg = inst.op.store.ptr.id;
-                            // 检查是否是 alloca
-                            const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                                alloca_regs.contains(target_reg)
-                            else
-                                false;
-
-                            if (is_alloca) {
-                                try writer.print("        reg_{d}.* = runtime.Value.initInt(reg_{d}.*.asInt() + {d});\n", .{ target_reg, target_reg, unroll_factor });
-                            } else {
-                                try writer.print("        reg_{d} += {d};\n", .{ target_reg, unroll_factor });
-                            }
-                            break;
-                        }
-                    }
-                } else {
-                    if (!try self.tryOptimizeIncrement(writer, inc_block)) {
+                    if (unroll_factor > 1) {
+                        // 找到 store 指令的目标寄存器
                         for (inc_block.instructions.items) |inst| {
-                            const is_invariant = switch (inst.op) {
-                                .const_int, .const_float, .const_string, .const_bool, .const_null => true,
-                                else => false,
-                            };
+                            if (inst.op == .store) {
+                                const target_reg = inst.op.store.ptr.id;
+                                // 检查是否是 alloca
+                                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                    alloca_regs.contains(target_reg)
+                                else
+                                    false;
 
-                            if (!is_invariant) {
-                                try code_list.appendSlice(self.allocator, "        ");
-                                try self.generateInstructionSimple(code_list, inst);
+                                if (is_alloca) {
+                                    try writer.print("        reg_{d}.* = runtime.Value.initInt(reg_{d}.*.asInt() + {d});\n", .{ target_reg, target_reg, unroll_factor });
+                                } else {
+                                    try writer.print("        reg_{d} += {d};\n", .{ target_reg, unroll_factor });
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        if (!try self.tryOptimizeIncrement(writer, inc_block)) {
+                            for (inc_block.instructions.items) |inst| {
+                                const is_invariant = switch (inst.op) {
+                                    .const_int, .const_float, .const_string, .const_bool, .const_null => true,
+                                    else => false,
+                                };
+
+                                if (!is_invariant) {
+                                    try code_list.appendSlice(self.allocator, "        ");
+                                    try self.generateInstructionSimple(code_list, inst);
+                                }
                             }
                         }
                     }
@@ -6176,33 +6448,35 @@ pub const NativeLinker = struct {
             }
 
             // 更新 phi 节点的值（在循环末尾）
-            for (phi_updates.items) |update| {
-                // 特殊情况：循环变量简单自增（phi_reg == value_reg）
-                if (update.phi_reg == update.value_reg) {
-                    try writer.print("        reg_{d} = reg_{d} + 1;\n", .{ update.phi_reg, update.phi_reg });
-                    continue;
-                }
+            if (!(body_block.terminator != null and (body_block.terminator.? == .cond_br or body_block.terminator.? == .br))) {
+                for (phi_updates.items) |update| {
+                    // 特殊情况：循环变量简单自增（phi_reg == value_reg）
+                    if (update.phi_reg == update.value_reg) {
+                        try writer.print("        reg_{d} = reg_{d} + 1;\n", .{ update.phi_reg, update.phi_reg });
+                        continue;
+                    }
 
-                // 检查类型是否匹配
-                const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
-                const value_type = if (self.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                    // 检查类型是否匹配
+                    const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
+                    const value_type = if (self.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
 
-                const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
-                const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                    const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
+                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
-                if (phi_tag == value_tag) {
-                    // 类型匹配，直接赋值
-                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
-                } else if (phi_tag == .i64 and value_tag == .php_value) {
-                    // phi 是 i64，value 是 php_value，需要转换
-                    try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
-                } else if (phi_tag == .f64 and value_tag == .php_value) {
-                    try writer.print("        reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
-                } else if (phi_tag == .bool and value_tag == .php_value) {
-                    try writer.print("        reg_{d} = reg_{d}.toBool();\n", .{ update.phi_reg, update.value_reg });
-                } else {
-                    // 其他情况，尝试直接赋值
-                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    if (phi_tag == value_tag) {
+                        // 类型匹配，直接赋值
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .i64 and value_tag == .php_value) {
+                        // phi 是 i64，value 是 php_value，需要转换
+                        try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .f64 and value_tag == .php_value) {
+                        try writer.print("        reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .bool and value_tag == .php_value) {
+                        try writer.print("        reg_{d} = reg_{d}.toBool();\n", .{ update.phi_reg, update.value_reg });
+                    } else {
+                        // 其他情况，尝试直接赋值
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    }
                 }
             }
 
@@ -6876,11 +7150,14 @@ pub const NativeLinker = struct {
         var accumulators = try self.analyzeLoopAccumulators(func, loop);
         defer accumulators.deinit(self.allocator);
 
-        // 如果没有子循环且 body 没有条件分支，使用优化版本
+        // 如果没有子循环，根据 body 是否包含 cond_br 选择不同路径：
+        // - 无 cond_br：走 StructuredNew（更紧凑）
+        // - 有 cond_br：走 generateStandardForLoop（覆盖 break/continue 等控制流）
+        // 这里仍需初始化 PHI 节点。
         const body_block = func.blocks.items[loop.body_start];
         const body_has_cond = if (body_block.terminator) |term| term == .cond_br else false;
 
-        if (loop.children.items.len == 0 and !body_has_cond) {
+        if (loop.children.items.len == 0) {
             // 简化路径：无子循环，无条件分支
             // 但仍需初始化 PHI 节点
             const header_block = func.blocks.items[loop.header];
@@ -6900,7 +7177,11 @@ pub const NativeLinker = struct {
                 }
             }
 
-            try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+            if (body_has_cond) {
+                try self.generateForLoopStructured(writer, func, loop, cleanup_regs);
+            } else {
+                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+            }
             return;
         }
 
