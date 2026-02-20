@@ -1762,6 +1762,11 @@ pub const Parser = struct {
             .k_match => self.parseMatch(),
             .k_new => self.parseNewOrAnonymousClass(),
             .k_clone => self.parseCloneExpression(),
+            .k_unset => {
+                const tok = try self.eat(.k_unset);
+                const name_id = try self.context.intern(self.lexer.buffer[tok.loc.start..tok.loc.end]);
+                return self.createNode(.{ .tag = .variable, .main_token = tok, .data = .{ .variable = .{ .name = name_id } } });
+            },
             // self:: 和 parent:: 静态访问关键字
             .k_self => {
                 const t = try self.eat(.k_self);

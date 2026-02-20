@@ -1368,6 +1368,28 @@ pub const PHPArray = struct {
     pub fn count(self: *PHPArray) usize {
         return self.elements.count();
     }
+
+    /// 删除元素（通过 ArrayKey）
+    pub fn unset(self: *PHPArray, allocator: Allocator, key: ArrayKey) bool {
+        if (self.elements.get(key)) |old_value| {
+            if (self.elements.remove(key)) {
+                old_value.release(allocator);
+                if (key == .string) {
+                    key.string.release(allocator);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// 删除元素（通过 Value 键，兼容 int/string）
+    pub fn unsetByValue(self: *PHPArray, allocator: Allocator, key: Value) bool {
+        if (key.isString()) {
+            return self.unset(allocator, ArrayKey{ .string = key.asString() });
+        }
+        return self.unset(allocator, ArrayKey{ .integer = key.toInt() });
+    }
 };
 
 // ============================================================================
@@ -5802,11 +5824,11 @@ fn fastPackedIntSum(items: []const Value) i64 {
     // comptime 自动选择最优向量宽度
     const vec_len = comptime std.simd.suggestVectorLength(i64) orelse 4;
     const V = @Vector(vec_len, i64);
-    
+
     var accum: V = @splat(0);
     var i: usize = 0;
     const len = items.len;
-    
+
     // 主循环：向量化累加
     const aligned = len & ~@as(usize, vec_len - 1);
     while (i < aligned) : (i += vec_len) {
@@ -5816,15 +5838,15 @@ fn fastPackedIntSum(items: []const Value) i64 {
         }
         accum +%= batch;
     }
-    
+
     // 水平归约
     var sum: i64 = @reduce(.Add, accum);
-    
+
     // 处理剩余元素
     while (i < len) : (i += 1) {
         sum +%= items[i].toInt();
     }
-    
+
     return sum;
 }
 

@@ -53,7 +53,6 @@ const MagicConstantKind = ast.MagicConstantKind;
 // but we will need to update usages to use Token.Tag values.
 const CastType = TokenTag;
 
-
 /// IR Generator - converts AST to SSA-form IR
 pub const IRGenerator = struct {
     allocator: Allocator,
@@ -406,15 +405,15 @@ pub const IRGenerator = struct {
         // 统一使用 php_value 类型，避免类型不匹配
         _ = type_; // 忽略传入的类型
         const alloca_type = Type{ .php_value = {} };
-        
+
         // 必须在堆上分配Type，因为指针需要在函数返回后仍然有效
         const type_ptr = try self.allocator.create(Type);
         type_ptr.* = alloca_type;
         const ptr_type = Type{ .ptr = type_ptr };
-        
+
         // Always create alloca in the entry block to ensure dominance
         const func = self.current_function orelse return error.NoCurrentFunction;
-        
+
         const result = func.newRegister(ptr_type);
         const inst = try self.allocator.create(Instruction);
         inst.* = .{
@@ -422,7 +421,7 @@ pub const IRGenerator = struct {
             .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1 } },
             .location = self.current_location,
         };
-        
+
         // Prepend to entry block to ensure it's before any potential use
         try self.entry_allocas.append(self.allocator, inst);
 
@@ -464,7 +463,7 @@ pub const IRGenerator = struct {
         }
 
         // Variable not found
-        
+
         // Check if it's a variable (starts with $)
         if (var_name.len > 0 and var_name[0] == '$') {
             // Undefined variable - create a null value
@@ -473,15 +472,15 @@ pub const IRGenerator = struct {
         } else {
             // It's a constant (identifier)
             // Generate call to php_constant_get(name)
-            
+
             // Create string literal for name
             const name_id = node.data.variable.name;
             const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_value);
-            
+
             // Emit call
             const args = try self.allocator.alloc(Register, 1);
             args[0] = name_reg;
-            
+
             return self.emitWithResult(.{ .call = .{
                 .func_name = "php_constant_get",
                 .args = args,
@@ -698,7 +697,7 @@ pub const IRGenerator = struct {
         if (param_data.default_value) |default_expr_idx| {
             // Has default value - generate conditional logic
             const func = self.current_function.?;
-            
+
             const cond_reg = try self.emitWithResult(.{
                 .has_arg = .{ .index = param_idx },
             }, .bool);
@@ -709,11 +708,7 @@ pub const IRGenerator = struct {
             const merge_block = try func.createBlock("param_merge");
 
             // 4. Branch
-            self.current_block.?.setTerminator(.{ .cond_br = .{ 
-                .cond = cond_reg, 
-                .then_block = present_block, 
-                .else_block = missing_block 
-            } });
+            self.current_block.?.setTerminator(.{ .cond_br = .{ .cond = cond_reg, .then_block = present_block, .else_block = missing_block } });
 
             // 5. Present Block
             self.current_block = present_block;
@@ -877,7 +872,7 @@ pub const IRGenerator = struct {
                     // 收集常量信息
                     const const_data = member.data.const_decl;
                     const const_name = self.getString(const_data.name);
-                    
+
                     // 提取常量值（仅支持简单字面量）
                     const value_node = self.getNode(const_data.value) orelse continue;
                     const const_value: ?TypeDef.ConstantValue = switch (value_node.tag) {
@@ -892,7 +887,7 @@ pub const IRGenerator = struct {
                         .literal_null => .{ .null = {} },
                         else => null, // 跳过复杂表达式
                     };
-                    
+
                     if (const_value) |cv| {
                         try constants.append(self.allocator, .{
                             .name = const_name,
@@ -900,7 +895,7 @@ pub const IRGenerator = struct {
                             .visibility = .public,
                         });
                     }
-                    
+
                     try self.generateClassConstDecl(member, class_name);
                 },
                 .trait_use => {
@@ -1062,14 +1057,14 @@ pub const IRGenerator = struct {
                     .is_variadic = false,
                     .is_reference = false,
                 });
-                
+
                 // Emit param instruction
                 const param_reg = try self.emitWithResult(.{ .param = .{ .index = 0, .name = "this" } }, Type{ .php_object = class_name });
 
                 // 同时注册$this变量，以便在方法体中通过$this访问
                 const this_reg = try self.getOrCreateVarRegister("this", .php_value);
                 _ = try self.emit(.{ .store = .{ .ptr = this_reg, .value = param_reg } }, null);
-                
+
                 try self.var_registers.put(self.allocator, "$this", this_reg);
             }
 
@@ -1245,11 +1240,11 @@ pub const IRGenerator = struct {
         const for_data = node.data.for_stmt;
 
         // 如果当前块已有指令，创建新块用于 init
-        const need_init_block = if (self.current_block) |block| 
-            block.instructions.items.len > 0 
-        else 
+        const need_init_block = if (self.current_block) |block|
+            block.instructions.items.len > 0
+        else
             false;
-        
+
         var init_block: ?*BasicBlock = null;
         if (need_init_block) {
             init_block = try self.createBlock("for_init");
@@ -1294,10 +1289,10 @@ pub const IRGenerator = struct {
         // Generate body
         self.setCurrentBlock(body_block);
         try self.generateStatement(for_data.body);
-        
+
         // 检查 body_block 是否已终止
         const body_terminated = body_block.terminator != null;
-        
+
         if (!body_terminated) {
             self.setCurrentBlock(body_block);
             self.setTerminator(.{ .br = loop_block });
@@ -1388,13 +1383,15 @@ pub const IRGenerator = struct {
         // Initialize iterator
         const iter_args = try self.allocator.alloc(Register, 1);
         iter_args[0] = iterable_reg;
-        
+
         // iter_addr = php_array_iter_init(iterable)
-        const iter_addr = try self.emitWithResult(.{ .call = .{
-            .func_name = "php_array_iter_init",
-            .args = iter_args,
-            .return_type = .php_value, // 返回 Value 类型
-        } }, .php_value);
+        const iter_addr = try self.emitWithResult(.{
+            .call = .{
+                .func_name = "php_array_iter_init",
+                .args = iter_args,
+                .return_type = .php_value, // 返回 Value 类型
+            },
+        }, .php_value);
 
         // Alloc iterator storage (to update it in increment)
         // 统一使用 php_value 类型
@@ -1402,7 +1399,7 @@ pub const IRGenerator = struct {
         php_value_type_ptr.* = Type{ .php_value = {} };
         const iter_ptr_type = Type{ .ptr = php_value_type_ptr };
         const iter_ptr = try self.emitWithResult(.{ .alloca = .{ .type_ = .php_value, .count = 1 } }, iter_ptr_type);
-        
+
         _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = iter_addr } }, null);
 
         // Jump to condition check
@@ -1417,19 +1414,19 @@ pub const IRGenerator = struct {
         // Condition check: php_array_iter_valid(iter)
         self.setCurrentBlock(cond_block);
         const curr_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
-        
+
         const valid_args = try self.allocator.alloc(Register, 1);
         valid_args[0] = curr_iter;
-        
+
         const valid_val = try self.emitWithResult(.{ .call = .{
             .func_name = "php_array_iter_valid",
             .args = valid_args,
             .return_type = .php_value,
         } }, .php_value);
-        
+
         // 转换为 bool
         const cond_reg = try self.emitWithResult(.{ .cast = .{ .value = valid_val, .from_type = .php_value, .to_type = .bool } }, .bool);
-        
+
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
             .then_block = body_block,
@@ -1447,16 +1444,16 @@ pub const IRGenerator = struct {
             if (key_node != null and key_node.?.tag == .variable) {
                 const key_name = self.getString(key_node.?.data.variable.name);
                 const key_var = try self.getOrCreateVarRegister(key_name, .php_value);
-                
+
                 const key_args = try self.allocator.alloc(Register, 1);
                 key_args[0] = body_iter;
-                
+
                 const key_val = try self.emitWithResult(.{ .call = .{
                     .func_name = "php_array_iter_key",
                     .args = key_args,
                     .return_type = .php_value,
                 } }, .php_value);
-                
+
                 _ = try self.emit(.{ .store = .{ .ptr = key_var, .value = key_val } }, null);
             }
         }
@@ -1466,16 +1463,16 @@ pub const IRGenerator = struct {
         if (value_node != null and value_node.?.tag == .variable) {
             const value_name = self.getString(value_node.?.data.variable.name);
             const value_var = try self.getOrCreateVarRegister(value_name, .php_value);
-            
+
             const val_args = try self.allocator.alloc(Register, 1);
             val_args[0] = body_iter;
-            
+
             const val_val = try self.emitWithResult(.{ .call = .{
                 .func_name = "php_array_iter_value",
                 .args = val_args,
                 .return_type = .php_value,
             } }, .php_value);
-            
+
             _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = val_val } }, null);
         }
 
@@ -1490,29 +1487,29 @@ pub const IRGenerator = struct {
         // Increment block: increment iterator
         self.setCurrentBlock(increment_block);
         const inc_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
-        
+
         const next_args = try self.allocator.alloc(Register, 1);
         next_args[0] = inc_iter;
-        
+
         const next_iter = try self.emitWithResult(.{ .call = .{
             .func_name = "php_array_iter_next",
             .args = next_args,
             .return_type = .php_value,
         } }, .php_value);
         _ = try self.emit(.{ .store = .{ .ptr = iter_ptr, .value = next_iter } }, null);
-        
+
         self.setTerminator(.{ .br = cond_block });
 
         // Exit block
         _ = self.loop_stack.pop();
         self.setCurrentBlock(exit_block);
-        
+
         // Cleanup iterator
         const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
-        
+
         const free_args = try self.allocator.alloc(Register, 1);
         free_args[0] = exit_iter;
-        
+
         _ = try self.emit(.{ .call = .{
             .func_name = "php_array_iter_free",
             .args = free_args,
@@ -1734,34 +1731,34 @@ pub const IRGenerator = struct {
             const var_node = self.getNode(var_idx);
             if (var_node != null and var_node.?.tag == .variable) {
                 const var_name = self.getString(var_node.?.data.variable.name);
-                
+
                 // 保存旧的映射
                 const old_mapping = self.var_registers.get(var_name);
-                
+
                 // 临时移除旧映射，确保创建新寄存器
                 _ = self.var_registers.remove(var_name);
-                
+
                 // 为每个 catch 块创建唯一的变量名，避免寄存器重用
                 const unique_var_name = try std.fmt.allocPrint(self.allocator, "{s}_catch_{d}_{d}", .{ var_name, index, @intFromPtr(node) });
                 defer self.allocator.free(unique_var_name);
-                
+
                 // 创建新的寄存器
                 const var_reg = try self.getOrCreateVarRegister(unique_var_name, .php_value);
                 _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg } }, null);
-                
+
                 // 在当前作用域中注册异常变量
                 try self.var_registers.put(self.allocator, var_name, var_reg);
-                
+
                 // Generate catch body
                 try self.generateStatement(catch_data.body);
-                
+
                 // 恢复旧的映射
                 if (old_mapping) |old_reg| {
                     try self.var_registers.put(self.allocator, var_name, old_reg);
                 } else {
                     _ = self.var_registers.remove(var_name);
                 }
-                
+
                 if (!self.isBlockTerminated()) {
                     self.setTerminator(.{ .br = next_block });
                 }
@@ -1847,15 +1844,15 @@ pub const IRGenerator = struct {
                 .args = args,
             } }, null);
         } else {
-             // Fallback: treat as expression and call php_go_builtin
-             const expr_reg = try self.generateExpression(go_data.call);
-             const args = try self.allocator.alloc(Register, 1);
-             args[0] = expr_reg;
-             _ = try self.emit(.{ .call = .{
-                 .func_name = "php_go_builtin",
-                 .args = args,
-                 .return_type = .php_value,
-             } }, null);
+            // Fallback: treat as expression and call php_go_builtin
+            const expr_reg = try self.generateExpression(go_data.call);
+            const args = try self.allocator.alloc(Register, 1);
+            args[0] = expr_reg;
+            _ = try self.emit(.{ .call = .{
+                .func_name = "php_go_builtin",
+                .args = args,
+                .return_type = .php_value,
+            } }, null);
         }
     }
 
@@ -1881,7 +1878,7 @@ pub const IRGenerator = struct {
     /// Generate IR for break statement
     fn generateBreakStmt(self: *Self, node: *const Node) !void {
         const break_data = node.data.break_stmt;
-        
+
         // 获取 break 层级（默认 1）
         var level: usize = 1;
         if (break_data.level) |level_node_idx| {
@@ -1891,14 +1888,14 @@ pub const IRGenerator = struct {
                 level = @intCast(lit_data.value);
             }
         }
-        
+
         // 标记函数有多层 break
         if (level > 1) {
             if (self.current_function) |func| {
                 func.has_multi_level_break = true;
             }
         }
-        
+
         // 从循环栈中获取目标循环
         if (self.loop_stack.items.len >= level) {
             const target_idx = self.loop_stack.items.len - level;
@@ -1910,7 +1907,7 @@ pub const IRGenerator = struct {
     /// Generate IR for continue statement
     fn generateContinueStmt(self: *Self, node: *const Node) !void {
         const continue_data = node.data.continue_stmt;
-        
+
         // 获取 continue 层级（默认 1）
         var level: usize = 1;
         if (continue_data.level) |level_node_idx| {
@@ -1920,14 +1917,14 @@ pub const IRGenerator = struct {
                 level = @intCast(lit_data.value);
             }
         }
-        
+
         // 标记函数有多层 continue
         if (level > 1) {
             if (self.current_function) |func| {
                 func.has_multi_level_break = true;
             }
         }
-        
+
         // 从循环栈中获取目标循环
         if (self.loop_stack.items.len >= level) {
             const target_idx = self.loop_stack.items.len - level;
@@ -2153,11 +2150,11 @@ pub const IRGenerator = struct {
         // Emit call to php_define(name, value)
         const name_id = const_data.name;
         const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_value);
-        
+
         const args = try self.allocator.alloc(Register, 2);
         args[0] = name_reg;
         args[1] = value_reg;
-        
+
         _ = try self.emitWithResult(.{ .call = .{
             .func_name = "php_define",
             .args = args,
@@ -2457,14 +2454,15 @@ pub const IRGenerator = struct {
         if (bin_data.op == .dot) {
             const lhs_node = self.getNode(bin_data.lhs);
             const rhs_node = self.getNode(bin_data.rhs);
-            
+
             if (lhs_node != null and rhs_node != null and
-                lhs_node.?.tag == .literal_string and rhs_node.?.tag == .literal_string) {
+                lhs_node.?.tag == .literal_string and rhs_node.?.tag == .literal_string)
+            {
                 const lhs_id = lhs_node.?.data.literal_string.value;
                 const rhs_id = rhs_node.?.data.literal_string.value;
                 const lhs_str = self.getString(lhs_id);
                 const rhs_str = self.getString(rhs_id);
-                const folded = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{lhs_str, rhs_str});
+                const folded = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ lhs_str, rhs_str });
                 const folded_id = try self.module.?.internString(folded);
                 return try self.emitWithResult(.{ .const_string = folded_id }, .php_string);
             }
@@ -2705,6 +2703,7 @@ pub const IRGenerator = struct {
     }
 
     /// Generate IR for function call
+    /// 生成函数调用的 IR（包含对部分语言结构/内建的最小特判）
     fn generateFunctionCall(self: *Self, node: *const Node) !Register {
         const call_data = node.data.function_call;
 
@@ -2774,6 +2773,24 @@ pub const IRGenerator = struct {
             invoke_args[0] = callback_reg;
             invoke_args[1] = args_arr;
             return self.emitWithResult(.{ .call = .{ .func_name = "php_invoke_callable_args_array", .args = invoke_args, .return_type = .php_value } }, .php_value);
+        }
+
+        // unset($arr[$key])：这是语言结构而非真实函数，AOT 需要生成 array_unset 指令
+        // 这里只做最小覆盖：单参数且为 array_access，并且带 index。
+        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "unset")) {
+            if (call_data.args.len == 1) {
+                const arg_idx = call_data.args[0];
+                const arg_node = self.getNode(arg_idx);
+                if (arg_node != null and arg_node.?.tag == .array_access) {
+                    const access = arg_node.?.data.array_access;
+                    if (access.index) |key_idx| {
+                        const array_reg = try self.generateExpression(access.target);
+                        const key_reg = try self.generateExpression(key_idx);
+                        _ = try self.emit(.{ .array_unset = .{ .array = array_reg, .key = key_reg } }, null);
+                        return self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    }
+                }
+            }
         }
 
         // Generate arguments (positional + named)
@@ -3413,9 +3430,9 @@ pub const IRGenerator = struct {
         // Return callable reference
         // Create array for captures
         const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);
-        
+
         for (captures.items) |cap_reg| {
-             _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg } }, null);
+            _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg } }, null);
         }
 
         // Closure name
@@ -3426,7 +3443,7 @@ pub const IRGenerator = struct {
         const args = try self.allocator.alloc(Register, 2);
         args[0] = name_reg;
         args[1] = caps_arr_reg;
-        
+
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
             .args = args,
@@ -3533,12 +3550,12 @@ pub const IRGenerator = struct {
         defer check_blocks.deinit(self.allocator);
         var arm_blocks = std.ArrayListUnmanaged(*BasicBlock){};
         defer arm_blocks.deinit(self.allocator);
-        
+
         for (0..match_data.arms.len) |_| {
             try check_blocks.append(self.allocator, try self.createBlock("match_check"));
             try arm_blocks.append(self.allocator, try self.createBlock("match_arm"));
         }
-        
+
         // default arm 块
         var default_block: ?*BasicBlock = null;
         if (match_data.default) |_| {
@@ -3553,10 +3570,10 @@ pub const IRGenerator = struct {
             const arm_node = self.getNode(arm_idx) orelse continue;
             if (arm_node.tag != .match_arm) continue;
             const arm_data = arm_node.data.match_arm;
-            
+
             const check_block = check_blocks.items[i];
             const arm_block = arm_blocks.items[i];
-            
+
             // 在检查块中生成条件
             self.setCurrentBlock(check_block);
             const cond_reg = try self.generateExpression(arm_data.conditions[0]);
@@ -3591,7 +3608,7 @@ pub const IRGenerator = struct {
             const default_node = self.getNode(default_idx) orelse return error.InvalidNode;
             if (default_node.tag != .match_arm) return error.InvalidNode;
             const default_data = default_node.data.match_arm;
-            
+
             self.setCurrentBlock(default_block.?);
             const result_reg = try self.generateExpression(default_data.body);
             try phi_incoming.append(self.allocator, .{ .value = result_reg, .block = default_block.? });
@@ -3686,7 +3703,7 @@ pub const IRGenerator = struct {
                 .caret => lhs_val ^ rhs_val,
                 .less_less => lhs_val << @intCast(@mod(rhs_val, 64)),
                 .greater_greater => lhs_val >> @intCast(@mod(rhs_val, 64)),
-            else => null,
+                else => null,
             };
 
             if (result) |val| {
@@ -3873,10 +3890,10 @@ pub const IRGenerator = struct {
                 const access_data = node.data.class_constant_access;
                 const class_name = self.getString(access_data.class_name);
                 const const_name = self.getString(access_data.constant_name);
-                
+
                 var key_buf: [256]u8 = undefined;
                 const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_name }) catch break :blk null;
-                
+
                 if (self.constant_cache.get(key)) |const_value| {
                     break :blk switch (const_value) {
                         .int => |v| ConstantValue{ .int_val = v },
