@@ -1583,6 +1583,11 @@ pub const Value = struct {
     }
 
     pub fn asArray(self: Value) *PHPArray {
+        // 如果是引用，先解引用
+        if (self.isRef()) {
+            const ref_ptr = self.asRef();
+            return ref_ptr.asArray();
+        }
         return @ptrFromInt(nanbox_abi.decodePtr(self.val));
     }
 
