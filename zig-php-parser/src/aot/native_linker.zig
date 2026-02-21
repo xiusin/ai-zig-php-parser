@@ -5791,35 +5791,35 @@ pub const NativeLinker = struct {
         var phi_updates = std.ArrayListUnmanaged(PhiUpdate){};
         defer phi_updates.deinit(self.allocator);
 
+        // 从 phi 节点的 incoming 值中提取更新信息
         for (header_block.instructions.items) |inst| {
             if (inst.op != .phi) continue;
             const result_reg = inst.result orelse continue;
+            const phi_op = inst.op.phi;
 
-            // 优先在 loop.blocks 内查找更新（while 的自增通常在 body 块里）
-            var update_reg: ?usize = null;
-            var blk_iter = loop.blocks.keyIterator();
-            while (blk_iter.next()) |blk_idx_ptr| {
-                const blk_idx = blk_idx_ptr.*;
-                if (blk_idx == loop.header) continue;
-                const scan_block = func.blocks.items[blk_idx];
-                for (scan_block.instructions.items) |scan_inst| {
-                    if (scan_inst.result) |scan_res| {
-                        switch (scan_inst.op) {
-                            .add => |op| {
-                                if (op.lhs.id == result_reg.id) {
-                                    update_reg = scan_res.id;
-                                    break;
-                                }
-                            },
-                            else => {},
-                        }
+            // 查找来自循环体的 incoming 值
+            for (phi_op.incoming) |incoming| {
+                // 检查这个 incoming 块是否在循环内（不是 header）
+                var is_loop_body = false;
+                var blk_iter = loop.blocks.keyIterator();
+                while (blk_iter.next()) |blk_idx_ptr| {
+                    const blk_idx = blk_idx_ptr.*;
+                    if (blk_idx == loop.header) continue;
+                    const scan_block = func.blocks.items[blk_idx];
+                    if (scan_block == incoming.block) {
+                        is_loop_body = true;
+                        break;
                     }
                 }
-                if (update_reg != null) break;
-            }
 
-            if (update_reg) |ureg| {
-                try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = ureg });
+                if (is_loop_body) {
+                    // 这是来自循环体的更新值
+                    try phi_updates.append(self.allocator, .{ 
+                        .phi_reg = result_reg.id, 
+                        .value_reg = incoming.value.id 
+                    });
+                    break;
+                }
             }
         }
 
