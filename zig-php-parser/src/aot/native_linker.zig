@@ -1000,6 +1000,8 @@ pub const NativeLinker = struct {
         .{ "echo", bi(.{ .runtime_name = "php_echo", .needs_allocator = false }) },
         .{ "print", bi(.{ .runtime_name = "php_print", .needs_allocator = false }) },
         .{ "var_dump", bi(.{ .runtime_name = "php_var_dump", .needs_allocator = false }) },
+        .{ "print_r", bi(.{ .runtime_name = "print_r", .needs_allocator = false }) },
+        .{ "var_export", bi(.{ .runtime_name = "var_export", .needs_allocator = false }) },
 
         .{ "define", bi(.{ .runtime_name = "php_define", .needs_allocator = true }) },
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
