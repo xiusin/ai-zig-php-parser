@@ -76,6 +76,8 @@ pub const IRGenerator = struct {
     current_location: SourceLocation,
     /// Variable to register mapping for current function
     var_registers: std.StringHashMapUnmanaged(Register),
+    /// Track by-reference variables (foreach &$v)
+    ref_vars: std.StringHashMapUnmanaged(void),
     /// Track variable usage for unused variable detection
     var_usage: std.StringHashMapUnmanaged(struct {
         is_used: bool,
@@ -128,6 +130,7 @@ pub const IRGenerator = struct {
             .string_table = null,
             .current_location = .{},
             .var_registers = .{},
+            .ref_vars = .{},
             .var_usage = .{},
             .entry_allocas = .{},
             .block_counter = 0,
@@ -140,6 +143,7 @@ pub const IRGenerator = struct {
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
         self.var_registers.deinit(self.allocator);
+        self.ref_vars.deinit(self.allocator);
         self.var_usage.deinit(self.allocator);
         self.entry_allocas.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
@@ -2781,13 +2785,31 @@ pub const IRGenerator = struct {
             if (call_data.args.len == 1) {
                 const arg_idx = call_data.args[0];
                 const arg_node = self.getNode(arg_idx);
-                if (arg_node != null and arg_node.?.tag == .array_access) {
-                    const access = arg_node.?.data.array_access;
-                    if (access.index) |key_idx| {
-                        const array_reg = try self.generateExpression(access.target);
-                        const key_reg = try self.generateExpression(key_idx);
-                        _ = try self.emit(.{ .array_unset = .{ .array = array_reg, .key = key_reg } }, null);
-                        return self.emitWithResult(.{ .const_null = {} }, .php_value);
+                if (arg_node != null) {
+                    if (arg_node.?.tag == .array_access) {
+                        const access = arg_node.?.data.array_access;
+                        if (access.index) |key_idx| {
+                            const array_reg = try self.generateExpression(access.target);
+                            const key_reg = try self.generateExpression(key_idx);
+                            _ = try self.emit(.{ .array_unset = .{ .array = array_reg, .key = key_reg } }, null);
+                            return self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        }
+                    } else if (arg_node.?.tag == .variable) {
+                        // unset($var) - break reference, set to null
+                        const var_name = self.getString(arg_node.?.data.variable.name);
+                        const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        
+                        if (self.ref_vars.contains(var_name)) {
+                            // Reference variable: just remove from ref_vars and var_registers
+                            _ = self.ref_vars.remove(var_name);
+                            _ = self.var_registers.remove(var_name);
+                        } else {
+                            // Normal variable: set to null
+                            if (self.var_registers.get(var_name)) |var_reg| {
+                                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = null_reg } }, null);
+                            }
+                        }
+                        return null_reg;
                     }
                 }
             }

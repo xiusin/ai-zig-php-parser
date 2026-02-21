@@ -2571,10 +2571,18 @@ pub const NativeLinker = struct {
                         const result_reg = inst.result orelse continue;
                         for (phi_op.incoming) |incoming| {
                             if (incoming.block == source_block) {
-                                const result_type = result_reg.type_;
-                                const value_type = incoming.value.type_;
-                                const result_tag = @as(std.meta.Tag(IR.Type), result_type);
-                                const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                                // 使用修正后的类型
+                                const result_corrected = if (self.current_register_types) |types|
+                                    types.get(result_reg.id) orelse result_reg.type_
+                                else
+                                    result_reg.type_;
+                                const value_corrected = if (self.current_register_types) |types|
+                                    types.get(incoming.value.id) orelse incoming.value.type_
+                                else
+                                    incoming.value.type_;
+
+                                const result_tag = @as(std.meta.Tag(IR.Type), result_corrected);
+                                const value_tag = @as(std.meta.Tag(IR.Type), value_corrected);
 
                                 if (result_tag == value_tag) {
                                     try writer.print("            reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
@@ -2582,6 +2590,14 @@ pub const NativeLinker = struct {
                                     try writer.print("            reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ result_reg.id, incoming.value.id });
                                 } else if (result_tag == .php_value and value_tag == .f64) {
                                     try writer.print("            reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .php_value and value_tag == .bool) {
+                                    try writer.print("            reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .i64 and value_tag == .php_value) {
+                                    try writer.print("            reg_{d} = reg_{d}.toInt();\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .f64 and value_tag == .php_value) {
+                                    try writer.print("            reg_{d} = reg_{d}.toFloat();\n", .{ result_reg.id, incoming.value.id });
+                                } else if (result_tag == .bool and value_tag == .php_value) {
+                                    try writer.print("            reg_{d} = reg_{d}.toBool();\n", .{ result_reg.id, incoming.value.id });
                                 } else {
                                     try writer.print("            reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
                                 }
@@ -3246,7 +3262,7 @@ pub const NativeLinker = struct {
             },
             .make_ref => |op| {
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.make_ref(reg_{d}, runtime.runtime_allocator);\n", .{op.ptr.id});
+                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.make_ref(&reg_{d}, runtime.runtime_allocator);\n", .{op.ptr.id});
                 }
             },
             .load => |op| {
@@ -4141,8 +4157,18 @@ pub const NativeLinker = struct {
             },
             .not => |op| {
                 if (inst.result) |reg| {
-                    const operand_type_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    // 使用修正后的类型
+                    const operand_corrected = if (self.current_register_types) |types|
+                        types.get(op.operand.id) orelse op.operand.type_
+                    else
+                        op.operand.type_;
+                    const result_corrected = if (self.current_register_types) |types|
+                        types.get(reg.id) orelse reg.type_
+                    else
+                        reg.type_;
+
+                    const operand_type_tag = @as(std.meta.Tag(IR.Type), operand_corrected);
+                    const type_tag = @as(std.meta.Tag(IR.Type), result_corrected);
 
                     if (type_tag == .bool) {
                         if (operand_type_tag == .bool) {
@@ -4158,6 +4184,10 @@ pub const NativeLinker = struct {
                         // Result is Value or something else
                         if (operand_type_tag == .php_value) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_not(reg_{d});\n", .{op.operand.id});
+                        } else if (operand_type_tag == .bool) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(!reg_{d});\n", .{op.operand.id});
+                        } else if (operand_type_tag == .i64) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d} == 0);\n", .{op.operand.id});
                         } else {
                             try writer.print("    reg_{d} = try runtime.php_not(", .{reg.id});
                             try self.writePhpValueExpr(writer, operand_type_tag, op.operand.id);
@@ -4182,8 +4212,14 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
 
-                        // 检查是否需要 allocator 参数
-                        if (self.functionNeedsAllocator(op.func_name)) {
+                        // 特殊处理 max/min 单参数（数组）
+                        if ((std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) and op.args.len == 1) {
+                            const arg = op.args[0];
+                            const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            try self.writePhpValueExpr(writer, arg_type, arg.id);
+                            try writer.writeAll(", runtime.Value.initNull());\n");
+                        } else if (self.functionNeedsAllocator(op.func_name)) {
                             if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
                                 if (op.args.len == 0) {
                                     try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
@@ -7219,8 +7255,17 @@ pub const NativeLinker = struct {
                 }
             },
             .eq => |op| {
-                const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                const lhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.lhs.id) orelse op.lhs.type_
+                else
+                    op.lhs.type_;
+                const rhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.rhs.id) orelse op.rhs.type_
+                else
+                    op.rhs.type_;
+
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
                     try writer.print("reg_{d} == reg_{d}", .{ op.lhs.id, op.rhs.id });
@@ -7233,8 +7278,17 @@ pub const NativeLinker = struct {
                 }
             },
             .ne => |op| {
-                const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                const lhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.lhs.id) orelse op.lhs.type_
+                else
+                    op.lhs.type_;
+                const rhs_corrected = if (self.current_register_types) |types|
+                    types.get(op.rhs.id) orelse op.rhs.type_
+                else
+                    op.rhs.type_;
+
+                const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
                     try writer.print("reg_{d} != reg_{d}", .{ op.lhs.id, op.rhs.id });
@@ -9233,7 +9287,7 @@ pub const NativeLinker = struct {
 
     /// 生成PHI节点的赋值语句
     /// 在跳转到目标块之前，检查目标块是否有PHI节点，如果有则设置PHI结果
-    fn generatePhiAssignments(_: *Self, writer: anytype, func: *const IR.Function, target_block: *const IR.BasicBlock, source_block_idx: usize) !void {
+    fn generatePhiAssignments(self: *Self, writer: anytype, func: *const IR.Function, target_block: *const IR.BasicBlock, source_block_idx: usize) !void {
         // 用于结构化循环的 phi 赋值（20 个空格缩进）
         const source_block = func.blocks.items[source_block_idx];
 
@@ -9245,11 +9299,18 @@ pub const NativeLinker = struct {
                 // 查找来自当前块的incoming值
                 for (phi_op.incoming) |incoming| {
                     if (incoming.block == source_block) {
-                        // 检查类型是否需要转换
-                        const result_type = result_reg.type_;
-                        const value_type = incoming.value.type_;
-                        const result_tag = @as(std.meta.Tag(IR.Type), result_type);
-                        const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                        // 使用修正后的类型
+                        const result_corrected = if (self.current_register_types) |types|
+                            types.get(result_reg.id) orelse result_reg.type_
+                        else
+                            result_reg.type_;
+                        const value_corrected = if (self.current_register_types) |types|
+                            types.get(incoming.value.id) orelse incoming.value.type_
+                        else
+                            incoming.value.type_;
+
+                        const result_tag = @as(std.meta.Tag(IR.Type), result_corrected);
+                        const value_tag = @as(std.meta.Tag(IR.Type), value_corrected);
 
                         if (result_tag == value_tag) {
                             // 类型匹配，直接赋值

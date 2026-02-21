@@ -3870,6 +3870,24 @@ pub fn php_ceil(val: Value) !Value {
 /// min - 最小值
 /// max - 最大值
 pub fn php_max(a: Value, b: Value) !Value {
+    // 如果 b 是 null，检查 a 是否是数组
+    if (b.isNull()) {
+        if (a.isArray()) {
+            const arr = a.asArray();
+            if (arr.elements.packed_values.items.len == 0) return Value.initInt(0);
+            
+            var max_val = arr.elements.packed_values.items[0];
+            for (arr.elements.packed_values.items[1..]) |val| {
+                if (val.toFloat() > max_val.toFloat()) {
+                    max_val = val;
+                }
+            }
+            return max_val;
+        }
+        return a; // 单个值直接返回
+    }
+    
+    // 两个参数比较
     if (a.isInt() and b.isInt()) {
         return Value.initInt(@max(a.asInt(), b.asInt()));
     }
@@ -3878,6 +3896,24 @@ pub fn php_max(a: Value, b: Value) !Value {
 
 /// min - 最小值
 pub fn php_min(a: Value, b: Value) !Value {
+    // 如果 b 是 null，检查 a 是否是数组
+    if (b.isNull()) {
+        if (a.isArray()) {
+            const arr = a.asArray();
+            if (arr.elements.packed_values.items.len == 0) return Value.initInt(0);
+            
+            var min_val = arr.elements.packed_values.items[0];
+            for (arr.elements.packed_values.items[1..]) |val| {
+                if (val.toFloat() < min_val.toFloat()) {
+                    min_val = val;
+                }
+            }
+            return min_val;
+        }
+        return a; // 单个值直接返回
+    }
+    
+    // 两个参数比较
     if (a.isInt() and b.isInt()) {
         return Value.initInt(@min(a.asInt(), b.asInt()));
     }

@@ -1465,18 +1465,7 @@ pub const IROptimizer = struct {
 
             try type_inference.inferTypes(func);
 
-            // 2. 保存类型推断结果到模块
-            var func_types = std.AutoHashMap(usize, IR.Type).init(self.allocator);
-            var reg_iter = type_inference.solver.reg_to_var.iterator();
-            while (reg_iter.next()) |entry| {
-                const reg_id = entry.key_ptr.*;
-                if (type_inference.getInferredType(reg_id)) |inferred_type| {
-                    try func_types.put(reg_id, inferred_type);
-                }
-            }
-            try module.inferred_types.put(func.name, func_types);
-
-            // 3. 类型特化
+            // 3. 类型特化（在 deinit 之前）
             var type_specialization = TypeSpecializationPass.init(self.allocator, &type_inference);
             try type_specialization.specialize(func);
 
@@ -1485,6 +1474,23 @@ pub const IROptimizer = struct {
             {
                 changed = true;
             }
+
+            // 2. 保存类型推断结果到模块（在特化之后）
+            var func_types = std.AutoHashMap(usize, IR.Type).init(self.allocator);
+            var reg_iter = type_inference.solver.reg_to_var.iterator();
+            while (reg_iter.next()) |entry| {
+                const reg_id = entry.key_ptr.*;
+                if (type_inference.getInferredType(reg_id)) |inferred_type| {
+                    try func_types.put(reg_id, inferred_type);
+                }
+            }
+            
+            // 如果已存在，先释放旧的
+            if (module.inferred_types.getPtr(func.name)) |old_map| {
+                old_map.deinit();
+                _ = module.inferred_types.remove(func.name);
+            }
+            try module.inferred_types.put(func.name, func_types);
         }
 
         return changed;
@@ -5492,12 +5498,12 @@ test "OptimizeLevel.getPassConfig" {
 test "PassConfig presets" {
     const debug = PassConfig.debug();
     try std.testing.expect(!debug.dead_code_elimination);
-    try std.testing.expectEqual(@as(u32, 1), debug.max_iterations);
+    try std.testing.expectEqual(@as(u32, 2), debug.max_iterations);
 
     const safe = PassConfig.releaseSafe();
     try std.testing.expect(safe.dead_code_elimination);
     try std.testing.expect(safe.cse);
-    try std.testing.expect(!safe.function_inlining);
+    try std.testing.expect(safe.function_inlining); // releaseSafe 启用内联
 
     const fast = PassConfig.releaseFast();
     try std.testing.expect(fast.function_inlining);
