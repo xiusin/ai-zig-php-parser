@@ -2928,7 +2928,9 @@ pub const IRGenerator = struct {
 
                 var is_ref = false;
                 if (func_symbol) |sym| {
-                    if (sym.metadata == .function) {
+                    // 安全检查：确保可以访问 metadata
+                    const metadata_tag = @as(std.meta.Tag(@TypeOf(sym.metadata)), sym.metadata);
+                    if (metadata_tag == .function) {
                         const params = sym.metadata.function.params;
                         if (i < params.len) {
                             is_ref = params[i].is_reference;

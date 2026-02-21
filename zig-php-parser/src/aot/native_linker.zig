@@ -3763,6 +3763,16 @@ pub const NativeLinker = struct {
                     try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} & reg_{d};\n", .{ op.lhs.id, op.rhs.id });
                 }
             },
+            .bit_or => |op| {
+                if (inst.result) |reg| {
+                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} | reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                }
+            },
+            .bit_xor => |op| {
+                if (inst.result) |reg| {
+                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} ^ reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                }
+            },
             .nop => {},
             .param => |op| {
                 if (inst.result) |reg| {

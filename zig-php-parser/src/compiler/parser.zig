@@ -2363,6 +2363,7 @@ pub const Parser = struct {
             .k_instanceof => 38, // instanceof has precedence between comparison and equality
             .equal_equal, .equal_equal_equal, .bang_equal, .bang_equal_equal => 35,
             .ampersand => 30, // Bitwise AND
+            .caret => 28, // Bitwise XOR
             .pipe => 25, // Bitwise OR
             .double_ampersand => 20, // Logical AND
             .double_pipe => 10, // Logical OR
