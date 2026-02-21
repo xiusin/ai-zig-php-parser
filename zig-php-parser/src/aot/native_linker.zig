@@ -2250,12 +2250,12 @@ pub const NativeLinker = struct {
         const dest_is_value = !(dest_tag == .i64 or dest_tag == .f64 or dest_tag == .bool);
 
         const dest_may_heap = if (self.current_reg_may_heap) |mh| mh[result_reg.id] else true;
-        // 不要在 phi 节点前 release，因为寄存器可能未初始化
-        // if (dest_is_value and dest_may_heap) {
-        //     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{ result_reg.id });
-        // }
 
-        try writer.writeAll("    switch (prev_block) {\n");
+        // 收集有效的 incoming 块
+        const IncomingItem = struct { idx: u32, src: IR.Register };
+        var valid_incoming = try std.ArrayList(IncomingItem).initCapacity(self.allocator, phi.incoming.len);
+        defer valid_incoming.deinit(self.allocator);
+
         for (phi.incoming) |incoming| {
             var pred_idx: ?u32 = null;
             for (func.blocks.items, 0..) |block, idx| {
@@ -2264,29 +2264,51 @@ pub const NativeLinker = struct {
                     break;
                 }
             }
-
             if (pred_idx) |idx| {
-                const src = incoming.value;
-                const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
-                const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
-                try writer.print("        {d} => {{ reg_{d} = ", .{ idx, result_reg.id });
-                try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, src.id);
-                try writer.writeAll(";");
-                if (dest_is_value and dest_may_heap) {
-                    const src_may_heap = switch (src_tag) {
-                        .i64, .f64, .bool => false,
-                        else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
-                    };
-                    if (src_may_heap) {
-                        try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
-                    }
-                }
-                try writer.writeAll(" },\n");
-            } else {
-                // Predecessor block not found (likely removed by optimization)
-                // We just skip this case, assuming it will never be taken at runtime
-                // because the block is unreachable.
+                try valid_incoming.append(self.allocator, .{ .idx = idx, .src = incoming.value });
             }
+        }
+
+        // 如果只有一个 incoming 值，直接赋值
+        if (valid_incoming.items.len == 1) {
+            const src = valid_incoming.items[0].src;
+            const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
+            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+            try writer.print("    reg_{d} = ", .{result_reg.id});
+            try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, src.id);
+            try writer.writeAll(";");
+            if (dest_is_value and dest_may_heap) {
+                const src_may_heap = switch (src_tag) {
+                    .i64, .f64, .bool => false,
+                    else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
+                };
+                if (src_may_heap) {
+                    try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
+                }
+            }
+            try writer.writeAll("\n");
+            return;
+        }
+
+        // 多个 incoming 值，生成 switch
+        try writer.writeAll("    switch (prev_block) {\n");
+        for (valid_incoming.items) |item| {
+            const src = item.src;
+            const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
+            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+            try writer.print("        {d} => {{ reg_{d} = ", .{ item.idx, result_reg.id });
+            try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, src.id);
+            try writer.writeAll(";");
+            if (dest_is_value and dest_may_heap) {
+                const src_may_heap = switch (src_tag) {
+                    .i64, .f64, .bool => false,
+                    else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
+                };
+                if (src_may_heap) {
+                    try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
+                }
+            }
+            try writer.writeAll(" },\n");
         }
         try writer.writeAll("        else => unreachable,\n");
         try writer.writeAll("    }\n");
