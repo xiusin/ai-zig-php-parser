@@ -1481,6 +1481,11 @@ pub const IRGenerator = struct {
             } }, .php_value);
 
             _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = val_val } }, null);
+            
+            // 如果是引用，标记变量为引用变量
+            if (foreach_data.value_by_ref) {
+                try self.ref_vars.put(self.allocator, value_name, {});
+            }
         }
 
         // Generate loop body
@@ -2038,7 +2043,25 @@ pub const IRGenerator = struct {
         const target_node = self.getNode(compound_data.target) orelse return;
 
         // Generate current value of target (read)
-        const current_value = try self.generateExpression(compound_data.target);
+        var current_value = try self.generateExpression(compound_data.target);
+        
+        // 如果是引用，需要解引用
+        var is_ref = false;
+        if (target_node.tag == .variable) {
+            const var_name = self.getString(target_node.data.variable.name);
+            // 检查是否在引用变量集合中
+            if (self.ref_vars.contains(var_name)) {
+                is_ref = true;
+                // 调用 php_deref 解引用
+                const deref_args = try self.allocator.alloc(Register, 1);
+                deref_args[0] = current_value;
+                current_value = try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_deref",
+                    .args = deref_args,
+                    .return_type = .php_value,
+                } }, .php_value);
+            }
+        }
 
         // Generate right-hand side value
         const rhs_value = try self.generateExpression(compound_data.value);
@@ -2064,8 +2087,23 @@ pub const IRGenerator = struct {
         switch (target_node.tag) {
             .variable => {
                 const var_name = self.getString(target_node.data.variable.name);
-                const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
-                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+                
+                if (is_ref) {
+                    // 如果是引用，调用 php_ref_assign 写回
+                    const ref_reg = try self.generateExpression(compound_data.target);
+                    const assign_args = try self.allocator.alloc(Register, 2);
+                    assign_args[0] = ref_reg;
+                    assign_args[1] = result_reg;
+                    _ = try self.emit(.{ .call = .{
+                        .func_name = "php_ref_assign",
+                        .args = assign_args,
+                        .return_type = .void,
+                    } }, null);
+                } else {
+                    // 普通变量，直接存储
+                    const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
+                    _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+                }
 
                 // Update symbol table
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);

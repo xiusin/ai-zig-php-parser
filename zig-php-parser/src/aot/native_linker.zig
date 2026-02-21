@@ -1002,6 +1002,10 @@ pub const NativeLinker = struct {
         .{ "var_dump", bi(.{ .runtime_name = "php_var_dump", .needs_allocator = false }) },
         .{ "print_r", bi(.{ .runtime_name = "print_r", .needs_allocator = false }) },
         .{ "var_export", bi(.{ .runtime_name = "var_export", .needs_allocator = false }) },
+        
+        // 引用操作函数
+        .{ "php_deref", bi(.{ .runtime_name = "php_deref", .needs_allocator = false }) },
+        .{ "php_ref_assign", bi(.{ .runtime_name = "php_ref_assign", .needs_allocator = false, .may_raise = false }) },
 
         .{ "define", bi(.{ .runtime_name = "php_define", .needs_allocator = true }) },
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },

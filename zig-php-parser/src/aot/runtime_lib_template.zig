@@ -1156,9 +1156,10 @@ pub const PHPArray = struct {
                 }
                 if (self.index >= self.elements.packed_values.items.len) return null;
                 self.key = .{ .integer = @intCast(self.index) };
-                self.value = self.elements.packed_values.items[self.index];
+                // 返回指向数组中实际元素的指针，而不是临时字段
+                const elem_ptr = &self.elements.packed_values.items[self.index];
                 self.index += 1;
-                return .{ .key_ptr = &self.key, .value_ptr = &self.value };
+                return .{ .key_ptr = &self.key, .value_ptr = elem_ptr };
             }
         };
 
@@ -2936,6 +2937,28 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
         return Value.initRef(mutable_ptr);
     }
     return Value.initNull();
+}
+
+/// 解引用：从引用中读取值
+pub fn php_deref(ref_val: Value) !Value {
+    if (ref_val.isRef()) {
+        const ptr = ref_val.asRef();
+        _ = ptr.retain();
+        return ptr.*;
+    }
+    // 如果不是引用，直接返回值
+    _ = ref_val.retain();
+    return ref_val;
+}
+
+/// 引用赋值：将值写入引用指向的位置
+pub fn php_ref_assign(ref_val: Value, new_val: Value) !void {
+    if (ref_val.isRef()) {
+        const ptr = ref_val.asRef();
+        ptr.release(runtime_allocator);
+        _ = new_val.retain();
+        ptr.* = new_val;
+    }
 }
 
 pub fn php_array_iter_next(iter_val: Value) !Value {
