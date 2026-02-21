@@ -1208,6 +1208,8 @@ pub const NativeLinker = struct {
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), _: *const IR.Module, func: *const IR.Function) !void {
         const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
         self.current_function_has_this = has_this;
+        self.current_function_for_resolve = func;
+        defer self.current_function_for_resolve = null;
 
         // 验证函数名
         if (func.name.len == 0 or !std.unicode.utf8ValidateSlice(func.name)) {
@@ -3768,15 +3770,42 @@ pub const NativeLinker = struct {
                         try writer.print("    reg_{d} = ctx;\n", .{reg.id});
                     } else {
                         const arg_idx = if (self.current_function_has_this) op.index - 1 else op.index;
-                        const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                        if (type_tag == .i64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toInt() else 0;\n", .{ arg_idx, arg_idx, arg_idx });
-                        } else if (type_tag == .f64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toFloat() else 0.0;\n", .{ arg_idx, arg_idx, arg_idx });
-                        } else if (type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toBool() else false;\n", .{ arg_idx, arg_idx, arg_idx });
+                        
+                        // 检查是否是可变参数
+                        const is_variadic = blk: {
+                            if (self.current_function_for_resolve) |func| {
+                                if (op.index < func.params.items.len) {
+                                    const param = func.params.items[op.index];
+                                    std.debug.print("Param {d} ({s}): is_variadic={}\n", .{ op.index, op.name, param.is_variadic });
+                                    break :blk param.is_variadic;
+                                }
+                            }
+                            break :blk false;
+                        };
+                        
+                        if (is_variadic) {
+                            // 可变参数：收集从 arg_idx 开始的所有参数到数组
+                            try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                            try writer.print("    {{\n", .{});
+                            try writer.print("        var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
+                            try writer.print("        var i: usize = {d};\n", .{arg_idx});
+                            try writer.print("        while (i < args.len) : (i += 1) {{\n", .{});
+                            try writer.print("            try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                            try writer.print("        }}\n", .{});
+                            try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                            try writer.print("    }}\n", .{});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ arg_idx, arg_idx, arg_idx });
+                            // 普通参数
+                            const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                            if (type_tag == .i64) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toInt() else 0;\n", .{ arg_idx, arg_idx, arg_idx });
+                            } else if (type_tag == .f64) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toFloat() else 0.0;\n", .{ arg_idx, arg_idx, arg_idx });
+                            } else if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toBool() else false;\n", .{ arg_idx, arg_idx, arg_idx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ arg_idx, arg_idx, arg_idx });
+                            }
                         }
                     }
                 }
@@ -9628,7 +9657,31 @@ pub const NativeLinker = struct {
                         try writer.print("        {s} = ctx;\n", .{result_reg.?});
                     } else {
                         const arg_idx = if (self.current_function_has_this) op.index - 1 else op.index;
-                        try writer.print("        {s} = if (args.len > {d}) args[{d}] else runtime.Value.initNull();\n", .{ result_reg.?, arg_idx, arg_idx });
+                        
+                        // 检查是否是可变参数
+                        const is_variadic = blk: {
+                            if (self.current_function_for_resolve) |func| {
+                                if (op.index < func.params.items.len) {
+                                    break :blk func.params.items[op.index].is_variadic;
+                                }
+                            }
+                            break :blk false;
+                        };
+                        
+                        if (is_variadic) {
+                            // 可变参数：收集从 arg_idx 开始的所有参数到数组
+                            try writer.print("        {s} = runtime.Value.initNull();\n", .{result_reg.?});
+                            try writer.print("        {{\n", .{});
+                            try writer.print("            var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
+                            try writer.print("            var i: usize = {d};\n", .{arg_idx});
+                            try writer.print("            while (i < args.len) : (i += 1) {{\n", .{});
+                            try writer.print("                try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                            try writer.print("            }}\n", .{});
+                            try writer.print("            {s} = runtime.Value.initArray(variadic_array);\n", .{result_reg.?});
+                            try writer.print("        }}\n", .{});
+                        } else {
+                            try writer.print("        {s} = if (args.len > {d}) args[{d}] else runtime.Value.initNull();\n", .{ result_reg.?, arg_idx, arg_idx });
+                        }
                     }
                 }
             },
