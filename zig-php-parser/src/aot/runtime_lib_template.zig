@@ -2926,6 +2926,18 @@ pub fn php_array_iter_value(iter_val: Value) !Value {
     return Value.initNull();
 }
 
+pub fn php_array_iter_value_ref(iter_val: Value) !Value {
+    const iter_addr = iter_val.asInt();
+    if (iter_addr == 0) return Value.initNull();
+    const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    if (iter.current) |entry| {
+        // 返回指向数组元素的引用（需要转换为可变指针）
+        const mutable_ptr: *Value = @constCast(entry.value_ptr);
+        return Value.initRef(mutable_ptr);
+    }
+    return Value.initNull();
+}
+
 pub fn php_array_iter_next(iter_val: Value) !Value {
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initInt(0);

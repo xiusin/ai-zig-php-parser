@@ -959,26 +959,41 @@ pub const Parser = struct {
         const iterable = try self.parseExpression(0);
         _ = try self.eat(.k_as);
 
+        // 检查第一个表达式是否有引用符号
+        var first_by_ref = false;
+        if (self.curr.tag == .ampersand) {
+            _ = try self.eat(.ampersand);
+            first_by_ref = true;
+        }
+
         // 解析第一个表达式
         const first_expr = try self.parseExpression(0);
 
         // 检查是否有 => 符号（键值对语法）
         var key: ?ast.Node.Index = null;
         var value: ast.Node.Index = undefined;
+        var value_by_ref = false;
 
         if (self.curr.tag == .fat_arrow) {
             // 有 => 符号，第一个表达式是键
             _ = try self.eat(.fat_arrow);
             key = first_expr;
+            
+            // 检查值是否是引用
+            if (self.curr.tag == .ampersand) {
+                _ = try self.eat(.ampersand);
+                value_by_ref = true;
+            }
             value = try self.parseExpression(0);
         } else {
             // 没有 => 符号，第一个表达式是值
             value = first_expr;
+            value_by_ref = first_by_ref;
         }
 
         _ = try self.eat(.r_paren);
         const body = try self.parseStatement();
-        return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = key, .value = value, .body = body } } });
+        return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = key, .value = value, .body = body, .value_by_ref = value_by_ref } } });
     }
 
     fn parseTry(self: *Parser) anyerror!ast.Node.Index {

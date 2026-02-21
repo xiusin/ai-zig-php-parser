@@ -1471,8 +1471,11 @@ pub const IRGenerator = struct {
             const val_args = try self.allocator.alloc(Register, 1);
             val_args[0] = body_iter;
 
+            // 根据是否是引用选择不同的函数
+            const func_name = if (foreach_data.value_by_ref) "php_array_iter_value_ref" else "php_array_iter_value";
+            
             const val_val = try self.emitWithResult(.{ .call = .{
-                .func_name = "php_array_iter_value",
+                .func_name = func_name,
                 .args = val_args,
                 .return_type = .php_value,
             } }, .php_value);
