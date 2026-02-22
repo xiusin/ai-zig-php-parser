@@ -1415,11 +1415,7 @@ pub const NativeLinker = struct {
                                     try cleanup_registers.append(self.allocator, reg.id);
                                 }
                             },
-                            .load => {
-                                if (corrected_type == .php_value) {
-                                    try cleanup_registers.append(self.allocator, reg.id);
-                                }
-                            },
+                            // load 不创建新的引用，不需要释放
                             else => {},
                         }
                     } else {
