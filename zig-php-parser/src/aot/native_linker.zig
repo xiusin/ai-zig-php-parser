@@ -1517,7 +1517,8 @@ pub const NativeLinker = struct {
 
         // 反向传播类型约束：根据操作的需求，更新操作数的类型
         // 但只更新那些类型不确定的寄存器（如 move 的结果）
-        std.debug.print("Backward type propagation...\n", .{});
+        // 反向类型传播：根据使用场景修正寄存器类型
+        const enable_debug = false; // 可选的调试输出
         
         // 首先标记哪些寄存器的类型是确定的（由定义决定）
         var definite_types = std.AutoHashMap(usize, void).init(self.allocator);
@@ -1528,7 +1529,6 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     switch (inst.op) {
                         // 这些指令的结果类型是确定的，不应该被反向传播修改
-                        // 注意：const_int/const_float/const_bool 可以被传播，因为它们可以转换为 Value
                         .const_string, .const_null,
                         .array_new, .new_object, .call, .call_indirect,
                         .array_get, .property_get,
@@ -1551,7 +1551,7 @@ pub const NativeLinker = struct {
                             if (all_registers.getPtr(op.lhs.id)) |lhs_type| {
                                 const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type.*);
                                 if (lhs_tag != .php_value and lhs_tag != .php_string) {
-                                    std.debug.print("  Propagate: reg_{d} {s} -> php_value (concat lhs)\n", .{ op.lhs.id, @tagName(lhs_tag) });
+                                    if (enable_debug) std.debug.print("  Propagate: reg_{d} {s} -> php_value (concat lhs)\n", .{ op.lhs.id, @tagName(lhs_tag) });
                                     lhs_type.* = .php_value;
                                 }
                             }
@@ -1560,7 +1560,7 @@ pub const NativeLinker = struct {
                             if (all_registers.getPtr(op.rhs.id)) |rhs_type| {
                                 const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type.*);
                                 if (rhs_tag != .php_value and rhs_tag != .php_string) {
-                                    std.debug.print("  Propagate: reg_{d} {s} -> php_value (concat rhs)\n", .{ op.rhs.id, @tagName(rhs_tag) });
+                                    if (enable_debug) std.debug.print("  Propagate: reg_{d} {s} -> php_value (concat rhs)\n", .{ op.rhs.id, @tagName(rhs_tag) });
                                     rhs_type.* = .php_value;
                                 }
                             }
@@ -1573,7 +1573,7 @@ pub const NativeLinker = struct {
                                 if (all_registers.getPtr(arg.id)) |arg_type| {
                                     const arg_tag = @as(std.meta.Tag(IR.Type), arg_type.*);
                                     if (arg_tag != .php_value) {
-                                        std.debug.print("  Propagate: reg_{d} {s} -> php_value (call arg)\n", .{ arg.id, @tagName(arg_tag) });
+                                        if (enable_debug) std.debug.print("  Propagate: reg_{d} {s} -> php_value (call arg)\n", .{ arg.id, @tagName(arg_tag) });
                                         arg_type.* = .php_value;
                                     }
                                 }
@@ -1587,7 +1587,7 @@ pub const NativeLinker = struct {
                                 if (all_registers.getPtr(arg.id)) |arg_type| {
                                     const arg_tag = @as(std.meta.Tag(IR.Type), arg_type.*);
                                     if (arg_tag != .php_value) {
-                                        std.debug.print("  Propagate: reg_{d} {s} -> php_value (call_indirect arg)\n", .{ arg.id, @tagName(arg_tag) });
+                                        if (enable_debug) std.debug.print("  Propagate: reg_{d} {s} -> php_value (call_indirect arg)\n", .{ arg.id, @tagName(arg_tag) });
                                         arg_type.* = .php_value;
                                     }
                                 }
