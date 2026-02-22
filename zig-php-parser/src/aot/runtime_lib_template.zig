@@ -963,6 +963,7 @@ pub const PHPString = struct {
         const new_length = self.length + other.length;
 
         if (new_length > 1024 * 1024 * 100) {
+            std.debug.print("StringTooLarge: self.length={d}, other.length={d}, new_length={d}\n", .{self.length, other.length, new_length});
             return error.StringTooLarge;
         }
 

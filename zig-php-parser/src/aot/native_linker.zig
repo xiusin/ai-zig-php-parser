@@ -4732,7 +4732,8 @@ pub const NativeLinker = struct {
                         "const idx_i64 = reg_{d}.toInt(); " ++
                         "if (idx_i64 < 0 or idx_i64 >= str.length) break :blk runtime.Value.initNull(); " ++
                         "const idx = @as(usize, @intCast(idx_i64)); " ++
-                        "break :blk runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, str.data[idx..idx+1])); " ++
+                        "const ch_slice = str.data[idx..@min(idx+1, str.data.len)]; " ++
+                        "break :blk runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, ch_slice)); " ++
                         "}} else (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull());\n", 
                         .{ op.array.id, op.array.id, op.key.id, op.array.id, op.key.id });
                 }
