@@ -558,6 +558,25 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 
     _ = try file.readAll(source);
 
+    // 检测是否需要多文件编译
+    const needs_multi_file = blk: {
+        // 简单检测：查找 require/include 关键字
+        if (std.mem.indexOf(u8, source, "require") != null or
+            std.mem.indexOf(u8, source, "include") != null)
+        {
+            break :blk true;
+        }
+        break :blk false;
+    };
+
+    if (needs_multi_file) {
+        // 多文件编译暂未完全支持，给出警告
+        std.debug.print("Warning: Detected require/include statements.\n", .{});
+        std.debug.print("         Multi-file compilation is not fully supported yet.\n", .{});
+        std.debug.print("         Attempting single-file compilation...\n\n", .{});
+        // 继续单文件编译
+    }
+
     // 创建 PHP 上下文和 Parser
     var context = PHPContext.init(allocator);
     defer context.deinit();
