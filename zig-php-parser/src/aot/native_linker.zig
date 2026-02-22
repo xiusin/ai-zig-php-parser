@@ -2624,8 +2624,38 @@ pub const NativeLinker = struct {
     ) !void {
         for (args, 0..) |arg, i| {
             if (i > 0) try writer.writeAll(", ");
-            const arg_type_tag = @as(std.meta.Tag(IR.Type), arg.type_);
-            try self.writePhpValueExpr(writer, arg_type_tag, arg.id);
+            
+            // 强制使用 current_register_types 获取真实类型
+            const arg_type_tag = if (self.current_register_types) |types| blk: {
+                if (types.get(arg.id)) |corrected_type| {
+                    const tag = @as(std.meta.Tag(IR.Type), corrected_type);
+                    std.debug.print("writeValueArgs: arg.id={d}, corrected_type={s}\n", .{ arg.id, @tagName(tag) });
+                    break :blk tag;
+                }
+                const tag = @as(std.meta.Tag(IR.Type), arg.type_);
+                std.debug.print("writeValueArgs: arg.id={d}, using arg.type_={s}\n", .{ arg.id, @tagName(tag) });
+                break :blk tag;
+            } else @as(std.meta.Tag(IR.Type), arg.type_);
+            
+            // 直接在这里生成类型转换，不依赖 writePhpValueExpr
+            if (arg_type_tag == .i64) {
+                var src_buf: [32]u8 = undefined;
+                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                try writer.print("runtime.Value.initInt({s})", .{src_ref});
+            } else if (arg_type_tag == .f64) {
+                var src_buf: [32]u8 = undefined;
+                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                try writer.print("runtime.Value.initFloat({s})", .{src_ref});
+            } else if (arg_type_tag == .bool) {
+                var src_buf: [32]u8 = undefined;
+                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                try writer.print("runtime.Value.initBool({s})", .{src_ref});
+            } else {
+                // php_value 或其他类型，直接使用
+                var src_buf: [32]u8 = undefined;
+                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                try writer.print("{s}", .{src_ref});
+            }
         }
     }
 
@@ -2634,6 +2664,11 @@ pub const NativeLinker = struct {
         writer: anytype,
         args: []const IR.Register,
     ) !void {
+        if (args.len > 0) {
+            std.debug.print("writeValueArgsArray: args.len={d}, first_arg.id={d}\n", .{ args.len, args[0].id });
+        } else {
+            std.debug.print("writeValueArgsArray: args.len=0\n", .{});
+        }
         try writer.writeAll("&[_]runtime.Value{");
         if (args.len > 0) {
             try self.writeValueArgs(writer, args);
@@ -3455,13 +3490,47 @@ pub const NativeLinker = struct {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
 
-                    // 检查操作数类型，必要时进行转换
-                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    // 使用 current_register_types 获取真实类型
+                    const lhs_type_tag = if (self.current_register_types) |types| blk: {
+                        if (types.get(op.lhs.id)) |corrected_type| {
+                            break :blk @as(std.meta.Tag(IR.Type), corrected_type);
+                        }
+                        break :blk @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    } else @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                    
+                    const rhs_type_tag = if (self.current_register_types) |types| blk: {
+                        if (types.get(op.rhs.id)) |corrected_type| {
+                            break :blk @as(std.meta.Tag(IR.Type), corrected_type);
+                        }
+                        break :blk @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    } else @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    
                     try writer.print("    reg_{d} = try runtime.php_concat(", .{reg.id});
-                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    
+                    // 左操作数
+                    if (lhs_type_tag == .i64) {
+                        try writer.print("runtime.Value.initInt(reg_{d})", .{op.lhs.id});
+                    } else if (lhs_type_tag == .f64) {
+                        try writer.print("runtime.Value.initFloat(reg_{d})", .{op.lhs.id});
+                    } else if (lhs_type_tag == .bool) {
+                        try writer.print("runtime.Value.initBool(reg_{d})", .{op.lhs.id});
+                    } else {
+                        try writer.print("reg_{d}", .{op.lhs.id});
+                    }
+                    
                     try writer.writeAll(", ");
-                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    
+                    // 右操作数
+                    if (rhs_type_tag == .i64) {
+                        try writer.print("runtime.Value.initInt(reg_{d})", .{op.rhs.id});
+                    } else if (rhs_type_tag == .f64) {
+                        try writer.print("runtime.Value.initFloat(reg_{d})", .{op.rhs.id});
+                    } else if (rhs_type_tag == .bool) {
+                        try writer.print("runtime.Value.initBool(reg_{d})", .{op.rhs.id});
+                    } else {
+                        try writer.print("reg_{d}", .{op.rhs.id});
+                    }
+                    
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                 }
             },
