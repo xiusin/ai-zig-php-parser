@@ -5233,6 +5233,12 @@ pub const NativeLinker = struct {
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asFloat();\n", .{src_ref});
                     } else if (dst_tag == .bool and src_tag == .php_value) {
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s}.toBool();\n", .{src_ref});
+                    } else if (dst_tag == .php_value and src_tag == .i64) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s});\n", .{src_ref});
+                    } else if (dst_tag == .php_value and src_tag == .f64) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s});\n", .{src_ref});
+                    } else if (dst_tag == .php_value and src_tag == .bool) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s});\n", .{src_ref});
                     } else {
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_ref});
                     }
@@ -6398,6 +6404,12 @@ pub const NativeLinker = struct {
                         try writer_.print("reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .f64 and value_tag == .php_value) {
                         try writer_.print("reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .php_value and value_tag == .i64) {
+                        try writer_.print("reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .php_value and value_tag == .f64) {
+                        try writer_.print("reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ update.phi_reg, update.value_reg });
+                    } else if (phi_tag == .php_value and value_tag == .bool) {
+                        try writer_.print("reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ update.phi_reg, update.value_reg });
                     } else {
                         try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
                     }
