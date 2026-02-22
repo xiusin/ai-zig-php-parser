@@ -80,6 +80,14 @@ pub const TypeInferencePass = struct {
                 try self.solver.addEquality(result.id, op.operand.id);
             },
             
+            .call_indirect => |op| {
+                // 间接调用的返回类型
+                const return_tag = @as(std.meta.Tag(IR.Type), op.return_type);
+                if (return_tag != .php_value) {
+                    try self.solver.addConcrete(result.id, op.return_type);
+                }
+            },
+            
             else => {},
         }
     }

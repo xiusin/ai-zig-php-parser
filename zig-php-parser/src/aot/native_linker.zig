@@ -1355,6 +1355,16 @@ pub const NativeLinker = struct {
                                 }
                             }
                         },
+                        .call_indirect => {
+                            // 间接调用也返回 runtime.Value
+                            const res_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                            if (res_tag != .php_value) {
+                                corrected_type = .php_value;
+                                if (self.config.verbose) {
+                                    // std.debug.print("  Type correction: reg_{d} {s} -> php_value (call_indirect result)\n", .{reg.id, @tagName(res_tag)});
+                                }
+                            }
+                        },
                         .array_get, .property_get => {
                             // 数组/对象访问都返回 runtime.Value
                             const res_tag = @as(std.meta.Tag(IR.Type), reg.type_);
