@@ -4728,11 +4728,13 @@ pub const NativeLinker = struct {
                     // 支持字符串索引访问：运行时检查类型
                     try self.writeRegAssignmentFmt(writer, reg.id, 
                         "if (reg_{d}.isString()) blk: {{ " ++
-                        "const idx = @as(usize, @intCast(reg_{d}.toInt())); " ++
-                        "break :blk runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, " ++
-                        "reg_{d}.asString().data[idx..idx+1])); " ++
+                        "const str = reg_{d}.asString(); " ++
+                        "const idx_i64 = reg_{d}.toInt(); " ++
+                        "if (idx_i64 < 0 or idx_i64 >= str.length) break :blk runtime.Value.initNull(); " ++
+                        "const idx = @as(usize, @intCast(idx_i64)); " ++
+                        "break :blk runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, str.data[idx..idx+1])); " ++
                         "}} else (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull());\n", 
-                        .{ op.array.id, op.key.id, op.array.id, op.array.id, op.key.id });
+                        .{ op.array.id, op.array.id, op.key.id, op.array.id, op.key.id });
                 }
             },
             .array_set => |op| {
