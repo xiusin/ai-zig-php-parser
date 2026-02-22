@@ -1519,6 +1519,99 @@ pub const NativeLinker = struct {
         }
         std.debug.print("Applied {d} corrected types to inferred_types\n", .{all_registers.count()});
 
+        // 反向传播类型约束：根据操作的需求，更新操作数的类型
+        // 但只更新那些类型不确定的寄存器（如 move 的结果）
+        std.debug.print("Backward type propagation...\n", .{});
+        
+        // 首先标记哪些寄存器的类型是确定的（由定义决定）
+        var definite_types = std.AutoHashMap(usize, void).init(self.allocator);
+        defer definite_types.deinit();
+        
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |reg| {
+                    switch (inst.op) {
+                        // 这些指令的结果类型是确定的，不应该被反向传播修改
+                        // 注意：const_int/const_float/const_bool 可以被传播，因为它们可以转换为 Value
+                        .const_string, .const_null,
+                        .array_new, .new_object, .call, .call_indirect,
+                        .array_get, .property_get,
+                        => {
+                            try definite_types.put(reg.id, {});
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+        
+        // 然后进行反向传播，但跳过类型确定的寄存器
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                switch (inst.op) {
+                    // concat 需要 php_value 参数
+                    .concat => |op| {
+                        if (!definite_types.contains(op.lhs.id)) {
+                            if (all_registers.getPtr(op.lhs.id)) |lhs_type| {
+                                const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type.*);
+                                if (lhs_tag != .php_value and lhs_tag != .php_string) {
+                                    std.debug.print("  Propagate: reg_{d} {s} -> php_value (concat lhs)\n", .{ op.lhs.id, @tagName(lhs_tag) });
+                                    lhs_type.* = .php_value;
+                                }
+                            }
+                        }
+                        if (!definite_types.contains(op.rhs.id)) {
+                            if (all_registers.getPtr(op.rhs.id)) |rhs_type| {
+                                const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type.*);
+                                if (rhs_tag != .php_value and rhs_tag != .php_string) {
+                                    std.debug.print("  Propagate: reg_{d} {s} -> php_value (concat rhs)\n", .{ op.rhs.id, @tagName(rhs_tag) });
+                                    rhs_type.* = .php_value;
+                                }
+                            }
+                        }
+                    },
+                    // call 需要 php_value 参数
+                    .call => |op| {
+                        for (op.args) |arg| {
+                            if (!definite_types.contains(arg.id)) {
+                                if (all_registers.getPtr(arg.id)) |arg_type| {
+                                    const arg_tag = @as(std.meta.Tag(IR.Type), arg_type.*);
+                                    if (arg_tag != .php_value) {
+                                        std.debug.print("  Propagate: reg_{d} {s} -> php_value (call arg)\n", .{ arg.id, @tagName(arg_tag) });
+                                        arg_type.* = .php_value;
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    // call_indirect 需要 php_value 参数
+                    .call_indirect => |op| {
+                        for (op.args) |arg| {
+                            if (!definite_types.contains(arg.id)) {
+                                if (all_registers.getPtr(arg.id)) |arg_type| {
+                                    const arg_tag = @as(std.meta.Tag(IR.Type), arg_type.*);
+                                    if (arg_tag != .php_value) {
+                                        std.debug.print("  Propagate: reg_{d} {s} -> php_value (call_indirect arg)\n", .{ arg.id, @tagName(arg_tag) });
+                                        arg_type.* = .php_value;
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // 用 all_registers 中的类型覆盖 inferred_types（反向传播后）
+        all_reg_iter = all_registers.iterator();
+        while (all_reg_iter.next()) |entry| {
+            const reg_id = entry.key_ptr.*;
+            const corrected_type = entry.value_ptr.*;
+            try inferred_types.put(reg_id, corrected_type);
+        }
+        std.debug.print("Applied {d} corrected types after backward propagation\n", .{all_registers.count()});
+
         // 用代码生成时的类型推断结果覆盖寄存器类型
         // TODO: 暂时禁用，因为需要配合代码生成时的类型特化
         // std.debug.print("Applying inferred types: {d} entries\n",
@@ -3505,6 +3598,13 @@ pub const NativeLinker = struct {
                         break :blk @as(std.meta.Tag(IR.Type), op.rhs.type_);
                     } else @as(std.meta.Tag(IR.Type), op.rhs.type_);
                     
+                    std.debug.print("concat: lhs.id={d}, lhs_type={s}, rhs.id={d}, rhs_type={s}\n", .{
+                        op.lhs.id,
+                        @tagName(lhs_type_tag),
+                        op.rhs.id,
+                        @tagName(rhs_type_tag),
+                    });
+                    
                     try writer.print("    reg_{d} = try runtime.php_concat(", .{reg.id});
                     
                     // 左操作数
@@ -5291,6 +5391,15 @@ pub const NativeLinker = struct {
                         if (op.operand.id < is_val.len and is_val[op.operand.id]) {
                             src_tag = .php_value;
                         }
+                    }
+
+                    if (reg.id == 120 or op.operand.id == 117) {
+                        std.debug.print("move: dst.id={d}, dst_tag={s}, src.id={d}, src_tag={s}\n", .{
+                            reg.id,
+                            @tagName(dst_tag),
+                            op.operand.id,
+                            @tagName(src_tag),
+                        });
                     }
 
                     var src_buf: [32]u8 = undefined;
@@ -10420,8 +10529,14 @@ pub const NativeLinker = struct {
                         try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            // 转换基本类型参数为 Value
-                            const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                            // 使用 current_register_types 获取真实类型
+                            const arg_type = if (self.current_register_types) |types| blk: {
+                                if (types.get(arg.id)) |corrected_type| {
+                                    break :blk @as(std.meta.Tag(IR.Type), corrected_type);
+                                }
+                                break :blk @as(std.meta.Tag(IR.Type), arg.type_);
+                            } else @as(std.meta.Tag(IR.Type), arg.type_);
+                            
                             if (arg_type == .i64) {
                                 var src_buf: [32]u8 = undefined;
                                 const src_ref = try self.getOperandRef(&src_buf, arg.id);
@@ -10450,8 +10565,14 @@ pub const NativeLinker = struct {
                             try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, op.func_name });
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
-                                // 转换基本类型为 Value
-                                const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                // 使用 current_register_types 获取真实类型
+                                const arg_type = if (self.current_register_types) |types| blk: {
+                                    if (types.get(arg.id)) |corrected_type| {
+                                        break :blk @as(std.meta.Tag(IR.Type), corrected_type);
+                                    }
+                                    break :blk @as(std.meta.Tag(IR.Type), arg.type_);
+                                } else @as(std.meta.Tag(IR.Type), arg.type_);
+                                
                                 if (arg_type == .i64) {
                                     var src_buf: [32]u8 = undefined;
                                     const src_ref = try self.getOperandRef(&src_buf, arg.id);
@@ -10479,8 +10600,19 @@ pub const NativeLinker = struct {
                         try writer.print("        _ = try runtime.{s}(", .{runtime_name});
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                            // 使用 current_register_types 获取真实类型
+                            const arg_type = if (self.current_register_types) |types| blk: {
+                                if (types.get(arg.id)) |corrected_type| {
+                                    break :blk @as(std.meta.Tag(IR.Type), corrected_type);
+                                }
+                                break :blk @as(std.meta.Tag(IR.Type), arg.type_);
+                            } else @as(std.meta.Tag(IR.Type), arg.type_);
+                            
                             if (arg_type == .i64) {
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                try writer.print("runtime.Value.initInt({s})", .{src_ref});
+                            } else if (arg_type == .f64) {
                                 var src_buf: [32]u8 = undefined;
                                 const src_ref = try self.getOperandRef(&src_buf, arg.id);
                                 try writer.print("runtime.Value.initInt({s})", .{src_ref});
