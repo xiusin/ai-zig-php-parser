@@ -5669,10 +5669,8 @@ pub const NativeLinker = struct {
             // 设置异常处理器
             if (block.exception_handler) |handler| {
                 self.current_exception_handler = handler.index;
-                std.debug.print("Block {d} ({s}) has exception_handler: {d}\n", .{ idx, block.label, handler.index });
             } else {
                 self.current_exception_handler = null;
-                std.debug.print("Block {d} ({s}) has NO exception_handler\n", .{ idx, block.label });
             }
             
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
@@ -9950,7 +9948,6 @@ pub const NativeLinker = struct {
 
     /// 生成指令
     fn generateInstruction(self: *Self, writer: anytype, inst: *const IR.Instruction) !void {
-        std.debug.print("generateInstruction: {s}\n", .{@tagName(inst.op)});
         // Add source location comment
         if (inst.location.line > 0) {
             try writer.print("        // {s}:{d}\n", .{ inst.location.file, inst.location.line });
