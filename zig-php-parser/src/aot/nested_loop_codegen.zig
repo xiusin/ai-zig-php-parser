@@ -65,12 +65,15 @@ pub const NestedLoopCodegenV3 = struct {
     stack: std.ArrayList(LoopFrame),
     /// 类型推断表（可选）
     inferred_types: ?*const std.AutoHashMap(usize, IR.Type),
+    /// alloca 寄存器集合（可选）
+    alloca_regs: ?*const std.AutoHashMap(usize, void),
 
     /// 初始化生成器
     pub fn init(
         allocator: Allocator,
         builder: *ZigCodeBuilder,
         inferred_types: ?*const std.AutoHashMap(usize, IR.Type),
+        alloca_regs: ?*const std.AutoHashMap(usize, void),
     ) NestedLoopCodegenV3 {
         return .{
             .allocator = allocator,
@@ -80,6 +83,7 @@ pub const NestedLoopCodegenV3 = struct {
                 0,
             ) catch unreachable,
             .inferred_types = inferred_types,
+            .alloca_regs = alloca_regs,
         };
     }
 
@@ -94,6 +98,19 @@ pub const NestedLoopCodegenV3 = struct {
             if (types.get(reg_id)) |t| return t;
         }
         return fallback;
+    }
+
+    /// 获取操作数引用（处理 alloca 寄存器）
+    fn getOperandRef(self: *const NestedLoopCodegenV3, buf: []u8, reg_id: usize) ![]const u8 {
+        const is_alloca = if (self.alloca_regs) |regs|
+            regs.contains(reg_id)
+        else
+            false;
+        
+        return if (is_alloca) 
+            try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
+        else 
+            try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
     }
 
     /// 判断块是否在循环外（用于 PHI init 值识别）
@@ -492,25 +509,28 @@ pub const NestedLoopCodegenV3 = struct {
                 const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                 const val_tag = @as(std.meta.Tag(IR.Type), val_type);
 
+                var src_buf: [32]u8 = undefined;
+                const src_ref = try self.getOperandRef(&src_buf, val_reg);
+
                 if (phi_tag == val_tag) {
                     try self.builder.writeLineFmt(
-                        "reg_{d} = reg_{d};",
-                        .{ res.id, val_reg },
+                        "reg_{d} = {s};",
+                        .{ res.id, src_ref },
                     );
                 } else if (phi_tag == .i64 and val_tag == .php_value) {
                     try self.builder.writeLineFmt(
-                        "reg_{d} = reg_{d}.asInt();",
-                        .{ res.id, val_reg },
+                        "reg_{d} = {s}.asInt();",
+                        .{ res.id, src_ref },
                     );
                 } else if (phi_tag == .f64 and val_tag == .php_value) {
                     try self.builder.writeLineFmt(
-                        "reg_{d} = reg_{d}.asFloat();",
-                        .{ res.id, val_reg },
+                        "reg_{d} = {s}.asFloat();",
+                        .{ res.id, src_ref },
                     );
                 } else {
                     try self.builder.writeLineFmt(
-                        "reg_{d} = reg_{d};",
-                        .{ res.id, val_reg },
+                        "reg_{d} = {s};",
+                        .{ res.id, src_ref },
                     );
                 }
             }

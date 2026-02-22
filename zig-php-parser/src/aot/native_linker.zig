@@ -2389,13 +2389,24 @@ pub const NativeLinker = struct {
         else
             false;
         
-        const result = if (is_alloca) 
+        return if (is_alloca) 
             try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
         else 
             try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
+    }
+
+    /// 格式化寄存器引用到 writer（用于替换所有 writer.print("reg_{d}", .{id})）
+    fn writeRegRef(self: *Self, writer: anytype, reg_id: usize) !void {
+        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+            alloca_regs.contains(reg_id)
+        else
+            false;
         
-        std.debug.print("getOperandRef: reg_{d}, is_alloca={}, result={s}\n", .{reg_id, is_alloca, result});
-        return result;
+        if (is_alloca) {
+            try writer.print("reg_{d}.*", .{reg_id});
+        } else {
+            try writer.print("reg_{d}", .{reg_id});
+        }
     }
 
     fn writeRegAssignmentPrefix(
@@ -2426,7 +2437,6 @@ pub const NativeLinker = struct {
         comptime format_str: []const u8,
         args: anytype,
     ) !void {
-        std.debug.print("writeRegAssignmentFmt: reg_{d}, format={s}, args={any}\n", .{reg_id, format_str, args});
         try self.writeRegAssignmentPrefix(writer, reg_id);
         try writer.print(format_str, args);
     }
@@ -2479,8 +2489,6 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
-
-        std.debug.print("writePhpValueExpr: reg_{d}, is_alloca={}\n", .{reg_id, is_alloca});
 
         // alloca 寄存器总是 *runtime.Value，需要解引用
         if (is_alloca) {
@@ -2661,22 +2669,27 @@ pub const NativeLinker = struct {
                                 const result_tag = @as(std.meta.Tag(IR.Type), result_corrected);
                                 const value_tag = @as(std.meta.Tag(IR.Type), value_corrected);
 
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
+
+                                std.debug.print("BR PHI: reg_{d} = {s} (incoming.value.id={})\n", .{result_reg.id, src_ref, incoming.value.id});
+
                                 if (result_tag == value_tag) {
-                                    try writer.print("            reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .php_value and value_tag == .i64) {
-                                    try writer.print("            reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = runtime.Value.initInt({s});\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .php_value and value_tag == .f64) {
-                                    try writer.print("            reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = runtime.Value.initFloat({s});\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .php_value and value_tag == .bool) {
-                                    try writer.print("            reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = runtime.Value.initBool({s});\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .i64 and value_tag == .php_value) {
-                                    try writer.print("            reg_{d} = reg_{d}.toInt();\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = {s}.toInt();\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .f64 and value_tag == .php_value) {
-                                    try writer.print("            reg_{d} = reg_{d}.toFloat();\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = {s}.toFloat();\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .bool and value_tag == .php_value) {
-                                    try writer.print("            reg_{d} = reg_{d}.toBool();\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = {s}.toBool();\n", .{ result_reg.id, src_ref });
                                 } else {
-                                    try writer.print("            reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
                                 }
                                 break;
                             }
@@ -3257,9 +3270,12 @@ pub const NativeLinker = struct {
                         op.value.type_;
                     const corrected_value_tag = @as(std.meta.Tag(IR.Type), corrected_value_type);
 
+                    var src_buf: [32]u8 = undefined;
+                    const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+
                     if (corrected_value_tag == .i64 or corrected_value_tag == .f64 or corrected_value_tag == .bool) {
                         // 直接赋值
-                        try writer.print("    reg_{d} = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                        try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
                     } else {
                         // 需要转换
                         try writer.print("    reg_{d} = ", .{op.ptr.id});
@@ -3353,7 +3369,9 @@ pub const NativeLinker = struct {
 
                     if (ptr_is_optimized_alloca) {
                         // 优化的 alloca：生成简化的赋值
-                        try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.ptr.id });
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, op.ptr.id);
+                        try writer.print("    reg_{d} = {s};\n", .{ reg.id, src_ref });
                         return;
                     }
 
@@ -5810,16 +5828,19 @@ pub const NativeLinker = struct {
                         const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                         const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, val);
+
                         if (phi_tag == value_tag) {
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = reg_{d}.asInt();\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s}.asInt();\n", .{ res.id, src_ref });
                         } else if (phi_tag == .f64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = reg_{d}.asFloat();\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s}.asFloat();\n", .{ res.id, src_ref });
                         } else if (phi_tag == .bool and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = reg_{d}.toBool();\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s}.toBool();\n", .{ res.id, src_ref });
                         } else {
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         }
                     }
                 }
@@ -6020,16 +6041,19 @@ pub const NativeLinker = struct {
                         const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                         const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, val);
+
                         if (phi_tag == value_tag) {
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = reg_{d}.asInt();\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s}.asInt();\n", .{ res.id, src_ref });
                         } else if (phi_tag == .f64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = reg_{d}.asFloat();\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s}.asFloat();\n", .{ res.id, src_ref });
                         } else if (phi_tag == .bool and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = reg_{d}.toBool();\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s}.toBool();\n", .{ res.id, src_ref });
                         } else {
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, val });
+                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         }
                     }
                 }
@@ -10495,7 +10519,9 @@ pub const NativeLinker = struct {
                 if (inst.result) |phi_result| {
                     if (op.incoming.len > 0) {
                         const first_value = op.incoming[0].value;
-                        try writer.print("        reg_{d} = reg_{d}; // PHI default\n", .{ phi_result.id, first_value.id });
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, first_value.id);
+                        try writer.print("        reg_{d} = {s}; // PHI default\n", .{ phi_result.id, src_ref });
                     }
                 }
             },
