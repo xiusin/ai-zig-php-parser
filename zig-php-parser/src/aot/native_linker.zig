@@ -1728,9 +1728,14 @@ pub const NativeLinker = struct {
                             for (cleanup_registers.items) |reg_id| {
                                 const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
                                 if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
+                                    // 检查寄存器的实际类型
+                                    const reg_type = all_registers.get(reg_id) orelse .php_value;
+                                    const reg_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                                    const is_ptr = reg_tag == .ptr;
+                                    
                                     try code.appendSlice(self.allocator, "    reg_");
                                     try code.writer(self.allocator).print("{d}", .{reg_id});
-                                    if (alloca_registers.contains(reg_id)) {
+                                    if (is_ptr) {
                                         try code.appendSlice(self.allocator, ".*.release(runtime.runtime_allocator);\n");
                                     } else {
                                         try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
@@ -1786,9 +1791,14 @@ pub const NativeLinker = struct {
                             for (cleanup_registers.items) |reg_id| {
                                 if (!self.shouldReleaseReg(reg_id)) continue;
 
+                                // 检查寄存器的实际类型
+                                const reg_type = all_registers.get(reg_id) orelse .php_value;
+                                const reg_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                                const is_ptr = reg_tag == .ptr;
+
                                 try code.appendSlice(self.allocator, "    reg_");
                                 try code.writer(self.allocator).print("{d}", .{reg_id});
-                                if (alloca_registers.contains(reg_id)) {
+                                if (is_ptr) {
                                     try code.appendSlice(self.allocator, ".*.release(runtime.runtime_allocator);\n");
                                 } else {
                                     try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
@@ -3263,40 +3273,29 @@ pub const NativeLinker = struct {
                 // alloca不需要生成代码
             },
             .store => |op| {
-                // 检查 ptr 是否是优化的 alloca（直接变量）
-                const ptr_is_optimized_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
-                    opt_regs.contains(op.ptr.id)
+                // 检查 ptr 的实际类型（可能被 mem2reg 提升）
+                const ptr_type = if (self.current_register_types) |types|
+                    types.get(op.ptr.id) orelse op.ptr.type_
                 else
-                    false;
+                    op.ptr.type_;
+                const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
+                
+                // 如果 ptr 不是指针类型，说明被 mem2reg 提升了
+                const ptr_is_optimized = ptr_tag != .ptr;
 
-                if (ptr_is_optimized_alloca) {
-                    // 优化的 alloca：直接赋值
-                    const corrected_value_type = if (self.current_register_types) |types|
-                        types.get(op.value.id) orelse op.value.type_
-                    else
-                        op.value.type_;
-                    const corrected_value_tag = @as(std.meta.Tag(IR.Type), corrected_value_type);
-
+                if (ptr_is_optimized) {
+                    // mem2reg 优化：直接赋值
                     var src_buf: [32]u8 = undefined;
                     const src_ref = try self.getOperandRef(&src_buf, op.value.id);
-
-                    if (corrected_value_tag == .i64 or corrected_value_tag == .f64 or corrected_value_tag == .bool) {
-                        // 直接赋值
-                        try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
-                    } else {
-                        // 需要转换
-                        try writer.print("    reg_{d} = ", .{op.ptr.id});
-                        try self.writePhpValueExpr(writer, corrected_value_tag, op.value.id);
-                        try writer.writeAll(".asInt();\n"); // TODO: 根据类型选择转换方法
-                    }
+                    try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
                 } else {
-                    // 原有的 store 逻辑
+                    // 原有的 store 逻辑（指针操作）
                     // 检查是否是 alloca 寄存器（即指针类型）
                     const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
                     const ptr_prefix = if (is_ptr) "" else "&";
 
                     // 1. 释放旧值
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{op.ptr.id});
+                    try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.ptr.id});
 
                     // 2. 增加新值引用计数并赋值
                     // 使用修正后的类型
@@ -3368,14 +3367,18 @@ pub const NativeLinker = struct {
             },
             .load => |op| {
                 if (inst.result) |reg| {
-                    // 检查 ptr 是否是优化的 alloca（直接变量）
-                    const ptr_is_optimized_alloca = if (self.current_optimized_alloca_regs) |opt_regs|
-                        opt_regs.contains(op.ptr.id)
+                    // 检查 ptr 的实际类型（可能被 mem2reg 提升）
+                    const ptr_type = if (self.current_register_types) |types|
+                        types.get(op.ptr.id) orelse op.ptr.type_
                     else
-                        false;
+                        op.ptr.type_;
+                    const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
+                    
+                    // 如果 ptr 不是指针类型，说明被 mem2reg 提升了
+                    const ptr_is_optimized = ptr_tag != .ptr;
 
-                    if (ptr_is_optimized_alloca) {
-                        // 优化的 alloca：生成简化的赋值
+                    if (ptr_is_optimized) {
+                        // mem2reg 优化：直接读取
                         var src_buf: [32]u8 = undefined;
                         const src_ref = try self.getOperandRef(&src_buf, op.ptr.id);
                         try writer.print("    reg_{d} = {s};\n", .{ reg.id, src_ref });
