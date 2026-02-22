@@ -377,11 +377,17 @@ pub const NativeLinker = struct {
 
         // 生成函数
         std.debug.print("=== GENERATING FUNCTIONS: count={d} ===\n", .{ir_module.functions.items.len});
+        var func_code = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+        defer func_code.deinit(self.allocator);
+        
         for (ir_module.functions.items, 0..) |func, i| {
             std.debug.print("[{d}] Generating function: {s}\n", .{ i, func.name });
-            try self.generateFunction(&code, ir_module, func);
+            try self.generateFunction(&func_code, ir_module, func);
             std.debug.print("[{d}] Done: {s}\n", .{ i, func.name });
         }
+        
+        // 将生成的函数代码写入主代码
+        try writer.writeAll(func_code.items);
 
         var has_select: bool = false;
         for (ir_module.functions.items) |func| {
@@ -593,7 +599,26 @@ pub const NativeLinker = struct {
             \\    registerAllFunctions() catch {};
             \\    defer runtime.cleanupAllClasses();
             \\
-            \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
+        );
+        
+        // 检查是否存在 __main__ 函数
+        var has_main = false;
+        for (ir_module.functions.items) |func| {
+            if (std.mem.eql(u8, func.name, "__main__")) {
+                has_main = true;
+                break;
+            }
+        }
+        
+        if (has_main) {
+            try writer.writeAll(
+                \\
+                \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
+                \\
+            );
+        }
+        
+        try writer.writeAll(
             \\    _ = runtime.php_go_wait_all(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch {};
             \\}
             \\
