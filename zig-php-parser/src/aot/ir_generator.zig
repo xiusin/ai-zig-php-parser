@@ -2928,17 +2928,9 @@ pub const IRGenerator = struct {
                 const arg_node = self.getNode(arg_idx);
                 const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) arg_node.?.data.named_arg.value else arg_idx;
 
-                var is_ref = false;
-                if (func_symbol) |sym| {
-                    // 安全检查：确保 metadata 是 function 类型
-                    const metadata_tag = @as(std.meta.Tag(@TypeOf(sym.metadata)), sym.metadata);
-                    if (metadata_tag == .function) {
-                        const func_meta = sym.metadata.function;
-                        if (i < func_meta.params.len) {
-                            is_ref = func_meta.params[i].is_reference;
-                        }
-                    }
-                }
+                // 暂时禁用引用参数检查，因为它导致 segmentation fault
+                // TODO: 修复 symbol table 的内存管理问题
+                const is_ref = false;
 
                 if (is_ref) {
                     const real_node = self.getNode(expr_idx);
