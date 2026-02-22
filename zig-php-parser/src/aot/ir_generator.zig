@@ -2930,12 +2930,12 @@ pub const IRGenerator = struct {
 
                 var is_ref = false;
                 if (func_symbol) |sym| {
-                    // 安全检查：确保可以访问 metadata
+                    // 安全检查：确保 metadata 是 function 类型
                     const metadata_tag = @as(std.meta.Tag(@TypeOf(sym.metadata)), sym.metadata);
                     if (metadata_tag == .function) {
-                        const params = sym.metadata.function.params;
-                        if (i < params.len) {
-                            is_ref = params[i].is_reference;
+                        const func_meta = sym.metadata.function;
+                        if (i < func_meta.params.len) {
+                            is_ref = func_meta.params[i].is_reference;
                         }
                     }
                 }
