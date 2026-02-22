@@ -2420,7 +2420,13 @@ pub const NativeLinker = struct {
         const phi = inst.op.phi;
 
         const result_reg = inst.result orelse return;
-        const dest_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
+        
+        // 使用修正后的类型
+        const dest_type = if (self.current_register_types) |types|
+            types.get(result_reg.id) orelse result_reg.type_
+        else
+            result_reg.type_;
+        const dest_tag = @as(std.meta.Tag(IR.Type), dest_type);
         const dest_is_value = !(dest_tag == .i64 or dest_tag == .f64 or dest_tag == .bool);
 
         const dest_may_heap = if (self.current_reg_may_heap) |mh| mh[result_reg.id] else true;
@@ -4115,14 +4121,31 @@ pub const NativeLinker = struct {
                             try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
                             try writer.print("    }}\n", .{});
                         } else {
-                            // 普通参数
-                            const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                            // 普通参数 - 使用修正后的类型
+                            const corrected_type = if (self.current_register_types) |types|
+                                types.get(reg.id) orelse reg.type_
+                            else
+                                reg.type_;
+                            const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
+                            
                             if (type_tag == .i64) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toInt() else 0;\n", .{ arg_idx, arg_idx, arg_idx });
                             } else if (type_tag == .f64) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toFloat() else 0.0;\n", .{ arg_idx, arg_idx, arg_idx });
                             } else if (type_tag == .bool) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toBool() else false;\n", .{ arg_idx, arg_idx, arg_idx });
+                            } else if (type_tag == .php_value) {
+                                // php_value 类型：需要检查原始类型并转换
+                                const orig_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                                if (orig_type_tag == .i64) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initInt(args[{d}].toInt()) else runtime.Value.initInt(0);\n", .{ arg_idx, arg_idx, arg_idx });
+                                } else if (orig_type_tag == .f64) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initFloat(args[{d}].toFloat()) else runtime.Value.initFloat(0.0);\n", .{ arg_idx, arg_idx, arg_idx });
+                                } else if (orig_type_tag == .bool) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initBool(args[{d}].toBool()) else runtime.Value.initBool(false);\n", .{ arg_idx, arg_idx, arg_idx });
+                                } else {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ arg_idx, arg_idx, arg_idx });
+                                }
                             } else {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ arg_idx, arg_idx, arg_idx });
                             }
