@@ -419,6 +419,49 @@ pub const DependencyResolver = struct {
                 if (i < source.len) {
                     path = source[path_start..i];
                 }
+            } else if (self.matchKeyword(source[i..], "__DIR__")) {
+                // Handle __DIR__ constant
+                i += 7; // length of "__DIR__"
+                
+                // Skip whitespace
+                while (i < source.len and (source[i] == ' ' or source[i] == '\t')) {
+                    i += 1;
+                }
+                
+                // Check for concatenation operator
+                if (i < source.len and source[i] == '.') {
+                    i += 1;
+                    // Skip whitespace
+                    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) {
+                        i += 1;
+                    }
+                    
+                    // Extract the concatenated string
+                    if (i < source.len and (source[i] == '\'' or source[i] == '"')) {
+                        const quote = source[i];
+                        i += 1;
+                        const path_start = i;
+                        while (i < source.len and source[i] != quote) {
+                            if (source[i] == '\\' and i + 1 < source.len) {
+                                i += 2;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        if (i < source.len) {
+                            // Resolve __DIR__ to current file's directory
+                            const dir = std.fs.path.dirname(current_file) orelse ".";
+                            const relative_path = source[path_start..i];
+                            
+                            // Combine directory with relative path
+                            const full_path = try std.fs.path.join(self.allocator, &[_][]const u8{ dir, relative_path });
+                            path = full_path;
+                        }
+                    }
+                } else {
+                    // Just __DIR__ without concatenation
+                    path = std.fs.path.dirname(current_file) orelse ".";
+                }
             } else if (source[i] == '$' or std.ascii.isAlphanumeric(source[i])) {
                 // Variable or expression - mark as dynamic
                 is_dynamic = true;
