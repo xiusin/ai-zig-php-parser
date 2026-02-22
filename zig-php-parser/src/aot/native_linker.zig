@@ -5665,6 +5665,16 @@ pub const NativeLinker = struct {
         const first_loop = cfg.loops.items[0];
         for (0..first_loop.header) |idx| {
             const block = func.blocks.items[idx];
+            
+            // 设置异常处理器
+            if (block.exception_handler) |handler| {
+                self.current_exception_handler = handler.index;
+                std.debug.print("Block {d} ({s}) has exception_handler: {d}\n", .{ idx, block.label, handler.index });
+            } else {
+                self.current_exception_handler = null;
+                std.debug.print("Block {d} ({s}) has NO exception_handler\n", .{ idx, block.label });
+            }
+            
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
             for (block.instructions.items) |inst| {
                 try writer.writeAll("    ");
@@ -10515,6 +10525,7 @@ pub const NativeLinker = struct {
             .call => |op| {
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
+                const in_try_block = self.current_exception_handler != null;
 
                 // 生成函数调用
                 if (result_reg) |r| {
@@ -10522,7 +10533,11 @@ pub const NativeLinker = struct {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
 
-                        try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                        if (in_try_block) {
+                            try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                        } else {
+                            try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                        }
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
                             // 使用 current_register_types 获取真实类型
@@ -10552,13 +10567,25 @@ pub const NativeLinker = struct {
                         if (needs_alloc) {
                             try writer.writeAll(", runtime.runtime_allocator");
                         }
-                        try writer.writeAll(");\n");
+                        if (in_try_block) {
+                            try writer.writeAll(") catch runtime.Value.initNull();\n");
+                        } else {
+                            try writer.writeAll(");\n");
+                        }
                     } else {
                         // 用户定义函数 - 构建参数数组
                         if (op.args.len == 0) {
-                            try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{ r, op.func_name });
+                            if (in_try_block) {
+                                try writer.print("        {s} = @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator) catch runtime.Value.initNull();\n", .{ r, op.func_name });
+                            } else {
+                                try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{ r, op.func_name });
+                            }
                         } else {
-                            try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, op.func_name });
+                            if (in_try_block) {
+                                try writer.print("        {s} = @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, op.func_name });
+                            } else {
+                                try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, op.func_name });
+                            }
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
                                 // 使用 current_register_types 获取真实类型
@@ -10585,7 +10612,11 @@ pub const NativeLinker = struct {
                                     try self.writeRegRef(writer, arg.id);
                                 }
                             }
-                            try writer.writeAll("}, runtime.runtime_allocator);\n");
+                            if (in_try_block) {
+                                try writer.writeAll("}, runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                            } else {
+                                try writer.writeAll("}, runtime.runtime_allocator);\n");
+                            }
                         }
                     }
                 } else {
