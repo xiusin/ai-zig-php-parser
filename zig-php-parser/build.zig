@@ -17,6 +17,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/compiler/mod.zig"),
     });
     
+    // Shared 模块（导出 compiler 的 Parser 等类型）
+    const shared_mod = b.createModule(.{
+        .root_source_file = b.path("src/shared/mod.zig"),
+    });
+    shared_mod.addImport("compiler", compiler_mod);
+    
     // 运行时模块
     const runtime_mod = b.createModule(.{
         .root_source_file = b.path("src/runtime/mod.zig"),
@@ -78,6 +84,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("bytecode", bytecode_mod);
     exe.root_module.addImport("jit", jit_mod);
     exe.root_module.addImport("extension", extension_mod);
+    exe.root_module.addImport("shared", shared_mod);
     exe.linkLibC();
     // Detect platform for Homebrew PCRE2 paths
     const pcre2_prefix = if (builtin.target.cpu.arch == .aarch64) "/opt/homebrew/opt/pcre2" else "/usr/local/opt/pcre2";
@@ -102,6 +109,7 @@ pub fn build(b: *std.Build) void {
     aot_test.root_module.addImport("bytecode", bytecode_mod);
     aot_test.root_module.addImport("jit", jit_mod);
     aot_test.root_module.addImport("extension", extension_mod);
+    aot_test.root_module.addImport("shared", shared_mod);
     const run_aot_test = b.addRunArtifact(aot_test);
     aot_test_step.dependOn(&run_aot_test.step);
 
@@ -157,6 +165,7 @@ pub fn build(b: *std.Build) void {
         test_exe.root_module.addImport("bytecode", bytecode_mod);
         test_exe.root_module.addImport("jit", jit_mod);
         test_exe.root_module.addImport("extension", extension_mod);
+        test_exe.root_module.addImport("shared", shared_mod);
 
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);

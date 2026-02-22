@@ -22,6 +22,12 @@ const NativeLinkerConfig = NativeLinkerMod.NativeLinkerConfig;
 const Target = NativeLinkerMod.Target;
 const OptimizeLevel = NativeLinkerMod.OptimizeLevel;
 
+// 导入共享模块
+const shared = @import("shared");
+const Parser = shared.Parser;
+const PHPContext = shared.PHPContext;
+const SyntaxMode = shared.SyntaxMode;
+
 /// 编译结果
 pub const MultiFileCompileResult = struct {
     success: bool,
@@ -33,7 +39,7 @@ pub const MultiFileCompileResult = struct {
 /// 单个文件的编译结果
 const FileCompileResult = struct {
     path: []const u8,
-    ir_module: *IR.Module,
+    aot_compiler: *CompilerMod.AOTCompiler,  // 保存编译器实例以保持 module 存活
     success: bool,
     error_message: ?[]const u8,
 };
@@ -72,9 +78,9 @@ pub const MultiFileCompiler = struct {
         
         var it = self.compiled_files.iterator();
         while (it.next()) |entry| {
-            const module = entry.value_ptr.ir_module;
-            module.deinit();
-            self.allocator.destroy(module);
+            const compiler = entry.value_ptr.aot_compiler;
+            compiler.deinit();
+            self.allocator.destroy(compiler);
         }
         self.compiled_files.deinit();
         
@@ -161,7 +167,7 @@ pub const MultiFileCompiler = struct {
         }
 
         // 获取源码
-        _ = file_node.?.source orelse {
+        const source = file_node.?.source orelse {
             self.diagnostics.reportError(
                 .{ .file = file_path },
                 "source not loaded",
@@ -169,19 +175,88 @@ pub const MultiFileCompiler = struct {
             );
             return false;
         };
-
-        // 直接使用 IRGenerator 编译（不通过 AOTCompiler 避免模块导入问题）
-        // 注意：这里需要外部传入已解析的 AST
-        // 由于无法在 aot 模块中导入 compiler 模块的 Parser
-        // 我们需要在调用 compile 之前预解析所有文件
         
-        // 临时方案：返回错误，要求使用单文件编译
-        self.diagnostics.reportError(
-            .{ .file = file_path },
-            "multi-file compilation requires parser integration - please use single-file mode",
-            .{},
-        );
-        return false;
+        // 确保源码是 null-terminated
+        const source_z = try self.allocator.dupeZ(u8, source);
+        defer self.allocator.free(source_z);
+
+        // 使用共享的 Parser 解析源码
+        var context = PHPContext.init(self.allocator);
+        defer context.deinit();
+        
+        const syntax_mode = switch (self.options.syntax_mode) {
+            .php => SyntaxMode.php,
+            .go => SyntaxMode.go,
+        };
+        
+        var p = try Parser.initWithMode(self.allocator, &context, source_z, syntax_mode);
+        defer p.deinit();
+        
+        const root_index = p.parse() catch |err| {
+            self.diagnostics.reportError(
+                .{ .file = file_path },
+                "parsing failed: {s}",
+                .{@errorName(err)},
+            );
+            return false;
+        };
+        
+        // 构建字符串表
+        var string_table = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+        defer {
+            for (string_table.items) |s| {
+                self.allocator.free(s);
+            }
+            string_table.deinit(self.allocator);
+        }
+        
+        for (context.string_pool.keys()) |str| {
+            const str_copy = try self.allocator.dupe(u8, str);
+            try string_table.append(self.allocator, str_copy);
+        }
+        
+        // 使用 AOTCompiler 完整编译流程
+        // 创建临时 options，设置不链接（只生成 IR）
+        var temp_options = self.options;
+        temp_options.link_executable = false;
+        
+        const aot_compiler = try CompilerMod.AOTCompiler.init(self.allocator, temp_options);
+        
+        try aot_compiler.setSource(source_z);
+        try aot_compiler.setAST(context.nodes.items, string_table.items, root_index);
+        
+        // 只编译到 IR，不生成可执行文件
+        const module_opt = aot_compiler.compileToIR() catch |err| {
+            self.diagnostics.reportError(
+                .{ .file = file_path },
+                "compilation failed: {s}",
+                .{@errorName(err)},
+            );
+            aot_compiler.deinit();
+            self.allocator.destroy(aot_compiler);
+            return false;
+        };
+        
+        if (module_opt == null) {
+            self.diagnostics.reportError(
+                .{ .file = file_path },
+                "compilation returned null module",
+                .{},
+            );
+            aot_compiler.deinit();
+            self.allocator.destroy(aot_compiler);
+            return false;
+        }
+        
+        // 保存结果（保存编译器实例以保持 module 存活）
+        try self.compiled_files.put(file_path, .{
+            .path = file_path,
+            .aot_compiler = aot_compiler,
+            .success = true,
+            .error_message = null,
+        });
+
+        return true;
     }
 
     /// 合并所有模块
@@ -197,7 +272,7 @@ pub const MultiFileCompiler = struct {
             const file_result = entry.value_ptr;
             if (!file_result.success) continue;
             
-            const source_module = file_result.ir_module;
+            const source_module = file_result.aot_compiler.ir_module orelse continue;
             
             // 合并函数
             for (source_module.functions.items) |func| {
