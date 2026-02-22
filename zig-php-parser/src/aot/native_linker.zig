@@ -3911,10 +3911,16 @@ pub const NativeLinker = struct {
                         try writer.writeAll("    if (");
                         try writer.print("reg_{d}", .{op.cond.id});
                         try writer.writeAll(") {\n");
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.then_value.id });
+                        
+                        var then_buf: [32]u8 = undefined;
+                        const then_ref = try self.getOperandRef(&then_buf, op.then_value.id);
+                        try writer.print("        reg_{d} = {s};\n", .{ reg.id, then_ref });
                         try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
                         try writer.writeAll("    } else {\n");
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.else_value.id });
+                        
+                        var else_buf: [32]u8 = undefined;
+                        const else_ref = try self.getOperandRef(&else_buf, op.else_value.id);
+                        try writer.print("        reg_{d} = {s};\n", .{ reg.id, else_ref });
                         try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
                         try writer.writeAll("    }\n");
                     }
@@ -5981,7 +5987,9 @@ pub const NativeLinker = struct {
 
         // while 循环的 phi 更新必须在循环体末尾回写，否则会导致循环变量不递增
         for (phi_updates.items) |update| {
-            try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+            var src_buf: [32]u8 = undefined;
+            const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
+            try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
         }
 
         // 生成增量块（如果有且不是 for 循环）
@@ -6757,25 +6765,30 @@ pub const NativeLinker = struct {
                             false;
 
                         // 生成赋值
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, ms.loop_count_reg);
+                        
                         if (is_optimized_alloca or inc_tag == .i64) {
                             // 目标是 i64
                             if (count_tag == .i64) {
-                                try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                                try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             } else if (count_tag == .php_value) {
-                                try writer.print("    reg_{d} = reg_{d}.asInt();\n", .{ inc_reg, ms.loop_count_reg });
+                                try writer.print("    reg_{d} = {s}.asInt();\n", .{ inc_reg, src_ref });
                             } else {
-                                try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                                try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             }
                         } else if (inc_tag == .php_value) {
                             // 目标是 Value
                             if (count_tag == .i64) {
-                                try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ inc_reg, ms.loop_count_reg });
+                                try writer.print("    reg_{d} = runtime.Value.initInt({s});\n", .{ inc_reg, src_ref });
                             } else {
-                                try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                                try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             }
                         } else {
                             // 其他情况
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, ms.loop_count_reg });
+                            var src_buf2: [32]u8 = undefined;
+                            const src_ref2 = try self.getOperandRef(&src_buf2, ms.loop_count_reg);
+                            try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref2 });
                         }
                         break;
                     }
@@ -6835,7 +6848,9 @@ pub const NativeLinker = struct {
                     for (inc_block.instructions.items) |inst| {
                         if (inst.op == .store) {
                             const inc_reg = inst.op.store.ptr.id;
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ inc_reg, limit_reg });
+                            var src_buf: [32]u8 = undefined;
+                            const src_ref = try self.getOperandRef(&src_buf, limit_reg);
+                            try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             break;
                         }
                     }
@@ -6915,7 +6930,9 @@ pub const NativeLinker = struct {
                         // 查找循环外来源的 incoming（基于 LoopMetadata）
                         for (phi_op.incoming) |incoming| {
                             if (isInitBlock(incoming.block, loop)) {
-                                try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, incoming.value.id });
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
+                                try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                                 break;
                             }
                         }
@@ -7137,19 +7154,22 @@ pub const NativeLinker = struct {
                 const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                 const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
+                var src_buf: [32]u8 = undefined;
+                const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
+
                 if (phi_tag == value_tag) {
                     // 类型匹配，直接赋值
-                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
                 } else if (phi_tag == .i64 and value_tag == .php_value) {
                     // phi 是 i64，value 是 php_value，需要转换
-                    try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
+                    try writer.print("        reg_{d} = {s}.asInt();\n", .{ update.phi_reg, src_ref });
                 } else if (phi_tag == .f64 and value_tag == .php_value) {
-                    try writer.print("        reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                    try writer.print("        reg_{d} = {s}.asFloat();\n", .{ update.phi_reg, src_ref });
                 } else if (phi_tag == .bool and value_tag == .php_value) {
-                    try writer.print("        reg_{d} = reg_{d}.toBool();\n", .{ update.phi_reg, update.value_reg });
+                    try writer.print("        reg_{d} = {s}.toBool();\n", .{ update.phi_reg, src_ref });
                 } else {
                     // 其他情况，尝试直接赋值
-                    try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                    try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
                 }
             }
 
@@ -7223,16 +7243,19 @@ pub const NativeLinker = struct {
                     const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                     const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
+                    var src_buf: [32]u8 = undefined;
+                    const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
+
                     if (phi_tag == value_tag) {
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                        try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
                     } else if (phi_tag == .i64 and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
+                        try writer.print("        reg_{d} = {s}.asInt();\n", .{ update.phi_reg, src_ref });
                     } else if (phi_tag == .f64 and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                        try writer.print("        reg_{d} = {s}.asFloat();\n", .{ update.phi_reg, src_ref });
                     } else if (phi_tag == .bool and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = reg_{d}.toBool();\n", .{ update.phi_reg, update.value_reg });
+                        try writer.print("        reg_{d} = {s}.toBool();\n", .{ update.phi_reg, src_ref });
                     } else {
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                        try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
                     }
                 }
 
@@ -7860,7 +7883,9 @@ pub const NativeLinker = struct {
                     if (inst.result) |res| {
                         for (phi_op.incoming) |incoming| {
                             if (isInitBlock(incoming.block, loop)) {
-                                try writer.print("        reg_{d} = reg_{d};\n", .{ res.id, incoming.value.id });
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
+                                try writer.print("        reg_{d} = {s};\n", .{ res.id, src_ref });
                                 break;
                             }
                         }
@@ -7888,7 +7913,9 @@ pub const NativeLinker = struct {
                 if (inst.result) |res| {
                     for (phi_op.incoming) |incoming| {
                         if (isInitBlock(incoming.block, loop)) {
-                            try writer.print("    reg_{d} = reg_{d};\n", .{ res.id, incoming.value.id });
+                            var src_buf: [32]u8 = undefined;
+                            const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
+                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                             break;
                         }
                     }
@@ -8046,12 +8073,17 @@ pub const NativeLinker = struct {
                         // 循环变量使用确定性更新：避免展开寄存器解析错位导致卡死
                         if (is_loop_var) {
                             try writer.print("        reg_{d} = reg_{d} + 1;\n", .{ result_reg.id, result_reg.id });
-                        } else if (phi_tag == value_tag) {
-                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, resolved_reg });
-                        } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("        reg_{d} = reg_{d}.asInt();\n", .{ result_reg.id, resolved_reg });
                         } else {
-                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, resolved_reg });
+                            var src_buf: [32]u8 = undefined;
+                            const src_ref = try self.getOperandRef(&src_buf, resolved_reg);
+                            
+                            if (phi_tag == value_tag) {
+                                try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
+                            } else if (phi_tag == .i64 and value_tag == .php_value) {
+                                try writer.print("        reg_{d} = {s}.asInt();\n", .{ result_reg.id, src_ref });
+                            } else {
+                                try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
+                            }
                         }
                     }
                 }
@@ -10284,13 +10316,19 @@ pub const NativeLinker = struct {
                                 // 转换基本类型为 Value
                                 const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
                                 if (arg_type == .i64) {
-                                    try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                    try writer.print("runtime.Value.initInt({s})", .{src_ref});
                                 } else if (arg_type == .f64) {
-                                    try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                    try writer.print("runtime.Value.initFloat({s})", .{src_ref});
                                 } else if (arg_type == .bool) {
-                                    try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                    try writer.print("runtime.Value.initBool({s})", .{src_ref});
                                 } else {
-                                    try writer.print("reg_{d}", .{arg.id});
+                                    try self.writeRegRef(writer, arg.id);
                                 }
                             }
                             try writer.writeAll("}, runtime.runtime_allocator);\n");
@@ -10321,13 +10359,19 @@ pub const NativeLinker = struct {
                                 // 转换基本类型为 Value
                                 const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
                                 if (arg_type == .i64) {
-                                    try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                    try writer.print("runtime.Value.initInt({s})", .{src_ref});
                                 } else if (arg_type == .f64) {
-                                    try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                    try writer.print("runtime.Value.initFloat({s})", .{src_ref});
                                 } else if (arg_type == .bool) {
-                                    try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                    try writer.print("runtime.Value.initBool({s})", .{src_ref});
                                 } else {
-                                    try writer.print("reg_{d}", .{arg.id});
+                                    try self.writeRegRef(writer, arg.id);
                                 }
                             }
                             try writer.writeAll("}, runtime.runtime_allocator);\n");
