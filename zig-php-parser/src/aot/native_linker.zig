@@ -1722,16 +1722,11 @@ pub const NativeLinker = struct {
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, ";\n");
                 } else {
-                    // 普通寄存器：使用修正后的类型（从 all_registers 获取）
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg_type);
+                    // 普通寄存器：总是使用 runtime.Value 以避免类型不匹配
+                    // TODO: 未来可以优化为使用原生类型，但需要更精确的类型推断
                     try code.appendSlice(self.allocator, "    var reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
-                    switch (type_tag) {
-                        .i64 => try code.appendSlice(self.allocator, ": i64 = 0;\n"),
-                        .f64 => try code.appendSlice(self.allocator, ": f64 = 0.0;\n"),
-                        .bool => try code.appendSlice(self.allocator, ": bool = false;\n"),
-                        else => try code.appendSlice(self.allocator, ": runtime.Value = runtime.Value.initNull();\n"),
-                    }
+                    try code.appendSlice(self.allocator, ": runtime.Value = runtime.Value.initNull();\n");
                     // 标记为可能未使用（避免Zig编译器警告）
                     try code.appendSlice(self.allocator, "    _ = &reg_");
                     try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -3399,7 +3394,7 @@ pub const NativeLinker = struct {
                         if (is_alloca) {
                             try writer.print("    reg_{d}.* = runtime.Value.initInt({d});\n", .{ reg.id, val });
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "{d};\n", .{val});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({d});\n", .{val});
                         }
                     } else {
                         if (self.regMayHeap(reg.id)) {
