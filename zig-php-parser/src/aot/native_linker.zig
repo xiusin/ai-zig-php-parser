@@ -2389,13 +2389,13 @@ pub const NativeLinker = struct {
         else
             false;
         
-        std.debug.print("getOperandRef: reg_{d}, is_alloca={}\n", .{reg_id, is_alloca});
+        const result = if (is_alloca) 
+            try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
+        else 
+            try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
         
-        if (is_alloca) {
-            return try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id});
-        } else {
-            return try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
-        }
+        std.debug.print("getOperandRef: reg_{d}, is_alloca={}, result={s}\n", .{reg_id, is_alloca, result});
+        return result;
     }
 
     fn writeRegAssignmentPrefix(
@@ -2426,6 +2426,7 @@ pub const NativeLinker = struct {
         comptime format_str: []const u8,
         args: anytype,
     ) !void {
+        std.debug.print("writeRegAssignmentFmt: reg_{d}, format={s}, args={any}\n", .{reg_id, format_str, args});
         try self.writeRegAssignmentPrefix(writer, reg_id);
         try writer.print(format_str, args);
     }
@@ -2478,6 +2479,8 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
+
+        std.debug.print("writePhpValueExpr: reg_{d}, is_alloca={}\n", .{reg_id, is_alloca});
 
         // alloca 寄存器总是 *runtime.Value，需要解引用
         if (is_alloca) {
@@ -5087,41 +5090,45 @@ pub const NativeLinker = struct {
                                 try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                             }
 
-                            // 动态类型 -> php_value：必须 retain，否则后续对目标寄存器 release 会提前释放底层对象
+                            // 动态类型 -> php_value：必须 retain
                             var src_buf: [32]u8 = undefined;
-                            const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                            const src = try self.getOperandRef(&src_buf, op.value.id);
                             if (dest_is_alloca) {
-                                try writer.print("    reg_{d}.* = {s}; // cast from {any} to {any}\n", .{ reg.id, src_ref, src_tag, to_tag });
+                                try writer.print("    reg_{d}.* = {s};\n", .{ reg.id, src });
                                 try writer.print("    _ = reg_{d}.*.retain();\n", .{reg.id});
                             } else {
-                                try writer.print("    reg_{d} = {s}; // cast from {any} to {any}\n", .{ reg.id, src_ref, src_tag, to_tag });
+                                try writer.print("    reg_{d} = {s};\n", .{ reg.id, src });
                                 try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                             }
                         }
                     } else if (to_tag == .i64) {
-                        // 转换到i64
+                        var src_buf: [32]u8 = undefined;
+                        const src = try self.getOperandRef(&src_buf, op.value.id);
                         if (src_tag == .i64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asInt();\n", .{op.value.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asInt();\n", .{src});
                         }
                     } else if (to_tag == .f64) {
-                        // 转换到f64
+                        var src_buf: [32]u8 = undefined;
+                        const src = try self.getOperandRef(&src_buf, op.value.id);
                         if (src_tag == .f64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asFloat();\n", .{op.value.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asFloat();\n", .{src});
                         }
                     } else if (to_tag == .bool) {
-                        // 转换到bool
+                        var src_buf: [32]u8 = undefined;
+                        const src = try self.getOperandRef(&src_buf, op.value.id);
                         if (src_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.value.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.toBool();\n", .{op.value.id});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "{s}.toBool();\n", .{src});
                         }
                     } else {
-                        // 默认：直接赋值
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}; // cast\n", .{op.value.id});
+                        var src_buf: [32]u8 = undefined;
+                        const src = try self.getOperandRef(&src_buf, op.value.id);
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src});
                     }
                 }
             },
