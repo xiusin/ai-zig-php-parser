@@ -1352,6 +1352,13 @@ pub const NativeLinker = struct {
                                 }
                             }
                         },
+                        .array_get, .property_get => {
+                            // 数组/对象访问都返回 runtime.Value
+                            const res_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                            if (res_tag != .php_value) {
+                                corrected_type = .php_value;
+                            }
+                        },
                         else => {},
                     }
 
@@ -1470,6 +1477,15 @@ pub const NativeLinker = struct {
                 }
             }
         }
+
+        // 用 all_registers 中的类型覆盖 inferred_types（修正后的类型优先）
+        var all_reg_iter = all_registers.iterator();
+        while (all_reg_iter.next()) |entry| {
+            const reg_id = entry.key_ptr.*;
+            const corrected_type = entry.value_ptr.*;
+            try inferred_types.put(reg_id, corrected_type);
+        }
+        std.debug.print("Applied {d} corrected types to inferred_types\n", .{all_registers.count()});
 
         // 用代码生成时的类型推断结果覆盖寄存器类型
         // TODO: 暂时禁用，因为需要配合代码生成时的类型特化
