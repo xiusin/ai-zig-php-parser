@@ -5666,12 +5666,8 @@ pub const NativeLinker = struct {
         for (0..first_loop.header) |idx| {
             const block = func.blocks.items[idx];
             
-            // 设置异常处理器
-            if (block.exception_handler) |handler| {
-                self.current_exception_handler = handler.index;
-            } else {
-                self.current_exception_handler = null;
-            }
+            // 设置异常处理器（内联辅助逻辑）
+            self.current_exception_handler = if (block.exception_handler) |h| h.index else null;
             
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
             for (block.instructions.items) |inst| {
