@@ -10294,13 +10294,19 @@ pub const NativeLinker = struct {
                             // 转换基本类型参数为 Value
                             const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
                             if (arg_type == .i64) {
-                                try writer.print("runtime.Value.initInt(reg_{d})", .{arg.id});
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                try writer.print("runtime.Value.initInt({s})", .{src_ref});
                             } else if (arg_type == .f64) {
-                                try writer.print("runtime.Value.initFloat(reg_{d})", .{arg.id});
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                try writer.print("runtime.Value.initFloat({s})", .{src_ref});
                             } else if (arg_type == .bool) {
-                                try writer.print("runtime.Value.initBool(reg_{d})", .{arg.id});
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                try writer.print("runtime.Value.initBool({s})", .{src_ref});
                             } else {
-                                try writer.print("reg_{d}", .{arg.id});
+                                try self.writeRegRef(writer, arg.id);
                             }
                         }
                         if (needs_alloc) {
@@ -10344,7 +10350,22 @@ pub const NativeLinker = struct {
                         try writer.print("        _ = try runtime.{s}(", .{runtime_name});
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            try writer.print("reg_{d}", .{arg.id});
+                            const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                            if (arg_type == .i64) {
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                try writer.print("runtime.Value.initInt({s})", .{src_ref});
+                            } else if (arg_type == .f64) {
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                try writer.print("runtime.Value.initFloat({s})", .{src_ref});
+                            } else if (arg_type == .bool) {
+                                var src_buf: [32]u8 = undefined;
+                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
+                                try writer.print("runtime.Value.initBool({s})", .{src_ref});
+                            } else {
+                                try self.writeRegRef(writer, arg.id);
+                            }
                         }
                         if (needs_alloc) {
                             try writer.writeAll(", runtime.runtime_allocator");
