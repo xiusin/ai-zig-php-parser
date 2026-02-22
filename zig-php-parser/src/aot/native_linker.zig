@@ -3377,73 +3377,43 @@ pub const NativeLinker = struct {
         switch (inst.op) {
             .const_int => |val| {
                 if (inst.result) |reg| {
-                    // 使用修正后的类型
-                    const corrected_type = if (self.current_register_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
-                    const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-
                     // 检查是否是 alloca 寄存器（指针）
                     const is_alloca = if (self.current_alloca_regs) |alloca_regs|
                         alloca_regs.contains(reg.id)
                     else
                         false;
 
-                    if (type_tag == .i64) {
+                    // 所有寄存器都是 Value 类型，总是生成 Value.initInt
+                    if (self.regMayHeap(reg.id)) {
                         if (is_alloca) {
-                            try writer.print("    reg_{d}.* = runtime.Value.initInt({d});\n", .{ reg.id, val });
+                            try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({d});\n", .{val});
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         }
+                    }
+                    if (is_alloca) {
+                        try writer.print("    reg_{d}.* = runtime.Value.initInt({d});\n", .{ reg.id, val });
                     } else {
-                        if (self.regMayHeap(reg.id)) {
-                            if (is_alloca) {
-                                try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
-                            } else {
-                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                            }
-                        }
-                        if (is_alloca) {
-                            try writer.print("    reg_{d}.* = runtime.Value.initInt({d});\n", .{ reg.id, val });
-                        } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({d});\n", .{val});
-                        }
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({d});\n", .{val});
                     }
                 }
             },
             .const_float => |val| {
                 if (inst.result) |reg| {
-                    const corrected_type = if (self.current_register_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
-                    const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    if (type_tag == .f64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "{d};\n", .{val});
-                    } else {
-                        if (self.regMayHeap(reg.id)) {
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                        }
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({d});\n", .{val});
+                    // 所有寄存器都是 Value 类型
+                    if (self.regMayHeap(reg.id)) {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({d});\n", .{val});
                 }
             },
             .const_bool => |val| {
                 if (inst.result) |reg| {
-                    const corrected_type = if (self.current_register_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
-                    const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    if (type_tag == .bool) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "{};\n", .{val});
-                    } else {
-                        if (self.regMayHeap(reg.id)) {
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                        }
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({});\n", .{val});
+                    // 所有寄存器都是 Value 类型
+                    if (self.regMayHeap(reg.id)) {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({});\n", .{val});
                 }
             },
             .const_string => |string_id| {
@@ -3472,40 +3442,11 @@ pub const NativeLinker = struct {
                 const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
 
                 if (ptr_is_optimized) {
-                    // mem2reg 优化：直接赋值，但需要类型转换
-                    // 获取 value 的实际类型
-                    const value_type = if (self.current_register_types) |types|
-                        types.get(op.value.id) orelse op.value.type_
-                    else
-                        op.value.type_;
-                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-                    
-                    // 获取 ptr 提升后的类型（从指针类型中提取）
-                    const ptr_target_type = if (ptr_tag == .ptr) blk: {
-                        break :blk switch (op.ptr.type_) {
-                            .ptr => |inner| @as(std.meta.Tag(IR.Type), inner.*),
-                            else => ptr_tag,
-                        };
-                    } else ptr_tag;
-                    
-                    // 如果 ptr 需要 php_value，但 value 是基本类型，需要转换
-                    if (ptr_target_type == .php_value and value_tag != .php_value) {
-                        if (value_tag == .i64) {
-                            try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ op.ptr.id, op.value.id });
-                        } else if (value_tag == .f64) {
-                            try writer.print("    reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ op.ptr.id, op.value.id });
-                        } else if (value_tag == .bool) {
-                            try writer.print("    reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ op.ptr.id, op.value.id });
-                        } else {
-                            var src_buf: [32]u8 = undefined;
-                            const src_ref = try self.getOperandRef(&src_buf, op.value.id);
-                            try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
-                        }
-                    } else {
-                        var src_buf: [32]u8 = undefined;
-                        const src_ref = try self.getOperandRef(&src_buf, op.value.id);
-                        try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
-                    }
+                    // mem2reg 优化：直接赋值
+                    // 由于所有寄存器都是 Value 类型，直接赋值即可
+                    var src_buf: [32]u8 = undefined;
+                    const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                    try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
                 } else {
                     // 原有的 store 逻辑（指针操作）
                     // 检查是否是 alloca 寄存器（即指针类型）
@@ -4141,31 +4082,16 @@ pub const NativeLinker = struct {
                             try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
                             try writer.print("    }}\n", .{});
                         } else {
-                            // 普通参数 - 使用修正后的类型
-                            const corrected_type = if (self.current_register_types) |types|
-                                types.get(reg.id) orelse reg.type_
-                            else
-                                reg.type_;
-                            const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
+                            // 普通参数 - 现在所有寄存器都是 Value 类型
+                            // 根据原始类型推断决定如何转换
+                            const orig_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                             
-                            if (type_tag == .i64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toInt() else 0;\n", .{ arg_idx, arg_idx, arg_idx });
-                            } else if (type_tag == .f64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toFloat() else 0.0;\n", .{ arg_idx, arg_idx, arg_idx });
-                            } else if (type_tag == .bool) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}].toBool() else false;\n", .{ arg_idx, arg_idx, arg_idx });
-                            } else if (type_tag == .php_value) {
-                                // php_value 类型：需要检查原始类型并转换
-                                const orig_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                                if (orig_type_tag == .i64) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initInt(args[{d}].toInt()) else runtime.Value.initInt(0);\n", .{ arg_idx, arg_idx, arg_idx });
-                                } else if (orig_type_tag == .f64) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initFloat(args[{d}].toFloat()) else runtime.Value.initFloat(0.0);\n", .{ arg_idx, arg_idx, arg_idx });
-                                } else if (orig_type_tag == .bool) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initBool(args[{d}].toBool()) else runtime.Value.initBool(false);\n", .{ arg_idx, arg_idx, arg_idx });
-                                } else {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ arg_idx, arg_idx, arg_idx });
-                                }
+                            if (orig_type_tag == .i64) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initInt(args[{d}].toInt()) else runtime.Value.initInt(0);\n", .{ arg_idx, arg_idx, arg_idx });
+                            } else if (orig_type_tag == .f64) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initFloat(args[{d}].toFloat()) else runtime.Value.initFloat(0.0);\n", .{ arg_idx, arg_idx, arg_idx });
+                            } else if (orig_type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initBool(args[{d}].toBool()) else runtime.Value.initBool(false);\n", .{ arg_idx, arg_idx, arg_idx });
                             } else {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ arg_idx, arg_idx, arg_idx });
                             }
