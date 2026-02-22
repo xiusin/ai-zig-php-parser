@@ -4721,112 +4721,17 @@ pub const NativeLinker = struct {
             },
             .array_get => |op| {
                 if (inst.result) |reg| {
-                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                        alloca_regs.contains(reg.id)
-                    else
-                        false;
-
                     if (self.shouldReleaseReg(reg.id)) {
-                        if (is_alloca) {
-                            try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
-                        } else {
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                        }
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
 
-                    const result_fallback = if (self.current_register_types) |types|
-                        (types.get(reg.id) orelse reg.type_)
-                    else
-                        reg.type_;
-                    const result_type = self.getInferredRegType(reg.id, result_fallback);
-                    const result_tag = @as(std.meta.Tag(IR.Type), result_type);
-
-                    const key_fallback = if (self.current_register_types) |types|
-                        (types.get(op.key.id) orelse op.key.type_)
-                    else
-                        op.key.type_;
-                    const key_type = self.getInferredRegType(op.key.id, key_fallback);
-                    const key_type_tag = @as(std.meta.Tag(IR.Type), key_type);
-
-                    if (key_type_tag == .i64) {
-                        // 键是i64类型，直接使用
-                        if (is_alloca) {
-                            switch (result_tag) {
-                                .php_value => {
-                                    try writer.print("    reg_{d}.* = reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                .i64 => {
-                                    try writer.print("    reg_{d}.* = (reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull()).asInt();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                .f64 => {
-                                    try writer.print("    reg_{d}.* = (reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull()).asFloat();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                .bool => {
-                                    try writer.print("    reg_{d}.* = (reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull()).toBool();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                else => {
-                                    try writer.print("    reg_{d}.* = reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                            }
-                        } else {
-                            switch (result_tag) {
-                                .php_value => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull();\n", .{ op.array.id, op.key.id });
-                                },
-                                .i64 => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "(reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull()).asInt();\n", .{ op.array.id, op.key.id });
-                                },
-                                .f64 => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "(reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull()).asFloat();\n", .{ op.array.id, op.key.id });
-                                },
-                                .bool => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "(reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull()).toBool();\n", .{ op.array.id, op.key.id });
-                                },
-                                else => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asArray().get(runtime.ArrayKey{{ .integer = reg_{d} }}) orelse runtime.Value.initNull();\n", .{ op.array.id, op.key.id });
-                                },
-                            }
-                        }
-                    } else {
-                        // 键是Value类型，使用 getByValue
-                        if (is_alloca) {
-                            switch (result_tag) {
-                                .php_value => {
-                                    try writer.print("    reg_{d}.* = reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                .i64 => {
-                                    try writer.print("    reg_{d}.* = (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()).asInt();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                .f64 => {
-                                    try writer.print("    reg_{d}.* = (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()).asFloat();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                .bool => {
-                                    try writer.print("    reg_{d}.* = (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()).toBool();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                                else => {
-                                    try writer.print("    reg_{d}.* = reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull();\n", .{ reg.id, op.array.id, op.key.id });
-                                },
-                            }
-                        } else {
-                            switch (result_tag) {
-                                .php_value => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull();\n", .{ op.array.id, op.key.id });
-                                },
-                                .i64 => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "(reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()).asInt();\n", .{ op.array.id, op.key.id });
-                                },
-                                .f64 => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "(reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()).asFloat();\n", .{ op.array.id, op.key.id });
-                                },
-                                .bool => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "(reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()).toBool();\n", .{ op.array.id, op.key.id });
-                                },
-                                else => {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull();\n", .{ op.array.id, op.key.id });
-                                },
-                            }
-                        }
-                    }
+                    // 支持字符串索引访问：运行时检查类型
+                    try self.writeRegAssignmentFmt(writer, reg.id, 
+                        "if (reg_{d}.isString()) " ++
+                        "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, " ++
+                        "reg_{d}.asString().data[reg_{d}.toInt()..reg_{d}.toInt()+1])) " ++
+                        "else (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull());\n", 
+                        .{ op.array.id, op.array.id, op.key.id, op.key.id, op.array.id, op.key.id });
                 }
             },
             .array_set => |op| {
