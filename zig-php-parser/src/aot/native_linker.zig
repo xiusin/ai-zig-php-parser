@@ -10851,11 +10851,11 @@ pub const NativeLinker = struct {
             },
             .catch_ => |op| {
                 _ = op;
-                // catch块的开始已经在BasicBlock处理中隐含了（通过switch状态机跳转）
-                // 这里我们可能需要从runtime获取当前的exception
-                // 注意：在NativeLinker中，我们实际上通过switch状态机来模拟控制流
-                // 当发生异常时，throw指令会设置状态并break
+                // catch块的开始 - 获取当前异常对象
                 try writer.print("        // catch clause\n", .{});
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.getException();\n", .{result_reg.?});
+                }
             },
             .get_exception => {
                 // 获取当前捕获的异常
