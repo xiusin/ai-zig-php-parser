@@ -2730,19 +2730,21 @@ pub const IRGenerator = struct {
             try self.generateExpression(then_idx)
         else
             cond_reg; // Elvis operator: $a ?: $b
+        const then_end_block = self.current_block.?; // 记录 then 分支结束的块
         self.setTerminator(.{ .br = merge_block });
 
         // Generate else expression
         self.setCurrentBlock(else_block);
         const else_reg = try self.generateExpression(ternary_data.else_expr);
+        const else_end_block = self.current_block.?; // 记录 else 分支结束的块
         self.setTerminator(.{ .br = merge_block });
 
         // Merge with phi node
         self.setCurrentBlock(merge_block);
 
         const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
-        incoming[0] = .{ .value = then_reg, .block = then_block };
-        incoming[1] = .{ .value = else_reg, .block = else_block };
+        incoming[0] = .{ .value = then_reg, .block = then_end_block };
+        incoming[1] = .{ .value = else_reg, .block = else_end_block };
 
         return self.emitWithResult(.{ .phi = .{ .incoming = incoming } }, .php_value);
     }
