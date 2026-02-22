@@ -3446,10 +3446,40 @@ pub const NativeLinker = struct {
                 const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
 
                 if (ptr_is_optimized) {
-                    // mem2reg 优化：直接赋值
-                    var src_buf: [32]u8 = undefined;
-                    const src_ref = try self.getOperandRef(&src_buf, op.value.id);
-                    try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
+                    // mem2reg 优化：直接赋值，但需要类型转换
+                    // 获取 value 的实际类型
+                    const value_type = if (self.current_register_types) |types|
+                        types.get(op.value.id) orelse op.value.type_
+                    else
+                        op.value.type_;
+                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                    
+                    // 获取 ptr 提升后的类型（从指针类型中提取）
+                    const ptr_target_type = if (ptr_tag == .ptr) blk: {
+                        break :blk switch (op.ptr.type_) {
+                            .ptr => |inner| @as(std.meta.Tag(IR.Type), inner.*),
+                            else => ptr_tag,
+                        };
+                    } else ptr_tag;
+                    
+                    // 如果 ptr 需要 php_value，但 value 是基本类型，需要转换
+                    if (ptr_target_type == .php_value and value_tag != .php_value) {
+                        if (value_tag == .i64) {
+                            try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ op.ptr.id, op.value.id });
+                        } else if (value_tag == .f64) {
+                            try writer.print("    reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ op.ptr.id, op.value.id });
+                        } else if (value_tag == .bool) {
+                            try writer.print("    reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ op.ptr.id, op.value.id });
+                        } else {
+                            var src_buf: [32]u8 = undefined;
+                            const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                            try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
+                        }
+                    } else {
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                        try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
+                    }
                 } else {
                     // 原有的 store 逻辑（指针操作）
                     // 检查是否是 alloca 寄存器（即指针类型）
@@ -10156,12 +10186,36 @@ pub const NativeLinker = struct {
                 var ptr_buf: [32]u8 = undefined;
                 var value_buf: [32]u8 = undefined;
                 const ptr = try std.fmt.bufPrint(&ptr_buf, "reg_{d}", .{op.ptr.id});
-                const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
+                
+                // 获取 value 的实际类型
+                const store_value_type = if (self.current_register_types) |types|
+                    types.get(op.value.id) orelse op.value.type_
+                else
+                    op.value.type_;
+                const store_value_tag = @as(std.meta.Tag(IR.Type), store_value_type);
 
                 if (ptr_is_optimized) {
-                    // mem2reg 优化：直接赋值
-                    try writer.print("        {s} = {s};\n", .{ ptr, value });
+                    // mem2reg 优化：直接赋值，但需要类型转换
+                    // 如果 ptr 需要 php_value，但 value 是基本类型，需要转换
+                    if (ptr_tag == .php_value and store_value_tag != .php_value) {
+                        if (store_value_tag == .i64) {
+                            try writer.print("        {s} = runtime.Value.initInt(reg_{d});\n", .{ ptr, op.value.id });
+                        } else if (store_value_tag == .f64) {
+                            try writer.print("        {s} = runtime.Value.initFloat(reg_{d});\n", .{ ptr, op.value.id });
+                        } else if (store_value_tag == .bool) {
+                            try writer.print("        {s} = runtime.Value.initBool(reg_{d});\n", .{ ptr, op.value.id });
+                        } else {
+                            const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
+                            try writer.print("        {s} = {s};\n", .{ ptr, value });
+                        }
+                    } else {
+                        const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
+                        try writer.print("        {s} = {s};\n", .{ ptr, value });
+                    }
                 } else {
+                    // 真实的指针存储
+                    const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
+                    
                     // 获取指针指向的类型
                     const ptr_inner_type = switch (op.ptr.type_) {
                         .ptr => |inner| inner.*,
