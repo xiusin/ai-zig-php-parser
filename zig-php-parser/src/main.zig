@@ -570,11 +570,44 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     };
 
     if (needs_multi_file) {
-        // 多文件编译暂未完全支持，给出警告
-        std.debug.print("Warning: Detected require/include statements.\n", .{});
-        std.debug.print("         Multi-file compilation is not fully supported yet.\n", .{});
-        std.debug.print("         Attempting single-file compilation...\n\n", .{});
-        // 继续单文件编译
+        // 使用多文件编译器
+        std.debug.print("Detected require/include statements, using multi-file compiler...\n", .{});
+        
+        // 确定输出路径
+        const output_path = options.output_file orelse blk: {
+            // 默认输出路径：移除 .php 后缀
+            const input = options.input_file;
+            if (std.mem.endsWith(u8, input, ".php")) {
+                break :blk input[0 .. input.len - 4];
+            }
+            break :blk input;
+        };
+        
+        var diagnostics = aot.DiagnosticEngine.init(allocator);
+        defer diagnostics.deinit();
+        
+        var multi_compiler = try aot.MultiFileCompiler.init(allocator, options, &diagnostics);
+        defer multi_compiler.deinit();
+        
+        const result = multi_compiler.compile(options.input_file, output_path) catch |err| {
+            std.debug.print("Error: Multi-file compilation failed: {s}\n", .{@errorName(err)});
+            diagnostics.printToStderr();
+            return;
+        };
+        
+        if (result.success) {
+            if (result.output_path) |output| {
+                std.debug.print("Success: Compiled {d} files to {s}\n", .{ result.files_compiled, output });
+            }
+        } else {
+            std.debug.print("Error: Multi-file compilation failed\n", .{});
+            if (result.error_message) |msg| {
+                std.debug.print("  {s}\n", .{msg});
+            }
+            diagnostics.printToStderr();
+            return error.CompilationFailed;
+        }
+        return;
     }
 
     // 创建 PHP 上下文和 Parser
