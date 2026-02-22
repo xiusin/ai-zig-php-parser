@@ -3157,7 +3157,12 @@ pub const NativeLinker = struct {
 
     /// 生成指令（简化版）
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
-        std.debug.print("generateInstructionSimple: {s}\n", .{@tagName(inst.op)});
+        if (inst.result) |res| {
+            std.debug.print("generateInstructionSimple: {s} -> reg_{d}\n", .{@tagName(inst.op), res.id});
+        } else {
+            std.debug.print("generateInstructionSimple: {s}\n", .{@tagName(inst.op)});
+        }
+        
         // 🔥 LICM: 跳过已提升的指令
         if (self.isInstructionHoisted(inst)) {
             return;
@@ -5095,6 +5100,8 @@ pub const NativeLinker = struct {
                     const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
                     const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
 
+                    std.debug.print("cast: reg_{d} = reg_{d}, src_tag={}, to_tag={}\n", .{reg.id, op.value.id, src_tag, to_tag});
+
                     const dest_is_alloca = if (self.current_alloca_regs) |alloca_regs|
                         alloca_regs.contains(reg.id)
                     else
@@ -5103,12 +5110,17 @@ pub const NativeLinker = struct {
                     // 根据目标类型生成不同的转换代码
                     if (to_tag == .php_value) {
                         // 转换到php_value
-                        if (src_tag == .i64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(reg_{d});\n", .{op.value.id});
-                        } else if (src_tag == .f64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d});\n", .{op.value.id});
-                        } else if (src_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d});\n", .{op.value.id});
+                        if (src_tag == .i64 or src_tag == .f64 or src_tag == .bool) {
+                            var src_buf: [32]u8 = undefined;
+                            const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                            
+                            if (src_tag == .i64) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s});\n", .{src_ref});
+                            } else if (src_tag == .f64) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s});\n", .{src_ref});
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s});\n", .{src_ref});
+                            }
                         } else {
                             if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
                                 try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
@@ -5159,6 +5171,8 @@ pub const NativeLinker = struct {
             .move => |op| {
                 // move: 简单的寄存器复制（用于替换冗余 cast）
                 if (inst.result) |reg| {
+                    std.debug.print("move: reg_{d} = reg_{d}\n", .{reg.id, op.operand.id});
+                    
                     const dst_fallback = if (self.current_reg_types) |types|
                         (types.get(reg.id) orelse reg.type_)
                     else if (self.current_register_types) |types|
