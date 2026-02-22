@@ -1310,6 +1310,24 @@ pub const NativeLinker = struct {
         for (func.blocks.items, 0..) |block, block_idx| {
             std.debug.print("Block {d}: {s}, {d} instructions\n", .{ block_idx, block.label, block.instructions.items.len });
             for (block.instructions.items) |inst| {
+                // 检查是否是被 mem2reg 提升的 alloca（nop 指令 + ptr 类型）
+                if (inst.op == .nop and inst.result != null) {
+                    const reg = inst.result.?;
+                    const reg_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                    if (reg_tag == .ptr) {
+                        // mem2reg 提升的 alloca：类型从 ptr 变为指向的类型
+                        const inner_type = switch (reg.type_) {
+                            .ptr => |inner| inner.*,
+                            else => .php_value,
+                        };
+                        try all_registers.put(reg.id, inner_type);
+                        std.debug.print("mem2reg promoted reg_{d}, type=ptr -> {s}\n", .{ 
+                            reg.id, 
+                            @tagName(@as(std.meta.Tag(IR.Type), inner_type))
+                        });
+                    }
+                }
+                
                 // 跳过 nop 指令（被优化掉的指令）
                 if (inst.op == .nop) continue;
                 
@@ -1528,6 +1546,11 @@ pub const NativeLinker = struct {
 
         // 保存到 self，供代码生成时使用
         self.current_register_types = &all_registers;
+
+        // 调试：检查 reg_1 的类型
+        if (all_registers.get(1)) |reg_1_type| {
+            std.debug.print("DEBUG: reg_1 type in all_registers = {s}\n", .{@tagName(@as(std.meta.Tag(IR.Type), reg_1_type))});
+        }
 
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         var optimized_alloca_regs = std.AutoHashMap(usize, void).init(self.allocator);
@@ -3280,8 +3303,9 @@ pub const NativeLinker = struct {
                     op.ptr.type_;
                 const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
                 
-                // 如果 ptr 不是指针类型，说明被 mem2reg 提升了
-                const ptr_is_optimized = ptr_tag != .ptr;
+                // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
+                const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
 
                 if (ptr_is_optimized) {
                     // mem2reg 优化：直接赋值
@@ -3374,8 +3398,9 @@ pub const NativeLinker = struct {
                         op.ptr.type_;
                     const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
                     
-                    // 如果 ptr 不是指针类型，说明被 mem2reg 提升了
-                    const ptr_is_optimized = ptr_tag != .ptr;
+                    // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
+                    const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                    const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
 
                     if (ptr_is_optimized) {
                         // mem2reg 优化：直接读取
@@ -9849,17 +9874,22 @@ pub const NativeLinker = struct {
                 try writer.print("        // alloca: {s}\n", .{result_reg.?});
             },
             .load => |op| {
-                // 检查是否是优化的 alloca
-                const ptr_is_optimized = if (self.current_optimized_alloca_regs) |opt_regs|
-                    opt_regs.contains(op.ptr.id)
+                // 检查 ptr 的实际类型（可能被 mem2reg 提升）
+                const ptr_type = if (self.current_register_types) |types|
+                    types.get(op.ptr.id) orelse op.ptr.type_
                 else
-                    false;
+                    op.ptr.type_;
+                const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
+                
+                // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
+                const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
 
                 var ptr_buf: [32]u8 = undefined;
                 const ptr = try std.fmt.bufPrint(&ptr_buf, "reg_{d}", .{op.ptr.id});
 
                 if (ptr_is_optimized) {
-                    // 优化的 alloca：直接读取，不需要解引用
+                    // mem2reg 优化：直接读取
                     try writer.print("        {s} = {s};\n", .{ result_reg.?, ptr });
                 } else {
                     // 智能处理类型转换
@@ -9909,11 +9939,16 @@ pub const NativeLinker = struct {
                 }
             },
             .store => |op| {
-                // 检查是否是优化的 alloca
-                const ptr_is_optimized = if (self.current_optimized_alloca_regs) |opt_regs|
-                    opt_regs.contains(op.ptr.id)
+                // 检查 ptr 的实际类型（可能被 mem2reg 提升）
+                const ptr_type = if (self.current_register_types) |types|
+                    types.get(op.ptr.id) orelse op.ptr.type_
                 else
-                    false;
+                    op.ptr.type_;
+                const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
+                
+                // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
+                const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
 
                 var ptr_buf: [32]u8 = undefined;
                 var value_buf: [32]u8 = undefined;
@@ -9921,7 +9956,7 @@ pub const NativeLinker = struct {
                 const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
 
                 if (ptr_is_optimized) {
-                    // 优化的 alloca：直接赋值，不需要解引用
+                    // mem2reg 优化：直接赋值
                     try writer.print("        {s} = {s};\n", .{ ptr, value });
                 } else {
                     // 获取指针指向的类型
@@ -9936,15 +9971,15 @@ pub const NativeLinker = struct {
                     }
 
                     // 存储新值 - 需要类型转换
-                    const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_inner_type);
+                    const ptr_inner_tag = @as(std.meta.Tag(IR.Type), ptr_inner_type);
                     const value_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
 
-                    if (ptr_tag == value_tag) {
+                    if (ptr_inner_tag == value_tag) {
                         // 类型匹配，直接赋值
                         try writer.print("        {s}.* = {s};\n", .{ ptr, value });
                     } else {
                         // 类型不匹配，需要转换
-                        if (ptr_tag == .php_value) {
+                        if (ptr_inner_tag == .php_value) {
                             // 存储到php_value指针，需要从基本类型转换
                             switch (value_tag) {
                                 .i64 => try writer.print("        {s}.* = runtime.Value.initInt({s});\n", .{ ptr, value }),
@@ -9954,7 +9989,7 @@ pub const NativeLinker = struct {
                             }
                         } else if (value_tag == .php_value) {
                             // 从php_value存储到基本类型指针，需要提取
-                            switch (ptr_tag) {
+                            switch (ptr_inner_tag) {
                                 .i64 => try writer.print("        {s}.* = {s}.asInt();\n", .{ ptr, value }),
                                 .f64 => try writer.print("        {s}.* = {s}.asFloat();\n", .{ ptr, value }),
                                 .bool => try writer.print("        {s}.* = {s}.asBool();\n", .{ ptr, value }),
