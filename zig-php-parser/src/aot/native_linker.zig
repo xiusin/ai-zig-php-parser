@@ -2523,14 +2523,10 @@ pub const NativeLinker = struct {
         src_id: usize,
     ) !void {
         _ = self;
-        if (dest_is_value and src_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{src_id});
-        if (dest_is_value and src_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{src_id});
-        if (dest_is_value and src_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{src_id});
-        if (!dest_is_value and src_tag == .php_value) {
-            if (dest_tag == .i64) return writer.print("reg_{d}.asInt()", .{src_id});
-            if (dest_tag == .f64) return writer.print("reg_{d}.asFloat()", .{src_id});
-            if (dest_tag == .bool) return writer.print("reg_{d}.toBool()", .{src_id});
-        }
+        _ = dest_is_value;
+        _ = dest_tag;
+        _ = src_tag;
+        // 所有寄存器都是 Value 类型，直接使用
         return writer.print("reg_{d}", .{src_id});
     }
 
@@ -2693,16 +2689,7 @@ pub const NativeLinker = struct {
             return writer.print("reg_{d}", .{reg_id});
         }
 
-        // 标量类型需要包装为 Value
-        if (effective_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
-        if (effective_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
-        if (effective_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
-
-        // 回退：原始类型是基本类型也转换
-        if (type_tag == .i64) return writer.print("runtime.Value.initInt(reg_{d})", .{reg_id});
-        if (type_tag == .f64) return writer.print("runtime.Value.initFloat(reg_{d})", .{reg_id});
-        if (type_tag == .bool) return writer.print("runtime.Value.initBool(reg_{d})", .{reg_id});
-
+        // 所有寄存器都是 Value 类型，直接使用
         return writer.print("reg_{d}", .{reg_id});
     }
 
@@ -2754,37 +2741,10 @@ pub const NativeLinker = struct {
         for (args, 0..) |arg, i| {
             if (i > 0) try writer.writeAll(", ");
             
-            // 强制使用 current_register_types 获取真实类型
-            const arg_type_tag = if (self.current_register_types) |types| blk: {
-                if (types.get(arg.id)) |corrected_type| {
-                    const tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    std.debug.print("writeValueArgs: arg.id={d}, corrected_type={s}\n", .{ arg.id, @tagName(tag) });
-                    break :blk tag;
-                }
-                const tag = @as(std.meta.Tag(IR.Type), arg.type_);
-                std.debug.print("writeValueArgs: arg.id={d}, using arg.type_={s}\n", .{ arg.id, @tagName(tag) });
-                break :blk tag;
-            } else @as(std.meta.Tag(IR.Type), arg.type_);
-            
-            // 直接在这里生成类型转换，不依赖 writePhpValueExpr
-            if (arg_type_tag == .i64) {
-                var src_buf: [32]u8 = undefined;
-                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                try writer.print("runtime.Value.initInt({s})", .{src_ref});
-            } else if (arg_type_tag == .f64) {
-                var src_buf: [32]u8 = undefined;
-                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                try writer.print("runtime.Value.initFloat({s})", .{src_ref});
-            } else if (arg_type_tag == .bool) {
-                var src_buf: [32]u8 = undefined;
-                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                try writer.print("runtime.Value.initBool({s})", .{src_ref});
-            } else {
-                // php_value 或其他类型，直接使用
-                var src_buf: [32]u8 = undefined;
-                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                try writer.print("{s}", .{src_ref});
-            }
+            // 所有寄存器都是 Value 类型，直接使用
+            var src_buf: [32]u8 = undefined;
+            const src_ref = try self.getOperandRef(&src_buf, arg.id);
+            try writer.print("{s}", .{src_ref});
         }
     }
 
@@ -9976,43 +9936,19 @@ pub const NativeLinker = struct {
             // 常量指令
             // ========================================================================
             .const_int => |val| {
-                // 根据结果寄存器类型生成不同的代码
-                if (inst.result) |reg| {
-                    const corrected_type = if (self.current_register_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
-                    if (corrected_type == .i64) {
-                        try writer.print("        {s} = {d};\n", .{ result_reg.?, val });
-                    } else {
-                        try writer.print("        {s} = runtime.Value.initInt({d});\n", .{ result_reg.?, val });
-                    }
+                // 所有寄存器都是 Value 类型
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initInt({d});\n", .{ result_reg.?, val });
                 }
             },
             .const_float => |val| {
-                if (inst.result) |reg| {
-                    const corrected_type = if (self.current_register_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
-                    if (corrected_type == .f64) {
-                        try writer.print("        {s} = {d};\n", .{ result_reg.?, val });
-                    } else {
-                        try writer.print("        {s} = runtime.Value.initFloat({d});\n", .{ result_reg.?, val });
-                    }
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initFloat({d});\n", .{ result_reg.?, val });
                 }
             },
             .const_bool => |val| {
-                if (inst.result) |reg| {
-                    const corrected_type = if (self.current_register_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
-                    if (corrected_type == .bool) {
-                        try writer.print("        {s} = {};\n", .{ result_reg.?, val });
-                    } else {
-                        try writer.print("        {s} = runtime.Value.initBool({});\n", .{ result_reg.?, val });
-                    }
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initBool({});\n", .{ result_reg.?, val });
                 }
             },
             .const_string => |string_id| {
