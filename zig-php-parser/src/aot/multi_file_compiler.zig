@@ -274,9 +274,32 @@ pub const MultiFileCompiler = struct {
             
             const source_module = file_result.aot_compiler.ir_module orelse continue;
             
-            // 合并函数
+            // 创建字符串索引映射
+            var string_index_map = std.AutoHashMap(usize, usize).init(self.allocator);
+            defer string_index_map.deinit();
+            
+            // 合并字符串表并记录映射
+            for (source_module.string_table.items, 0..) |str, old_idx| {
+                const new_idx = merged.string_table.items.len;
+                try merged.string_table.append(self.allocator, str);
+                try string_index_map.put(old_idx, new_idx);
+            }
+            
+            // 合并函数并更新字符串索引
             for (source_module.functions.items) |func| {
-                try merged.functions.append(self.allocator, func);
+                const new_func = func;
+                // 更新函数中的所有 const_string 指令
+                for (new_func.blocks.items) |block| {
+                    for (block.*.instructions.items) |*inst| {
+                        if (inst.*.op == .const_string) {
+                            const old_idx = inst.*.op.const_string;
+                            if (string_index_map.get(old_idx)) |new_idx| {
+                                inst.*.op = .{ .const_string = @intCast(new_idx) };
+                            }
+                        }
+                    }
+                }
+                try merged.functions.append(self.allocator, new_func);
             }
             
             // 合并类型定义
@@ -288,15 +311,11 @@ pub const MultiFileCompiler = struct {
             for (source_module.globals.items) |global| {
                 try merged.globals.append(self.allocator, global);
             }
-            
-            // 合并字符串表
-            for (source_module.string_table.items) |str| {
-                try merged.string_table.append(self.allocator, str);
-            }
         }
 
         if (self.options.verbose) {
             std.debug.print("  Merged module has {d} functions\n", .{merged.functions.items.len});
+            std.debug.print("  Merged string table has {d} entries\n", .{merged.string_table.items.len});
         }
     }
 
