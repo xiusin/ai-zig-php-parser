@@ -6445,11 +6445,12 @@ pub const NativeLinker = struct {
                 }
 
                 for (phi_updates_) |update| {
-                    if (update.phi_reg == update.value_reg) {
-                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                        try writer_.print("reg_{d} = reg_{d} + 1;\n", .{ update.phi_reg, update.phi_reg });
-                        continue;
-                    }
+                    // 移除错误的自增优化，使用标准 phi 更新
+                    // if (update.phi_reg == update.value_reg) {
+                    //     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                    //     try writer_.print("reg_{d} = try runtime.php_add(reg_{d}, runtime.Value.initInt(1));\n", .{ update.phi_reg, update.phi_reg });
+                    //     continue;
+                    // }
 
                     const phi_type = if (self_.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
                     const value_type = if (self_.current_reg_types) |rt| rt.get(update.value_reg) orelse IR.Type.php_value else IR.Type.php_value;
@@ -7252,11 +7253,11 @@ pub const NativeLinker = struct {
 
             // 更新 phi 节点的值（在循环末尾）
             for (phi_updates.items) |update| {
-                // 特殊情况：循环变量简单自增（phi_reg == value_reg）
-                if (update.phi_reg == update.value_reg) {
-                    try writer.print("        reg_{d} = reg_{d} + 1;\n", .{ update.phi_reg, update.phi_reg });
-                    continue;
-                }
+                // 移除错误的自增优化
+                // if (update.phi_reg == update.value_reg) {
+                //     try writer.print("        reg_{d} = try runtime.php_add(reg_{d}, runtime.Value.initInt(1));\n", .{ update.phi_reg, update.phi_reg });
+                //     continue;
+                // }
 
                 // 检查类型是否匹配
                 const phi_type = if (self.current_reg_types) |rt| rt.get(update.phi_reg) orelse IR.Type.php_value else IR.Type.php_value;
@@ -8181,21 +8182,21 @@ pub const NativeLinker = struct {
                         const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
                         const value_tag = @as(std.meta.Tag(IR.Type), value_type);
 
-                        // 循环变量使用确定性更新：避免展开寄存器解析错位导致卡死
-                        if (is_loop_var) {
-                            try writer.print("        reg_{d} = reg_{d} + 1;\n", .{ result_reg.id, result_reg.id });
+                        // 移除错误的循环变量优化
+                        // if (is_loop_var) {
+                        //     try writer.print("        reg_{d} = try runtime.php_add(reg_{d}, runtime.Value.initInt(1));\n", .{ result_reg.id, result_reg.id });
+                        // } else {
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, resolved_reg);
+                        
+                        if (phi_tag == value_tag) {
+                            try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
+                        } else if (phi_tag == .i64 and value_tag == .php_value) {
+                            try writer.print("        reg_{d} = {s}.asInt();\n", .{ result_reg.id, src_ref });
                         } else {
-                            var src_buf: [32]u8 = undefined;
-                            const src_ref = try self.getOperandRef(&src_buf, resolved_reg);
-                            
-                            if (phi_tag == value_tag) {
-                                try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
-                            } else if (phi_tag == .i64 and value_tag == .php_value) {
-                                try writer.print("        reg_{d} = {s}.asInt();\n", .{ result_reg.id, src_ref });
-                            } else {
-                                try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
-                            }
+                            try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
                         }
+                        // }
                     }
                 }
             }
