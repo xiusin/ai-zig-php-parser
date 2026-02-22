@@ -1310,6 +1310,9 @@ pub const NativeLinker = struct {
         for (func.blocks.items, 0..) |block, block_idx| {
             std.debug.print("Block {d}: {s}, {d} instructions\n", .{ block_idx, block.label, block.instructions.items.len });
             for (block.instructions.items) |inst| {
+                // 跳过 nop 指令（被优化掉的指令）
+                if (inst.op == .nop) continue;
+                
                 // 收集 result 寄存器
                 if (inst.result) |reg| {
                     // 修正类型：如果指令使用运行时函数，结果应该是 Value
@@ -1367,6 +1370,7 @@ pub const NativeLinker = struct {
                         try alloca_registers.put(reg.id, {});
                         std.debug.print("alloca reg_{d}, type={s}\n", .{ reg.id, @tagName(@as(std.meta.Tag(IR.Type), corrected_type)) });
                     }
+                    // 注意：nop 指令（被优化掉的 alloca）不应该被添加到 alloca_registers
 
                     // 检查是否需要释放（字符串、数组等需要分配内存的类型）
                     if (inst.op != .alloca) {
@@ -1685,6 +1689,12 @@ pub const NativeLinker = struct {
 
         self.current_alloca_regs = &alloca_registers;
         defer self.current_alloca_regs = null;
+        
+        std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
+        var alloca_it = alloca_registers.keyIterator();
+        while (alloca_it.next()) |key| {
+            std.debug.print("  alloca: reg_{d}\n", .{key.*});
+        }
 
         self.current_cleanup_regs = cleanup_registers.items;
         defer self.current_cleanup_regs = null;
@@ -2372,6 +2382,22 @@ pub const NativeLinker = struct {
 
     /// 写入赋值语句的开始部分（不包括分号和换行）
     /// 返回是否需要解引用
+    /// 生成操作数引用（处理 alloca）
+    fn getOperandRef(self: *Self, buf: []u8, reg_id: usize) ![]const u8 {
+        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+            alloca_regs.contains(reg_id)
+        else
+            false;
+        
+        std.debug.print("getOperandRef: reg_{d}, is_alloca={}\n", .{reg_id, is_alloca});
+        
+        if (is_alloca) {
+            return try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id});
+        } else {
+            return try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
+        }
+    }
+
     fn writeRegAssignmentPrefix(
         self: *Self,
         writer: anytype,
@@ -2381,6 +2407,8 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
+        
+        std.debug.print("writeRegAssignmentPrefix: reg_{d}, is_alloca={}, current_alloca_regs={}\n", .{reg_id, is_alloca, self.current_alloca_regs != null});
 
         if (is_alloca) {
             try writer.print("    reg_{d}.* = ", .{reg_id});
@@ -3113,6 +3141,7 @@ pub const NativeLinker = struct {
 
     /// 生成指令（简化版）
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
+        std.debug.print("generateInstructionSimple: {s}\n", .{@tagName(inst.op)});
         // 🔥 LICM: 跳过已提升的指令
         if (self.isInstructionHoisted(inst)) {
             return;
@@ -4469,12 +4498,17 @@ pub const NativeLinker = struct {
                 }
             },
             .array_new => |op| {
-                _ = op; // 暂时忽略容量
+                _ = op;
                 if (inst.result) |reg| {
-                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                        alloca_regs.contains(reg.id)
-                    else
-                        false;
+                    std.debug.print("ENTER array_new: reg_{d}\n", .{reg.id});
+                    const is_alloca = if (self.current_alloca_regs) |alloca_regs| blk: {
+                        const result = alloca_regs.contains(reg.id);
+                        std.debug.print("  alloca_regs.contains({d})={}, count={}\n", .{reg.id, result, alloca_regs.count()});
+                        break :blk result;
+                    } else blk: {
+                        std.debug.print("  current_alloca_regs=null\n", .{});
+                        break :blk false;
+                    };
 
                     if (is_alloca) {
                         try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
@@ -5054,11 +5088,13 @@ pub const NativeLinker = struct {
                             }
 
                             // 动态类型 -> php_value：必须 retain，否则后续对目标寄存器 release 会提前释放底层对象
+                            var src_buf: [32]u8 = undefined;
+                            const src_ref = try self.getOperandRef(&src_buf, op.value.id);
                             if (dest_is_alloca) {
-                                try writer.print("    reg_{d}.* = reg_{d}; // cast from {any} to {any}\n", .{ reg.id, op.value.id, src_tag, to_tag });
+                                try writer.print("    reg_{d}.* = {s}; // cast from {any} to {any}\n", .{ reg.id, src_ref, src_tag, to_tag });
                                 try writer.print("    _ = reg_{d}.*.retain();\n", .{reg.id});
                             } else {
-                                try writer.print("    reg_{d} = reg_{d}; // cast from {any} to {any}\n", .{ reg.id, op.value.id, src_tag, to_tag });
+                                try writer.print("    reg_{d} = {s}; // cast from {any} to {any}\n", .{ reg.id, src_ref, src_tag, to_tag });
                                 try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                             }
                         }
@@ -5117,14 +5153,17 @@ pub const NativeLinker = struct {
                         }
                     }
 
+                    var src_buf: [32]u8 = undefined;
+                    const src_ref = try self.getOperandRef(&src_buf, op.operand.id);
+                    
                     if (dst_tag == .i64 and src_tag == .php_value) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asInt();\n", .{op.operand.id});
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asInt();\n", .{src_ref});
                     } else if (dst_tag == .f64 and src_tag == .php_value) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asFloat();\n", .{op.operand.id});
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asFloat();\n", .{src_ref});
                     } else if (dst_tag == .bool and src_tag == .php_value) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.toBool();\n", .{op.operand.id});
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s}.toBool();\n", .{src_ref});
                     } else {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d};\n", .{op.operand.id});
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_ref});
                     }
                 }
             },
@@ -9612,12 +9651,13 @@ pub const NativeLinker = struct {
 
     /// 生成指令
     fn generateInstruction(self: *Self, writer: anytype, inst: *const IR.Instruction) !void {
+        std.debug.print("generateInstruction: {s}\n", .{@tagName(inst.op)});
         // Add source location comment
         if (inst.location.line > 0) {
             try writer.print("        // {s}:{d}\n", .{ inst.location.file, inst.location.line });
         }
 
-        // 生成结果寄存器声明（如果有）
+        // 生成结果寄存器名称（如果有）
         var result_buf: [32]u8 = undefined;
         const result_reg = if (inst.result) |r|
             try std.fmt.bufPrint(&result_buf, "reg_{d}", .{r.id})
@@ -10269,8 +10309,8 @@ pub const NativeLinker = struct {
             // 数组操作指令
             // ========================================================================
             .array_new => |op| {
-                _ = op; // 暂时忽略容量
-                try writer.print("        {s} = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));\n", .{result_reg.?});
+                _ = op;
+                try self.writeRegAssignment(writer, inst.result.?.id, "runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
             },
             .array_get => |op| {
                 var array_buf: [32]u8 = undefined;

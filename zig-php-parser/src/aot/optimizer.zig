@@ -1785,6 +1785,8 @@ pub const IROptimizer = struct {
             alloca.op = .nop;
             self.stats.allocas_promoted += 1;
         }
+        
+        std.debug.print("mem2reg: Optimization complete, promoted {d} allocas\n", .{promotable_allocas.items.len});
 
         return true;
     }
@@ -1950,24 +1952,31 @@ pub const IROptimizer = struct {
                     .load => |op| {
                         if (op.ptr.id == result_id) {
                             // Valid use
-                            if (!op.type_.eql(alloca.op.alloca.type_)) return false; // Type mismatch
+                            if (!op.type_.eql(alloca.op.alloca.type_)) {
+                                std.debug.print("  reg_{d} NOT promotable: load type mismatch\n", .{result_id});
+                                return false;
+                            }
                         }
                     },
                     .store => |op| {
                         if (op.ptr.id == result_id) {
                             // Valid use
-                            if (op.value.id == result_id) return false; // Storing pointer to itself?
+                            if (op.value.id == result_id) {
+                                std.debug.print("  reg_{d} NOT promotable: storing pointer to itself\n", .{result_id});
+                                return false;
+                            }
                         } else if (op.value.id == result_id) {
                             // Escaping pointer!
+                            std.debug.print("  reg_{d} NOT promotable: escaping pointer\n", .{result_id});
                             return false;
                         }
                     },
                     else => {
                         // Check if register is used in other operands
-                        // We need to check all operands.
-                        // Ideally we have use-def chains.
-                        // Here we just scan.
-                        if (self.usesRegister(inst, result_id)) return false;
+                        if (self.usesRegister(inst, result_id)) {
+                            std.debug.print("  reg_{d} NOT promotable: used in {s}\n", .{result_id, @tagName(inst.op)});
+                            return false;
+                        }
                     },
                 }
             }
