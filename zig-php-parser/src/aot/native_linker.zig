@@ -5791,25 +5791,24 @@ pub const NativeLinker = struct {
             }
 
             if (is_loop_header) {
-                // 暂时禁用循环优化，使用标准基本块生成
-                // const loop = loop_info.?;
-                // _ = loop;
+                const loop = loop_info.?;
+
                 // 生成循环
-                // if (loop.is_for_loop) {
-                //     try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-                // } else {
-                //     try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
-                // }
+                if (loop.is_for_loop) {
+                    try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+                } else {
+                    try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+                }
 
                 // 标记循环内的所有块为已处理
-                // try self.markLoopBlocksProcessed(func, loop, processed);
+                try self.markLoopBlocksProcessed(func, loop, processed);
 
                 // 跳到循环退出块
-                // if (loop.exit_block) |exit_idx| {
-                //     current_block = exit_idx;
-                // } else {
-                //     current_block += 1;
-                // }
+                if (loop.exit_block) |exit_idx| {
+                    current_block = exit_idx;
+                } else {
+                    current_block += 1;
+                }
             } else {
                 // 生成普通块
                 const block = func.blocks.items[current_block];
@@ -6461,7 +6460,14 @@ pub const NativeLinker = struct {
 
                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
                     if (phi_tag == value_tag) {
-                        try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                        if (phi_tag == .php_value) {
+                            // php_value 需要 retain 以保持引用计数正确
+                            try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                            try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                            try writer_.print("_ = reg_{d}.retain();\n", .{update.phi_reg});
+                        } else {
+                            try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
+                        }
                     } else if (phi_tag == .i64 and value_tag == .php_value) {
                         try writer_.print("reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .f64 and value_tag == .php_value) {
@@ -7274,6 +7280,10 @@ pub const NativeLinker = struct {
                 if (phi_tag == value_tag) {
                     // 类型匹配，直接赋值
                     try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+                    if (phi_tag == .php_value) {
+                        // php_value 需要 retain
+                        try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
+                    }
                 } else if (phi_tag == .i64 and value_tag == .php_value) {
                     // phi 是 i64，value 是 php_value，需要转换
                     try writer.print("        reg_{d} = {s}.asInt();\n", .{ update.phi_reg, src_ref });
@@ -8007,14 +8017,12 @@ pub const NativeLinker = struct {
                 }
             }
 
-            // 暂时禁用循环优化
-            // if (body_has_cond) {
-            //     try self.generateForLoopStructured(writer, func, loop, cleanup_regs);
-            // } else {
-            //     try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-            // }
-            // return;
-            _ = body_has_cond;
+            if (body_has_cond) {
+                try self.generateForLoopStructured(writer, func, loop, cleanup_regs);
+            } else {
+                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+            }
+            return;
         }
 
         // 有子循环：使用新的生成策略
@@ -8483,12 +8491,8 @@ pub const NativeLinker = struct {
         _ = block_to_loop;
         _ = processed;
 
-        // 暂时禁用循环优化
-        // try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
-        _ = writer;
-        _ = func;
-        _ = loop;
-        _ = cleanup_regs;
+        // 简化实现：先生成基本的 while 循环
+        try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
     }
 
     fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
