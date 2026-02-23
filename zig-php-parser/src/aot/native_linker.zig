@@ -3654,13 +3654,13 @@ pub const NativeLinker = struct {
                     const lhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), lhs_fallback) == .php_value) .php_value else lhs_tag;
                     const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
 
-                    // 如果所有操作数都是 i64，生成原生加法
+                    // 如果所有操作数都是 i64，生成原生加法（但寄存器是 Value，需要转换）
                     if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
-                        // i64 + i64 → i64（原生）
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                        // i64 + i64 → i64（原生，但需要转换）
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(reg_{d}.asInt() + reg_{d}.asInt());\n", .{ op.lhs.id, op.rhs.id });
                     } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
-                        // f64 + f64 → f64（原生）
-                        try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} + reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                        // f64 + f64 → f64（原生，但需要转换）
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d}.asFloat() + reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
                     } else {
                         // 混合类型或 php_value，使用运行时函数
                         switch (result_tag) {
@@ -5207,12 +5207,13 @@ pub const NativeLinker = struct {
                             var src_buf: [32]u8 = undefined;
                             const src_ref = try self.getOperandRef(&src_buf, op.value.id);
                             
+                            // 所有寄存器都是 Value 类型，需要转换
                             if (src_tag == .i64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s});\n", .{src_ref});
+                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s}.asInt());\n", .{src_ref});
                             } else if (src_tag == .f64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s});\n", .{src_ref});
+                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s}.asFloat());\n", .{src_ref});
                             } else {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s});\n", .{src_ref});
+                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s}.asBool());\n", .{src_ref});
                             }
                         } else {
                             if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
@@ -7480,15 +7481,17 @@ pub const NativeLinker = struct {
                 const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
+                // 检查实际寄存器类型（所有寄存器都是 Value）
+                // 如果推断类型是 i64/f64，需要转换
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
                     // 复制传播：解析操作数
                     const lhs_id = self.resolveLoadSource(op.lhs.id);
                     const rhs_id = self.resolveLoadSource(op.rhs.id);
-                    try writer.print("reg_{d} < reg_{d}", .{ lhs_id, rhs_id });
+                    try writer.print("reg_{d}.asInt() < reg_{d}.asInt()", .{ lhs_id, rhs_id });
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
                     const lhs_id = self.resolveLoadSource(op.lhs.id);
                     const rhs_id = self.resolveLoadSource(op.rhs.id);
-                    try writer.print("reg_{d} < reg_{d}", .{ lhs_id, rhs_id });
+                    try writer.print("reg_{d}.asFloat() < reg_{d}.asFloat()", .{ lhs_id, rhs_id });
                 } else {
                     try writer.writeAll("(try runtime.php_lt(");
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
@@ -7511,9 +7514,9 @@ pub const NativeLinker = struct {
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
-                    try writer.print("reg_{d} <= reg_{d}", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("reg_{d}.asInt() <= reg_{d}.asInt()", .{ op.lhs.id, op.rhs.id });
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
-                    try writer.print("reg_{d} <= reg_{d}", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("reg_{d}.asFloat() <= reg_{d}.asFloat()", .{ op.lhs.id, op.rhs.id });
                 } else {
                     try writer.writeAll("(try runtime.php_le(");
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
@@ -7536,9 +7539,9 @@ pub const NativeLinker = struct {
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
-                    try writer.print("reg_{d} > reg_{d}", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("reg_{d}.asInt() > reg_{d}.asInt()", .{ op.lhs.id, op.rhs.id });
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
-                    try writer.print("reg_{d} > reg_{d}", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("reg_{d}.asFloat() > reg_{d}.asFloat()", .{ op.lhs.id, op.rhs.id });
                 } else {
                     try writer.writeAll("(try runtime.php_gt(");
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
@@ -7561,9 +7564,9 @@ pub const NativeLinker = struct {
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
-                    try writer.print("reg_{d} >= reg_{d}", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("reg_{d}.asInt() >= reg_{d}.asInt()", .{ op.lhs.id, op.rhs.id });
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
-                    try writer.print("reg_{d} >= reg_{d}", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("reg_{d}.asFloat() >= reg_{d}.asFloat()", .{ op.lhs.id, op.rhs.id });
                 } else {
                     try writer.writeAll("(try runtime.php_ge(");
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
@@ -7586,7 +7589,7 @@ pub const NativeLinker = struct {
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
                 if (lhs_type_tag == .i64 and rhs_type_tag == .i64) {
-                    try writer.print("reg_{d} == reg_{d}", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("reg_{d}.asInt() == reg_{d}.asInt()", .{ op.lhs.id, op.rhs.id });
                 } else {
                     try writer.writeAll("(try runtime.php_eq(");
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
