@@ -2563,6 +2563,30 @@ pub const NativeLinker = struct {
             try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
     }
 
+    /// 获取操作数引用，根据期望类型自动添加转换
+    fn getOperandRefTyped(self: *Self, buf: []u8, reg_id: usize, expected_type: std.meta.Tag(IR.Type)) ![]const u8 {
+        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+            alloca_regs.contains(reg_id)
+        else
+            false;
+        
+        const base_ref = if (is_alloca) 
+            try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
+        else 
+            try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
+        
+        // 如果期望类型是基本类型，添加转换
+        if (expected_type == .i64) {
+            return try std.fmt.bufPrint(buf, "{s}.asInt()", .{base_ref});
+        } else if (expected_type == .f64) {
+            return try std.fmt.bufPrint(buf, "{s}.asFloat()", .{base_ref});
+        } else if (expected_type == .bool) {
+            return try std.fmt.bufPrint(buf, "{s}.asBool()", .{base_ref});
+        }
+        
+        return base_ref;
+    }
+
     /// 格式化寄存器引用到 writer（用于替换所有 writer.print("reg_{d}", .{id})）
     fn writeRegRef(self: *Self, writer: anytype, reg_id: usize) !void {
         const is_alloca = if (self.current_alloca_regs) |alloca_regs|
@@ -5187,17 +5211,38 @@ pub const NativeLinker = struct {
                     // 根据目标类型生成不同的转换代码
                     if (to_tag == .php_value) {
                         // 转换到php_value
-                        if (src_tag == .i64 or src_tag == .f64 or src_tag == .bool) {
+                        
+                        // 优化：如果源也是 php_value（实际类型），直接赋值
+                        if (src_tag == .php_value) {
+                            // php_value -> php_value：直接赋值（无意义的 cast）
+                            var src_buf: [32]u8 = undefined;
+                            const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                            if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
+                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                            }
+                            if (dest_is_alloca) {
+                                try writer.print("    reg_{d}.* = {s};\n", .{ reg.id, src_ref });
+                                try writer.print("    _ = reg_{d}.*.retain();\n", .{reg.id});
+                            } else {
+                                try writer.print("    reg_{d} = {s};\n", .{ reg.id, src_ref });
+                                try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
+                            }
+                        } else if (src_tag == .i64 or src_tag == .f64 or src_tag == .bool) {
+                            // 基本类型 -> php_value
+                            // 但所有寄存器实际都是 Value，所以这是 Value.asInt() -> Value.initInt(...)
+                            // 优化：直接赋值即可
                             var src_buf: [32]u8 = undefined;
                             const src_ref = try self.getOperandRef(&src_buf, op.value.id);
                             
-                            // 所有寄存器都是 Value 类型，需要转换
-                            if (src_tag == .i64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s}.asInt());\n", .{src_ref});
-                            } else if (src_tag == .f64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s}.asFloat());\n", .{src_ref});
+                            if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
+                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                            }
+                            if (dest_is_alloca) {
+                                try writer.print("    reg_{d}.* = {s};\n", .{ reg.id, src_ref });
+                                try writer.print("    _ = reg_{d}.*.retain();\n", .{reg.id});
                             } else {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s}.asBool());\n", .{src_ref});
+                                try writer.print("    reg_{d} = {s};\n", .{ reg.id, src_ref });
+                                try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                             }
                         } else {
                             if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
