@@ -5791,24 +5791,25 @@ pub const NativeLinker = struct {
             }
 
             if (is_loop_header) {
-                const loop = loop_info.?;
-
+                // 暂时禁用循环优化，使用标准基本块生成
+                // const loop = loop_info.?;
+                // _ = loop;
                 // 生成循环
-                if (loop.is_for_loop) {
-                    try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-                } else {
-                    try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
-                }
+                // if (loop.is_for_loop) {
+                //     try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+                // } else {
+                //     try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+                // }
 
                 // 标记循环内的所有块为已处理
-                try self.markLoopBlocksProcessed(func, loop, processed);
+                // try self.markLoopBlocksProcessed(func, loop, processed);
 
                 // 跳到循环退出块
-                if (loop.exit_block) |exit_idx| {
-                    current_block = exit_idx;
-                } else {
-                    current_block += 1;
-                }
+                // if (loop.exit_block) |exit_idx| {
+                //     current_block = exit_idx;
+                // } else {
+                //     current_block += 1;
+                // }
             } else {
                 // 生成普通块
                 const block = func.blocks.items[current_block];
@@ -8006,12 +8007,14 @@ pub const NativeLinker = struct {
                 }
             }
 
-            if (body_has_cond) {
-                try self.generateForLoopStructured(writer, func, loop, cleanup_regs);
-            } else {
-                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-            }
-            return;
+            // 暂时禁用循环优化
+            // if (body_has_cond) {
+            //     try self.generateForLoopStructured(writer, func, loop, cleanup_regs);
+            // } else {
+            //     try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
+            // }
+            // return;
+            _ = body_has_cond;
         }
 
         // 有子循环：使用新的生成策略
@@ -8480,8 +8483,12 @@ pub const NativeLinker = struct {
         _ = block_to_loop;
         _ = processed;
 
-        // 简化实现：先生成基本的 while 循环
-        try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+        // 暂时禁用循环优化
+        // try self.generateWhileLoopStructuredNew(writer, func, loop, cleanup_regs);
+        _ = writer;
+        _ = func;
+        _ = loop;
+        _ = cleanup_regs;
     }
 
     fn detectLoops(self: *Self, func: *const IR.Function, cfg: *ControlFlowAnalysis) !void {
