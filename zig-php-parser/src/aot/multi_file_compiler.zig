@@ -73,9 +73,11 @@ pub const MultiFileCompiler = struct {
 
     /// 清理
     pub fn deinit(self: *Self) void {
+        // 1. 清理 dependency_resolver
         self.dependency_resolver.deinit();
         self.allocator.destroy(self.dependency_resolver);
         
+        // 2. 清理 compiled_files（包含原始模块）
         var it = self.compiled_files.iterator();
         while (it.next()) |entry| {
             const compiler = entry.value_ptr.aot_compiler;
@@ -84,8 +86,14 @@ pub const MultiFileCompiler = struct {
         }
         self.compiled_files.deinit();
         
+        // 3. 清理 merged_module（只清理容器，不清理内容，因为内容属于原始模块）
         if (self.merged_module) |module| {
-            module.deinit();
+            // 只释放容器，不释放内容（functions/types/globals 属于原始模块）
+            module.inferred_types.deinit();
+            module.functions.deinit(self.allocator);
+            module.globals.deinit(self.allocator);
+            module.types.deinit(self.allocator);
+            module.string_table.deinit(self.allocator);
             self.allocator.destroy(module);
         }
     }

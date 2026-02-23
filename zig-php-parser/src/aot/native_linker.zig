@@ -3403,19 +3403,27 @@ pub const NativeLinker = struct {
 
                 if (ptr_is_optimized) {
                     // mem2reg 优化：直接赋值
-                    // 由于所有寄存器都是 Value 类型，直接赋值即可
-                    var src_buf: [32]u8 = undefined;
-                    const src_ref = try self.getOperandRef(&src_buf, op.value.id);
-                    try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
-                    
-                    // 如果是 php_value 类型，需要 retain 以保持引用计数正确
+                    // 检查是否需要引用计数管理
                     const value_type = if (self.current_register_types) |types|
                         types.get(op.value.id) orelse op.value.type_
                     else
                         op.value.type_;
                     const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-                    if (value_tag == .php_value or value_tag == .php_string or value_tag == .php_array or value_tag == .php_object) {
-                        try writer.print("    _ = reg_{d}.retain();\n", .{op.ptr.id});
+                    const needs_refcount = value_tag == .php_value or value_tag == .php_string or value_tag == .php_array or value_tag == .php_object;
+                    
+                    var src_buf: [32]u8 = undefined;
+                    const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                    
+                    if (needs_refcount) {
+                        // 先 retain 新值（防止新旧值相同时被释放）
+                        try writer.print("    _ = ({s}).retain();\n", .{src_ref});
+                        // 释放旧值
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{op.ptr.id});
+                        // 赋值
+                        try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
+                    } else {
+                        // 非引用计数类型，直接赋值
+                        try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
                     }
                 } else {
                     // 原有的 store 逻辑（指针操作）
@@ -6652,11 +6660,11 @@ pub const NativeLinker = struct {
                     for (scan_block.instructions.items) |scan_inst| {
                         if (scan_inst.result) |scan_res| {
                             switch (scan_inst.op) {
-                                .add => |op| {
+                                .add, .sub => |op| {
                                     if (op.lhs.id == result_reg.id) {
                                         update_reg = scan_res.id;
                                         std.debug.print(
-                                            "  Found update in loop block {d}: reg_{d} = reg_{d} + ...\n",
+                                            "  Found update in loop block {d}: reg_{d} = reg_{d} +/- ...\n",
                                             .{ blk_idx, scan_res.id, op.lhs.id },
                                         );
                                         break;
@@ -6678,10 +6686,10 @@ pub const NativeLinker = struct {
                         for (inc_block.instructions.items) |inc_inst| {
                             if (inc_inst.result) |inc_result| {
                                 switch (inc_inst.op) {
-                                    .add => |op| {
+                                    .add, .sub => |op| {
                                         if (op.lhs.id == result_reg.id) {
                                             update_reg = inc_result.id;
-                                            std.debug.print("  Found update in increment: reg_{d} = reg_{d} + ...\n", .{ inc_result.id, op.lhs.id });
+                                            std.debug.print("  Found update in increment: reg_{d} = reg_{d} +/- ...\n", .{ inc_result.id, op.lhs.id });
                                             break;
                                         }
                                     },
