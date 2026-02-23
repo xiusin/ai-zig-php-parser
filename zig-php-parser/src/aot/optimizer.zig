@@ -63,6 +63,8 @@ pub const PassConfig = struct {
     dead_code_elimination: bool = true,
     /// Enable constant propagation
     constant_propagation: bool = true,
+    /// Enable copy propagation
+    copy_propagation: bool = true,
     sccp: bool = false,
     /// Enable box/unbox elimination
     box_unbox_elim: bool = true,
@@ -449,6 +451,13 @@ pub const IROptimizer = struct {
 
             if (self.config.rc_elision) {
                 if (try self.runRCEllision(module)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyModule(module);
+            }
+
+            if (self.config.copy_propagation) {
+                if (try self.runCopyPropagation(module)) {
                     changed = true;
                 }
                 if (self.verify_ir) try self.verifyModule(module);
@@ -3383,6 +3392,133 @@ pub const IROptimizer = struct {
         for (module.functions.items) |func| {
             if (try self.propagateConstantsInFunction(func)) {
                 changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    /// Copy propagation: replace uses of copied values with the original
+    fn runCopyPropagation(self: *Self, module: *Module) !bool {
+        var changed = false;
+
+        for (module.functions.items) |func| {
+            if (try self.propagateCopiesInFunction(func)) {
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    /// Propagate copies in a single function
+    fn propagateCopiesInFunction(self: *Self, func: *Function) !bool {
+        var changed = false;
+        var copy_map = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer copy_map.deinit();
+
+        // 收集所有的复制指令
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |result| {
+                    switch (inst.op) {
+                        .move => |op| {
+                            // reg_a = reg_b
+                            try copy_map.put(result.id, op.operand.id);
+                        },
+                        .cast => |op| {
+                            // 同类型 cast 也是复制
+                            const src_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
+                            const dst_tag = @as(std.meta.Tag(IR.Type), op.to_type);
+                            if (src_tag == dst_tag) {
+                                try copy_map.put(result.id, op.operand.id);
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        if (copy_map.count() == 0) return false;
+
+        // 传递闭包：如果 a=b, b=c，则 a=c
+        var iter = copy_map.iterator();
+        while (iter.next()) |entry| {
+            var source = entry.value_ptr.*;
+            while (copy_map.get(source)) |next_source| {
+                if (next_source == source) break; // 避免循环
+                source = next_source;
+            }
+            if (source != entry.value_ptr.*) {
+                entry.value_ptr.* = source;
+                changed = true;
+            }
+        }
+
+        // 替换所有使用
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |*inst| {
+                // 替换操作数
+                switch (inst.op) {
+                    .add => |*op| {
+                        if (copy_map.get(op.lhs.id)) |source| {
+                            op.lhs.id = source;
+                            changed = true;
+                        }
+                        if (copy_map.get(op.rhs.id)) |source| {
+                            op.rhs.id = source;
+                            changed = true;
+                        }
+                    },
+                    .sub => |*op| {
+                        if (copy_map.get(op.lhs.id)) |source| {
+                            op.lhs.id = source;
+                            changed = true;
+                        }
+                        if (copy_map.get(op.rhs.id)) |source| {
+                            op.rhs.id = source;
+                            changed = true;
+                        }
+                    },
+                    .mul => |*op| {
+                        if (copy_map.get(op.lhs.id)) |source| {
+                            op.lhs.id = source;
+                            changed = true;
+                        }
+                        if (copy_map.get(op.rhs.id)) |source| {
+                            op.rhs.id = source;
+                            changed = true;
+                        }
+                    },
+                    .div => |*op| {
+                        if (copy_map.get(op.lhs.id)) |source| {
+                            op.lhs.id = source;
+                            changed = true;
+                        }
+                        if (copy_map.get(op.rhs.id)) |source| {
+                            op.rhs.id = source;
+                            changed = true;
+                        }
+                    },
+                    .call => |*op| {
+                        for (op.args) |*arg| {
+                            if (copy_map.get(arg.id)) |source| {
+                                arg.id = source;
+                                changed = true;
+                            }
+                        }
+                    },
+                    .ret => |*op| {
+                        if (op.value) |*val| {
+                            if (copy_map.get(val.id)) |source| {
+                                val.id = source;
+                                changed = true;
+                            }
+                        }
+                    },
+                    else => {},
+                }
             }
         }
 
