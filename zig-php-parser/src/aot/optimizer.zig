@@ -30,6 +30,7 @@ const Terminator = IR.Terminator;
 const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const Analysis = @import("analysis.zig");
+const EscapeAnalysis = @import("escape_analysis.zig").EscapeAnalysis;
 
 // ============================================================================
 // Optimization Level Configuration
@@ -313,6 +314,8 @@ pub const IROptimizer = struct {
     call_graph: std.StringHashMap(FunctionInfo),
     /// Scratch map for type specialization to avoid per-function allocations
     type_known_types: std.AutoHashMap(u32, Type),
+    /// Escape analysis for reference counting optimization
+    escape_analysis: EscapeAnalysis,
     /// Recursion depth for renameVariables
     rename_depth: u32 = 0,
 
@@ -354,6 +357,7 @@ pub const IROptimizer = struct {
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
             .type_known_types = std.AutoHashMap(u32, Type).init(allocator),
+            .escape_analysis = EscapeAnalysis.init(allocator),
         };
     }
 
@@ -369,6 +373,7 @@ pub const IROptimizer = struct {
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
             .type_known_types = std.AutoHashMap(u32, Type).init(allocator),
+            .escape_analysis = EscapeAnalysis.init(allocator),
         };
     }
 
@@ -378,6 +383,7 @@ pub const IROptimizer = struct {
         self.constant_values.deinit();
         self.call_graph.deinit();
         self.type_known_types.deinit();
+        self.escape_analysis.deinit();
     }
 
     /// Get optimization statistics
@@ -2535,6 +2541,9 @@ pub const IROptimizer = struct {
     fn runRCEllision(self: *Self, module: *Module) !bool {
         var changed = false;
         for (module.functions.items) |func| {
+            // 先运行逃逸分析
+            try self.escape_analysis.analyze(func);
+            
             if (try self.eliminateRCEllisionInFunction(func)) {
                 changed = true;
             }
@@ -2551,6 +2560,18 @@ pub const IROptimizer = struct {
                 const inst = block.instructions.items[i];
                 switch (inst.op) {
                     .retain => |op| {
+                        // 检查是否逃逸
+                        if (!self.escape_analysis.isEscaped(op.operand.id)) {
+                            // 不逃逸的值可以完全消除 retain
+                            _ = block.instructions.orderedRemove(i);
+                            inst.deinit(self.allocator);
+                            self.allocator.destroy(inst);
+                            self.stats.dead_instructions_removed += 1;
+                            self.stats.rc_instructions_removed += 1;
+                            changed = true;
+                            continue;
+                        }
+                        
                         const operand_tag = @as(std.meta.Tag(Type), op.operand.type_);
                         if (operand_tag != .php_value and operand_tag != .php_string and operand_tag != .php_array and operand_tag != .php_object and operand_tag != .php_resource and operand_tag != .php_callable) {
                             _ = block.instructions.orderedRemove(i);
@@ -2582,6 +2603,18 @@ pub const IROptimizer = struct {
                         }
                     },
                     .release => |op| {
+                        // 检查是否逃逸
+                        if (!self.escape_analysis.isEscaped(op.operand.id)) {
+                            // 不逃逸的值可以完全消除 release
+                            _ = block.instructions.orderedRemove(i);
+                            inst.deinit(self.allocator);
+                            self.allocator.destroy(inst);
+                            self.stats.dead_instructions_removed += 1;
+                            self.stats.rc_instructions_removed += 1;
+                            changed = true;
+                            continue;
+                        }
+                        
                         const operand_tag = @as(std.meta.Tag(Type), op.operand.type_);
                         if (operand_tag != .php_value and operand_tag != .php_string and operand_tag != .php_array and operand_tag != .php_object and operand_tag != .php_resource and operand_tag != .php_callable) {
                             _ = block.instructions.orderedRemove(i);
