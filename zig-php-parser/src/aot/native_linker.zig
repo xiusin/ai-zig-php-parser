@@ -4424,20 +4424,12 @@ pub const NativeLinker = struct {
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
 
-                    const res_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                    if (res_type_tag == .bool) {
-                        try writer.print("    reg_{d} = ", .{reg.id});
-                        try self.writeBoolExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(" and ");
-                        try self.writeBoolExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(";\n");
-                    } else {
-                        try writer.print("    reg_{d} = runtime.Value.initBool(", .{reg.id});
-                        try self.writeBoolExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(" and ");
-                        try self.writeBoolExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    }
+                    // 所有寄存器都是 Value 类型，总是需要包装
+                    try writer.print("    reg_{d} = runtime.Value.initBool(", .{reg.id});
+                    try self.writeBoolExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(" and ");
+                    try self.writeBoolExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(");\n");
                 }
             },
             .or_ => |op| {
@@ -4445,20 +4437,12 @@ pub const NativeLinker = struct {
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
 
-                    const res_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                    if (res_type_tag == .bool) {
-                        try writer.print("    reg_{d} = ", .{reg.id});
-                        try self.writeBoolExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(" or ");
-                        try self.writeBoolExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(";\n");
-                    } else {
-                        try writer.print("    reg_{d} = runtime.Value.initBool(", .{reg.id});
-                        try self.writeBoolExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(" or ");
-                        try self.writeBoolExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    }
+                    // 所有寄存器都是 Value 类型，总是需要包装
+                    try writer.print("    reg_{d} = runtime.Value.initBool(", .{reg.id});
+                    try self.writeBoolExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(" or ");
+                    try self.writeBoolExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(");\n");
                 }
             },
             .neg => |op| {
