@@ -3407,6 +3407,16 @@ pub const NativeLinker = struct {
                     var src_buf: [32]u8 = undefined;
                     const src_ref = try self.getOperandRef(&src_buf, op.value.id);
                     try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
+                    
+                    // 如果是 php_value 类型，需要 retain 以保持引用计数正确
+                    const value_type = if (self.current_register_types) |types|
+                        types.get(op.value.id) orelse op.value.type_
+                    else
+                        op.value.type_;
+                    const value_tag = @as(std.meta.Tag(IR.Type), value_type);
+                    if (value_tag == .php_value or value_tag == .php_string or value_tag == .php_array or value_tag == .php_object) {
+                        try writer.print("    _ = reg_{d}.retain();\n", .{op.ptr.id});
+                    }
                 } else {
                     // 原有的 store 逻辑（指针操作）
                     // 检查是否是 alloca 寄存器（即指针类型）

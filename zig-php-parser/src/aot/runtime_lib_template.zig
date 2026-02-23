@@ -960,11 +960,9 @@ pub const PHPString = struct {
 
     /// 字符串连接（支持 COW 就地复用：ref_count==1 时 realloc 扩展，避免新建对象）
     pub fn concat(self: *PHPString, other: *PHPString, allocator: Allocator) !*PHPString {
-        std.debug.print("concat: self.length={d}, other.length={d}, self.ref_count={d}, other.ref_count={d}\n", .{self.length, other.length, self.ref_count, other.ref_count});
         const new_length = self.length + other.length;
 
         if (new_length > 1024 * 1024 * 100) {
-            std.debug.print("StringTooLarge: self.length={d}, other.length={d}, new_length={d}\n", .{self.length, other.length, new_length});
             return error.StringTooLarge;
         }
 
