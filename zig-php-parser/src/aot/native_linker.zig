@@ -6521,11 +6521,12 @@ pub const NativeLinker = struct {
                     } else if (phi_tag == .f64 and value_tag == .php_value) {
                         try writer_.print("reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .php_value and value_tag == .i64) {
-                        try writer_.print("reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ update.phi_reg, update.value_reg });
+                        // 所有寄存器都是 Value，需要 asInt()
+                        try writer_.print("reg_{d} = runtime.Value.initInt(reg_{d}.asInt());\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .php_value and value_tag == .f64) {
-                        try writer_.print("reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ update.phi_reg, update.value_reg });
+                        try writer_.print("reg_{d} = runtime.Value.initFloat(reg_{d}.asFloat());\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .php_value and value_tag == .bool) {
-                        try writer_.print("reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ update.phi_reg, update.value_reg });
+                        try writer_.print("reg_{d} = runtime.Value.initBool(reg_{d}.toBool());\n", .{ update.phi_reg, update.value_reg });
                     } else {
                         try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
                     }
