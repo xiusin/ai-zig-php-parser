@@ -10472,8 +10472,8 @@ pub const NativeLinker = struct {
             // 字符串运算指令
             // ========================================================================
             .concat => |op| {
-                var lhs_buf: [64]u8 = undefined;
-                var rhs_buf: [64]u8 = undefined;
+                var lhs_buf: [128]u8 = undefined;
+                var rhs_buf: [128]u8 = undefined;
 
                 // 检查操作数类型，需要时转换为 Value
                 const lhs_type = op.lhs.type_;
@@ -10481,17 +10481,22 @@ pub const NativeLinker = struct {
                 const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
                 const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
 
+                // 所有寄存器都是 Value，需要类型转换
                 const lhs = if (lhs_tag == .i64)
-                    try std.fmt.bufPrint(&lhs_buf, "runtime.Value.initInt(reg_{d})", .{op.lhs.id})
+                    try std.fmt.bufPrint(&lhs_buf, "runtime.Value.initInt(reg_{d}.asInt())", .{op.lhs.id})
                 else if (lhs_tag == .f64)
-                    try std.fmt.bufPrint(&lhs_buf, "runtime.Value.initFloat(reg_{d})", .{op.lhs.id})
+                    try std.fmt.bufPrint(&lhs_buf, "runtime.Value.initFloat(reg_{d}.asFloat())", .{op.lhs.id})
+                else if (lhs_tag == .bool)
+                    try std.fmt.bufPrint(&lhs_buf, "runtime.Value.initBool(reg_{d}.toBool())", .{op.lhs.id})
                 else
                     try std.fmt.bufPrint(&lhs_buf, "reg_{d}", .{op.lhs.id});
 
                 const rhs = if (rhs_tag == .i64)
-                    try std.fmt.bufPrint(&rhs_buf, "runtime.Value.initInt(reg_{d})", .{op.rhs.id})
+                    try std.fmt.bufPrint(&rhs_buf, "runtime.Value.initInt(reg_{d}.asInt())", .{op.rhs.id})
                 else if (rhs_tag == .f64)
-                    try std.fmt.bufPrint(&rhs_buf, "runtime.Value.initFloat(reg_{d})", .{op.rhs.id})
+                    try std.fmt.bufPrint(&rhs_buf, "runtime.Value.initFloat(reg_{d}.asFloat())", .{op.rhs.id})
+                else if (rhs_tag == .bool)
+                    try std.fmt.bufPrint(&rhs_buf, "runtime.Value.initBool(reg_{d}.toBool())", .{op.rhs.id})
                 else
                     try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
 
