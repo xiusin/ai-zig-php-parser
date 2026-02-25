@@ -3616,26 +3616,26 @@ pub const NativeLinker = struct {
                     
                     try writer.print("    reg_{d} = try runtime.php_concat(", .{reg.id});
                     
-                    // 左操作数
+                    // 左操作数 - 所有寄存器都是 Value，需要类型转换
                     if (lhs_type_tag == .i64) {
-                        try writer.print("runtime.Value.initInt(reg_{d})", .{op.lhs.id});
+                        try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.lhs.id});
                     } else if (lhs_type_tag == .f64) {
-                        try writer.print("runtime.Value.initFloat(reg_{d})", .{op.lhs.id});
+                        try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.lhs.id});
                     } else if (lhs_type_tag == .bool) {
-                        try writer.print("runtime.Value.initBool(reg_{d})", .{op.lhs.id});
+                        try writer.print("runtime.Value.initBool(reg_{d}.toBool())", .{op.lhs.id});
                     } else {
                         try writer.print("reg_{d}", .{op.lhs.id});
                     }
                     
                     try writer.writeAll(", ");
                     
-                    // 右操作数
+                    // 右操作数 - 所有寄存器都是 Value，需要类型转换
                     if (rhs_type_tag == .i64) {
-                        try writer.print("runtime.Value.initInt(reg_{d})", .{op.rhs.id});
+                        try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.rhs.id});
                     } else if (rhs_type_tag == .f64) {
-                        try writer.print("runtime.Value.initFloat(reg_{d})", .{op.rhs.id});
+                        try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.rhs.id});
                     } else if (rhs_type_tag == .bool) {
-                        try writer.print("runtime.Value.initBool(reg_{d})", .{op.rhs.id});
+                        try writer.print("runtime.Value.initBool(reg_{d}.toBool())", .{op.rhs.id});
                     } else {
                         try writer.print("reg_{d}", .{op.rhs.id});
                     }
