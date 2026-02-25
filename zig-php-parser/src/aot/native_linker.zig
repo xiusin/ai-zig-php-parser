@@ -1231,8 +1231,6 @@ pub const NativeLinker = struct {
 
     /// 生成函数
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), _: *const IR.Module, func: *const IR.Function) !void {
-        std.debug.print("=== generateFunction: {s}, blocks={d} ===\n", .{func.name, func.blocks.items.len});
-        
         const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
         self.current_function_has_this = has_this;
         self.current_function_for_resolve = func;
@@ -1860,7 +1858,6 @@ pub const NativeLinker = struct {
         // 生成代码体
         if (func.blocks.items.len == 1) {
             // 单基本块：直接生成线性代码
-            std.debug.print("Single block path: {d} instructions\n", .{func.blocks.items[0].instructions.items.len});
             try code.appendSlice(self.allocator, "    // Instructions\n");
             const block = func.blocks.items[0];
             for (block.instructions.items) |inst| {
@@ -1979,7 +1976,6 @@ pub const NativeLinker = struct {
                 try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
             }
         } else {
-            std.debug.print("Multi-block path: {d} blocks\n", .{func.blocks.items.len});
             try self.generateControlFlowStateMachine(code, func, cleanup_registers.items, &alloca_registers);
         }
 
@@ -2669,9 +2665,11 @@ pub const NativeLinker = struct {
         comptime format_str: []const u8,
         args: anytype,
     ) !void {
-        // 调试：检测所有 initInt
-        if (std.mem.indexOf(u8, format_str, "initInt") != null) {
-            std.debug.print("REG_{d}: {s} | args: {any}\n", .{reg_id, format_str, args});
+        // 检测错误模式
+        if (std.mem.indexOf(u8, format_str, "initInt(reg_") != null and 
+            std.mem.indexOf(u8, format_str, "asInt") == null) {
+            std.debug.print("ERROR: reg_{d} = {s}\n", .{reg_id, format_str});
+            @panic("Found initInt(reg_) without asInt()!");
         }
         try self.writeRegAssignmentPrefix(writer, reg_id);
         try writer.print(format_str, args);
@@ -3413,13 +3411,6 @@ pub const NativeLinker = struct {
             try writer.print("    // {s}:{d}\n", .{ inst.location.file, inst.location.line });
         }
 
-        // 调试：跟踪所有指令
-        if (inst.result) |reg| {
-            std.debug.print("INST: {s} -> reg_{d}\n", .{@tagName(inst.op), reg.id});
-        } else {
-            std.debug.print("INST: {s} (no result)\n", .{@tagName(inst.op)});
-        }
-
         switch (inst.op) {
             .const_int => |val| {
                 if (inst.result) |reg| {
@@ -3668,13 +3659,6 @@ pub const NativeLinker = struct {
                         }
                         break :blk @as(std.meta.Tag(IR.Type), op.rhs.type_);
                     } else @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    
-                    std.debug.print("concat: lhs.id={d}, lhs_type={s}, rhs.id={d}, rhs_type={s}\n", .{
-                        op.lhs.id,
-                        @tagName(lhs_type_tag),
-                        op.rhs.id,
-                        @tagName(rhs_type_tag),
-                    });
                     
                     try writer.print("    reg_{d} = try runtime.php_concat(", .{reg.id});
                     
@@ -5254,13 +5238,6 @@ pub const NativeLinker = struct {
             .cast => |op| {
                 // cast: 类型转换
                 if (inst.result) |reg| {
-                    std.debug.print("CAST: reg_{d} = cast reg_{d} from {s} to {s}\n", .{
-                        reg.id,
-                        op.value.id,
-                        @tagName(@as(std.meta.Tag(IR.Type), op.from_type)),
-                        @tagName(@as(std.meta.Tag(IR.Type), op.to_type)),
-                    });
-                    
                     // Get the actual type of the source register
                     const src_fallback = if (self.current_reg_types) |types|
                         (types.get(op.value.id) orelse op.value.type_)
@@ -6067,11 +6044,19 @@ pub const NativeLinker = struct {
                         if (phi_tag == value_tag) {
                             try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = {s}.asInt();\n", .{ res.id, src_ref });
+                            // 所有寄存器都是 Value，需要包装
+                            try writer.print("    reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ res.id, src_ref });
                         } else if (phi_tag == .f64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = {s}.asFloat();\n", .{ res.id, src_ref });
+                            try writer.print("    reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ res.id, src_ref });
                         } else if (phi_tag == .bool and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = {s}.toBool();\n", .{ res.id, src_ref });
+                            try writer.print("    reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ res.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .i64) {
+                            // 反向：php_value <- i64，也需要包装
+                            try writer.print("    reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ res.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .f64) {
+                            try writer.print("    reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ res.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .bool) {
+                            try writer.print("    reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ res.id, src_ref });
                         } else {
                             try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         }
@@ -6282,11 +6267,18 @@ pub const NativeLinker = struct {
                         if (phi_tag == value_tag) {
                             try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = {s}.asInt();\n", .{ res.id, src_ref });
+                            // 所有寄存器都是 Value，需要包装
+                            try writer.print("    reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ res.id, src_ref });
                         } else if (phi_tag == .f64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = {s}.asFloat();\n", .{ res.id, src_ref });
+                            try writer.print("    reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ res.id, src_ref });
                         } else if (phi_tag == .bool and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = {s}.toBool();\n", .{ res.id, src_ref });
+                            try writer.print("    reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ res.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .i64) {
+                            try writer.print("    reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ res.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .f64) {
+                            try writer.print("    reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ res.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .bool) {
+                            try writer.print("    reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ res.id, src_ref });
                         } else {
                             try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
                         }
@@ -7011,11 +7003,12 @@ pub const NativeLinker = struct {
                         const src_ref = try self.getOperandRef(&src_buf, ms.loop_count_reg);
                         
                         if (is_optimized_alloca or inc_tag == .i64) {
-                            // 目标是 i64
+                            // 目标是 i64 - 但所有寄存器都是 Value
                             if (count_tag == .i64) {
                                 try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             } else if (count_tag == .php_value) {
-                                try writer.print("    reg_{d} = {s}.asInt();\n", .{ inc_reg, src_ref });
+                                // 需要包装
+                                try writer.print("    reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ inc_reg, src_ref });
                             } else {
                                 try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             }
@@ -7409,12 +7402,18 @@ pub const NativeLinker = struct {
                         try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
                     }
                 } else if (phi_tag == .i64 and value_tag == .php_value) {
-                    // phi 是 i64，value 是 php_value，需要转换
-                    try writer.print("        reg_{d} = {s}.asInt();\n", .{ update.phi_reg, src_ref });
+                    // phi 是 i64，value 是 php_value - 所有寄存器都是 Value，需要包装
+                    try writer.print("        reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ update.phi_reg, src_ref });
                 } else if (phi_tag == .f64 and value_tag == .php_value) {
-                    try writer.print("        reg_{d} = {s}.asFloat();\n", .{ update.phi_reg, src_ref });
+                    try writer.print("        reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ update.phi_reg, src_ref });
                 } else if (phi_tag == .bool and value_tag == .php_value) {
-                    try writer.print("        reg_{d} = {s}.toBool();\n", .{ update.phi_reg, src_ref });
+                    try writer.print("        reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ update.phi_reg, src_ref });
+                } else if (phi_tag == .php_value and value_tag == .i64) {
+                    try writer.print("        reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ update.phi_reg, src_ref });
+                } else if (phi_tag == .php_value and value_tag == .f64) {
+                    try writer.print("        reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ update.phi_reg, src_ref });
+                } else if (phi_tag == .php_value and value_tag == .bool) {
+                    try writer.print("        reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ update.phi_reg, src_ref });
                 } else {
                     // 其他情况，尝试直接赋值
                     try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
@@ -7497,11 +7496,18 @@ pub const NativeLinker = struct {
                     if (phi_tag == value_tag) {
                         try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
                     } else if (phi_tag == .i64 and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = {s}.asInt();\n", .{ update.phi_reg, src_ref });
+                        // 所有寄存器都是 Value，需要包装
+                        try writer.print("        reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ update.phi_reg, src_ref });
                     } else if (phi_tag == .f64 and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = {s}.asFloat();\n", .{ update.phi_reg, src_ref });
+                        try writer.print("        reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ update.phi_reg, src_ref });
                     } else if (phi_tag == .bool and value_tag == .php_value) {
-                        try writer.print("        reg_{d} = {s}.toBool();\n", .{ update.phi_reg, src_ref });
+                        try writer.print("        reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ update.phi_reg, src_ref });
+                    } else if (phi_tag == .php_value and value_tag == .i64) {
+                        try writer.print("        reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ update.phi_reg, src_ref });
+                    } else if (phi_tag == .php_value and value_tag == .f64) {
+                        try writer.print("        reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ update.phi_reg, src_ref });
+                    } else if (phi_tag == .php_value and value_tag == .bool) {
+                        try writer.print("        reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ update.phi_reg, src_ref });
                     } else {
                         try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
                     }
@@ -8330,7 +8336,18 @@ pub const NativeLinker = struct {
                         if (phi_tag == value_tag) {
                             try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            try writer.print("        reg_{d} = {s}.asInt();\n", .{ result_reg.id, src_ref });
+                            // 所有寄存器都是 Value，需要包装
+                            try writer.print("        reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ result_reg.id, src_ref });
+                        } else if (phi_tag == .f64 and value_tag == .php_value) {
+                            try writer.print("        reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ result_reg.id, src_ref });
+                        } else if (phi_tag == .bool and value_tag == .php_value) {
+                            try writer.print("        reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ result_reg.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .i64) {
+                            try writer.print("        reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ result_reg.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .f64) {
+                            try writer.print("        reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ result_reg.id, src_ref });
+                        } else if (phi_tag == .php_value and value_tag == .bool) {
+                            try writer.print("        reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ result_reg.id, src_ref });
                         } else {
                             try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
                         }
@@ -10573,17 +10590,12 @@ pub const NativeLinker = struct {
                             } else @as(std.meta.Tag(IR.Type), arg.type_);
                             
                             if (arg_type == .i64) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                try writer.print("runtime.Value.initInt({s})", .{src_ref});
+                                // 所有寄存器都是 Value，直接使用
+                                try writer.print("reg_{d}", .{arg.id});
                             } else if (arg_type == .f64) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                try writer.print("runtime.Value.initFloat({s})", .{src_ref});
+                                try writer.print("reg_{d}", .{arg.id});
                             } else if (arg_type == .bool) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                try writer.print("runtime.Value.initBool({s})", .{src_ref});
+                                try writer.print("reg_{d}", .{arg.id});
                             } else {
                                 try self.writeRegRef(writer, arg.id);
                             }
@@ -10621,17 +10633,12 @@ pub const NativeLinker = struct {
                                 } else @as(std.meta.Tag(IR.Type), arg.type_);
                                 
                                 if (arg_type == .i64) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                    try writer.print("runtime.Value.initInt({s})", .{src_ref});
+                                    // 所有寄存器都是 Value，直接使用
+                                    try writer.print("reg_{d}", .{arg.id});
                                 } else if (arg_type == .f64) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                    try writer.print("runtime.Value.initFloat({s})", .{src_ref});
+                                    try writer.print("reg_{d}", .{arg.id});
                                 } else if (arg_type == .bool) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                    try writer.print("runtime.Value.initBool({s})", .{src_ref});
+                                    try writer.print("reg_{d}", .{arg.id});
                                 } else {
                                     try self.writeRegRef(writer, arg.id);
                                 }
@@ -10694,17 +10701,12 @@ pub const NativeLinker = struct {
                                 // 转换基本类型为 Value
                                 const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
                                 if (arg_type == .i64) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                    try writer.print("runtime.Value.initInt({s})", .{src_ref});
+                                    // 所有寄存器都是 Value，直接使用
+                                    try writer.print("reg_{d}", .{arg.id});
                                 } else if (arg_type == .f64) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                    try writer.print("runtime.Value.initFloat({s})", .{src_ref});
+                                    try writer.print("reg_{d}", .{arg.id});
                                 } else if (arg_type == .bool) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                    try writer.print("runtime.Value.initBool({s})", .{src_ref});
+                                    try writer.print("reg_{d}", .{arg.id});
                                 } else {
                                     try self.writeRegRef(writer, arg.id);
                                 }
