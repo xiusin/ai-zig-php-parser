@@ -2884,24 +2884,33 @@ pub const NativeLinker = struct {
                                 const result_tag = @as(std.meta.Tag(IR.Type), result_corrected);
                                 const value_tag = @as(std.meta.Tag(IR.Type), value_corrected);
 
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-
-                                std.debug.print("BR PHI: reg_{d} = {s} (incoming.value.id={})\n", .{result_reg.id, src_ref, incoming.value.id});
-
                                 if (result_tag == value_tag) {
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
                                     try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .php_value and value_tag == .i64) {
-                                    try writer.print("            reg_{d} = runtime.Value.initInt({s});\n", .{ result_reg.id, src_ref });
+                                    var src_buf: [128]u8 = undefined;
+                                    const src_wrapped = try self.getValueWrapper(&src_buf, incoming.value.id, value_tag);
+                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_wrapped });
                                 } else if (result_tag == .php_value and value_tag == .f64) {
-                                    try writer.print("            reg_{d} = runtime.Value.initFloat({s});\n", .{ result_reg.id, src_ref });
+                                    var src_buf: [128]u8 = undefined;
+                                    const src_wrapped = try self.getValueWrapper(&src_buf, incoming.value.id, value_tag);
+                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_wrapped });
                                 } else if (result_tag == .php_value and value_tag == .bool) {
-                                    try writer.print("            reg_{d} = runtime.Value.initBool({s});\n", .{ result_reg.id, src_ref });
+                                    var src_buf: [128]u8 = undefined;
+                                    const src_wrapped = try self.getValueWrapper(&src_buf, incoming.value.id, value_tag);
+                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_wrapped });
                                 } else if (result_tag == .i64 and value_tag == .php_value) {
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
                                     try writer.print("            reg_{d} = {s}.toInt();\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .f64 and value_tag == .php_value) {
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
                                     try writer.print("            reg_{d} = {s}.toFloat();\n", .{ result_reg.id, src_ref });
                                 } else if (result_tag == .bool and value_tag == .php_value) {
+                                    var src_buf: [32]u8 = undefined;
+                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
                                     try writer.print("            reg_{d} = {s}.toBool();\n", .{ result_reg.id, src_ref });
                                 } else {
                                     try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
@@ -5361,11 +5370,18 @@ pub const NativeLinker = struct {
                     } else if (dst_tag == .bool and src_tag == .php_value) {
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s}.toBool();\n", .{src_ref});
                     } else if (dst_tag == .php_value and src_tag == .i64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s});\n", .{src_ref});
+                        // 所有寄存器都是 Value，需要类型转换
+                        var src_buf2: [128]u8 = undefined;
+                        const src_wrapped = try self.getValueWrapper(&src_buf2, op.operand.id, src_tag);
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_wrapped});
                     } else if (dst_tag == .php_value and src_tag == .f64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s});\n", .{src_ref});
+                        var src_buf2: [128]u8 = undefined;
+                        const src_wrapped = try self.getValueWrapper(&src_buf2, op.operand.id, src_tag);
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_wrapped});
                     } else if (dst_tag == .php_value and src_tag == .bool) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s});\n", .{src_ref});
+                        var src_buf2: [128]u8 = undefined;
+                        const src_wrapped = try self.getValueWrapper(&src_buf2, op.operand.id, src_tag);
+                        try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_wrapped});
                     } else {
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_ref});
                     }
@@ -6970,9 +6986,11 @@ pub const NativeLinker = struct {
                                 try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             }
                         } else if (inc_tag == .php_value) {
-                            // 目标是 Value
+                            // 目标是 Value - 所有寄存器都是 Value，需要类型转换
                             if (count_tag == .i64) {
-                                try writer.print("    reg_{d} = runtime.Value.initInt({s});\n", .{ inc_reg, src_ref });
+                                var src_buf2: [128]u8 = undefined;
+                                const src_wrapped = try self.getValueWrapper(&src_buf2, ms.loop_count_reg, count_tag);
+                                try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_wrapped });
                             } else {
                                 try writer.print("    reg_{d} = {s};\n", .{ inc_reg, src_ref });
                             }
