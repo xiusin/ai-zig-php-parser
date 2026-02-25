@@ -2587,6 +2587,32 @@ pub const NativeLinker = struct {
         return base_ref;
     }
 
+    /// 生成类型包装表达式：将推断类型的寄存器包装为 Value
+    /// 例如：i64 -> Value.initInt(reg.asInt())
+    fn getValueWrapper(self: *Self, buf: []u8, reg_id: usize, inferred_type: std.meta.Tag(IR.Type)) ![]const u8 {
+        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+            alloca_regs.contains(reg_id)
+        else
+            false;
+        
+        const base_ref = if (is_alloca) 
+            try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
+        else 
+            try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
+        
+        // 根据推断类型生成包装
+        if (inferred_type == .i64) {
+            return try std.fmt.bufPrint(buf, "runtime.Value.initInt({s}.asInt())", .{base_ref});
+        } else if (inferred_type == .f64) {
+            return try std.fmt.bufPrint(buf, "runtime.Value.initFloat({s}.asFloat())", .{base_ref});
+        } else if (inferred_type == .bool) {
+            return try std.fmt.bufPrint(buf, "runtime.Value.initBool({s}.toBool())", .{base_ref});
+        }
+        
+        // php_value 或其他类型，直接返回
+        return base_ref;
+    }
+
     /// 格式化寄存器引用到 writer（用于替换所有 writer.print("reg_{d}", .{id})）
     fn writeRegRef(self: *Self, writer: anytype, reg_id: usize) !void {
         const is_alloca = if (self.current_alloca_regs) |alloca_regs|
@@ -5229,20 +5255,17 @@ pub const NativeLinker = struct {
                             }
                         } else if (src_tag == .i64 or src_tag == .f64 or src_tag == .bool) {
                             // 基本类型 -> php_value
-                            // 但所有寄存器实际都是 Value，所以这是 Value.asInt() -> Value.initInt(...)
-                            // 优化：直接赋值即可
-                            var src_buf: [32]u8 = undefined;
-                            const src_ref = try self.getOperandRef(&src_buf, op.value.id);
+                            // 所有寄存器实际都是 Value，需要生成包装代码
+                            var src_buf: [128]u8 = undefined;
+                            const src_wrapped = try self.getValueWrapper(&src_buf, op.value.id, src_tag);
                             
                             if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
                                 try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                             }
                             if (dest_is_alloca) {
-                                try writer.print("    reg_{d}.* = {s};\n", .{ reg.id, src_ref });
-                                try writer.print("    _ = reg_{d}.*.retain();\n", .{reg.id});
+                                try writer.print("    reg_{d}.* = {s};\n", .{ reg.id, src_wrapped });
                             } else {
-                                try writer.print("    reg_{d} = {s};\n", .{ reg.id, src_ref });
-                                try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
+                                try writer.print("    reg_{d} = {s};\n", .{ reg.id, src_wrapped });
                             }
                         } else {
                             if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
@@ -9678,13 +9701,13 @@ pub const NativeLinker = struct {
                         } else {
                             // 需要类型转换
                             if (result_tag == .php_value) {
-                                // 转换为 Value
+                                // 转换为 Value - 所有寄存器都是 Value，需要类型转换
                                 if (value_tag == .i64) {
-                                    try writer.print("                    reg_{d} = runtime.Value.initInt(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("                    reg_{d} = runtime.Value.initInt(reg_{d}.asInt());\n", .{ result_reg.id, incoming.value.id });
                                 } else if (value_tag == .f64) {
-                                    try writer.print("                    reg_{d} = runtime.Value.initFloat(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("                    reg_{d} = runtime.Value.initFloat(reg_{d}.asFloat());\n", .{ result_reg.id, incoming.value.id });
                                 } else if (value_tag == .bool) {
-                                    try writer.print("                    reg_{d} = runtime.Value.initBool(reg_{d});\n", .{ result_reg.id, incoming.value.id });
+                                    try writer.print("                    reg_{d} = runtime.Value.initBool(reg_{d}.toBool());\n", .{ result_reg.id, incoming.value.id });
                                 } else {
                                     try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
                                 }
