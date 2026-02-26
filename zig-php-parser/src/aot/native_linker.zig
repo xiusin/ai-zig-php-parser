@@ -639,30 +639,38 @@ pub const NativeLinker = struct {
         defer self.allocator.free(generated_code);
         
         std.debug.print("Post-processing: {d} bytes\n", .{generated_code.len});
+        std.debug.print("Searching for 'initInt(reg_' pattern...\n", .{});
         
         // 替换 initInt(reg_ 为 initInt(reg_.asInt()，但跳过已经有 asInt 的
-        var fixed_code = std.ArrayList(u8).init(self.allocator);
-        defer fixed_code.deinit();
+        var fixed_code = try std.ArrayList(u8).initCapacity(self.allocator, generated_code.len);
+        defer fixed_code.deinit(self.allocator);
         
         var fixes: usize = 0;
         var i: usize = 0;
+        var last_copy: usize = 0;  // 上次复制到的位置
+        
         while (i < generated_code.len) {
             // 查找 "initInt(reg_"
             if (i + 11 < generated_code.len and 
                 std.mem.eql(u8, generated_code[i..i+11], "initInt(reg_")) {
+                std.debug.print("Found initInt(reg_ at position {d}\n", .{i});
                 // 检查后面是否已经有 .asInt()
                 var j = i + 11;
                 while (j < generated_code.len and generated_code[j] != ')') : (j += 1) {}
+                
+                std.debug.print("Checking range: {s}\n", .{generated_code[i..j+1]});
                 
                 const has_asInt = std.mem.indexOf(u8, generated_code[i..j], ".asInt()") != null;
                 const has_asFloat = std.mem.indexOf(u8, generated_code[i..j], ".asFloat()") != null;
                 const has_toBool = std.mem.indexOf(u8, generated_code[i..j], ".toBool()") != null;
                 
                 if (!has_asInt and !has_asFloat and !has_toBool) {
-                    // 需要修复：找到 reg_X)，替换为 reg_X.asInt())
                     std.debug.print("Fixing: {s}\n", .{generated_code[i..j+1]});
-                    try fixed_code.appendSlice(generated_code[i..j]);
-                    try fixed_code.appendSlice(".asInt()");
+                    // 复制从 last_copy 到 j 的内容
+                    try fixed_code.appendSlice(self.allocator, generated_code[last_copy..j]);
+                    // 插入 .asInt()
+                    try fixed_code.appendSlice(self.allocator, ".asInt()");
+                    last_copy = j;
                     i = j;
                     fixes += 1;
                     continue;
@@ -677,8 +685,9 @@ pub const NativeLinker = struct {
                 
                 const has_asFloat = std.mem.indexOf(u8, generated_code[i..j], ".asFloat()") != null;
                 if (!has_asFloat) {
-                    try fixed_code.appendSlice(generated_code[i..j]);
-                    try fixed_code.appendSlice(".asFloat()");
+                    try fixed_code.appendSlice(self.allocator, generated_code[last_copy..j]);
+                    try fixed_code.appendSlice(self.allocator, ".asFloat()");
+                    last_copy = j;
                     i = j;
                     fixes += 1;
                     continue;
@@ -692,21 +701,26 @@ pub const NativeLinker = struct {
                 
                 const has_toBool = std.mem.indexOf(u8, generated_code[i..j], ".toBool()") != null;
                 if (!has_toBool) {
-                    try fixed_code.appendSlice(generated_code[i..j]);
-                    try fixed_code.appendSlice(".toBool()");
+                    try fixed_code.appendSlice(self.allocator, generated_code[last_copy..j]);
+                    try fixed_code.appendSlice(self.allocator, ".toBool()");
+                    last_copy = j;
                     i = j;
                     fixes += 1;
                     continue;
                 }
             }
             
-            try fixed_code.append(generated_code[i]);
             i += 1;
+        }
+        
+        // 复制剩余内容
+        if (last_copy < generated_code.len) {
+            try fixed_code.appendSlice(self.allocator, generated_code[last_copy..]);
         }
         
         std.debug.print("Applied {d} fixes\n", .{fixes});
 
-        return try fixed_code.toOwnedSlice();
+        return try fixed_code.toOwnedSlice(self.allocator);
     }
 
     /// 生成全局变量
