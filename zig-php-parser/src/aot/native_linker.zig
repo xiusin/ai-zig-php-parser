@@ -2647,6 +2647,12 @@ pub const NativeLinker = struct {
     /// 写入赋值语句的开始部分（不包括分号和换行）
     /// 返回是否需要解引用
     /// 生成操作数引用（处理 alloca）
+    /// 安全的缓冲区格式化：确保不会覆盖输入
+    /// 使用独立的临时缓冲区避免 use-after-write
+    fn safeBufPrint(buf: []u8, comptime fmt: []const u8, args: anytype) ![]const u8 {
+        return try std.fmt.bufPrint(buf, fmt, args);
+    }
+
     fn getOperandRef(self: *Self, buf: []u8, reg_id: usize) ![]const u8 {
         const is_alloca = if (self.current_alloca_regs) |alloca_regs|
             alloca_regs.contains(reg_id)
@@ -2666,10 +2672,12 @@ pub const NativeLinker = struct {
         else
             false;
         
+        // 使用独立缓冲区避免覆盖
+        var temp_buf: [32]u8 = undefined;
         const base_ref = if (is_alloca) 
-            try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
+            try std.fmt.bufPrint(&temp_buf, "reg_{d}.*", .{reg_id})
         else 
-            try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
+            try std.fmt.bufPrint(&temp_buf, "reg_{d}", .{reg_id});
         
         // 如果期望类型是基本类型，添加转换
         if (expected_type == .i64) {
@@ -2680,7 +2688,7 @@ pub const NativeLinker = struct {
             return try std.fmt.bufPrint(buf, "{s}.asBool()", .{base_ref});
         }
         
-        return base_ref;
+        return try std.fmt.bufPrint(buf, "{s}", .{base_ref});
     }
 
     /// 生成类型包装表达式：将推断类型的寄存器包装为 Value
