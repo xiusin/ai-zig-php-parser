@@ -14,11 +14,11 @@ pub const EscapeAnalysis = struct {
     /// 工作列表
     worklist: std.ArrayList(usize),
 
-    pub fn init(allocator: std.mem.Allocator) EscapeAnalysis {
+    pub fn init(allocator: std.mem.Allocator) !EscapeAnalysis {
         return .{
             .allocator = allocator,
             .escaped = std.AutoHashMap(usize, void).init(allocator),
-            .worklist = std.ArrayList(usize).init(allocator),
+            .worklist = try std.ArrayList(usize).initCapacity(allocator, 0),
         };
     }
 
@@ -75,12 +75,6 @@ pub const EscapeAnalysis = struct {
             .call => |op| {
                 for (op.args) |arg| {
                     try self.markEscaped(arg.id);
-                }
-            },
-            // 存储到全局/属性逃逸
-            .store_global, .store_property => {
-                if (inst.result) |result| {
-                    try self.markEscaped(result.id);
                 }
             },
             // 数组/对象元素逃逸

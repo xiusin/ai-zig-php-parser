@@ -30,7 +30,7 @@ const Terminator = IR.Terminator;
 const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const Analysis = @import("analysis.zig");
-const EscapeAnalysis = @import("escape_analysis.zig").EscapeAnalysis;
+// const EscapeAnalysis = @import("escape_analysis.zig").EscapeAnalysis;
 
 // ============================================================================
 // Optimization Level Configuration
@@ -315,7 +315,7 @@ pub const IROptimizer = struct {
     /// Scratch map for type specialization to avoid per-function allocations
     type_known_types: std.AutoHashMap(u32, Type),
     /// Escape analysis for reference counting optimization
-    escape_analysis: EscapeAnalysis,
+    // escape_analysis: EscapeAnalysis,
     /// Recursion depth for renameVariables
     rename_depth: u32 = 0,
 
@@ -357,7 +357,7 @@ pub const IROptimizer = struct {
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
             .type_known_types = std.AutoHashMap(u32, Type).init(allocator),
-            .escape_analysis = EscapeAnalysis.init(allocator),
+            // .escape_analysis = EscapeAnalysis.init(allocator),
         };
     }
 
@@ -373,7 +373,7 @@ pub const IROptimizer = struct {
             .constant_values = std.AutoHashMap(u32, ConstantValue).init(allocator),
             .call_graph = std.StringHashMap(FunctionInfo).init(allocator),
             .type_known_types = std.AutoHashMap(u32, Type).init(allocator),
-            .escape_analysis = EscapeAnalysis.init(allocator),
+            // .escape_analysis = EscapeAnalysis.init(allocator),
         };
     }
 
@@ -383,7 +383,7 @@ pub const IROptimizer = struct {
         self.constant_values.deinit();
         self.call_graph.deinit();
         self.type_known_types.deinit();
-        self.escape_analysis.deinit();
+        // self.escape_analysis.deinit();
     }
 
     /// Get optimization statistics
@@ -2542,7 +2542,7 @@ pub const IROptimizer = struct {
         var changed = false;
         for (module.functions.items) |func| {
             // 先运行逃逸分析
-            try self.escape_analysis.analyze(func);
+            // try self.escape_analysis.analyze(func);
             
             if (try self.eliminateRCEllisionInFunction(func)) {
                 changed = true;
@@ -2561,7 +2561,7 @@ pub const IROptimizer = struct {
                 switch (inst.op) {
                     .retain => |op| {
                         // 检查是否逃逸
-                        if (!self.escape_analysis.isEscaped(op.operand.id)) {
+                        if (false and !self.escape_analysis.isEscaped(op.operand.id)) {
                             // 不逃逸的值可以完全消除 retain
                             _ = block.instructions.orderedRemove(i);
                             inst.deinit(self.allocator);
@@ -2604,7 +2604,7 @@ pub const IROptimizer = struct {
                     },
                     .release => |op| {
                         // 检查是否逃逸
-                        if (!self.escape_analysis.isEscaped(op.operand.id)) {
+                        if (false and !self.escape_analysis.isEscaped(op.operand.id)) {
                             // 不逃逸的值可以完全消除 release
                             _ = block.instructions.orderedRemove(i);
                             inst.deinit(self.allocator);

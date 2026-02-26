@@ -387,7 +387,9 @@ pub const NativeLinker = struct {
         }
         
         // 将生成的函数代码写入主代码
+        std.debug.print("Writing function code to main\n", .{});
         try writer.writeAll(func_code.items);
+        std.debug.print("Function code written\n", .{});
 
         var has_select: bool = false;
         for (ir_module.functions.items) |func| {
@@ -611,20 +613,100 @@ pub const NativeLinker = struct {
         }
         
         if (has_main) {
+            std.debug.print("Writing main call\n", .{});
             try writer.writeAll(
                 \\
                 \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
                 \\
             );
+            std.debug.print("After main call\n", .{});
         }
+        
+        std.debug.print("Before final writeAll\n", .{});
         
         try writer.writeAll(
             \\    _ = runtime.php_go_wait_all(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch {};
             \\}
             \\
         );
+        
+        std.debug.print("After writeAll\n", .{});
 
-        return code.toOwnedSlice(self.allocator);
+        std.debug.print("\n\n=== STARTING POST-PROCESSING ===\n\n", .{});
+        
+        // 后处理：修复所有错误的类型转换模式
+        var generated_code = try code.toOwnedSlice(self.allocator);
+        defer self.allocator.free(generated_code);
+        
+        std.debug.print("Post-processing: {d} bytes\n", .{generated_code.len});
+        
+        // 替换 initInt(reg_ 为 initInt(reg_.asInt()，但跳过已经有 asInt 的
+        var fixed_code = std.ArrayList(u8).init(self.allocator);
+        defer fixed_code.deinit();
+        
+        var fixes: usize = 0;
+        var i: usize = 0;
+        while (i < generated_code.len) {
+            // 查找 "initInt(reg_"
+            if (i + 11 < generated_code.len and 
+                std.mem.eql(u8, generated_code[i..i+11], "initInt(reg_")) {
+                // 检查后面是否已经有 .asInt()
+                var j = i + 11;
+                while (j < generated_code.len and generated_code[j] != ')') : (j += 1) {}
+                
+                const has_asInt = std.mem.indexOf(u8, generated_code[i..j], ".asInt()") != null;
+                const has_asFloat = std.mem.indexOf(u8, generated_code[i..j], ".asFloat()") != null;
+                const has_toBool = std.mem.indexOf(u8, generated_code[i..j], ".toBool()") != null;
+                
+                if (!has_asInt and !has_asFloat and !has_toBool) {
+                    // 需要修复：找到 reg_X)，替换为 reg_X.asInt())
+                    std.debug.print("Fixing: {s}\n", .{generated_code[i..j+1]});
+                    try fixed_code.appendSlice(generated_code[i..j]);
+                    try fixed_code.appendSlice(".asInt()");
+                    i = j;
+                    fixes += 1;
+                    continue;
+                }
+            }
+            
+            // 同样处理 initFloat 和 initBool
+            if (i + 13 < generated_code.len and 
+                std.mem.eql(u8, generated_code[i..i+13], "initFloat(reg_")) {
+                var j = i + 13;
+                while (j < generated_code.len and generated_code[j] != ')') : (j += 1) {}
+                
+                const has_asFloat = std.mem.indexOf(u8, generated_code[i..j], ".asFloat()") != null;
+                if (!has_asFloat) {
+                    try fixed_code.appendSlice(generated_code[i..j]);
+                    try fixed_code.appendSlice(".asFloat()");
+                    i = j;
+                    fixes += 1;
+                    continue;
+                }
+            }
+            
+            if (i + 12 < generated_code.len and 
+                std.mem.eql(u8, generated_code[i..i+12], "initBool(reg_")) {
+                var j = i + 12;
+                while (j < generated_code.len and generated_code[j] != ')') : (j += 1) {}
+                
+                const has_toBool = std.mem.indexOf(u8, generated_code[i..j], ".toBool()") != null;
+                if (!has_toBool) {
+                    try fixed_code.appendSlice(generated_code[i..j]);
+                    try fixed_code.appendSlice(".toBool()");
+                    i = j;
+                    fixes += 1;
+                    continue;
+                }
+            }
+            
+            try fixed_code.append(generated_code[i]);
+            i += 1;
+        }
+        
+        std.debug.print("Applied {d} fixes\n", .{fixes});
+
+        return try fixed_code.toOwnedSlice();
     }
 
     /// 生成全局变量
@@ -2806,6 +2888,7 @@ pub const NativeLinker = struct {
         writer: anytype,
         args: []const IR.Register,
     ) !void {
+        _ = self;
         for (args, 0..) |arg, i| {
             if (i > 0) try writer.writeAll(", ");
             
@@ -3409,6 +3492,13 @@ pub const NativeLinker = struct {
         // Add source location comment
         if (inst.location.line > 0) {
             try writer.print("    // {s}:{d}\n", .{ inst.location.file, inst.location.line });
+        }
+
+        // 调试：输出所有指令
+        if (inst.result) |reg| {
+            if (reg.id == 3) {
+                std.debug.print("=== INST for reg_3: {s} ===\n", .{@tagName(inst.op)});
+            }
         }
 
         switch (inst.op) {
@@ -5238,6 +5328,16 @@ pub const NativeLinker = struct {
             .cast => |op| {
                 // cast: 类型转换
                 if (inst.result) |reg| {
+                    // 调试
+                    if (reg.id == 3) {
+                        std.debug.print("CAST reg_3: from={s}, to={s}, value.id={d}, value.type={s}\n", .{
+                            @tagName(@as(std.meta.Tag(IR.Type), op.from_type)),
+                            @tagName(@as(std.meta.Tag(IR.Type), op.to_type)),
+                            op.value.id,
+                            @tagName(@as(std.meta.Tag(IR.Type), op.value.type_)),
+                        });
+                    }
+                    
                     // Get the actual type of the source register
                     const src_fallback = if (self.current_reg_types) |types|
                         (types.get(op.value.id) orelse op.value.type_)
@@ -5248,6 +5348,14 @@ pub const NativeLinker = struct {
                     const src_real_type = self.getInferredRegType(op.value.id, src_fallback);
                     const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
                     const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
+
+                    if (reg.id == 3) {
+                        std.debug.print("  src_real_type={s}, src_tag={s}, to_tag={s}\n", .{
+                            @tagName(@as(std.meta.Tag(IR.Type), src_real_type)),
+                            @tagName(src_tag),
+                            @tagName(to_tag),
+                        });
+                    }
 
                     const dest_is_alloca = if (self.current_alloca_regs) |alloca_regs|
                         alloca_regs.contains(reg.id)
