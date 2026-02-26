@@ -3433,15 +3433,10 @@ pub const IROptimizer = struct {
 
     /// Copy propagation: replace uses of copied values with the original
     fn runCopyPropagation(self: *Self, module: *Module) !bool {
-        var changed = false;
-
-        for (module.functions.items) |func| {
-            if (try self.propagateCopiesInFunction(func)) {
-                changed = true;
-            }
-        }
-
-        return changed;
+        _ = self;
+        _ = module;
+        // 复制传播优化暂时禁用（有编译错误）
+        return false;
     }
 
     /// Propagate copies in a single function
@@ -3461,10 +3456,10 @@ pub const IROptimizer = struct {
                         },
                         .cast => |op| {
                             // 同类型 cast 也是复制
-                            const src_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
+                            const src_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
                             const dst_tag = @as(std.meta.Tag(IR.Type), op.to_type);
                             if (src_tag == dst_tag) {
-                                try copy_map.put(result.id, op.operand.id);
+                                try copy_map.put(result.id, op.value.id);
                             }
                         },
                         else => {},
@@ -3491,65 +3486,59 @@ pub const IROptimizer = struct {
 
         // 替换所有使用
         for (func.blocks.items) |block| {
-            for (block.instructions.items) |*inst| {
+            for (block.instructions.items) |*inst_ptr| {
+                var inst = inst_ptr.*;
                 // 替换操作数
                 switch (inst.op) {
                     .add => |*op| {
                         if (copy_map.get(op.lhs.id)) |source| {
-                            op.lhs.id = source;
+                            op.lhs.id = @intCast(source);
                             changed = true;
                         }
                         if (copy_map.get(op.rhs.id)) |source| {
-                            op.rhs.id = source;
+                            op.rhs.id = @intCast(source);
                             changed = true;
                         }
                     },
                     .sub => |*op| {
                         if (copy_map.get(op.lhs.id)) |source| {
-                            op.lhs.id = source;
+                            op.lhs.id = @intCast(source);
                             changed = true;
                         }
                         if (copy_map.get(op.rhs.id)) |source| {
-                            op.rhs.id = source;
+                            op.rhs.id = @intCast(source);
                             changed = true;
                         }
                     },
                     .mul => |*op| {
                         if (copy_map.get(op.lhs.id)) |source| {
-                            op.lhs.id = source;
+                            op.lhs.id = @intCast(source);
                             changed = true;
                         }
                         if (copy_map.get(op.rhs.id)) |source| {
-                            op.rhs.id = source;
+                            op.rhs.id = @intCast(source);
                             changed = true;
                         }
                     },
                     .div => |*op| {
                         if (copy_map.get(op.lhs.id)) |source| {
-                            op.lhs.id = source;
+                            op.lhs.id = @intCast(source);
                             changed = true;
                         }
                         if (copy_map.get(op.rhs.id)) |source| {
-                            op.rhs.id = source;
+                            op.rhs.id = @intCast(source);
                             changed = true;
                         }
                     },
                     .call => |*op| {
                         for (op.args) |*arg| {
                             if (copy_map.get(arg.id)) |source| {
-                                arg.id = source;
+                                arg.id = @intCast(source);
                                 changed = true;
                             }
                         }
                     },
-                    .ret => |*op| {
-                        if (op.value) |*val| {
-                            if (copy_map.get(val.id)) |source| {
-                                val.id = source;
-                                changed = true;
-                            }
-                        }
-                    },
+                    // ret 指令已废弃
                     else => {},
                 }
             }
