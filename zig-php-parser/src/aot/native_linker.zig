@@ -2703,12 +2703,14 @@ pub const NativeLinker = struct {
         else
             false;
         
+        // 先生成 base_ref 到临时缓冲区
+        var temp_buf: [32]u8 = undefined;
         const base_ref = if (is_alloca) 
-            try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
+            try std.fmt.bufPrint(&temp_buf, "reg_{d}.*", .{reg_id})
         else 
-            try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
+            try std.fmt.bufPrint(&temp_buf, "reg_{d}", .{reg_id});
         
-        // 根据推断类型生成包装
+        // 根据推断类型生成包装（现在 base_ref 不会被覆盖）
         if (inferred_type == .i64) {
             return try std.fmt.bufPrint(buf, "runtime.Value.initInt({s}.asInt())", .{base_ref});
         } else if (inferred_type == .f64) {
@@ -2718,7 +2720,7 @@ pub const NativeLinker = struct {
         }
         
         // php_value 或其他类型，直接返回
-        return base_ref;
+        return try std.fmt.bufPrint(buf, "{s}", .{base_ref});
     }
 
     /// 格式化寄存器引用到 writer（用于替换所有 writer.print("reg_{d}", .{id})）
