@@ -459,6 +459,15 @@ pub const IRGenerator = struct {
             });
         }
 
+        // 检查是否是全局变量或在 __main__ 函数中
+        const is_global = self.global_vars.contains(var_name);
+        const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+        
+        if (is_global or is_main) {
+            // 从全局表读取
+            return self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
+        }
+
         // Look up variable register
         if (self.lookupVarRegister(var_name)) |ptr_reg| {
             // 从指针类型中提取指向的类型
@@ -1984,8 +1993,24 @@ pub const IRGenerator = struct {
         switch (target_node.tag) {
             .variable => {
                 const var_name = self.getString(target_node.data.variable.name);
-                const var_reg = try self.getOrCreateVarRegister(var_name, value_reg.type_);
-                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = value_reg } }, null);
+                
+                // 检查是否是全局变量或在 __main__ 函数中
+                const is_global = self.global_vars.contains(var_name);
+                const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                
+                if (is_global or is_main) {
+                    // 写入全局表
+                    _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = value_reg } }, null);
+                    
+                    // 如果在 __main__ 中，也标记为全局变量
+                    if (is_main and !is_global) {
+                        try self.global_vars.put(self.allocator, var_name, {});
+                    }
+                } else {
+                    // 普通局部变量
+                    const var_reg = try self.getOrCreateVarRegister(var_name, value_reg.type_);
+                    _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = value_reg } }, null);
+                }
 
                 // Update symbol table
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);

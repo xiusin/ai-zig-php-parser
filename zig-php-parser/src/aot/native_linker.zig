@@ -1334,20 +1334,6 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "\");\n");
 
         // 变量声明
-        
-        // 全局变量读取（在函数开始时）
-        if (func.global_vars.items.len > 0) {
-            try code.appendSlice(self.allocator, "    // 读取全局变量\n");
-            for (func.global_vars.items) |var_name| {
-                // 去掉 $ 前缀
-                const clean_name = if (std.mem.startsWith(u8, var_name, "$")) var_name[1..] else var_name;
-                try code.appendSlice(self.allocator, "    var ");
-                try code.appendSlice(self.allocator, clean_name);
-                try code.appendSlice(self.allocator, " = getGlobalVar(\"");
-                try code.appendSlice(self.allocator, var_name);
-                try code.appendSlice(self.allocator, "\");\n");
-            }
-        }
 
         // 收集寄存器信息
         var all_registers = std.AutoHashMap(usize, IR.Type).init(self.allocator);
@@ -1914,20 +1900,6 @@ pub const NativeLinker = struct {
             if (block.terminator) |term| {
                 switch (term) {
                     .ret => |ret_val| {
-                        // 写回全局变量（在 cleanup 之前）
-                        if (func.global_vars.items.len > 0) {
-                            try code.appendSlice(self.allocator, "\n    // 写回全局变量\n");
-                            for (func.global_vars.items) |var_name| {
-                                // 去掉 $ 前缀
-                                const clean_name = if (std.mem.startsWith(u8, var_name, "$")) var_name[1..] else var_name;
-                                try code.appendSlice(self.allocator, "    try setGlobalVar(\"");
-                                try code.appendSlice(self.allocator, var_name);
-                                try code.appendSlice(self.allocator, "\", ");
-                                try code.appendSlice(self.allocator, clean_name);
-                                try code.appendSlice(self.allocator, ");\n");
-                            }
-                        }
-                        
                         // 在return之前执行cleanup，但跳过即将返回的寄存器
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
@@ -5642,6 +5614,19 @@ pub const NativeLinker = struct {
             },
             .clear_exception => {
                 try writer.writeAll("    runtime.clearException();\n");
+            },
+            .global_get => |op| {
+                // 从全局表读取变量
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    try writer.print("    reg_{d} = getGlobalVar(\"{s}\");\n", .{ reg.id, op.name });
+                }
+            },
+            .global_set => |op| {
+                // 写入全局表
+                if (op.value) |val| {
+                    try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ op.name, val.id });
+                }
             },
             .cast => |op| {
                 // cast: 类型转换

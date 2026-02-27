@@ -717,6 +717,12 @@ pub const Instruction = struct {
         /// Get type tag of PHP value
         get_type: UnaryOp,
 
+        // ============ Global Variable Operations ============
+        /// Get global variable
+        global_get: GlobalVarOp,
+        /// Set global variable
+        global_set: GlobalVarOp,
+
         // ============ PHP Array Operations ============
         /// Create new array
         array_new: ArrayNewOp,
@@ -911,6 +917,14 @@ pub const Instruction = struct {
         value: Register,
         from_type: Type,
         to_type: Type,
+    };
+
+    /// Global variable operation
+    pub const GlobalVarOp = struct {
+        /// Variable name (with $ prefix)
+        name: []const u8,
+        /// Value register (for global_set)
+        value: ?Register = null,
     };
 
     /// Runtime type check
@@ -1375,6 +1389,16 @@ pub const IRPrinter = struct {
             .move => |op| try self.print("move {any}", .{op.operand}),
             .type_check => |op| try self.print("type_check {any} is {any}", .{ op.value, op.expected_type }),
             .get_type => |op| try self.print("get_type {any}", .{op.operand}),
+
+            // Global variable operations
+            .global_get => |op| try self.print("global.get {s}", .{op.name}),
+            .global_set => |op| {
+                if (op.value) |val| {
+                    try self.print("global.set {s} = {any}", .{ op.name, val });
+                } else {
+                    try self.print("global.set {s}", .{op.name});
+                }
+            },
 
             // Array operations
             .array_new => |op| try self.print("array.new capacity={d}", .{op.capacity}),

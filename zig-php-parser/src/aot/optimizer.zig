@@ -2856,6 +2856,13 @@ pub const IROptimizer = struct {
             .try_begin, .try_end, .get_exception, .clear_exception => {},
             .mutex_lock, .mutex_unlock, .mutex_new => {},
             .catch_ => {},
+            // Global variable operations
+            .global_get => {},
+            .global_set => |op| {
+                if (op.value) |val| {
+                    try self.used_registers.put(val.id, {});
+                }
+            },
             // Concurrency operations
             .go_spawn => |op| {
                 for (op.args) |arg| {
@@ -2927,6 +2934,10 @@ pub const IROptimizer = struct {
             .strlen, .array_count => false,
             .instanceof => false,
             .implements_interface => false,
+
+            // Global variable operations
+            .global_get => false,
+            .global_set => true,
 
             // Operations with side effects
             .store => true,
