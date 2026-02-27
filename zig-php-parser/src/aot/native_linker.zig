@@ -4939,60 +4939,20 @@ pub const NativeLinker = struct {
                         types.get(op.operand.id) orelse op.operand.type_
                     else
                         op.operand.type_;
-                    const result_corrected = if (self.current_register_types) |types|
-                        types.get(reg.id) orelse reg.type_
-                    else
-                        reg.type_;
 
                     const operand_type_tag = @as(std.meta.Tag(IR.Type), operand_corrected);
-                    const type_tag = @as(std.meta.Tag(IR.Type), result_corrected);
                     
-                    // 检查寄存器的实际声明类型（不是推断类型）
-                    const actual_result_type = @as(std.meta.Tag(IR.Type), reg.type_);
-                    
-                    std.debug.print("  operand_type_tag={s}, type_tag={s}, actual_result_type={s}\n", .{
-                        @tagName(operand_type_tag), @tagName(type_tag), @tagName(actual_result_type)
-                    });
-
-                    // 如果实际类型是 php_value，不要生成 .toBool()
-                    if (actual_result_type == .php_value) {
-                        std.debug.print("  -> using php_value path\n", .{});
-                        if (operand_type_tag == .php_value) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_not(reg_{d});\n", .{op.operand.id});
-                        } else if (operand_type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(!reg_{d});\n", .{op.operand.id});
-                        } else if (operand_type_tag == .i64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d} == 0);\n", .{op.operand.id});
-                        } else {
-                            try writer.print("    reg_{d} = try runtime.php_not(", .{reg.id});
-                            try self.writePhpValueExpr(writer, operand_type_tag, op.operand.id);
-                            try writer.writeAll(");\n");
-                        }
-                    } else if (type_tag == .bool) {
-                        std.debug.print("  -> using bool path\n", .{});
-                        if (operand_type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "!reg_{d};\n", .{op.operand.id});
-                        } else if (operand_type_tag == .php_value) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_not(reg_{d})).toBool();\n", .{op.operand.id});
-                        } else if (operand_type_tag == .i64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} == 0;\n", .{op.operand.id});
-                        } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_not(reg_{d})).toBool();\n", .{op.operand.id});
-                        }
+                    // 所有寄存器都声明为 runtime.Value，所以总是生成返回 Value 的代码
+                    if (operand_type_tag == .php_value) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_not(reg_{d});\n", .{op.operand.id});
+                    } else if (operand_type_tag == .bool) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(!reg_{d});\n", .{op.operand.id});
+                    } else if (operand_type_tag == .i64) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d} == 0);\n", .{op.operand.id});
                     } else {
-                        std.debug.print("  -> using default path\n", .{});
-                        // Result is Value or something else
-                        if (operand_type_tag == .php_value) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_not(reg_{d});\n", .{op.operand.id});
-                        } else if (operand_type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(!reg_{d});\n", .{op.operand.id});
-                        } else if (operand_type_tag == .i64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d} == 0);\n", .{op.operand.id});
-                        } else {
-                            try writer.print("    reg_{d} = try runtime.php_not(", .{reg.id});
-                            try self.writePhpValueExpr(writer, operand_type_tag, op.operand.id);
-                            try writer.writeAll(");\n");
-                        }
+                        try writer.print("    reg_{d} = try runtime.php_not(", .{reg.id});
+                        try self.writePhpValueExpr(writer, operand_type_tag, op.operand.id);
+                        try writer.writeAll(");\n");
                     }
                 }
             },
