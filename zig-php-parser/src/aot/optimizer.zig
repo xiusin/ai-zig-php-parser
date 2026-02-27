@@ -2766,6 +2766,10 @@ pub const IROptimizer = struct {
                 try self.used_registers.put(op.inner_key.id, {});
                 try self.used_registers.put(op.value.id, {});
             },
+            .array_ensure => |op| {
+                try self.used_registers.put(op.array.id, {});
+                try self.used_registers.put(op.key.id, {});
+            },
             .array_push => |op| {
                 try self.used_registers.put(op.array.id, {});
                 try self.used_registers.put(op.value.id, {});
@@ -2942,7 +2946,7 @@ pub const IROptimizer = struct {
             // Operations with side effects
             .store => true,
             .call, .call_indirect => true,
-            .array_new, .array_get, .array_set, .array_set_nested, .array_push, .array_key_exists, .array_unset => true,
+            .array_new, .array_get, .array_set, .array_set_nested, .array_ensure, .array_push, .array_key_exists, .array_unset => true,
             .concat, .interpolate => true,
             .new_object, .property_get, .property_set, .method_call, .clone => true,
             .static_method_call, .static_property_get, .static_property_set => true,

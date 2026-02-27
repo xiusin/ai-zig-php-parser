@@ -732,6 +732,8 @@ pub const Instruction = struct {
         array_set: ArraySetOp,
         /// Set nested array element (supports auto-vivification)
         array_set_nested: ArraySetNestedOp,
+        /// Ensure array element exists (auto-vivification), returns the sub-array
+        array_ensure: ArrayGetOp,
         /// Push to array
         array_push: ArrayPushOp,
         /// Get array count
@@ -1405,6 +1407,7 @@ pub const IRPrinter = struct {
             .array_get => |op| try self.print("array.get {any}[{any}]", .{ op.array, op.key }),
             .array_set => |op| try self.print("array.set {any}[{any}] = {any}", .{ op.array, op.key, op.value }),
             .array_set_nested => |op| try self.print("array.set_nested {any}[{any}][{any}] = {any}", .{ op.outer_array, op.outer_key, op.inner_key, op.value }),
+            .array_ensure => |op| try self.print("array.ensure {any}[{any}]", .{ op.array, op.key }),
             .array_push => |op| try self.print("array.push {any} <- {any}", .{ op.array, op.value }),
             .array_count => |op| try self.print("array.count {any}", .{op.operand}),
             .array_key_exists => |op| try self.print("array.key_exists {any}[{any}]", .{ op.array, op.key }),

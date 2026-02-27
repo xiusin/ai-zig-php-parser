@@ -2016,39 +2016,60 @@ pub const IRGenerator = struct {
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
             },
             .array_access => {
-                // 检查是否是嵌套的 array_access
-                const target_expr = self.getNode(target_node.data.array_access.target);
-                const is_nested = target_expr != null and target_expr.?.tag == .array_access;
+                // 递归收集所有嵌套的键
+                var keys: std.ArrayList(Register) = .empty;
+                defer keys.deinit(self.allocator);
                 
-                if (is_nested and target_node.data.array_access.index != null and target_expr.?.data.array_access.index != null) {
-                    // 嵌套数组赋值：$outer[$outer_key][$inner_key] = value
-                    const outer_array_reg = try self.generateExpression(target_expr.?.data.array_access.target);
-                    const outer_key_reg = try self.generateExpression(target_expr.?.data.array_access.index.?);
-                    const inner_key_reg = try self.generateExpression(target_node.data.array_access.index.?);
-                    
-                    _ = try self.emit(.{ .array_set_nested = .{
-                        .outer_array = outer_array_reg,
-                        .outer_key = outer_key_reg,
-                        .inner_key = inner_key_reg,
-                        .value = value_reg,
-                    } }, null);
-                } else {
-                    // 普通数组赋值
-                    const array_reg = try self.generateExpression(target_node.data.array_access.target);
-                    if (target_node.data.array_access.index) |idx| {
+                var current = target_node;
+                while (current.tag == .array_access) {
+                    if (current.data.array_access.index) |idx| {
                         const key_reg = try self.generateExpression(idx);
-                        _ = try self.emit(.{ .array_set = .{
-                            .array = array_reg,
-                            .key = key_reg,
-                            .value = value_reg,
-                        } }, null);
+                        try keys.insert(self.allocator, 0, key_reg); // 插入到开头，保持顺序
                     } else {
                         // $arr[] = value - push to array
-                        _ = try self.emit(.{ .array_push = .{
-                            .array = array_reg,
-                            .value = value_reg,
-                        } }, null);
+                        const array_reg = try self.generateExpression(current.data.array_access.target);
+                        _ = try self.emit(.{ .array_push = .{ .array = array_reg, .value = value_reg } }, null);
+                        return;
                     }
+                    
+                    const target_expr = self.getNode(current.data.array_access.target);
+                    if (target_expr == null or target_expr.?.tag != .array_access) break;
+                    current = target_expr.?;
+                }
+                
+                // 生成基础数组
+                const base_array = try self.generateExpression(current.data.array_access.target);
+                
+                if (keys.items.len == 1) {
+                    // 单层：$arr[$key] = value
+                    _ = try self.emit(.{ .array_set = .{ 
+                        .array = base_array, 
+                        .key = keys.items[0], 
+                        .value = value_reg 
+                    } }, null);
+                } else {
+                    // 多层：逐层使用 array_ensure 获取子数组
+                    // 对于 $arr[k0][k1][k2] = value:
+                    // temp1 = array_ensure(arr, k0)
+                    // temp2 = array_ensure(temp1, k1)
+                    // array_set(temp2, k2, value)
+                    
+                    var current_array = base_array;
+                    var i: usize = 0;
+                    while (i + 1 < keys.items.len) : (i += 1) {
+                        // 获取或创建子数组
+                        current_array = try self.emitWithResult(.{ .array_ensure = .{
+                            .array = current_array,
+                            .key = keys.items[i],
+                        } }, .php_value);
+                    }
+                    
+                    // 最后一层：设置实际值
+                    _ = try self.emit(.{ .array_set = .{
+                        .array = current_array,
+                        .key = keys.items[keys.items.len - 1],
+                        .value = value_reg,
+                    } }, null);
                 }
             },
             .property_access => {

@@ -5274,6 +5274,42 @@ pub const NativeLinker = struct {
                     \\
                 );
             },
+            .array_ensure => |op| {
+                // 确保数组元素存在（auto-vivification），返回子数组
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    try writer.writeAll(
+                        \\    {
+                        \\        const arr = reg_
+                    );
+                    try writer.print("{d}", .{op.array.id});
+                    try writer.writeAll(
+                        \\.asArray();
+                        \\        var elem = arr.getByValue(reg_
+                    );
+                    try writer.print("{d}", .{op.key.id});
+                    try writer.writeAll(
+                        \\);
+                        \\        if (elem == null or elem.?.isNull()) {
+                        \\            const new_arr = try runtime.PHPArray.init(runtime.runtime_allocator);
+                        \\            const new_val = runtime.Value.initArray(new_arr);
+                        \\            try arr.setByValue(runtime.runtime_allocator, reg_
+                    );
+                    try writer.print("{d}", .{op.key.id});
+                    try writer.writeAll(
+                        \\, new_val);
+                        \\            elem = new_val;
+                        \\        }
+                        \\        reg_
+                    );
+                    try writer.print("{d}", .{reg.id});
+                    try writer.writeAll(
+                        \\ = elem.?;
+                        \\    }
+                        \\
+                    );
+                }
+            },
             .array_push => |op| {
                 // 简化：所有寄存器都是 Value 类型，直接使用
                 try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
