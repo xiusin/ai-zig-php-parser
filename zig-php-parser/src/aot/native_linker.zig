@@ -2928,48 +2928,30 @@ pub const NativeLinker = struct {
                         const result_reg = inst.result orelse continue;
                         for (phi_op.incoming) |incoming| {
                             if (incoming.block == source_block) {
-                                // 使用修正后的类型
-                                const result_corrected = if (self.current_register_types) |types|
-                                    types.get(result_reg.id) orelse result_reg.type_
-                                else
-                                    result_reg.type_;
-                                const value_corrected = if (self.current_register_types) |types|
-                                    types.get(incoming.value.id) orelse incoming.value.type_
-                                else
-                                    incoming.value.type_;
+                                // 使用原始类型，不是推断类型
+                                const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
+                                const value_tag = @as(std.meta.Tag(IR.Type), incoming.value.type_);
 
-                                const result_tag = @as(std.meta.Tag(IR.Type), result_corrected);
-                                const value_tag = @as(std.meta.Tag(IR.Type), value_corrected);
-
-                                if (result_tag == value_tag) {
+                                if (result_tag == value_tag or result_tag == .php_value) {
+                                    // 类型匹配或结果是 php_value，直接赋值
                                     var src_buf: [32]u8 = undefined;
                                     const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
                                     try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
-                                } else if (result_tag == .php_value and value_tag == .i64) {
-                                    var src_buf: [128]u8 = undefined;
-                                    const src_wrapped = try self.getValueWrapper(&src_buf, incoming.value.id, value_tag);
-                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_wrapped });
-                                } else if (result_tag == .php_value and value_tag == .f64) {
-                                    var src_buf: [128]u8 = undefined;
-                                    const src_wrapped = try self.getValueWrapper(&src_buf, incoming.value.id, value_tag);
-                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_wrapped });
-                                } else if (result_tag == .php_value and value_tag == .bool) {
-                                    var src_buf: [128]u8 = undefined;
-                                    const src_wrapped = try self.getValueWrapper(&src_buf, incoming.value.id, value_tag);
-                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_wrapped });
-                                } else if (result_tag == .i64 and value_tag == .php_value) {
+                                } else if (value_tag == .php_value) {
+                                    // 从 php_value 转换到原生类型（只有当结果不是 php_value 时）
                                     var src_buf: [32]u8 = undefined;
                                     const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                                    try writer.print("            reg_{d} = {s}.toInt();\n", .{ result_reg.id, src_ref });
-                                } else if (result_tag == .f64 and value_tag == .php_value) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                                    try writer.print("            reg_{d} = {s}.toFloat();\n", .{ result_reg.id, src_ref });
-                                } else if (result_tag == .bool and value_tag == .php_value) {
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                                    try writer.print("            reg_{d} = {s}.toBool();\n", .{ result_reg.id, src_ref });
+                                    if (result_tag == .i64) {
+                                        try writer.print("            reg_{d} = {s}.toInt();\n", .{ result_reg.id, src_ref });
+                                    } else if (result_tag == .f64) {
+                                        try writer.print("            reg_{d} = {s}.toFloat();\n", .{ result_reg.id, src_ref });
+                                    } else if (result_tag == .bool) {
+                                        try writer.print("            reg_{d} = {s}.toBool();\n", .{ result_reg.id, src_ref });
+                                    } else {
+                                        try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
+                                    }
                                 } else {
+                                    // 原生类型之间的转换或包装
                                     var src_buf: [32]u8 = undefined;
                                     const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
                                     try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
@@ -9956,6 +9938,7 @@ pub const NativeLinker = struct {
     /// 生成PHI节点的赋值语句
     /// 在跳转到目标块之前，检查目标块是否有PHI节点，如果有则设置PHI结果
     fn generatePhiAssignments(self: *Self, writer: anytype, func: *const IR.Function, target_block: *const IR.BasicBlock, source_block_idx: usize) !void {
+        _ = self;
         // 用于结构化循环的 phi 赋值（20 个空格缩进）
         const source_block = func.blocks.items[source_block_idx];
 
@@ -9967,37 +9950,18 @@ pub const NativeLinker = struct {
                 // 查找来自当前块的incoming值
                 for (phi_op.incoming) |incoming| {
                     if (incoming.block == source_block) {
-                        // 使用修正后的类型
-                        const result_corrected = if (self.current_register_types) |types|
-                            types.get(result_reg.id) orelse result_reg.type_
-                        else
-                            result_reg.type_;
-                        const value_corrected = if (self.current_register_types) |types|
-                            types.get(incoming.value.id) orelse incoming.value.type_
-                        else
-                            incoming.value.type_;
+                        // 使用原始类型，不是推断类型
+                        // 因为寄存器声明是基于原始类型的
+                        const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
+                        const value_tag = @as(std.meta.Tag(IR.Type), incoming.value.type_);
 
-                        const result_tag = @as(std.meta.Tag(IR.Type), result_corrected);
-                        const value_tag = @as(std.meta.Tag(IR.Type), value_corrected);
-
-                        if (result_tag == value_tag) {
-                            // 类型匹配，直接赋值
+                        if (result_tag == value_tag or result_tag == .php_value) {
+                            // 类型匹配或结果是 php_value，直接赋值
                             try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
                         } else {
-                            // 需要类型转换
-                            if (result_tag == .php_value) {
-                                // 转换为 Value - 所有寄存器都是 Value，需要类型转换
-                                if (value_tag == .i64) {
-                                    try writer.print("                    reg_{d} = runtime.Value.initInt(reg_{d}.asInt());\n", .{ result_reg.id, incoming.value.id });
-                                } else if (value_tag == .f64) {
-                                    try writer.print("                    reg_{d} = runtime.Value.initFloat(reg_{d}.asFloat());\n", .{ result_reg.id, incoming.value.id });
-                                } else if (value_tag == .bool) {
-                                    try writer.print("                    reg_{d} = runtime.Value.initBool(reg_{d}.toBool());\n", .{ result_reg.id, incoming.value.id });
-                                } else {
-                                    try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
-                                }
-                            } else if (value_tag == .php_value) {
-                                // 从 Value 转换
+                            // 需要类型转换（只有当结果不是 php_value 时）
+                            if (value_tag == .php_value) {
+                                // 从 Value 转换到原生类型
                                 if (result_tag == .i64) {
                                     try writer.print("                    reg_{d} = reg_{d}.toInt();\n", .{ result_reg.id, incoming.value.id });
                                 } else if (result_tag == .f64) {
@@ -10008,7 +9972,7 @@ pub const NativeLinker = struct {
                                     try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
                                 }
                             } else {
-                                // 其他类型转换
+                                // 原生类型之间的转换
                                 try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
                             }
                         }

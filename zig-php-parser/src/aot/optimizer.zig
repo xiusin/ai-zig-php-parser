@@ -1779,27 +1779,41 @@ pub const IROptimizer = struct {
                 if (phi_op.incoming.len == 0) continue;
 
                 // 检查所有 incoming 值的类型
-                // 策略：如果有任何 i64，就特化为 i64（php_value 可以转换）
+                // 策略：只有当所有 incoming 值都是同一原生类型时才特化
                 var has_i64 = false;
                 var has_f64 = false;
                 var has_bool = false;
+                var has_php_value = false;
                 var has_other = false;
 
                 for (phi_op.incoming) |inc| {
                     const inc_type = @as(std.meta.Tag(IR.Type), inc.value.type_);
-                    if (inc_type == .i64) has_i64 = true else if (inc_type == .f64) has_f64 = true else if (inc_type == .bool) has_bool = true else if (inc_type != .php_value) has_other = true;
+                    if (inc_type == .i64) {
+                        has_i64 = true;
+                    } else if (inc_type == .f64) {
+                        has_f64 = true;
+                    } else if (inc_type == .bool) {
+                        has_bool = true;
+                    } else if (inc_type == .php_value) {
+                        has_php_value = true;
+                    } else {
+                        has_other = true;
+                    }
                 }
 
-                // 如果有原生类型且没有冲突的其他类型，特化
-                if (has_i64 and !has_f64 and !has_other) {
-                    phi_inst.result.?.type_ = .{ .i64 = {} };
-                    std.debug.print("  Specialized phi reg_{d} to i64\n", .{phi_inst.result.?.id});
-                } else if (has_f64 and !has_i64 and !has_other) {
-                    phi_inst.result.?.type_ = .{ .f64 = {} };
-                    std.debug.print("  Specialized phi reg_{d} to f64\n", .{phi_inst.result.?.id});
-                } else if (has_bool and !has_i64 and !has_f64 and !has_other) {
-                    phi_inst.result.?.type_ = .{ .bool = {} };
-                    std.debug.print("  Specialized phi reg_{d} to bool\n", .{phi_inst.result.?.id});
+                // 只有当所有 incoming 值都是同一原生类型时才特化
+                // 如果有 php_value，保持 php_value（不特化）
+                if (!has_php_value and !has_other) {
+                    if (has_i64 and !has_f64 and !has_bool) {
+                        phi_inst.result.?.type_ = .{ .i64 = {} };
+                        std.debug.print("  Specialized phi reg_{d} to i64\n", .{phi_inst.result.?.id});
+                    } else if (has_f64 and !has_i64 and !has_bool) {
+                        phi_inst.result.?.type_ = .{ .f64 = {} };
+                        std.debug.print("  Specialized phi reg_{d} to f64\n", .{phi_inst.result.?.id});
+                    } else if (has_bool and !has_i64 and !has_f64) {
+                        phi_inst.result.?.type_ = .{ .bool = {} };
+                        std.debug.print("  Specialized phi reg_{d} to bool\n", .{phi_inst.result.?.id});
+                    }
                 }
             }
         }
