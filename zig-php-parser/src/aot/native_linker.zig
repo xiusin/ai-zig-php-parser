@@ -4350,17 +4350,17 @@ pub const NativeLinker = struct {
             },
             .bit_and => |op| {
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} & reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() & reg_{d}.toInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                 }
             },
             .bit_or => |op| {
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} | reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() | reg_{d}.toInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                 }
             },
             .bit_xor => |op| {
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d} ^ reg_{d};\n", .{ op.lhs.id, op.rhs.id });
+                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() ^ reg_{d}.toInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                 }
             },
             .nop => {},
