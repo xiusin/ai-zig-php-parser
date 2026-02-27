@@ -5208,35 +5208,43 @@ pub const NativeLinker = struct {
             },
             .array_set_nested => |op| {
                 // 嵌套数组赋值，支持 auto-vivification
+                // 注意：outer_array 本身可能是 null（来自 array_get）
                 try writer.writeAll(
                     \\    {
-                    \\        const outer_arr = reg_
+                    \\        // 确保 outer_array 不是 null
+                    \\        var outer_val = reg_
                 );
                 try writer.print("{d}", .{op.outer_array.id});
                 try writer.writeAll(
-                    \\.asArray();
-                    \\        var inner = outer_arr.getByValue(reg_
+                    \\;
+                    \\        if (outer_val.isNull()) {
+                    \\            // outer_array 是 null，无法设置（这是三维+数组的情况）
+                    \\            // 跳过此操作，因为父级数组不存在
+                    \\        } else {
+                    \\            const outer_arr = outer_val.asArray();
+                    \\            var inner = outer_arr.getByValue(reg_
                 );
                 try writer.print("{d}", .{op.outer_key.id});
                 try writer.writeAll(
                     \\);
-                    \\        if (inner == null or inner.?.isNull()) {
-                    \\            const new_arr = try runtime.PHPArray.init(runtime.runtime_allocator);
-                    \\            const new_val = runtime.Value.initArray(new_arr);
-                    \\            try outer_arr.setByValue(runtime.runtime_allocator, reg_
+                    \\            if (inner == null or inner.?.isNull()) {
+                    \\                const new_arr = try runtime.PHPArray.init(runtime.runtime_allocator);
+                    \\                const new_val = runtime.Value.initArray(new_arr);
+                    \\                try outer_arr.setByValue(runtime.runtime_allocator, reg_
                 );
                 try writer.print("{d}", .{op.outer_key.id});
                 try writer.writeAll(
                     \\, new_val);
-                    \\            inner = new_val;
-                    \\        }
-                    \\        try inner.?.asArray().setByValue(runtime.runtime_allocator, reg_
+                    \\                inner = new_val;
+                    \\            }
+                    \\            try inner.?.asArray().setByValue(runtime.runtime_allocator, reg_
                 );
                 try writer.print("{d}", .{op.inner_key.id});
                 try writer.writeAll(", reg_");
                 try writer.print("{d}", .{op.value.id});
                 try writer.writeAll(
                     \\);
+                    \\        }
                     \\    }
                     \\
                 );
