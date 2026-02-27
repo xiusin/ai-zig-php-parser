@@ -1647,6 +1647,7 @@ pub const IROptimizer = struct {
 
         for (promotable_allocas.items) |alloca| {
             const defs = def_blocks.get(alloca).?;
+            
             // Compute IDF
             var idf = try self.computeIDF(defs.items, &dt);
             defer idf.deinit(self.allocator);
@@ -1968,17 +1969,16 @@ pub const IROptimizer = struct {
     fn computeIDF(self: *Self, defs: []const *BasicBlock, dt: *const Analysis.DominatorTree) !std.ArrayListUnmanaged(*BasicBlock) {
         var idf = std.ArrayListUnmanaged(*BasicBlock){};
 
-        // Priority Queue using level (higher level = deeper)
-        // We actually need to process by level for efficiency, but simple worklist is fine.
         var worklist = std.ArrayListUnmanaged(*BasicBlock){};
         defer worklist.deinit(self.allocator);
 
         var visited = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
         defer visited.deinit();
 
+        // 初始化 worklist，但不标记为 visited
+        // 这样如果 def 块在自己的 frontier 中（循环情况），可以被添加到 IDF
         for (defs) |def| {
             try worklist.append(self.allocator, def);
-            try visited.put(def, {});
         }
 
         var i: usize = 0;
