@@ -2174,9 +2174,18 @@ pub const IRGenerator = struct {
                         .return_type = .void,
                     } }, null);
                 } else {
-                    // 普通变量，直接存储
-                    const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
-                    _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+                    // 检查是否是全局变量或在 __main__ 函数中
+                    const is_global = self.global_vars.contains(var_name);
+                    const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                    
+                    if (is_global or is_main) {
+                        // 写入全局表
+                        _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = result_reg } }, null);
+                    } else {
+                        // 普通变量，直接存储
+                        const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
+                        _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+                    }
                 }
 
                 // Update symbol table
