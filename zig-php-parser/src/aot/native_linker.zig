@@ -518,7 +518,8 @@ pub const NativeLinker = struct {
             \\
             \\pub fn getGlobalVar(name: []const u8) runtime.Value {
             \\    if (!global_vars_initialized) return runtime.Value.initNull();
-            \\    return global_vars.get(name) orelse runtime.Value.initNull();
+            \\    const value = global_vars.get(name) orelse runtime.Value.initNull();
+            \\    return value.retain();
             \\}
             \\
             \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
