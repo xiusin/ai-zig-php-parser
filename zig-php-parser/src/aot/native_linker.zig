@@ -2710,7 +2710,19 @@ pub const NativeLinker = struct {
 
         // 根据类型生成条件表达式
         switch (type_tag) {
-            .bool => try writer.print("reg_{d}", .{reg_id}),
+            .bool => {
+                // 检查是否是 alloca
+                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                    alloca_regs.contains(reg_id)
+                else
+                    false;
+
+                if (is_alloca) {
+                    try writer.print("reg_{d}.*.toBool()", .{reg_id});
+                } else {
+                    try writer.print("reg_{d}.toBool()", .{reg_id});
+                }
+            },
             .i64 => try writer.print("(reg_{d} != 0)", .{reg_id}),
             .f64 => try writer.print("(reg_{d} != 0.0)", .{reg_id}),
             else => {
@@ -2823,12 +2835,11 @@ pub const NativeLinker = struct {
         writer: anytype,
         args: []const IR.Register,
     ) !void {
-        _ = self;
         for (args, 0..) |arg, i| {
             if (i > 0) try writer.writeAll(", ");
             
-            // 函数参数需要 Value 类型，直接使用寄存器（所有寄存器都是 Value）
-            try writer.print("reg_{d}", .{arg.id});
+            // 使用 writeRegRef 处理 alloca 解引用
+            try self.writeRegRef(writer, arg.id);
         }
     }
 
@@ -4204,7 +4215,8 @@ pub const NativeLinker = struct {
             },
             .type_check => |op| {
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.isNull();\n", .{op.value.id});
+                    // 所有寄存器都是 Value 类型，包装成 Value.initBool
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d}.isNull());\n", .{op.value.id});
                 }
             },
             .select => |op| {
@@ -4219,7 +4231,8 @@ pub const NativeLinker = struct {
                     } else {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         try writer.writeAll("    if (");
-                        try writer.print("reg_{d}", .{op.cond.id});
+                        // 使用 writeConditionExpr 处理条件
+                        try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
                         try writer.writeAll(") {\n");
                         
                         var then_buf: [32]u8 = undefined;
@@ -4750,13 +4763,11 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
 
-                        // 特殊处理 max/min 单参数（数组）
-                        if ((std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) and op.args.len == 1) {
-                            const arg = op.args[0];
-                            const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                        // 特殊处理 max/min：使用数组参数
+                        if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            try self.writePhpValueExpr(writer, arg_type, arg.id);
-                            try writer.writeAll(", runtime.Value.initNull());\n");
+                            try self.writeValueArgsArray(writer, op.args);
+                            try writer.writeAll(");\n");
                         } else if (self.functionNeedsAllocator(op.func_name)) {
                             if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
                                 if (op.args.len == 0) {
@@ -5698,7 +5709,10 @@ pub const NativeLinker = struct {
 
     /// 尝试生成结构化控制流（新版本，使用 ArrayList writer）
     fn tryGenerateStructuredControlFlowNew(self: *Self, writer: anytype, func: *const IR.Function, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void)) !bool {
-        _ = alloca_regs;
+        // 保存并设置 alloca_regs（用于 writeRegRef）
+        const prev_alloca_regs = self.current_alloca_regs;
+        self.current_alloca_regs = alloca_regs;
+        defer self.current_alloca_regs = prev_alloca_regs;
 
         std.debug.print("tryGenerateStructuredControlFlowNew for {s}\n", .{func.name});
 
@@ -10653,24 +10667,8 @@ pub const NativeLinker = struct {
                         }
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            // 使用 current_register_types 获取真实类型
-                            const arg_type = if (self.current_register_types) |types| blk: {
-                                if (types.get(arg.id)) |corrected_type| {
-                                    break :blk @as(std.meta.Tag(IR.Type), corrected_type);
-                                }
-                                break :blk @as(std.meta.Tag(IR.Type), arg.type_);
-                            } else @as(std.meta.Tag(IR.Type), arg.type_);
-                            
-                            if (arg_type == .i64) {
-                                // 所有寄存器都是 Value，直接使用
-                                try writer.print("reg_{d}", .{arg.id});
-                            } else if (arg_type == .f64) {
-                                try writer.print("reg_{d}", .{arg.id});
-                            } else if (arg_type == .bool) {
-                                try writer.print("reg_{d}", .{arg.id});
-                            } else {
-                                try self.writeRegRef(writer, arg.id);
-                            }
+                            // 统一使用 writeRegRef 处理 alloca 解引用
+                            try self.writeRegRef(writer, arg.id);
                         }
                         if (needs_alloc) {
                             try writer.writeAll(", runtime.runtime_allocator");
@@ -10696,24 +10694,8 @@ pub const NativeLinker = struct {
                             }
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
-                                // 使用 current_register_types 获取真实类型
-                                const arg_type = if (self.current_register_types) |types| blk: {
-                                    if (types.get(arg.id)) |corrected_type| {
-                                        break :blk @as(std.meta.Tag(IR.Type), corrected_type);
-                                    }
-                                    break :blk @as(std.meta.Tag(IR.Type), arg.type_);
-                                } else @as(std.meta.Tag(IR.Type), arg.type_);
-                                
-                                if (arg_type == .i64) {
-                                    // 所有寄存器都是 Value，直接使用
-                                    try writer.print("reg_{d}", .{arg.id});
-                                } else if (arg_type == .f64) {
-                                    try writer.print("reg_{d}", .{arg.id});
-                                } else if (arg_type == .bool) {
-                                    try writer.print("reg_{d}", .{arg.id});
-                                } else {
-                                    try self.writeRegRef(writer, arg.id);
-                                }
+                                // 统一使用 writeRegRef 处理 alloca 解引用
+                                try self.writeRegRef(writer, arg.id);
                             }
                             if (in_try_block) {
                                 try writer.writeAll("}, runtime.runtime_allocator) catch runtime.Value.initNull();\n");
@@ -10730,33 +10712,8 @@ pub const NativeLinker = struct {
                         try writer.print("        _ = try runtime.{s}(", .{runtime_name});
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            // 使用 current_register_types 获取真实类型
-                            const arg_type = if (self.current_register_types) |types| blk: {
-                                if (types.get(arg.id)) |corrected_type| {
-                                    break :blk @as(std.meta.Tag(IR.Type), corrected_type);
-                                }
-                                break :blk @as(std.meta.Tag(IR.Type), arg.type_);
-                            } else @as(std.meta.Tag(IR.Type), arg.type_);
-                            
-                            if (arg_type == .i64) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                try writer.print("runtime.Value.initInt({s})", .{src_ref});
-                            } else if (arg_type == .f64) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                try writer.print("runtime.Value.initInt({s})", .{src_ref});
-                            } else if (arg_type == .f64) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                try writer.print("runtime.Value.initFloat({s})", .{src_ref});
-                            } else if (arg_type == .bool) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, arg.id);
-                                try writer.print("runtime.Value.initBool({s})", .{src_ref});
-                            } else {
-                                try self.writeRegRef(writer, arg.id);
-                            }
+                            // 统一使用 writeRegRef 处理 alloca 解引用
+                            try self.writeRegRef(writer, arg.id);
                         }
                         if (needs_alloc) {
                             try writer.writeAll(", runtime.runtime_allocator");
@@ -10770,18 +10727,8 @@ pub const NativeLinker = struct {
                             try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{op.func_name});
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
-                                // 转换基本类型为 Value
-                                const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
-                                if (arg_type == .i64) {
-                                    // 所有寄存器都是 Value，直接使用
-                                    try writer.print("reg_{d}", .{arg.id});
-                                } else if (arg_type == .f64) {
-                                    try writer.print("reg_{d}", .{arg.id});
-                                } else if (arg_type == .bool) {
-                                    try writer.print("reg_{d}", .{arg.id});
-                                } else {
-                                    try self.writeRegRef(writer, arg.id);
-                                }
+                                // 统一使用 writeRegRef 处理 alloca 解引用
+                                try self.writeRegRef(writer, arg.id);
                             }
                             try writer.writeAll("}, runtime.runtime_allocator);\n");
                         }

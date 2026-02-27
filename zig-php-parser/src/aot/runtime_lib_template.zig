@@ -3915,11 +3915,12 @@ pub fn php_ceil(val: Value) !Value {
 
 /// min - 最小值
 /// max - 最大值
-pub fn php_max(a: Value, b: Value) !Value {
-    // 如果 b 是 null，检查 a 是否是数组
-    if (b.isNull()) {
-        if (a.isArray()) {
-            const arr = a.asArray();
+pub fn php_max(args: []const Value) !Value {
+    if (args.len == 0) return Value.initInt(0);
+    if (args.len == 1) {
+        // 单参数：如果是数组，返回数组最大值
+        if (args[0].isArray()) {
+            const arr = args[0].asArray();
             if (arr.elements.packed_values.items.len == 0) return Value.initInt(0);
             
             var max_val = arr.elements.packed_values.items[0];
@@ -3930,22 +3931,26 @@ pub fn php_max(a: Value, b: Value) !Value {
             }
             return max_val;
         }
-        return a; // 单个值直接返回
+        return args[0];
     }
     
-    // 两个参数比较
-    if (a.isInt() and b.isInt()) {
-        return Value.initInt(@max(a.asInt(), b.asInt()));
+    // 多参数：找最大值
+    var max_val = args[0];
+    for (args[1..]) |val| {
+        if (val.toFloat() > max_val.toFloat()) {
+            max_val = val;
+        }
     }
-    return Value.initFloat(@max(a.toFloat(), b.toFloat()));
+    return max_val;
 }
 
 /// min - 最小值
-pub fn php_min(a: Value, b: Value) !Value {
-    // 如果 b 是 null，检查 a 是否是数组
-    if (b.isNull()) {
-        if (a.isArray()) {
-            const arr = a.asArray();
+pub fn php_min(args: []const Value) !Value {
+    if (args.len == 0) return Value.initInt(0);
+    if (args.len == 1) {
+        // 单参数：如果是数组，返回数组最小值
+        if (args[0].isArray()) {
+            const arr = args[0].asArray();
             if (arr.elements.packed_values.items.len == 0) return Value.initInt(0);
             
             var min_val = arr.elements.packed_values.items[0];
@@ -3956,14 +3961,17 @@ pub fn php_min(a: Value, b: Value) !Value {
             }
             return min_val;
         }
-        return a; // 单个值直接返回
+        return args[0];
     }
     
-    // 两个参数比较
-    if (a.isInt() and b.isInt()) {
-        return Value.initInt(@min(a.asInt(), b.asInt()));
+    // 多参数：找最小值
+    var min_val = args[0];
+    for (args[1..]) |val| {
+        if (val.toFloat() < min_val.toFloat()) {
+            min_val = val;
+        }
     }
-    return Value.initFloat(@min(a.toFloat(), b.toFloat()));
+    return min_val;
 }
 
 /// sin - 正弦
