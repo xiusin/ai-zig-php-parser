@@ -2369,13 +2369,19 @@ pub const NativeLinker = struct {
             if (has_do_while and has_switch and has_match and has_recursive_call and has_foreach) break;
         }
 
-        // 如果有特殊控制流，直接跳过结构化尝试
-        // foreach 嵌套在其他循环中时也使用状态机（结构化生成器无法正确处理）
-        const has_nested_foreach = has_foreach and func.blocks.items.len > 10; // 简单启发式
-        if (!func.has_multi_level_break and !has_do_while and !has_switch and !has_match and !has_recursive_call and !has_nested_foreach) {
-            const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
-            if (structured_result) {
-                return;
+        // 临时禁用结构化控制流生成（AOT-CODEGEN-002）
+        // 问题：结构化生成器在循环中错误地将顺序 if 语句识别为嵌套结构
+        // 导致在第二个 if 的 then 分支中插入 continue，跳过后续代码
+        // 解决方案：使用状态机模式，虽然代码冗长但正确
+        if (false) {
+            // 如果有特殊控制流，直接跳过结构化尝试
+            // foreach 嵌套在其他循环中时也使用状态机（结构化生成器无法正确处理）
+            const has_nested_foreach = has_foreach and func.blocks.items.len > 10; // 简单启发式
+            if (!func.has_multi_level_break and !has_do_while and !has_switch and !has_match and !has_recursive_call and !has_nested_foreach) {
+                const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
+                if (structured_result) {
+                    return;
+                }
             }
         }
 
