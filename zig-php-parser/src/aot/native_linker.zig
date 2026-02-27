@@ -4445,7 +4445,7 @@ pub const NativeLinker = struct {
             },
             .has_arg => |op| {
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "(args.len > {d}) and !args[{d}].isMissing();\n", .{ op.index, op.index });
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool((args.len > {d}) and !args[{d}].isMissing());\n", .{ op.index, op.index });
                 }
             },
             .eq => |op| {
