@@ -2411,14 +2411,29 @@ pub const NativeLinker = struct {
                 try writer.print("            {d} => {{ // {s}\n", .{ block_idx, block.label });
             }
 
-            // 生成块内指令
-            for (block.instructions.items) |inst| {
-                try code.appendSlice(self.allocator, "    ");
+            // 收集所有 phi 节点
+            var phi_instructions = std.ArrayList(*const IR.Instruction).initCapacity(self.allocator, 0) catch unreachable;
+            defer phi_instructions.deinit(self.allocator);
+            
+            var first_non_phi_idx: usize = 0;
+            for (block.instructions.items, 0..) |inst, idx| {
                 if (inst.op == .phi) {
-                    try self.generatePhiInstructionStateMachine(code, inst, func);
+                    try phi_instructions.append(self.allocator, inst);
                 } else {
-                    try self.generateInstructionSimple(code, inst);
+                    first_non_phi_idx = idx;
+                    break;
                 }
+            }
+            
+            // 如果有 phi 节点，生成并行赋值
+            if (phi_instructions.items.len > 0) {
+                try self.generatePhiInstructionsParallel(code, phi_instructions.items, func);
+            }
+
+            // 生成非 phi 指令
+            for (block.instructions.items[first_non_phi_idx..]) |inst| {
+                try code.appendSlice(self.allocator, "    ");
+                try self.generateInstructionSimple(code, inst);
             }
 
             // 生成终止指令
@@ -2446,6 +2461,92 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "            else => unreachable,\n");
         try code.appendSlice(self.allocator, "        }\n");
         try code.appendSlice(self.allocator, "    }\n");
+    }
+
+    /// 生成多个 phi 指令的并行赋值（状态机版本）
+    fn generatePhiInstructionsParallel(
+        self: *Self,
+        code: *std.ArrayList(u8),
+        phi_instructions: []*const IR.Instruction,
+        func: *const IR.Function,
+    ) !void {
+        var writer = code.writer(self.allocator);
+        
+        // 收集所有 phi 节点的信息
+        const PhiInfo = struct {
+            result_reg: IR.Register,
+            incoming: []const IR.Instruction.PhiIncoming,
+        };
+        
+        var phi_infos = std.ArrayList(PhiInfo).initCapacity(self.allocator, phi_instructions.len) catch unreachable;
+        defer phi_infos.deinit(self.allocator);
+        
+        for (phi_instructions) |inst| {
+            const result_reg = inst.result orelse continue;
+            try phi_infos.append(self.allocator, .{
+                .result_reg = result_reg,
+                .incoming = inst.op.phi.incoming,
+            });
+        }
+        
+        if (phi_infos.items.len == 0) return;
+        
+        // 收集所有可能的前驱块
+        var pred_blocks = std.AutoHashMap(u32, void).init(self.allocator);
+        defer pred_blocks.deinit();
+        
+        for (phi_infos.items) |info| {
+            for (info.incoming) |incoming| {
+                for (func.blocks.items, 0..) |block, idx| {
+                    if (block == incoming.block) {
+                        try pred_blocks.put(@intCast(idx), {});
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // 为每个前驱块生成并行赋值
+        try writer.writeAll("    switch (prev_block) {\n");
+        
+        var pred_iter = pred_blocks.keyIterator();
+        while (pred_iter.next()) |pred_idx_ptr| {
+            const pred_idx = pred_idx_ptr.*;
+            try writer.print("        {d} => {{\n", .{pred_idx});
+            
+            // 收集这个前驱块的所有赋值
+            var assignments = std.ArrayList(PhiAssignment).initCapacity(self.allocator, 0) catch unreachable;
+            defer assignments.deinit(self.allocator);
+            
+            for (phi_infos.items) |info| {
+                for (info.incoming) |incoming| {
+                    var incoming_idx: ?u32 = null;
+                    for (func.blocks.items, 0..) |block, idx| {
+                        if (block == incoming.block) {
+                            incoming_idx = @intCast(idx);
+                            break;
+                        }
+                    }
+                    if (incoming_idx) |idx| {
+                        if (idx == pred_idx) {
+                            try assignments.append(self.allocator, .{
+                                .result = info.result_reg,
+                                .value = incoming.value,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // 使用并行赋值
+            try self.generatePhiAssignmentsParallel(writer, assignments.items, "            ");
+            
+            try writer.writeAll("        },\n");
+        }
+        
+        try writer.writeAll("        else => unreachable,\n");
+        try writer.writeAll("    }\n");
     }
 
     fn generatePhiInstructionStateMachine(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction, func: *const IR.Function) !void {
