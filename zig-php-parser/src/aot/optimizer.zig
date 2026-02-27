@@ -2067,6 +2067,10 @@ pub const IROptimizer = struct {
         }
 
         // 2. Process Instructions
+        // 记录每个 alloca 在当前块中是否有 store
+        var has_store_in_block = std.AutoHashMap(*Instruction, bool).init(self.allocator);
+        defer has_store_in_block.deinit();
+
         for (block.instructions.items) |inst| {
             switch (inst.op) {
                 .load => |op| {
@@ -2109,6 +2113,9 @@ pub const IROptimizer = struct {
                         }
 
                         try stack.?.append(self.allocator, op.value);
+                        
+                        // 标记当前块有 store
+                        try has_store_in_block.put(alloca, true);
 
                         // Remove store
                         inst.op = .nop;
@@ -2128,7 +2135,44 @@ pub const IROptimizer = struct {
 
                     if (current_values.getPtr(alloca)) |stack| {
                         if (stack.items.len > 0) {
-                            const val = stack.items[stack.items.len - 1];
+                            var val = stack.items[stack.items.len - 1];
+                            
+                            // 修复：如果当前块有 store，使用 store 的值
+                            // 否则，如果栈顶是 phi 节点的结果，使用第一个非 phi 值
+                            const has_store = has_store_in_block.get(alloca) orelse false;
+                            if (!has_store and stack.items.len > 1) {
+                                // 从栈顶往下找第一个非 phi 值
+                                var idx = stack.items.len - 1;
+                                while (idx > 0) : (idx -= 1) {
+                                    const candidate = stack.items[idx];
+                                    
+                                    // 检查是否是 phi 节点的结果
+                                    var is_phi_result = false;
+                                    var phi_it = new_phis.iterator();
+                                    while (phi_it.next()) |phi_entry| {
+                                        var phi_map = phi_entry.value_ptr;
+                                        if (phi_map.get(alloca)) |check_phi_inst| {
+                                            if (check_phi_inst.result) |phi_res| {
+                                                if (candidate.id == phi_res.id) {
+                                                    is_phi_result = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (!is_phi_result) {
+                                        // 找到非 phi 值
+                                        if (idx < stack.items.len - 1) {
+                                            val = candidate;
+                                            std.debug.print("  Using non-phi value: reg_{d} (skipped {d} phi nodes)\n", .{ val.id, stack.items.len - 1 - idx });
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            std.debug.print("  Adding phi incoming: block_{d} -> block_{d}, reg_{d} (stack depth: {d})\n", .{ block.index, succ.index, val.id, stack.items.len });
 
                             // Add incoming value to phi
                             // We need to reallocate the incoming slice
@@ -2142,17 +2186,21 @@ pub const IROptimizer = struct {
                             if (old_incoming.len > 0) self.allocator.free(old_incoming);
 
                             phi_inst.op.phi.incoming = new_incoming;
+                        } else {
+                            std.debug.print("  WARNING: Empty stack for alloca in block_{d} -> block_{d}\n", .{ block.index, succ.index });
                         }
+                    } else {
+                        std.debug.print("  WARNING: No stack for alloca in block_{d} -> block_{d}\n", .{ block.index, succ.index });
                     }
                 }
             }
         }
 
-        // 4. Recurse
-        if (dt.children[block.index].items.len > 0) {
-            for (dt.children[block.index].items) |child| {
-                try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map);
-            }
+        // 4. Recurse to all dominated blocks (not just direct children)
+        // 修复：应该递归到所有被当前块支配的块，包括 CFG 后继
+        // 使用支配树的子节点来确保正确的遍历顺序
+        for (dt.children[block.index].items) |child| {
+            try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map);
         }
 
         // 5. Pop Stacks
