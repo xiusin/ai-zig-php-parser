@@ -225,6 +225,8 @@ pub const Function = struct {
     next_register_id: u32,
     /// Whether this function has multi-level break/continue (requires state machine)
     has_multi_level_break: bool = false,
+    /// Global variables used in this function
+    global_vars: std.ArrayListUnmanaged([]const u8) = .{},
 
     const Self = @This();
 
@@ -252,6 +254,7 @@ pub const Function = struct {
             self.allocator.destroy(block);
         }
         self.blocks.deinit(self.allocator);
+        self.global_vars.deinit(self.allocator);
     }
 
     /// Add a parameter

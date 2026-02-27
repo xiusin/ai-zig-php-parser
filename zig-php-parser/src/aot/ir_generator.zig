@@ -92,6 +92,8 @@ pub const IRGenerator = struct {
     try_stack: std.ArrayListUnmanaged(TryContext),
     /// 常量缓存：class_name::const_name -> ConstantValue
     constant_cache: std.StringHashMapUnmanaged(TypeDef.ConstantValue),
+    /// 全局变量集合（在函数中通过 global 声明的变量）
+    global_vars: std.StringHashMapUnmanaged(void),
 
     const Self = @This();
 
@@ -137,6 +139,7 @@ pub const IRGenerator = struct {
             .loop_stack = .{},
             .try_stack = .{},
             .constant_cache = .{},
+            .global_vars = .{},
         };
     }
 
@@ -149,6 +152,7 @@ pub const IRGenerator = struct {
         self.loop_stack.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
         self.constant_cache.deinit(self.allocator);
+        self.global_vars.deinit(self.allocator);
     }
 
     fn flushEntryAllocas(self: *Self, entry_block: *BasicBlock) !void {
@@ -565,9 +569,8 @@ pub const IRGenerator = struct {
             .list_empty => {},
             .block => try self.generateBlock(node),
             .const_decl => try self.generateConstDecl(node),
-            // global_stmt和static_stmt暂时跳过，因为AST可能未正确初始化data
-            .global_stmt => {},
-            .static_stmt => {},
+            .global_stmt => try self.generateGlobalStmt(node),
+            .static_stmt => try self.generateStaticStmt(node),
             else => {
                 _ = try self.generateExpression(index);
             },
@@ -656,6 +659,14 @@ pub const IRGenerator = struct {
 
         // Check for unused variables
         try self.checkUnusedVariables();
+
+        // 将全局变量列表添加到函数
+        var global_it = self.global_vars.keyIterator();
+        while (global_it.next()) |var_name| {
+            try func.global_vars.append(self.allocator, var_name.*);
+        }
+        // 清空全局变量集合，为下一个函数准备
+        self.global_vars.clearRetainingCapacity();
 
         // Restore previous context
         self.var_registers.deinit(self.allocator);
@@ -2238,8 +2249,8 @@ pub const IRGenerator = struct {
             const var_node = self.getNode(var_idx) orelse continue;
             if (var_node.tag == .variable) {
                 const var_name = self.getString(var_node.data.variable.name);
-                // Mark variable as global reference
-                _ = try self.getOrCreateVarRegister(var_name, .php_value);
+                // 标记为全局变量
+                try self.global_vars.put(self.allocator, var_name, {});
             }
         }
     }

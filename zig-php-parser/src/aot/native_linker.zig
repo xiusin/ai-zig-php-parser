@@ -512,11 +512,36 @@ pub const NativeLinker = struct {
         // 生成主入口
         try writer.writeAll(
             \\
+            \\// 全局变量表
+            \\var global_vars: std.StringHashMap(runtime.Value) = undefined;
+            \\var global_vars_initialized: bool = false;
+            \\
+            \\pub fn getGlobalVar(name: []const u8) runtime.Value {
+            \\    if (!global_vars_initialized) return runtime.Value.initNull();
+            \\    return global_vars.get(name) orelse runtime.Value.initNull();
+            \\}
+            \\
+            \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
+            \\    if (!global_vars_initialized) return;
+            \\    try global_vars.put(name, value);
+            \\}
+            \\
             \\pub fn main() !void {
             \\    const allocator = std.heap.page_allocator;
             \\
             \\    runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
+            \\
+            \\    // 初始化全局变量表
+            \\    global_vars = std.StringHashMap(runtime.Value).init(allocator);
+            \\    global_vars_initialized = true;
+            \\    defer {
+            \\        var it = global_vars.valueIterator();
+            \\        while (it.next()) |val| {
+            \\            val.release(runtime.runtime_allocator);
+            \\        }
+            \\        global_vars.deinit();
+            \\    }
             \\
             \\    // 初始化静态字符串池（一次性开销）
             \\    initStaticStrings();
@@ -1309,6 +1334,20 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "\");\n");
 
         // 变量声明
+        
+        // 全局变量读取（在函数开始时）
+        if (func.global_vars.items.len > 0) {
+            try code.appendSlice(self.allocator, "    // 读取全局变量\n");
+            for (func.global_vars.items) |var_name| {
+                // 去掉 $ 前缀
+                const clean_name = if (std.mem.startsWith(u8, var_name, "$")) var_name[1..] else var_name;
+                try code.appendSlice(self.allocator, "    var ");
+                try code.appendSlice(self.allocator, clean_name);
+                try code.appendSlice(self.allocator, " = getGlobalVar(\"");
+                try code.appendSlice(self.allocator, var_name);
+                try code.appendSlice(self.allocator, "\");\n");
+            }
+        }
 
         // 收集寄存器信息
         var all_registers = std.AutoHashMap(usize, IR.Type).init(self.allocator);
@@ -1875,6 +1914,20 @@ pub const NativeLinker = struct {
             if (block.terminator) |term| {
                 switch (term) {
                     .ret => |ret_val| {
+                        // 写回全局变量（在 cleanup 之前）
+                        if (func.global_vars.items.len > 0) {
+                            try code.appendSlice(self.allocator, "\n    // 写回全局变量\n");
+                            for (func.global_vars.items) |var_name| {
+                                // 去掉 $ 前缀
+                                const clean_name = if (std.mem.startsWith(u8, var_name, "$")) var_name[1..] else var_name;
+                                try code.appendSlice(self.allocator, "    try setGlobalVar(\"");
+                                try code.appendSlice(self.allocator, var_name);
+                                try code.appendSlice(self.allocator, "\", ");
+                                try code.appendSlice(self.allocator, clean_name);
+                                try code.appendSlice(self.allocator, ");\n");
+                            }
+                        }
+                        
                         // 在return之前执行cleanup，但跳过即将返回的寄存器
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
