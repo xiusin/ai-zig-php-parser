@@ -2367,24 +2367,10 @@ pub const IROptimizer = struct {
                 if (reg_rename_map.get(op.ptr.id)) |new_id| op.ptr.id = new_id;
                 if (reg_rename_map.get(op.value.id)) |new_id| op.value.id = new_id;
             },
-            .phi => |phi_op| {
-                // 更新 PHI incoming 值（需要重新分配数组）
-                const old_incoming = phi_op.incoming;
-                if (old_incoming.len > 0) {
-                    const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len);
-                    for (old_incoming, 0..) |inc, i| {
-                        var new_val = inc.value;
-                        if (reg_rename_map.get(inc.value.id)) |new_id| {
-                            new_val.id = new_id;
-                        }
-                        new_incoming[i] = .{
-                            .value = new_val,
-                            .block = inc.block,
-                        };
-                    }
-                    if (old_incoming.len > 0) self.allocator.free(old_incoming);
-                    inst.op = .{ .phi = .{ .incoming = new_incoming } };
-                }
+            .phi => {
+                // PHI 节点的 incoming 值不需要重命名
+                // 因为它们已经是正确的 SSA 值（在 renameVariables 中设置）
+                // 重命名会导致错误的值传播
             },
             .call => |op| {
                 // CallOp 使用 func_name 字符串，不需要重命名函数名
