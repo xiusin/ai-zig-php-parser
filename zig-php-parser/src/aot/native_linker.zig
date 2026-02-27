@@ -3982,9 +3982,11 @@ pub const NativeLinker = struct {
                     const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
 
                     if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(reg_{d}.asInt() - reg_{d}.asInt());\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_sub
+                        try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_sub(reg_{d}, reg_{d})).asInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d}.asFloat() - reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_sub
+                        try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_sub(reg_{d}, reg_{d})).asFloat());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else {
                         switch (result_tag) {
                             .php_value => {
@@ -4057,9 +4059,11 @@ pub const NativeLinker = struct {
                     const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
 
                     if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(reg_{d}.asInt() * reg_{d}.asInt());\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_mul
+                        try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_mul(reg_{d}, reg_{d})).asInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d}.asFloat() * reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_mul
+                        try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_mul(reg_{d}, reg_{d})).asFloat());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else {
                         switch (result_tag) {
                             .php_value => {
@@ -4132,9 +4136,11 @@ pub const NativeLinker = struct {
                     const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
 
                     if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(@divTrunc(reg_{d}.asInt(), reg_{d}.asInt()));\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_div
+                        try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_div(reg_{d}, reg_{d})).asInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d}.asFloat() / reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_div
+                        try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_div(reg_{d}, reg_{d})).asFloat());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else {
                         switch (result_tag) {
                             .php_value => {
@@ -4207,9 +4213,11 @@ pub const NativeLinker = struct {
                     const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
 
                     if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(@rem(reg_{d}.asInt(), reg_{d}.asInt()));\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_mod
+                        try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_mod(reg_{d}, reg_{d})).asInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(@mod(reg_{d}.asFloat(), reg_{d}.asFloat()));\n", .{ op.lhs.id, op.rhs.id });
+                        // 所有寄存器都是 Value 类型，必须使用 php_mod
+                        try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_mod(reg_{d}, reg_{d})).asFloat());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else {
                         switch (result_tag) {
                             .php_value => {
