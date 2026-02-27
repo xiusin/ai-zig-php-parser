@@ -6816,6 +6816,27 @@ pub const NativeLinker = struct {
                         try writer_.writeAll("} else {\n");
 
                         const else_target = @as(usize, cbr.else_block.index);
+                        
+                        // 如果 else_target 已经被访问，手动生成 phi 赋值
+                        if (visited.contains(else_target)) {
+                            const else_block = func_.blocks.items[else_target];
+                            for (else_block.instructions.items) |inst| {
+                                if (inst.op == .phi) {
+                                    const phi_op = inst.op.phi;
+                                    if (inst.result) |phi_res| {
+                                        // 查找来自当前块的 incoming
+                                        for (phi_op.incoming) |incoming| {
+                                            if (incoming.block == block) {
+                                                try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
+                                                try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
                         if (loop_.increment) |inc2| {
                             if (else_target == inc2 or else_target == loop_.header) {
                                 try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth + 1);
