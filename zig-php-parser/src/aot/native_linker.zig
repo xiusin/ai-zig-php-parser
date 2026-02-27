@@ -4965,25 +4965,11 @@ pub const NativeLinker = struct {
                 }
             },
             .array_set => |op| {
-                const key_type_tag = @as(std.meta.Tag(IR.Type), op.key.type_);
-                const value_type_tag = @as(std.meta.Tag(IR.Type), op.value.type_);
-
-                if (key_type_tag == .i64) {
-                    try writer.print(
-                        "    try reg_{d}.asArray().set(runtime.runtime_allocator, runtime.ArrayKey{{ .integer = reg_{d} }}, ",
-                        .{ op.array.id, op.key.id },
-                    );
-                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
-                    try writer.writeAll(");\n");
-                } else {
-                    // 假设是 Value 类型，使用 setByValue
-                    try writer.print(
-                        "    try reg_{d}.asArray().setByValue(runtime.runtime_allocator, reg_{d}, ",
-                        .{ op.array.id, op.key.id },
-                    );
-                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
-                    try writer.writeAll(");\n");
-                }
+                // 简化：所有寄存器都是 Value 类型，使用 setByValue
+                try writer.print(
+                    "    try reg_{d}.asArray().setByValue(runtime.runtime_allocator, reg_{d}, reg_{d});\n",
+                    .{ op.array.id, op.key.id, op.value.id },
+                );
             },
             .array_push => |op| {
                 // 简化：所有寄存器都是 Value 类型，直接使用
@@ -5004,20 +4990,11 @@ pub const NativeLinker = struct {
                 }
             },
             .array_unset => |op| {
-                const key_type = self.getInferredRegType(op.key.id, op.key.type_);
-                const key_tag = @as(std.meta.Tag(IR.Type), key_type);
-
-                if (key_tag == .i64) {
-                    try writer.print(
-                        "    _ = reg_{d}.asArray().unset(runtime.runtime_allocator, runtime.ArrayKey{{ .integer = reg_{d} }});\n",
-                        .{ op.array.id, op.key.id },
-                    );
-                } else {
-                    try writer.print(
-                        "    _ = reg_{d}.asArray().unsetByValue(runtime.runtime_allocator, reg_{d});\n",
-                        .{ op.array.id, op.key.id },
-                    );
-                }
+                // 简化：所有寄存器都是 Value 类型，使用 unsetByValue
+                try writer.print(
+                    "    _ = reg_{d}.asArray().unsetByValue(runtime.runtime_allocator, reg_{d});\n",
+                    .{ op.array.id, op.key.id },
+                );
             },
             .interpolate => |op| {
                 // 字符串插值：将多个部分连接成一个字符串
@@ -10783,47 +10760,15 @@ pub const NativeLinker = struct {
                 const array = try std.fmt.bufPrint(&array_buf, "reg_{d}", .{op.array.id});
                 const key = try std.fmt.bufPrint(&key_buf, "reg_{d}", .{op.key.id});
 
-                // 智能处理键的类型
-                if (op.key.type_ == .i64) {
-                    // 键是i64类型，直接使用
-                    try writer.print("        {s} = {s}.asArray().get(runtime.ArrayKey{{ .integer = {s} }}) orelse runtime.Value.initNull();\n", .{ result_reg.?, array, key });
-                } else if (op.key.type_ == .php_value) {
-                    // 键是Value类型，需要转换
-                    try writer.print("        {s} = {s}.asArray().get(runtime.ArrayKey{{ .integer = {s}.toInt() }}) orelse runtime.Value.initNull();\n", .{ result_reg.?, array, key });
-                } else {
-                    // 其他类型，默认转换为整数
-                    try writer.print("        {s} = {s}.asArray().get(runtime.ArrayKey{{ .integer = @intCast({s}) }}) orelse runtime.Value.initNull();\n", .{ result_reg.?, array, key });
-                }
+                // 简化：所有寄存器都是 Value 类型，使用 getByValue
+                try writer.print("        {s} = {s}.asArray().getByValue({s}) orelse runtime.Value.initNull();\n", .{ result_reg.?, array, key });
             },
             .array_set => |op| {
                 var array_buf: [32]u8 = undefined;
                 const array = try std.fmt.bufPrint(&array_buf, "reg_{d}", .{op.array.id});
 
-                // 根据 key 的类型生成不同的代码
-                try writer.print("        try {s}.asArray().set(runtime.runtime_allocator, ", .{array});
-
-                const key_type_tag = @as(std.meta.Tag(IR.Type), op.key.type_);
-                if (key_type_tag == .i64) {
-                    try writer.print("runtime.ArrayKey{{ .integer = reg_{d} }}, ", .{op.key.id});
-                } else if (key_type_tag == .php_string or key_type_tag == .php_value) {
-                    try writer.print("runtime.ArrayKey{{ .string = reg_{d}.asString() }}, ", .{op.key.id});
-                } else {
-                    // fallback: 转换为 Value 再用 setByValue
-                    try writer.print("runtime.ArrayKey{{ .integer = reg_{d}.toInt() }}, ", .{op.key.id});
-                }
-
-                // 智能处理值的类型
-                if (op.value.type_ == .php_value) {
-                    try writer.print("reg_{d});\n", .{op.value.id});
-                } else if (op.value.type_ == .i64) {
-                    try writer.print("runtime.Value.initInt(reg_{d}));\n", .{op.value.id});
-                } else if (op.value.type_ == .f64) {
-                    try writer.print("runtime.Value.initFloat(reg_{d}));\n", .{op.value.id});
-                } else if (op.value.type_ == .bool) {
-                    try writer.print("runtime.Value.initBool(reg_{d}));\n", .{op.value.id});
-                } else {
-                    try writer.print("reg_{d});\n", .{op.value.id});
-                }
+                // 简化：所有寄存器都是 Value 类型，使用 setByValue
+                try writer.print("        try {s}.asArray().setByValue(runtime.runtime_allocator, reg_{d}, reg_{d});\n", .{ array, op.key.id, op.value.id });
             },
             .array_push => |op| {
                 var array_buf: [32]u8 = undefined;
