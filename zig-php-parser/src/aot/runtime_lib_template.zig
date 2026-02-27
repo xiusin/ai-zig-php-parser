@@ -2380,6 +2380,18 @@ pub fn php_sub(lhs: Value, rhs: Value) !Value {
     return Value.initFloat(a - b);
 }
 
+/// Negate a value (unary minus)
+pub fn php_neg(val: Value) !Value {
+    if (val.isInt()) {
+        const a = val.asInt();
+        if (a == Value.INT48_MIN) {
+            return Value.initFloat(-@as(f64, @floatFromInt(a)));
+        }
+        return Value.initInt(-a);
+    }
+    return Value.initFloat(-val.toFloat());
+}
+
 /// 乘法运算（PHP语义）
 pub fn php_mul(lhs: Value, rhs: Value) !Value {
     if (lhs.isInt() and rhs.isInt()) {
@@ -2423,7 +2435,8 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
     const a = lhs.toInt();
     const b = rhs.toInt();
     if (b == 0) return error.DivisionByZero;
-    return Value.initInt(@mod(a, b));
+    // PHP 使用 remainder（保留符号），不是 modulo
+    return Value.initInt(@rem(a, b));
 }
 
 /// 幂运算（PHP语义）
