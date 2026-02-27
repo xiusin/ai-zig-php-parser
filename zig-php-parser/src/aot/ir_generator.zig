@@ -2695,7 +2695,15 @@ pub const IRGenerator = struct {
             const expr_node = self.getNode(unary_data.expr);
             if (expr_node != null and expr_node.?.tag == .variable) {
                 const var_name = self.getString(expr_node.?.data.variable.name);
-                if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                
+                // 检查是否是全局变量或在 __main__ 函数中
+                const is_global = self.global_vars.contains(var_name);
+                const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                
+                if (is_global or is_main) {
+                    // 写入全局表
+                    _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = new_value } }, null);
+                } else if (self.lookupVarRegister(var_name)) |ptr_reg| {
                     _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = new_value } }, null);
                 }
             }
@@ -2739,7 +2747,15 @@ pub const IRGenerator = struct {
             switch (en.tag) {
                 .variable => {
                     const var_name = self.getString(en.data.variable.name);
-                    if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                    
+                    // 检查是否是全局变量或在 __main__ 函数中
+                    const is_global = self.global_vars.contains(var_name);
+                    const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                    
+                    if (is_global or is_main) {
+                        // 写入全局表
+                        _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = new_value } }, null);
+                    } else if (self.lookupVarRegister(var_name)) |ptr_reg| {
                         _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = new_value } }, null);
                     }
                 },
