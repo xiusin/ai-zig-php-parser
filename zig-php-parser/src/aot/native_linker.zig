@@ -6711,11 +6711,32 @@ pub const NativeLinker = struct {
                 block_idx: usize,
                 visited: *std.AutoHashMap(usize, void),
                 depth: usize,
+                source_block_idx: ?usize,  // 前驱块索引
             ) anyerror!void {
                 if (visited.contains(block_idx)) return;
                 try visited.put(block_idx, {});
 
                 const block = func_.blocks.items[block_idx];
+
+                // 生成该块的 phi 赋值（来自 source_block）
+                if (source_block_idx) |src_idx| {
+                    const source_block = func_.blocks.items[src_idx];
+                    for (block.instructions.items) |inst| {
+                        if (inst.op == .phi) {
+                            const phi_op = inst.op.phi;
+                            if (inst.result) |phi_res| {
+                                // 查找来自 source_block 的 incoming
+                                for (phi_op.incoming) |incoming| {
+                                    if (incoming.block == source_block) {
+                                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                        try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 for (block.instructions.items) |inst| {
                     if (inst.op == .phi) continue;
@@ -6745,7 +6766,7 @@ pub const NativeLinker = struct {
                             }
                         }
                         if (loop_.blocks.contains(target)) {
-                            try go(self_, writer_, code_, func_, loop_, phi_updates_, target, visited, depth);
+                            try go(self_, writer_, code_, func_, loop_, phi_updates_, target, visited, depth, block_idx);
                         }
                     },
                     .cond_br => |cbr| {
@@ -6782,13 +6803,13 @@ pub const NativeLinker = struct {
                                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
                                     try writer_.writeAll("break;\n");
                                 } else if (loop_.blocks.contains(then_target)) {
-                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1);
+                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1, block_idx);
                                 }
                             } else if (loop_.blocks.contains(then_target)) {
-                                try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1);
+                                try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1, block_idx);
                             }
                         } else if (loop_.blocks.contains(then_target)) {
-                            try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1);
+                            try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1, block_idx);
                         }
 
                         try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
@@ -6805,13 +6826,13 @@ pub const NativeLinker = struct {
                                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
                                     try writer_.writeAll("break;\n");
                                 } else if (loop_.blocks.contains(else_target)) {
-                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1);
+                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1, block_idx);
                                 }
                             } else if (loop_.blocks.contains(else_target)) {
-                                try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1);
+                                try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1, block_idx);
                             }
                         } else if (loop_.blocks.contains(else_target)) {
-                            try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1);
+                            try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1, block_idx);
                         }
 
                         try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
@@ -7420,7 +7441,7 @@ pub const NativeLinker = struct {
                         {
                             var visited = std.AutoHashMap(usize, void).init(self.allocator);
                             defer visited.deinit();
-                            try generateLoopBodyFromBlock(self, writer, code_list, func, loop, phi_updates.items, loop.body_start, &visited, 2);
+                            try generateLoopBodyFromBlock(self, writer, code_list, func, loop, phi_updates.items, loop.body_start, &visited, 2, null);
                         } else {
                             for (body_block.instructions.items) |inst| {
                                 const is_invariant = switch (inst.op) {
