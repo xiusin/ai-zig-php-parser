@@ -2928,37 +2928,28 @@ pub const NativeLinker = struct {
             ir_type;
 
         const type_tag = @as(std.meta.Tag(IR.Type), actual_type);
-        
-        if (reg_id == 10) {
-            std.debug.print("writeConditionExpr: reg_10, ir_type={s}, actual_type={s}, type_tag={s}\n", .{
-                @tagName(ir_type), @tagName(actual_type), @tagName(type_tag)
-            });
-        }
+
+        // 检查是否是 alloca
+        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+            alloca_regs.contains(reg_id)
+        else
+            false;
 
         // 根据类型生成条件表达式
+        // 注意：即使类型推导说是 bool，如果实际是 Value，也需要 .toBool()
         switch (type_tag) {
             .bool => {
-                // 检查是否是 alloca
-                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                    alloca_regs.contains(reg_id)
-                else
-                    false;
-
+                // bool 类型可能实际上是 Value.initBool()
+                // 为了安全，统一使用 .toBool()
                 if (is_alloca) {
-                    try writer.print("reg_{d}.*", .{reg_id});
+                    try writer.print("reg_{d}.*.toBool()", .{reg_id});
                 } else {
-                    try writer.print("reg_{d}", .{reg_id});
+                    try writer.print("reg_{d}.toBool()", .{reg_id});
                 }
             },
             .i64 => try writer.print("(reg_{d} != 0)", .{reg_id}),
             .f64 => try writer.print("(reg_{d} != 0.0)", .{reg_id}),
             else => {
-                // 检查是否是 alloca
-                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                    alloca_regs.contains(reg_id)
-                else
-                    false;
-
                 if (is_alloca) {
                     try writer.print("reg_{d}.*.toBool()", .{reg_id});
                 } else {

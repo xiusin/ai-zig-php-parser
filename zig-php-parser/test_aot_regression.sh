@@ -27,6 +27,7 @@ test_script() {
     local name=$1
     local php_file=$2
     local ignore_float=${3:-false}
+    local timeout=${4:-5}  # 默认 5 秒超时
     
     TOTAL=$((TOTAL + 1))
     echo -n "测试 $TOTAL: $name ... "
@@ -40,12 +41,16 @@ test_script() {
         return 1
     fi
     
-    # 运行并对比
+    # 运行并对比（带超时）
     local php_out="/tmp/php_out_$TOTAL.txt"
     local aot_out="/tmp/aot_out_$TOTAL.txt"
     
-    php "$php_file" > "$php_out" 2>&1 || true
-    "$aot_output" > "$aot_out" 2>&1 || true
+    timeout $timeout php "$php_file" > "$php_out" 2>&1 || true
+    if ! timeout $timeout "$aot_output" > "$aot_out" 2>&1; then
+        echo -e "${RED}❌ 运行超时或崩溃${NC}"
+        FAILED=$((FAILED + 1))
+        return 1
+    fi
     
     if [ "$ignore_float" = true ]; then
         # 使用 Python 比较，忽略浮点数精度差异
