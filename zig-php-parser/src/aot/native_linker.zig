@@ -719,8 +719,79 @@ pub const NativeLinker = struct {
         }
         
         std.debug.print("Applied {d} fixes\n", .{fixes});
+        
+        // 第二轮修复：处理裸的 reg_X = reg_Y.asInt() 模式
+        std.debug.print("Searching for bare '.asInt()' assignments...\n", .{});
+        var final_code = try std.ArrayList(u8).initCapacity(self.allocator, fixed_code.items.len);
+        defer final_code.deinit(self.allocator);
+        
+        var fixes2: usize = 0;
+        i = 0;
+        last_copy = 0;
+        
+        while (i < fixed_code.items.len) {
+            // 查找 "reg_X = reg_Y.asInt();" 模式
+            if (i + 4 < fixed_code.items.len and 
+                std.mem.eql(u8, fixed_code.items[i..i+4], "reg_")) {
+                // 找到 reg_，查找 = 
+                var j = i + 4;
+                while (j < fixed_code.items.len and (fixed_code.items[j] >= '0' and fixed_code.items[j] <= '9')) : (j += 1) {}
+                
+                if (j < fixed_code.items.len and fixed_code.items[j] == ' ' and 
+                    j + 1 < fixed_code.items.len and fixed_code.items[j+1] == '=') {
+                    // 找到 "reg_X = "，检查右边是否是 "reg_Y.asInt();" 或 "reg_Y.asFloat();" 或 "reg_Y.toBool();"
+                    var k = j + 2;
+                    while (k < fixed_code.items.len and fixed_code.items[k] == ' ') : (k += 1) {}
+                    
+                    if (k + 4 < fixed_code.items.len and std.mem.eql(u8, fixed_code.items[k..k+4], "reg_")) {
+                        var m = k + 4;
+                        while (m < fixed_code.items.len and (fixed_code.items[m] >= '0' and fixed_code.items[m] <= '9')) : (m += 1) {}
+                        
+                        // 检查是否是 .asInt(); 或 .asFloat(); 或 .toBool();
+                        if (m + 9 < fixed_code.items.len and std.mem.eql(u8, fixed_code.items[m..m+9], ".asInt();")) {
+                            // 找到裸的 .asInt()，需要包装
+                            try final_code.appendSlice(self.allocator, fixed_code.items[last_copy..j+2]); // 复制到 "="
+                            try final_code.appendSlice(self.allocator, " runtime.Value.initInt(");
+                            try final_code.appendSlice(self.allocator, fixed_code.items[k..m+8]); // reg_Y.asInt()
+                            try final_code.appendSlice(self.allocator, ");");
+                            last_copy = m + 9;
+                            i = m + 9;
+                            fixes2 += 1;
+                            continue;
+                        } else if (m + 11 < fixed_code.items.len and std.mem.eql(u8, fixed_code.items[m..m+11], ".asFloat();")) {
+                            try final_code.appendSlice(self.allocator, fixed_code.items[last_copy..j+2]);
+                            try final_code.appendSlice(self.allocator, " runtime.Value.initFloat(");
+                            try final_code.appendSlice(self.allocator, fixed_code.items[k..m+10]);
+                            try final_code.appendSlice(self.allocator, ");");
+                            last_copy = m + 11;
+                            i = m + 11;
+                            fixes2 += 1;
+                            continue;
+                        } else if (m + 10 < fixed_code.items.len and std.mem.eql(u8, fixed_code.items[m..m+10], ".toBool();")) {
+                            try final_code.appendSlice(self.allocator, fixed_code.items[last_copy..j+2]);
+                            try final_code.appendSlice(self.allocator, " runtime.Value.initBool(");
+                            try final_code.appendSlice(self.allocator, fixed_code.items[k..m+9]);
+                            try final_code.appendSlice(self.allocator, ");");
+                            last_copy = m + 10;
+                            i = m + 10;
+                            fixes2 += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            
+            i += 1;
+        }
+        
+        // 复制剩余内容
+        if (last_copy < fixed_code.items.len) {
+            try final_code.appendSlice(self.allocator, fixed_code.items[last_copy..]);
+        }
+        
+        std.debug.print("Applied {d} bare conversion fixes\n", .{fixes2});
 
-        return try fixed_code.toOwnedSlice(self.allocator);
+        return try final_code.toOwnedSlice(self.allocator);
     }
 
     /// 生成全局变量
@@ -3856,25 +3927,28 @@ pub const NativeLinker = struct {
                                 try writer.writeAll(");\n");
                             },
                             .i64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_add(", .{reg.id});
+                                // 所有寄存器都是 Value 类型，需要包装
+                                try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_add(", .{reg.id});
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
-                                try writer.writeAll(")).asInt();\n");
+                                try writer.writeAll(")).asInt());\n");
                             },
                             .f64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_add(", .{reg.id});
+                                // 所有寄存器都是 Value 类型，需要包装
+                                try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_add(", .{reg.id});
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
-                                try writer.writeAll(")).asFloat();\n");
+                                try writer.writeAll(")).asFloat());\n");
                             },
                             .bool => {
-                                try writer.print("    reg_{d} = (try runtime.php_add(", .{reg.id});
+                                // 所有寄存器都是 Value 类型，需要包装
+                                try writer.print("    reg_{d} = runtime.Value.initBool((try runtime.php_add(", .{reg.id});
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
-                                try writer.writeAll(")).asBool();\n");
+                                try writer.writeAll(")).asBool());\n");
                             },
                             else => {
                                 try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
@@ -5544,25 +5618,31 @@ pub const NativeLinker = struct {
                         var src_buf: [32]u8 = undefined;
                         const src = try self.getOperandRef(&src_buf, op.value.id);
                         if (src_tag == .i64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src});
+                            // 所有寄存器都是 Value 类型，需要包装
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s}.asInt());\n", .{src});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asInt();\n", .{src});
+                            // 所有寄存器都是 Value 类型，需要包装
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt({s}.asInt());\n", .{src});
                         }
                     } else if (to_tag == .f64) {
                         var src_buf: [32]u8 = undefined;
                         const src = try self.getOperandRef(&src_buf, op.value.id);
                         if (src_tag == .f64) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src});
+                            // 所有寄存器都是 Value 类型，需要包装
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s}.asFloat());\n", .{src});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asFloat();\n", .{src});
+                            // 所有寄存器都是 Value 类型，需要包装
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({s}.asFloat());\n", .{src});
                         }
                     } else if (to_tag == .bool) {
                         var src_buf: [32]u8 = undefined;
                         const src = try self.getOperandRef(&src_buf, op.value.id);
                         if (src_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src});
+                            // 所有寄存器都是 Value 类型，需要包装
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s}.toBool());\n", .{src});
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "{s}.toBool();\n", .{src});
+                            // 所有寄存器都是 Value 类型，需要包装
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool({s}.toBool());\n", .{src});
                         }
                     } else {
                         var src_buf: [32]u8 = undefined;
@@ -6819,9 +6899,11 @@ pub const NativeLinker = struct {
                             try writer_.print("reg_{d} = reg_{d};\n", .{ update.phi_reg, update.value_reg });
                         }
                     } else if (phi_tag == .i64 and value_tag == .php_value) {
-                        try writer_.print("reg_{d} = reg_{d}.asInt();\n", .{ update.phi_reg, update.value_reg });
+                        // 所有寄存器都是 Value 类型，需要包装
+                        try writer_.print("reg_{d} = runtime.Value.initInt(reg_{d}.asInt());\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .f64 and value_tag == .php_value) {
-                        try writer_.print("reg_{d} = reg_{d}.asFloat();\n", .{ update.phi_reg, update.value_reg });
+                        // 所有寄存器都是 Value 类型，需要包装
+                        try writer_.print("reg_{d} = runtime.Value.initFloat(reg_{d}.asFloat());\n", .{ update.phi_reg, update.value_reg });
                     } else if (phi_tag == .php_value and value_tag == .i64) {
                         // 所有寄存器都是 Value，需要 asInt()
                         try writer_.print("reg_{d} = runtime.Value.initInt(reg_{d}.asInt());\n", .{ update.phi_reg, update.value_reg });
