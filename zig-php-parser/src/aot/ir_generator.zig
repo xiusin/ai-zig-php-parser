@@ -2535,6 +2535,11 @@ pub const IRGenerator = struct {
             return folded_reg;
         }
 
+        // 短路求值：&& 和 ||
+        if (bin_data.op == .k_and or bin_data.op == .double_ampersand or bin_data.op == .k_or or bin_data.op == .double_pipe) {
+            return try self.generateShortCircuitLogical(bin_data.lhs, bin_data.rhs, bin_data.op);
+        }
+
         // Generate operands
         const lhs_reg = try self.generateExpression(bin_data.lhs);
         const rhs_reg = try self.generateExpression(bin_data.rhs);
@@ -2572,10 +2577,6 @@ pub const IRGenerator = struct {
             .greater => self.emitWithResult(.{ .gt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
             .greater_equal => self.emitWithResult(.{ .ge = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
             .spaceship => self.emitWithResult(.{ .spaceship = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
-
-            // Logical - 返回 php_value，不是 bool
-            .k_and, .double_ampersand => self.emitWithResult(.{ .and_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
-            .k_or, .double_pipe => self.emitWithResult(.{ .or_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
 
             // Bitwise
             .ampersand => self.emitWithResult(.{ .bit_and = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
@@ -2723,6 +2724,62 @@ pub const IRGenerator = struct {
     }
 
     /// Generate IR for ternary expression
+    /// Generate short-circuit logical operation (&& and ||)
+    fn generateShortCircuitLogical(self: *Self, lhs_idx: Node.Index, rhs_idx: Node.Index, op: TokenTag) !Register {
+        // Generate left operand
+        const lhs_reg = try self.generateExpression(lhs_idx);
+
+        // Create blocks
+        const rhs_block = try self.createBlock("logical_rhs");
+        const merge_block = try self.createBlock("logical_merge");
+
+        const is_and = (op == .k_and or op == .double_ampersand);
+
+        // For &&: if lhs is false, skip rhs and return false
+        // For ||: if lhs is true, skip rhs and return true
+        if (is_and) {
+            // if (!lhs) goto merge else goto rhs
+            self.setTerminator(.{ .cond_br = .{
+                .cond = lhs_reg,
+                .then_block = rhs_block,
+                .else_block = merge_block,
+            } });
+        } else {
+            // if (lhs) goto merge else goto rhs
+            self.setTerminator(.{ .cond_br = .{
+                .cond = lhs_reg,
+                .then_block = merge_block,
+                .else_block = rhs_block,
+            } });
+        }
+
+        const lhs_end_block = self.current_block.?;
+
+        // Generate right operand
+        self.setCurrentBlock(rhs_block);
+        const rhs_reg = try self.generateExpression(rhs_idx);
+        const rhs_end_block = self.current_block.?;
+        self.setTerminator(.{ .br = merge_block });
+
+        // Merge with phi node
+        self.setCurrentBlock(merge_block);
+
+        const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
+        if (is_and) {
+            // &&: [false from lhs_end, rhs from rhs_end]
+            const false_val = try self.emitWithResult(.{ .const_bool = false }, .php_value);
+            incoming[0] = .{ .value = false_val, .block = lhs_end_block };
+            incoming[1] = .{ .value = rhs_reg, .block = rhs_end_block };
+        } else {
+            // ||: [lhs from lhs_end, rhs from rhs_end]
+            // 注意：lhs 为 true 时短路，所以 phi 的第一个值应该是 lhs_reg
+            incoming[0] = .{ .value = lhs_reg, .block = lhs_end_block };
+            incoming[1] = .{ .value = rhs_reg, .block = rhs_end_block };
+        }
+
+        return self.emitWithResult(.{ .phi = .{ .incoming = incoming } }, .php_value);
+    }
+
     fn generateTernaryExpr(self: *Self, node: *const Node) !Register {
         const ternary_data = node.data.ternary_expr;
 
