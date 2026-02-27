@@ -4929,6 +4929,20 @@ pub const NativeLinker = struct {
                     }
                 }
             },
+            .bit_not => |op| {
+                if (inst.result) |reg| {
+                    const operand_type_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
+
+                    // 所有寄存器都声明为 Value，所以总是返回 Value
+                    if (operand_type_tag == .php_value) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(~reg_{d}.toInt());\n", .{op.operand.id});
+                    } else if (operand_type_tag == .i64) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(~reg_{d});\n", .{op.operand.id});
+                    } else {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(~reg_{d}.toInt());\n", .{op.operand.id});
+                    }
+                }
+            },
             .not => |op| {
                 if (inst.result) |reg| {
                     std.debug.print("generateInstructionSimple: not reg_{d} = !reg_{d}, result_type={s}, operand_type={s}\n", .{

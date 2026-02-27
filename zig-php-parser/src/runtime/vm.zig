@@ -8734,6 +8734,11 @@ pub const VM = struct {
             .minus => return self.negateValue(operand),
             .bang => return Value.initBool(!operand.toBool()),
             .plus => return operand, // Unary plus
+            .tilde => {
+                // Bitwise NOT
+                const int_val = operand.toInt();
+                return Value.initInt(~int_val);
+            },
             .ampersand => return operand, // Reference operator (treat as value for now to prevent crash)
             .k_clone => {
                 if (operand.getTag() != .object) {

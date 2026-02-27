@@ -1650,7 +1650,7 @@ pub const Parser = struct {
     fn parseUnary(self: *Parser) anyerror!ast.Node.Index {
         const tag = self.curr.tag;
         switch (tag) {
-            .bang, .minus, .plus, .ampersand => {
+            .bang, .minus, .plus, .ampersand, .tilde => {
                 const token = self.curr;
                 self.nextToken();
                 // Use parseUnary to handle cases like !!$x or !$obj->method()
