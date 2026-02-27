@@ -2679,6 +2679,29 @@ pub const NativeLinker = struct {
         }
     }
 
+    /// 生成 phi 节点的值赋值（统一函数）
+    /// 使用原始类型，不是推断类型，确保类型一致
+    fn generatePhiValueAssignment(
+        self: *Self,
+        writer: anytype,
+        result_reg: IR.Register,
+        value_reg: IR.Register,
+        indent: []const u8,
+    ) !void {
+        _ = self;
+        // 使用原始类型，不是推断类型
+        const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
+        
+        // 如果结果是 php_value，总是直接赋值（所有寄存器都是 Value）
+        if (result_tag == .php_value) {
+            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+        } else {
+            // 结果是原生类型（不应该发生，因为所有寄存器都是 Value）
+            // 但为了安全，还是处理一下
+            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+        }
+    }
+
     /// 生成完整的赋值语句（包括分号和换行）
     /// format_str 不应包含 "reg_{d} = " 前缀
     fn writeRegAssignmentFmt(
@@ -2928,34 +2951,7 @@ pub const NativeLinker = struct {
                         const result_reg = inst.result orelse continue;
                         for (phi_op.incoming) |incoming| {
                             if (incoming.block == source_block) {
-                                // 使用原始类型，不是推断类型
-                                const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
-                                const value_tag = @as(std.meta.Tag(IR.Type), incoming.value.type_);
-
-                                if (result_tag == value_tag or result_tag == .php_value) {
-                                    // 类型匹配或结果是 php_value，直接赋值
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
-                                } else if (value_tag == .php_value) {
-                                    // 从 php_value 转换到原生类型（只有当结果不是 php_value 时）
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                                    if (result_tag == .i64) {
-                                        try writer.print("            reg_{d} = {s}.toInt();\n", .{ result_reg.id, src_ref });
-                                    } else if (result_tag == .f64) {
-                                        try writer.print("            reg_{d} = {s}.toFloat();\n", .{ result_reg.id, src_ref });
-                                    } else if (result_tag == .bool) {
-                                        try writer.print("            reg_{d} = {s}.toBool();\n", .{ result_reg.id, src_ref });
-                                    } else {
-                                        try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
-                                    }
-                                } else {
-                                    // 原生类型之间的转换或包装
-                                    var src_buf: [32]u8 = undefined;
-                                    const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                                    try writer.print("            reg_{d} = {s};\n", .{ result_reg.id, src_ref });
-                                }
+                                try self.generatePhiValueAssignment(writer, result_reg, incoming.value, "            ");
                                 break;
                             }
                         }
@@ -6169,51 +6165,19 @@ pub const NativeLinker = struct {
                 if (inst.result) |res| {
                     if (phi_op.incoming.len == 0) continue;
 
-                    var init_value: ?usize = null;
+                    var init_value: ?IR.Register = null;
                     for (phi_op.incoming) |incoming| {
                         if (isInitBlock(incoming.block, loop)) {
-                            init_value = incoming.value.id;
+                            init_value = incoming.value;
                             break;
                         }
                     }
                     if (init_value == null) {
-                        init_value = phi_op.incoming[0].value.id;
+                        init_value = phi_op.incoming[0].value;
                     }
 
                     if (init_value) |val| {
-                        const phi_type = if (self.current_reg_types) |rt|
-                            rt.get(res.id) orelse res.type_
-                        else
-                            res.type_;
-                        const value_type = if (self.current_reg_types) |rt|
-                            rt.get(val) orelse IR.Type.php_value
-                        else
-                            IR.Type.php_value;
-                        const phi_tag = @as(std.meta.Tag(IR.Type), phi_type);
-                        const value_tag = @as(std.meta.Tag(IR.Type), value_type);
-
-                        var src_buf: [32]u8 = undefined;
-                        const src_ref = try self.getOperandRef(&src_buf, val);
-
-                        if (phi_tag == value_tag) {
-                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
-                        } else if (phi_tag == .i64 and value_tag == .php_value) {
-                            // 所有寄存器都是 Value，需要包装
-                            try writer.print("    reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ res.id, src_ref });
-                        } else if (phi_tag == .f64 and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ res.id, src_ref });
-                        } else if (phi_tag == .bool and value_tag == .php_value) {
-                            try writer.print("    reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ res.id, src_ref });
-                        } else if (phi_tag == .php_value and value_tag == .i64) {
-                            // 反向：php_value <- i64，也需要包装
-                            try writer.print("    reg_{d} = runtime.Value.initInt({s}.asInt());\n", .{ res.id, src_ref });
-                        } else if (phi_tag == .php_value and value_tag == .f64) {
-                            try writer.print("    reg_{d} = runtime.Value.initFloat({s}.asFloat());\n", .{ res.id, src_ref });
-                        } else if (phi_tag == .php_value and value_tag == .bool) {
-                            try writer.print("    reg_{d} = runtime.Value.initBool({s}.toBool());\n", .{ res.id, src_ref });
-                        } else {
-                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
-                        }
+                        try self.generatePhiValueAssignment(writer, res, val, "    ");
                     }
                 }
             }
@@ -9938,7 +9902,6 @@ pub const NativeLinker = struct {
     /// 生成PHI节点的赋值语句
     /// 在跳转到目标块之前，检查目标块是否有PHI节点，如果有则设置PHI结果
     fn generatePhiAssignments(self: *Self, writer: anytype, func: *const IR.Function, target_block: *const IR.BasicBlock, source_block_idx: usize) !void {
-        _ = self;
         // 用于结构化循环的 phi 赋值（20 个空格缩进）
         const source_block = func.blocks.items[source_block_idx];
 
@@ -9950,32 +9913,7 @@ pub const NativeLinker = struct {
                 // 查找来自当前块的incoming值
                 for (phi_op.incoming) |incoming| {
                     if (incoming.block == source_block) {
-                        // 使用原始类型，不是推断类型
-                        // 因为寄存器声明是基于原始类型的
-                        const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
-                        const value_tag = @as(std.meta.Tag(IR.Type), incoming.value.type_);
-
-                        if (result_tag == value_tag or result_tag == .php_value) {
-                            // 类型匹配或结果是 php_value，直接赋值
-                            try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
-                        } else {
-                            // 需要类型转换（只有当结果不是 php_value 时）
-                            if (value_tag == .php_value) {
-                                // 从 Value 转换到原生类型
-                                if (result_tag == .i64) {
-                                    try writer.print("                    reg_{d} = reg_{d}.toInt();\n", .{ result_reg.id, incoming.value.id });
-                                } else if (result_tag == .f64) {
-                                    try writer.print("                    reg_{d} = reg_{d}.toFloat();\n", .{ result_reg.id, incoming.value.id });
-                                } else if (result_tag == .bool) {
-                                    try writer.print("                    reg_{d} = reg_{d}.toBool();\n", .{ result_reg.id, incoming.value.id });
-                                } else {
-                                    try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
-                                }
-                            } else {
-                                // 原生类型之间的转换
-                                try writer.print("                    reg_{d} = reg_{d};\n", .{ result_reg.id, incoming.value.id });
-                            }
-                        }
+                        try self.generatePhiValueAssignment(writer, result_reg, incoming.value, "                    ");
                         break;
                     }
                 }
