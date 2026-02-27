@@ -7158,7 +7158,7 @@ pub const NativeLinker = struct {
                     }
                 }
             }
-        } else if (dead_loop) {
+        } else if (false and dead_loop) {  // 暂时禁用 dead_loop 优化
             // 无效循环：只执行最后一次赋值
             try writer.print("    // Dead loop eliminated\n", .{});
 
