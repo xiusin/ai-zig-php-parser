@@ -1980,7 +1980,7 @@ pub const IRGenerator = struct {
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
             },
             .array_access => {
-                // 检查是否是嵌套的 array_access (e.g., $matrix[$i][$j] = value)
+                // 检查是否是嵌套的 array_access
                 const target_expr = self.getNode(target_node.data.array_access.target);
                 const is_nested = target_expr != null and target_expr.?.tag == .array_access;
                 
