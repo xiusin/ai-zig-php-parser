@@ -94,20 +94,46 @@
 
 ### 6. 全局变量支持（P1）⚠️
 
-**状态**: 编译通过但功能不正确
+**状态**: 基础设施已完成，但功能未完全实现
+
+**已完成**:
+- ✅ 全局变量表（HashMap）
+- ✅ 全局变量跟踪（IR Generator）
+- ✅ 函数级全局变量列表
+- ✅ 读写全局变量的辅助函数
 
 **问题**: 
-- `global` 关键字被识别但不共享变量
-- 全局变量在函数中为空或默认值
+- ❌ 变量访问未映射到全局表
+- ❌ `global` 关键字被识别但不共享变量
+- ❌ 全局变量在函数中为空或默认值
 
-**需要实现**:
-1. 创建全局变量表
-2. 修改 IR 生成器处理 `global` 语句
-3. 在函数中访问全局变量表
+**需要完成**:
+1. 修改变量访问的 IR 生成
+2. 在 `getOrCreateVarRegister` 中检查全局变量
+3. 生成全局表的读取/写入代码
 
-**工作量**: 4-6 小时
+**工作量**: 2-3 小时
 
-**解决方案**: 使用参数传递或类属性
+**解决方案**: 
+```php
+// 方案 1：使用类属性
+class GlobalState {
+    public static $global_var = 100;
+}
+
+function test_global() {
+    echo GlobalState::$global_var;
+}
+
+// 方案 2：使用参数传递
+function test_global(&$global_var) {
+    echo $global_var;
+    $global_var++;
+}
+
+$global_var = 100;
+test_global($global_var);
+```
 
 ---
 
