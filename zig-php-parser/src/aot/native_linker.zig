@@ -10576,98 +10576,26 @@ pub const NativeLinker = struct {
                 }
             },
             .mul => |op| {
-                // 快速路径：纯整数/浮点
-                if (inst.result) |reg| {
-                    if (reg.type_ == .i64 and op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
-                        try writer.print("        {s} = reg_{d} * reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
-                    } else if (reg.type_ == .f64 and op.lhs.type_ == .f64 and op.rhs.type_ == .f64) {
-                        try writer.print("        {s} = reg_{d} * reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
-                    } else {
-                        // 需要类型转换
-                        try writer.print("        {s} = try runtime.php_mul(", .{result_reg.?});
-                        const lhs_type = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                        if (lhs_type == .i64) {
-                            try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.lhs.id});
-                        } else if (lhs_type == .f64) {
-                            try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.lhs.id});
-                        } else if (lhs_type == .bool) {
-                            try writer.print("runtime.Value.initBool(reg_{d}.toBool())", .{op.lhs.id});
-                        } else {
-                            try writer.print("reg_{d}", .{op.lhs.id});
-                        }
-                        try writer.writeAll(", ");
-                        const rhs_type = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                        if (rhs_type == .i64) {
-                            try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.rhs.id});
-                        } else if (rhs_type == .f64) {
-                            try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.rhs.id});
-                        } else if (rhs_type == .bool) {
-                            try writer.print("runtime.Value.initBool(reg_{d}.toBool())", .{op.rhs.id});
-                        } else {
-                            try writer.print("reg_{d}", .{op.rhs.id});
-                        }
-                        try writer.writeAll(");\n");
-                    }
+                // 所有寄存器都是 Value 类型，必须使用 php_mul
+                if (inst.result) |_| {
+                    try writer.print("        {s} = try runtime.php_mul(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                 } else {
                     try writer.print("        _ = try runtime.php_mul(reg_{d}, reg_{d});\n", .{ op.lhs.id, op.rhs.id });
                 }
             },
             .div => |op| {
-                if (inst.result) |reg| {
-                    if (reg.type_ == .f64 and op.lhs.type_ == .f64 and op.rhs.type_ == .f64) {
-                        try writer.print("        {s} = reg_{d} / reg_{d};\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
-                    } else {
-                        // 需要类型转换
-                        try writer.print("        {s} = try runtime.php_div(", .{result_reg.?});
-                        const lhs_type = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                        if (lhs_type == .i64) {
-                            try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.lhs.id});
-                        } else if (lhs_type == .f64) {
-                            try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.lhs.id});
-                        } else {
-                            try writer.print("reg_{d}", .{op.lhs.id});
-                        }
-                        try writer.writeAll(", ");
-                        const rhs_type = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                        if (rhs_type == .i64) {
-                            try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.rhs.id});
-                        } else if (rhs_type == .f64) {
-                            try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.rhs.id});
-                        } else {
-                            try writer.print("reg_{d}", .{op.rhs.id});
-                        }
-                        try writer.writeAll(");\n");
-                    }
+                // 所有寄存器都是 Value 类型，必须使用 php_div
+                if (inst.result) |_| {
+                    try writer.print("        {s} = try runtime.php_div(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                 }
             },
             .mod => |op| {
-                if (inst.result) |reg| {
-                    if (reg.type_ == .i64 and op.lhs.type_ == .i64 and op.rhs.type_ == .i64) {
-                        try writer.print("        {s} = @mod(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
-                    } else {
-                        // 需要类型转换
-                        try writer.print("        {s} = try runtime.php_mod(", .{result_reg.?});
-                        const lhs_type = @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                        if (lhs_type == .i64) {
-                            try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.lhs.id});
-                        } else if (lhs_type == .f64) {
-                            try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.lhs.id});
-                        } else {
-                            try writer.print("reg_{d}", .{op.lhs.id});
-                        }
-                        try writer.writeAll(", ");
-                        const rhs_type = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                        if (rhs_type == .i64) {
-                            try writer.print("runtime.Value.initInt(reg_{d}.asInt())", .{op.rhs.id});
-                        } else if (rhs_type == .f64) {
-                            try writer.print("runtime.Value.initFloat(reg_{d}.asFloat())", .{op.rhs.id});
-                        } else {
-                            try writer.print("reg_{d}", .{op.rhs.id});
-                        }
-                        try writer.writeAll(");\n");
-                    }
+                // 所有寄存器都是 Value 类型，必须使用 php_mod
+                if (inst.result) |_| {
+                    try writer.print("        {s} = try runtime.php_mod(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                 }
             },
+            .eq => |op| {
             .pow => |op| {
                 if (inst.result) |reg| {
                     const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
