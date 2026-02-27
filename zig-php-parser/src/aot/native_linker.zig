@@ -7681,9 +7681,9 @@ pub const NativeLinker = struct {
         _ = self;
 
         switch (type_tag) {
-            .i64 => try writer.print("reg_{d} != 0", .{reg_id}),
-            .f64 => try writer.print("reg_{d} != 0.0", .{reg_id}),
-            .bool => try writer.print("reg_{d}", .{reg_id}),
+            .i64 => try writer.print("reg_{d}.asInt() != 0", .{reg_id}),
+            .f64 => try writer.print("reg_{d}.asFloat() != 0.0", .{reg_id}),
+            .bool => try writer.print("reg_{d}.toBool()", .{reg_id}),  // 所有寄存器都是 Value
             .php_value => try writer.print("reg_{d}.toBool()", .{reg_id}),
             else => try writer.print("reg_{d}.toBool()", .{reg_id}),
         }
