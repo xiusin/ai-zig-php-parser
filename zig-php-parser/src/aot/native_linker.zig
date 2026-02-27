@@ -2491,6 +2491,28 @@ pub const NativeLinker = struct {
         
         if (phi_infos.items.len == 0) return;
         
+        // 检查是否所有 phi 节点都只有一个 incoming
+        var all_single_incoming = true;
+        for (phi_infos.items) |info| {
+            if (info.incoming.len != 1) {
+                all_single_incoming = false;
+                break;
+            }
+        }
+        
+        // 如果都是单个 incoming，直接赋值（不需要 switch）
+        if (all_single_incoming) {
+            for (phi_infos.items) |info| {
+                if (info.incoming.len > 0) {
+                    try writer.print("    reg_{d} = reg_{d};\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                }
+            }
+            return;
+        }
+        
         // 收集所有可能的前驱块
         var pred_blocks = std.AutoHashMap(u32, void).init(self.allocator);
         defer pred_blocks.deinit();
@@ -2820,36 +2842,54 @@ pub const NativeLinker = struct {
         assignments: []const PhiAssignment,
         indent: []const u8,
     ) !void {
-        _ = self;
         
         if (assignments.len == 0) return;
         
-        // 检测是否有依赖关系
-        var has_dependency = false;
+        // 检测每个赋值是否有依赖
+        var needs_temp = try std.ArrayList(bool).initCapacity(self.allocator, assignments.len);
+        defer needs_temp.deinit(self.allocator);
+        
         for (assignments) |assign1| {
+            var has_dep = false;
             for (assignments) |assign2| {
-                if (assign1.result.id == assign2.value.id) {
-                    has_dependency = true;
+                // 如果 assign1 的结果是 assign2 的源，则 assign2 需要临时变量
+                if (assign1.result.id == assign2.value.id and assign1.result.id != assign2.result.id) {
+                    has_dep = true;
                     break;
                 }
             }
-            if (has_dependency) break;
+            try needs_temp.append(self.allocator, has_dep);
         }
         
-        if (!has_dependency) {
+        // 检查是否有任何依赖
+        var has_any_dependency = false;
+        for (needs_temp.items) |need| {
+            if (need) {
+                has_any_dependency = true;
+                break;
+            }
+        }
+        
+        if (!has_any_dependency) {
             // 无依赖，直接赋值
             for (assignments) |assign| {
                 try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
             }
         } else {
-            // 有依赖，使用临时变量
-            // 第一步：保存所有源值到临时变量
+            // 有依赖，只为需要的赋值使用临时变量
+            // 第一步：保存需要临时变量的源值
             for (assignments, 0..) |assign, i| {
-                try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
+                if (needs_temp.items[i]) {
+                    try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
+                }
             }
-            // 第二步：从临时变量赋值到目标
+            // 第二步：赋值
             for (assignments, 0..) |assign, i| {
-                try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
+                if (needs_temp.items[i]) {
+                    try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
+                } else {
+                    try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+                }
             }
         }
     }
