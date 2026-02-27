@@ -58,6 +58,17 @@ pub fn intval(str: []const u8, base: u8) i64 {
 
     if (s.len == 0) return 0;
 
+    // 如果包含小数点，先尝试解析为浮点数
+    if (std.mem.indexOf(u8, s, ".") != null) {
+        if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
+            return @intFromFloat(float_val);
+        } else |_| {
+            // 浮点数解析失败，尝试部分解析
+            const result = parsePartialInt(s, 10);
+            return if (negative) -result else result;
+        }
+    }
+
     const actual_base: u8 = determineBase(s, base);
     const parse_str = skipBasePrefix(s, actual_base);
 

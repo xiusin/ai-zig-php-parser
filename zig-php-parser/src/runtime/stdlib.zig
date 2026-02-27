@@ -3971,7 +3971,20 @@ fn intvalFn(vm: *VM, args: []const Value) !Value {
         .integer => args[0].asInt(),
         .float => @intFromFloat(args[0].asFloat()),
         .boolean => if (args[0].asBool()) @as(i64, 1) else @as(i64, 0),
-        .string => std.fmt.parseInt(i64, args[0].getAsString().data.data, 10) catch 0,
+        .string => blk: {
+            const str = args[0].getAsString().data.data;
+            // 先尝试解析为整数
+            if (std.fmt.parseInt(i64, str, 10)) |int_val| {
+                break :blk int_val;
+            } else |_| {
+                // 如果失败，尝试解析为浮点数再转整数
+                if (std.fmt.parseFloat(f64, str)) |float_val| {
+                    break :blk @intFromFloat(float_val);
+                } else |_| {
+                    break :blk 0;
+                }
+            }
+        },
         else => 0,
     });
 }
