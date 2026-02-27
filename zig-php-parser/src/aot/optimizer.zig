@@ -28,6 +28,14 @@ const Register = IR.Register;
 const Type = IR.Type;
 const Terminator = IR.Terminator;
 const Diagnostics = @import("diagnostics.zig");
+
+// 回边记录类型
+const BackEdge = struct {
+    from: *IR.BasicBlock,
+    to: *IR.BasicBlock,
+    alloca: *Instruction,
+    value: Register,
+};
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const Analysis = @import("analysis.zig");
 // const EscapeAnalysis = @import("escape_analysis.zig").EscapeAnalysis;
@@ -1698,7 +1706,30 @@ pub const IROptimizer = struct {
         // We'll assume valid code or handle it.
 
         if (func.getEntryBlock()) |entry| {
-            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map);
+            // 记录回边的 phi incoming
+            var back_edges = try std.ArrayList(BackEdge).initCapacity(self.allocator, 0);
+            defer back_edges.deinit(self.allocator);
+            
+            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map, &back_edges);
+            
+            // 填充回边
+            std.debug.print("mem2reg: Filling {d} back-edge phi incoming...\n", .{back_edges.items.len});
+            for (back_edges.items) |edge| {
+                if (new_phis.getPtr(edge.to)) |succ_phis| {
+                    if (succ_phis.getPtr(edge.alloca)) |phi_inst_ptr| {
+                        const phi_inst = phi_inst_ptr.*;
+                        std.debug.print("  Adding phi incoming (back-edge): block_{d} -> block_{d}, reg_{d}\n", .{ edge.from.index, edge.to.index, edge.value.id });
+
+                        const old_incoming = phi_inst.op.phi.incoming;
+                        const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
+                        @memcpy(new_incoming[0..old_incoming.len], old_incoming);
+                        new_incoming[old_incoming.len] = .{ .value = edge.value, .block = edge.from };
+
+                        if (old_incoming.len > 0) self.allocator.free(old_incoming);
+                        phi_inst.op.phi.incoming = new_incoming;
+                    }
+                }
+            }
         }
 
         std.debug.print("mem2reg: Variables renamed\n", .{});
@@ -2029,6 +2060,7 @@ pub const IROptimizer = struct {
         new_phis: *std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)),
         reg_to_alloca: *std.AutoHashMap(u32, *Instruction),
         reg_rename_map: *std.AutoHashMap(u32, u32),
+        back_edges: *std.ArrayList(BackEdge),
     ) !void {
         // 防止无限递归
         const max_depth = 1000;
@@ -2067,10 +2099,6 @@ pub const IROptimizer = struct {
         }
 
         // 2. Process Instructions
-        // 记录每个 alloca 在当前块中是否有 store
-        var has_store_in_block = std.AutoHashMap(*Instruction, bool).init(self.allocator);
-        defer has_store_in_block.deinit();
-
         for (block.instructions.items) |inst| {
             switch (inst.op) {
                 .load => |op| {
@@ -2101,21 +2129,11 @@ pub const IROptimizer = struct {
                             stack = current_values.getPtr(alloca);
                         }
 
-                        // Save current height (if not already saved for this block? No, stores push new values)
-                        // Actually we need to pop *all* pushes from this block.
-                        // So we should track pushes.
-                        // `stack_heights` tracks the height *before* entry to this block.
-                        // No, `stack_heights` stores the height *before* the push we just did?
-                        // We need to restore the stack to the state it was at the start of the block.
-                        // So we only record height ONCE per alloca per block.
                         if (!stack_heights.contains(alloca)) {
                             try stack_heights.put(alloca, stack.?.items.len);
                         }
 
                         try stack.?.append(self.allocator, op.value);
-                        
-                        // 标记当前块有 store
-                        try has_store_in_block.put(alloca, true);
 
                         // Remove store
                         inst.op = .nop;
@@ -2125,82 +2143,61 @@ pub const IROptimizer = struct {
             }
         }
 
-        // 3. Update Successors' Phis
+        // 3. Recurse to dominated blocks FIRST
+        for (dt.children[block.index].items) |child| {
+            try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map, back_edges);
+        }
+
+        // 4. Update Successors' Phis AFTER recursion
+        // 只更新非回边的 phi（回边会在第二遍处理）
         for (block.successors.items) |succ| {
-            if (new_phis.getPtr(succ)) |succ_phis| {
-                var it = succ_phis.iterator();
-                while (it.next()) |entry| {
-                    const alloca = entry.key_ptr.*;
-                    const phi_inst = entry.value_ptr.*;
+            // 检测回边：如果后继的索引 <= 当前块的索引，可能是回边
+            const is_back_edge = succ.index <= block.index;
+            
+            if (is_back_edge) {
+                // 记录回边，稍后填充
+                if (new_phis.getPtr(succ)) |succ_phis| {
+                    var it = succ_phis.iterator();
+                    while (it.next()) |entry| {
+                        const alloca = entry.key_ptr.*;
 
-                    if (current_values.getPtr(alloca)) |stack| {
-                        if (stack.items.len > 0) {
-                            var val = stack.items[stack.items.len - 1];
-                            
-                            // 修复：如果当前块有 store，使用 store 的值
-                            // 否则，如果栈顶是 phi 节点的结果，使用第一个非 phi 值
-                            const has_store = has_store_in_block.get(alloca) orelse false;
-                            if (!has_store and stack.items.len > 1) {
-                                // 从栈顶往下找第一个非 phi 值
-                                var idx = stack.items.len - 1;
-                                while (idx > 0) : (idx -= 1) {
-                                    const candidate = stack.items[idx];
-                                    
-                                    // 检查是否是 phi 节点的结果
-                                    var is_phi_result = false;
-                                    var phi_it = new_phis.iterator();
-                                    while (phi_it.next()) |phi_entry| {
-                                        var phi_map = phi_entry.value_ptr;
-                                        if (phi_map.get(alloca)) |check_phi_inst| {
-                                            if (check_phi_inst.result) |phi_res| {
-                                                if (candidate.id == phi_res.id) {
-                                                    is_phi_result = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    
-                                    if (!is_phi_result) {
-                                        // 找到非 phi 值
-                                        if (idx < stack.items.len - 1) {
-                                            val = candidate;
-                                            std.debug.print("  Using non-phi value: reg_{d} (skipped {d} phi nodes)\n", .{ val.id, stack.items.len - 1 - idx });
-                                        }
-                                        break;
-                                    }
-                                }
+                        if (current_values.getPtr(alloca)) |stack| {
+                            if (stack.items.len > 0) {
+                                const val = stack.items[stack.items.len - 1];
+                                try back_edges.append(self.allocator, .{
+                                    .from = block,
+                                    .to = succ,
+                                    .alloca = alloca,
+                                    .value = val,
+                                });
                             }
-
-                            std.debug.print("  Adding phi incoming: block_{d} -> block_{d}, reg_{d} (stack depth: {d})\n", .{ block.index, succ.index, val.id, stack.items.len });
-
-                            // Add incoming value to phi
-                            // We need to reallocate the incoming slice
-                            const old_incoming = phi_inst.op.phi.incoming;
-                            const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
-                            @memcpy(new_incoming[0..old_incoming.len], old_incoming);
-                            new_incoming[old_incoming.len] = .{ .value = val, .block = block };
-
-                            // Free old slice if it wasn't empty/static?
-                            // Currently slices are owned by instruction if created.
-                            if (old_incoming.len > 0) self.allocator.free(old_incoming);
-
-                            phi_inst.op.phi.incoming = new_incoming;
-                        } else {
-                            std.debug.print("  WARNING: Empty stack for alloca in block_{d} -> block_{d}\n", .{ block.index, succ.index });
                         }
-                    } else {
-                        std.debug.print("  WARNING: No stack for alloca in block_{d} -> block_{d}\n", .{ block.index, succ.index });
+                    }
+                }
+            } else {
+                if (new_phis.getPtr(succ)) |succ_phis| {
+                    var it = succ_phis.iterator();
+                    while (it.next()) |entry| {
+                        const alloca = entry.key_ptr.*;
+                        const phi_inst = entry.value_ptr.*;
+
+                        if (current_values.getPtr(alloca)) |stack| {
+                            if (stack.items.len > 0) {
+                                const val = stack.items[stack.items.len - 1];
+                                std.debug.print("  Adding phi incoming (forward): block_{d} -> block_{d}, reg_{d}\n", .{ block.index, succ.index, val.id });
+
+                                const old_incoming = phi_inst.op.phi.incoming;
+                                const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
+                                @memcpy(new_incoming[0..old_incoming.len], old_incoming);
+                                new_incoming[old_incoming.len] = .{ .value = val, .block = block };
+
+                                if (old_incoming.len > 0) self.allocator.free(old_incoming);
+                                phi_inst.op.phi.incoming = new_incoming;
+                            }
+                        }
                     }
                 }
             }
-        }
-
-        // 4. Recurse to all dominated blocks (not just direct children)
-        // 修复：应该递归到所有被当前块支配的块，包括 CFG 后继
-        // 使用支配树的子节点来确保正确的遍历顺序
-        for (dt.children[block.index].items) |child| {
-            try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map);
         }
 
         // 5. Pop Stacks
