@@ -781,7 +781,92 @@ pub const NativeLinker = struct {
         
         std.debug.print("Applied {d} bare conversion fixes\n", .{fixes2});
 
-        return try final_code.toOwnedSlice(self.allocator);
+        // 第三轮修复：处理裸的二元运算符 (reg_X = reg_Y * reg_Z)
+        var final_code2 = try std.ArrayList(u8).initCapacity(self.allocator, final_code.items.len * 2);
+        errdefer final_code2.deinit(self.allocator);
+        
+        var fixes3: usize = 0;
+        i = 0;
+        last_copy = 0;
+        
+        std.debug.print("Searching for bare operators (*, /, %, +, -)...\n", .{});
+        
+        while (i < final_code.items.len) {
+            // 查找 "reg_X = reg_Y [*/%+-] reg_Z;" 模式
+            if (i + 4 < final_code.items.len and 
+                std.mem.eql(u8, final_code.items[i..i+4], "reg_")) {
+                var j = i + 4;
+                while (j < final_code.items.len and (final_code.items[j] >= '0' and final_code.items[j] <= '9')) : (j += 1) {}
+                
+                if (j < final_code.items.len and final_code.items[j] == ' ' and 
+                    j + 1 < final_code.items.len and final_code.items[j+1] == '=') {
+                    // 找到 "reg_X = "，检查右边是否是 "reg_Y [op] reg_Z;"
+                    var k = j + 2;
+                    while (k < final_code.items.len and final_code.items[k] == ' ') : (k += 1) {}
+                    
+                    if (k + 4 < final_code.items.len and std.mem.eql(u8, final_code.items[k..k+4], "reg_")) {
+                        var m = k + 4;
+                        while (m < final_code.items.len and (final_code.items[m] >= '0' and final_code.items[m] <= '9')) : (m += 1) {}
+                        
+                        // 跳过空格
+                        while (m < final_code.items.len and final_code.items[m] == ' ') : (m += 1) {}
+                        
+                        // 检查运算符
+                        if (m < final_code.items.len) {
+                            const op_char = final_code.items[m];
+                            if (op_char == '*' or op_char == '/' or op_char == '%' or op_char == '+' or op_char == '-') {
+                                // 找到运算符，检查右边是否是 reg_Z
+                                var n = m + 1;
+                                while (n < final_code.items.len and final_code.items[n] == ' ') : (n += 1) {}
+                                
+                                if (n + 4 < final_code.items.len and std.mem.eql(u8, final_code.items[n..n+4], "reg_")) {
+                                    var p = n + 4;
+                                    while (p < final_code.items.len and (final_code.items[p] >= '0' and final_code.items[p] <= '9')) : (p += 1) {}
+                                    
+                                    // 检查是否以 ; 结尾
+                                    while (p < final_code.items.len and final_code.items[p] == ' ') : (p += 1) {}
+                                    if (p < final_code.items.len and final_code.items[p] == ';') {
+                                        // 找到裸的二元运算，需要替换为 php_* 函数
+                                        const op_name = switch (op_char) {
+                                            '*' => "php_mul",
+                                            '/' => "php_div",
+                                            '%' => "php_mod",
+                                            '+' => "php_add",
+                                            '-' => "php_sub",
+                                            else => unreachable,
+                                        };
+                                        
+                                        try final_code2.appendSlice(self.allocator, final_code.items[last_copy..j+2]); // 复制到 "="
+                                        try final_code2.appendSlice(self.allocator, " try runtime.");
+                                        try final_code2.appendSlice(self.allocator, op_name);
+                                        try final_code2.appendSlice(self.allocator, "(");
+                                        try final_code2.appendSlice(self.allocator, final_code.items[k..m]); // reg_Y
+                                        try final_code2.appendSlice(self.allocator, ", ");
+                                        try final_code2.appendSlice(self.allocator, final_code.items[n..p]); // reg_Z
+                                        try final_code2.appendSlice(self.allocator, ");");
+                                        last_copy = p + 1;
+                                        i = p + 1;
+                                        fixes3 += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            i += 1;
+        }
+        
+        // 复制剩余内容
+        if (last_copy < final_code.items.len) {
+            try final_code2.appendSlice(self.allocator, final_code.items[last_copy..]);
+        }
+        
+        std.debug.print("Applied {d} bare operator fixes\n", .{fixes3});
+
+        return try final_code2.toOwnedSlice(self.allocator);
     }
 
     /// 生成全局变量
@@ -4029,6 +4114,7 @@ pub const NativeLinker = struct {
                 }
             },
             .mul => |op| {
+                std.debug.print("generateInstructionSimple: mul reg_{d} = reg_{d} * reg_{d}\n", .{ if (inst.result) |r| r.id else 999, op.lhs.id, op.rhs.id });
                 if (inst.result) |reg| {
                     const lhs_fallback = if (self.current_register_types) |types|
                         (types.get(op.lhs.id) orelse op.lhs.type_)
@@ -4054,6 +4140,18 @@ pub const NativeLinker = struct {
                     const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
                     const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
                     const result_tag = @as(std.meta.Tag(IR.Type), result_type);
+
+                    // DEBUG: 输出类型信息
+                    if (reg.id == 40) {
+                        std.debug.print("DEBUG mul reg_40: lhs_tag={s}, rhs_tag={s}, result_tag={s}\n", .{
+                            @tagName(lhs_tag), @tagName(rhs_tag), @tagName(result_tag)
+                        });
+                        std.debug.print("  lhs_fallback={s}, rhs_fallback={s}, result_fallback={s}\n", .{
+                            @tagName(@as(std.meta.Tag(IR.Type), lhs_fallback)),
+                            @tagName(@as(std.meta.Tag(IR.Type), rhs_fallback)),
+                            @tagName(@as(std.meta.Tag(IR.Type), result_fallback))
+                        });
+                    }
 
                     const lhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), lhs_fallback) == .php_value) .php_value else lhs_tag;
                     const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
@@ -10603,7 +10701,6 @@ pub const NativeLinker = struct {
                     try writer.print("        {s} = try runtime.php_mod(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                 }
             },
-            .eq => |op| {
             .pow => |op| {
                 if (inst.result) |reg| {
                     const lhs_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
