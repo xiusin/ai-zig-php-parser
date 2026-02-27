@@ -2713,6 +2713,12 @@ pub const NativeLinker = struct {
             ir_type;
 
         const type_tag = @as(std.meta.Tag(IR.Type), actual_type);
+        
+        if (reg_id == 10) {
+            std.debug.print("writeConditionExpr: reg_10, ir_type={s}, actual_type={s}, type_tag={s}\n", .{
+                @tagName(ir_type), @tagName(actual_type), @tagName(type_tag)
+            });
+        }
 
         // 根据类型生成条件表达式
         switch (type_tag) {
@@ -2724,9 +2730,9 @@ pub const NativeLinker = struct {
                     false;
 
                 if (is_alloca) {
-                    try writer.print("reg_{d}.*.toBool()", .{reg_id});
+                    try writer.print("reg_{d}.*", .{reg_id});
                 } else {
-                    try writer.print("reg_{d}.toBool()", .{reg_id});
+                    try writer.print("reg_{d}", .{reg_id});
                 }
             },
             .i64 => try writer.print("(reg_{d} != 0)", .{reg_id}),
@@ -4394,7 +4400,16 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    if (type_tag == .bool) {
+                    
+                    // 检查实际声明类型，不是推断类型
+                    if (type_tag == .php_value) {
+                        // 结果是 Value，不要 .toBool()
+                        try writer.print("    reg_{d} = try runtime.php_identical(", .{reg.id});
+                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                        try writer.writeAll(");\n");
+                    } else if (type_tag == .bool) {
                         try writer.print("    reg_{d} = (try runtime.php_identical(", .{reg.id});
                         try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
                         try writer.writeAll(", ");
@@ -4414,7 +4429,16 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    if (type_tag == .bool) {
+                    
+                    // 检查实际声明类型，不是推断类型
+                    if (type_tag == .php_value) {
+                        // 结果是 Value，不要 .toBool()
+                        try writer.print("    reg_{d} = try runtime.php_not_identical(", .{reg.id});
+                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                        try writer.writeAll(");\n");
+                    } else if (type_tag == .bool) {
                         try writer.print("    reg_{d} = (try runtime.php_not_identical(", .{reg.id});
                         try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
                         try writer.writeAll(", ");
@@ -4714,6 +4738,10 @@ pub const NativeLinker = struct {
             },
             .not => |op| {
                 if (inst.result) |reg| {
+                    std.debug.print("generateInstructionSimple: not reg_{d} = !reg_{d}, result_type={s}, operand_type={s}\n", .{
+                        reg.id, op.operand.id, @tagName(reg.type_), @tagName(op.operand.type_)
+                    });
+                    
                     // 使用修正后的类型
                     const operand_corrected = if (self.current_register_types) |types|
                         types.get(op.operand.id) orelse op.operand.type_
@@ -4726,8 +4754,30 @@ pub const NativeLinker = struct {
 
                     const operand_type_tag = @as(std.meta.Tag(IR.Type), operand_corrected);
                     const type_tag = @as(std.meta.Tag(IR.Type), result_corrected);
+                    
+                    // 检查寄存器的实际声明类型（不是推断类型）
+                    const actual_result_type = @as(std.meta.Tag(IR.Type), reg.type_);
+                    
+                    std.debug.print("  operand_type_tag={s}, type_tag={s}, actual_result_type={s}\n", .{
+                        @tagName(operand_type_tag), @tagName(type_tag), @tagName(actual_result_type)
+                    });
 
-                    if (type_tag == .bool) {
+                    // 如果实际类型是 php_value，不要生成 .toBool()
+                    if (actual_result_type == .php_value) {
+                        std.debug.print("  -> using php_value path\n", .{});
+                        if (operand_type_tag == .php_value) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_not(reg_{d});\n", .{op.operand.id});
+                        } else if (operand_type_tag == .bool) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(!reg_{d});\n", .{op.operand.id});
+                        } else if (operand_type_tag == .i64) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d} == 0);\n", .{op.operand.id});
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_not(", .{reg.id});
+                            try self.writePhpValueExpr(writer, operand_type_tag, op.operand.id);
+                            try writer.writeAll(");\n");
+                        }
+                    } else if (type_tag == .bool) {
+                        std.debug.print("  -> using bool path\n", .{});
                         if (operand_type_tag == .bool) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "!reg_{d};\n", .{op.operand.id});
                         } else if (operand_type_tag == .php_value) {
@@ -4738,6 +4788,7 @@ pub const NativeLinker = struct {
                             try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_not(reg_{d})).toBool();\n", .{op.operand.id});
                         }
                     } else {
+                        std.debug.print("  -> using default path\n", .{});
                         // Result is Value or something else
                         if (operand_type_tag == .php_value) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_not(reg_{d});\n", .{op.operand.id});

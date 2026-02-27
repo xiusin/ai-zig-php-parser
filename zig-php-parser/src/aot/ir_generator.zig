@@ -1342,7 +1342,7 @@ pub const IRGenerator = struct {
 
         // Condition: counter < count
         self.setCurrentBlock(cond_block);
-        const cond_reg = try self.emitWithResult(.{ .lt = .{ .lhs = counter_reg, .rhs = count_reg } }, .bool);
+        const cond_reg = try self.emitWithResult(.{ .lt = .{ .lhs = counter_reg, .rhs = count_reg } }, .php_value);
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
             .then_block = body_block,
@@ -1428,11 +1428,9 @@ pub const IRGenerator = struct {
             .return_type = .php_value,
         } }, .php_value);
 
-        // 转换为 bool
-        const cond_reg = try self.emitWithResult(.{ .cast = .{ .value = valid_val, .from_type = .php_value, .to_type = .bool } }, .bool);
-
+        // 不需要转换，直接使用 php_value
         self.setTerminator(.{ .cond_br = .{
-            .cond = cond_reg,
+            .cond = valid_val,
             .then_block = body_block,
             .else_block = exit_block,
         } });
@@ -2545,20 +2543,20 @@ pub const IRGenerator = struct {
             .percent => self.emitWithResult(.{ .mod = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
             .star_star => self.emitWithResult(.{ .pow = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, arith_result_type),
 
-            // Comparison
-            .equal_equal => self.emitWithResult(.{ .eq = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .bang_equal => self.emitWithResult(.{ .ne = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .equal_equal_equal => self.emitWithResult(.{ .identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .bang_equal_equal => self.emitWithResult(.{ .not_identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .less => self.emitWithResult(.{ .lt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .less_equal => self.emitWithResult(.{ .le = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .greater => self.emitWithResult(.{ .gt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .greater_equal => self.emitWithResult(.{ .ge = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            // Comparison - 返回 php_value，不是 bool
+            .equal_equal => self.emitWithResult(.{ .eq = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .bang_equal => self.emitWithResult(.{ .ne = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .equal_equal_equal => self.emitWithResult(.{ .identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .bang_equal_equal => self.emitWithResult(.{ .not_identical = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .less => self.emitWithResult(.{ .lt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .less_equal => self.emitWithResult(.{ .le = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .greater => self.emitWithResult(.{ .gt = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .greater_equal => self.emitWithResult(.{ .ge = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
             .spaceship => self.emitWithResult(.{ .spaceship = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
 
-            // Logical
-            .k_and, .double_ampersand => self.emitWithResult(.{ .and_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
-            .k_or, .double_pipe => self.emitWithResult(.{ .or_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .bool),
+            // Logical - 返回 php_value，不是 bool
+            .k_and, .double_ampersand => self.emitWithResult(.{ .and_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .k_or, .double_pipe => self.emitWithResult(.{ .or_ = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
 
             // Bitwise
             .ampersand => self.emitWithResult(.{ .bit_and = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
@@ -2633,7 +2631,7 @@ pub const IRGenerator = struct {
 
         return switch (unary_data.op) {
             .minus => self.emitWithResult(.{ .neg = .{ .operand = operand_reg } }, operand_reg.type_),
-            .bang => self.emitWithResult(.{ .not = .{ .operand = operand_reg } }, .bool),
+            .bang => self.emitWithResult(.{ .not = .{ .operand = operand_reg } }, .php_value), // 返回 Value，不是 bool
             .tilde => self.emitWithResult(.{ .bit_not = .{ .operand = operand_reg } }, .i64),
             .plus => operand_reg, // Unary plus is a no-op
             else => operand_reg,
