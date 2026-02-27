@@ -2679,8 +2679,17 @@ pub const NativeLinker = struct {
         }
     }
 
+    /// Phi 赋值结构
+    const PhiAssignment = struct {
+        result: IR.Register,
+        value: IR.Register,
+    };
+
     /// 生成 phi 节点的值赋值（统一函数）
     /// 使用原始类型，不是推断类型，确保类型一致
+    /// 
+    /// 注意：这个函数只生成单个 phi 赋值
+    /// 对于多个相互依赖的 phi 节点，调用者需要处理并行赋值语义
     fn generatePhiValueAssignment(
         self: *Self,
         writer: anytype,
@@ -2699,6 +2708,48 @@ pub const NativeLinker = struct {
             // 结果是原生类型（不应该发生，因为所有寄存器都是 Value）
             // 但为了安全，还是处理一下
             try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+        }
+    }
+    
+    /// 生成多个 phi 节点的并行赋值
+    /// 处理相互依赖的情况，使用临时变量
+    fn generatePhiAssignmentsParallel(
+        self: *Self,
+        writer: anytype,
+        assignments: []const PhiAssignment,
+        indent: []const u8,
+    ) !void {
+        _ = self;
+        
+        if (assignments.len == 0) return;
+        
+        // 检测是否有依赖关系
+        var has_dependency = false;
+        for (assignments) |assign1| {
+            for (assignments) |assign2| {
+                if (assign1.result.id == assign2.value.id) {
+                    has_dependency = true;
+                    break;
+                }
+            }
+            if (has_dependency) break;
+        }
+        
+        if (!has_dependency) {
+            // 无依赖，直接赋值
+            for (assignments) |assign| {
+                try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+            }
+        } else {
+            // 有依赖，使用临时变量
+            // 第一步：保存所有源值到临时变量
+            for (assignments, 0..) |assign, i| {
+                try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
+            }
+            // 第二步：从临时变量赋值到目标
+            for (assignments, 0..) |assign, i| {
+                try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
+            }
         }
     }
 
@@ -2943,7 +2994,10 @@ pub const NativeLinker = struct {
                     }
                 }
 
-                // 设置目标块的 phi 节点值（内联）
+                // 收集所有 phi 赋值
+                var assignments = std.ArrayList(PhiAssignment).initCapacity(self.allocator, 0) catch unreachable;
+                defer assignments.deinit(self.allocator);
+                
                 const source_block = func.blocks.items[current_block_idx];
                 for (target.instructions.items) |inst| {
                     if (inst.op == .phi) {
@@ -2951,12 +3005,15 @@ pub const NativeLinker = struct {
                         const result_reg = inst.result orelse continue;
                         for (phi_op.incoming) |incoming| {
                             if (incoming.block == source_block) {
-                                try self.generatePhiValueAssignment(writer, result_reg, incoming.value, "            ");
+                                try assignments.append(self.allocator, .{ .result = result_reg, .value = incoming.value });
                                 break;
                             }
                         }
                     }
                 }
+                
+                // 使用并行赋值
+                try self.generatePhiAssignmentsParallel(writer, assignments.items, "            ");
 
                 try writer.print("                prev_block = current_block;\n                current_block = {d};\n", .{target_idx});
             },
