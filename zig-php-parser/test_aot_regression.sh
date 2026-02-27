@@ -119,6 +119,38 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+# 已知问题测试（不计入失败）
+echo ""
+echo "=== 已知问题测试（不影响总结果） ==="
+
+echo -n "测试 X1: 类型推导（已知问题：三元运算符） ... "
+rm -rf .zigphp_aot_build
+if ./zig-out/bin/php-interpreter --compile --output=/tmp/test_type_aot /tmp/test_simple_types.php > /dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  编译成功（待验证）${NC}"
+else
+    echo -e "${YELLOW}⚠️  编译失败（已知问题）${NC}"
+fi
+
+echo -n "测试 X2: 复杂控制流（已知问题：多维数组） ... "
+rm -rf .zigphp_aot_build
+if ./zig-out/bin/php-interpreter --compile --output=/tmp/test_cf_aot /tmp/test_control_flow.php > /dev/null 2>&1; then
+    if /tmp/test_cf_aot > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  运行成功（待验证）${NC}"
+    else
+        echo -e "${YELLOW}⚠️  运行失败（已知问题）${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️  编译失败（已知问题）${NC}"
+fi
+
+echo -n "测试 X3: 数组和字符串（已知问题：implode）... "
+rm -rf .zigphp_aot_build
+if ./zig-out/bin/php-interpreter --compile --output=/tmp/test_arr_aot /tmp/test_array_string.php > /dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  编译成功（待验证）${NC}"
+else
+    echo -e "${YELLOW}⚠️  编译失败（已知问题）${NC}"
+fi
+
 # 总结
 echo ""
 echo "======================================"
