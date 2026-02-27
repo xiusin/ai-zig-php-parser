@@ -159,42 +159,32 @@ pub const NativeLinker = struct {
     /// 获取寄存器的推断类型（优先使用推断结果）
     /// strict_mode = true 时，fallback 到 php_value 会触发诊断警告
     fn getInferredRegType(self: *Self, reg_id: usize, fallback: IR.Type) IR.Type {
-        return self.getInferredRegTypeEx(reg_id, fallback, false);
+        // 强制所有寄存器类型为 php_value，因为所有寄存器都是 runtime.Value
+        _ = self;
+        _ = reg_id;
+        _ = fallback;
+        return IR.Type{ .php_value = {} };
     }
 
     /// 严格模式类型推断：推断失败时报告诊断警告
     fn getInferredRegTypeStrict(self: *Self, reg_id: usize, fallback: IR.Type) IR.Type {
-        return self.getInferredRegTypeEx(reg_id, fallback, true);
+        // 强制所有寄存器类型为 php_value
+        return self.getInferredRegType(reg_id, fallback);
     }
 
-    /// 类型推断核心实现
+    /// 类型推断核心实现（已废弃，保留用于兼容）
     fn getInferredRegTypeEx(
         self: *Self,
         reg_id: usize,
         fallback: IR.Type,
         strict: bool,
     ) IR.Type {
-        if (self.current_inferred_types) |types| {
-            if (types.get(reg_id)) |inferred| {
-                type_infer_hit_count += 1;
-                return inferred;
-            }
-        }
-        type_infer_fallback_count += 1;
-        // 严格模式：fallback 到 php_value 时发出警告
-        if (strict) {
-            const fallback_tag = @as(
-                std.meta.Tag(IR.Type),
-                fallback,
-            );
-            if (fallback_tag == .php_value) {
-                std.debug.print(
-                    "[STRICT_TYPE] reg_{d} 推断失败，退化为 php_value\n",
-                    .{reg_id},
-                );
-            }
-        }
-        return fallback;
+        _ = self;
+        _ = strict;
+        _ = reg_id;
+        _ = fallback;
+        // 强制所有寄存器类型为 php_value
+        return IR.Type{ .php_value = {} };
     }
 
     /// 重置类型推断统计
