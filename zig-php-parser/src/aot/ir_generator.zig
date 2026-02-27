@@ -1980,20 +1980,39 @@ pub const IRGenerator = struct {
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
             },
             .array_access => {
-                const array_reg = try self.generateExpression(target_node.data.array_access.target);
-                if (target_node.data.array_access.index) |idx| {
-                    const key_reg = try self.generateExpression(idx);
-                    _ = try self.emit(.{ .array_set = .{
-                        .array = array_reg,
-                        .key = key_reg,
+                // 检查是否是嵌套的 array_access (e.g., $matrix[$i][$j] = value)
+                const target_expr = self.getNode(target_node.data.array_access.target);
+                const is_nested = target_expr != null and target_expr.?.tag == .array_access;
+                
+                if (is_nested and target_node.data.array_access.index != null and target_expr.?.data.array_access.index != null) {
+                    // 嵌套数组赋值：$outer[$outer_key][$inner_key] = value
+                    const outer_array_reg = try self.generateExpression(target_expr.?.data.array_access.target);
+                    const outer_key_reg = try self.generateExpression(target_expr.?.data.array_access.index.?);
+                    const inner_key_reg = try self.generateExpression(target_node.data.array_access.index.?);
+                    
+                    _ = try self.emit(.{ .array_set_nested = .{
+                        .outer_array = outer_array_reg,
+                        .outer_key = outer_key_reg,
+                        .inner_key = inner_key_reg,
                         .value = value_reg,
                     } }, null);
                 } else {
-                    // $arr[] = value - push to array
-                    _ = try self.emit(.{ .array_push = .{
-                        .array = array_reg,
-                        .value = value_reg,
-                    } }, null);
+                    // 普通数组赋值
+                    const array_reg = try self.generateExpression(target_node.data.array_access.target);
+                    if (target_node.data.array_access.index) |idx| {
+                        const key_reg = try self.generateExpression(idx);
+                        _ = try self.emit(.{ .array_set = .{
+                            .array = array_reg,
+                            .key = key_reg,
+                            .value = value_reg,
+                        } }, null);
+                    } else {
+                        // $arr[] = value - push to array
+                        _ = try self.emit(.{ .array_push = .{
+                            .array = array_reg,
+                            .value = value_reg,
+                        } }, null);
+                    }
                 }
             },
             .property_access => {

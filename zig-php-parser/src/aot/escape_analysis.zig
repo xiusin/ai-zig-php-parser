@@ -78,7 +78,7 @@ pub const EscapeAnalysis = struct {
                 }
             },
             // 数组/对象元素逃逸
-            .array_set, .object_set => {
+            .array_set, .array_set_nested, .object_set => {
                 if (inst.result) |result| {
                     try self.markEscaped(result.id);
                 }

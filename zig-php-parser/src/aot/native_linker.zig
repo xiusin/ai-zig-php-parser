@@ -5206,6 +5206,41 @@ pub const NativeLinker = struct {
                     .{ op.array.id, op.key.id, op.value.id },
                 );
             },
+            .array_set_nested => |op| {
+                // 嵌套数组赋值，支持 auto-vivification
+                try writer.writeAll(
+                    \\    {
+                    \\        const outer_arr = reg_
+                );
+                try writer.print("{d}", .{op.outer_array.id});
+                try writer.writeAll(
+                    \\.asArray();
+                    \\        var inner = outer_arr.getByValue(reg_
+                );
+                try writer.print("{d}", .{op.outer_key.id});
+                try writer.writeAll(
+                    \\);
+                    \\        if (inner == null or inner.?.isNull()) {
+                    \\            const new_arr = try runtime.PHPArray.init(runtime.runtime_allocator);
+                    \\            const new_val = runtime.Value.initArray(new_arr);
+                    \\            try outer_arr.setByValue(runtime.runtime_allocator, reg_
+                );
+                try writer.print("{d}", .{op.outer_key.id});
+                try writer.writeAll(
+                    \\, new_val);
+                    \\            inner = new_val;
+                    \\        }
+                    \\        try inner.?.asArray().setByValue(runtime.runtime_allocator, reg_
+                );
+                try writer.print("{d}", .{op.inner_key.id});
+                try writer.writeAll(", reg_");
+                try writer.print("{d}", .{op.value.id});
+                try writer.writeAll(
+                    \\);
+                    \\    }
+                    \\
+                );
+            },
             .array_push => |op| {
                 // 简化：所有寄存器都是 Value 类型，直接使用
                 try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
@@ -10187,6 +10222,12 @@ pub const NativeLinker = struct {
                 try reg_last_use.put(op.key.id, use_info);
                 try reg_last_use.put(op.value.id, use_info);
             },
+            .array_set_nested => |op| {
+                try reg_last_use.put(op.outer_array.id, use_info);
+                try reg_last_use.put(op.outer_key.id, use_info);
+                try reg_last_use.put(op.inner_key.id, use_info);
+                try reg_last_use.put(op.value.id, use_info);
+            },
             .array_push => |op| {
                 try reg_last_use.put(op.array.id, use_info);
                 try reg_last_use.put(op.value.id, use_info);
@@ -10267,6 +10308,12 @@ pub const NativeLinker = struct {
             .array_set => |op| {
                 try updateUse(reg_lifetime, op.array.id, block_idx, inst_idx);
                 try updateUse(reg_lifetime, op.key.id, block_idx, inst_idx);
+                try updateUse(reg_lifetime, op.value.id, block_idx, inst_idx);
+            },
+            .array_set_nested => |op| {
+                try updateUse(reg_lifetime, op.outer_array.id, block_idx, inst_idx);
+                try updateUse(reg_lifetime, op.outer_key.id, block_idx, inst_idx);
+                try updateUse(reg_lifetime, op.inner_key.id, block_idx, inst_idx);
                 try updateUse(reg_lifetime, op.value.id, block_idx, inst_idx);
             },
             .array_push => |op| {
@@ -10906,6 +10953,41 @@ pub const NativeLinker = struct {
 
                 // 简化：所有寄存器都是 Value 类型，使用 setByValue
                 try writer.print("        try {s}.asArray().setByValue(runtime.runtime_allocator, reg_{d}, reg_{d});\n", .{ array, op.key.id, op.value.id });
+            },
+            .array_set_nested => |op| {
+                // 嵌套数组赋值，支持 auto-vivification
+                try writer.writeAll(
+                    \\        {
+                    \\            const outer_arr = reg_
+                );
+                try writer.print("{d}", .{op.outer_array.id});
+                try writer.writeAll(
+                    \\.asArray();
+                    \\            var inner = outer_arr.getByValue(reg_
+                );
+                try writer.print("{d}", .{op.outer_key.id});
+                try writer.writeAll(
+                    \\);
+                    \\            if (inner == null or inner.?.isNull()) {
+                    \\                const new_arr = try runtime.PHPArray.init(runtime.runtime_allocator);
+                    \\                const new_val = runtime.Value.initArray(new_arr);
+                    \\                try outer_arr.setByValue(runtime.runtime_allocator, reg_
+                );
+                try writer.print("{d}", .{op.outer_key.id});
+                try writer.writeAll(
+                    \\, new_val);
+                    \\                inner = new_val;
+                    \\            }
+                    \\            try inner.?.asArray().setByValue(runtime.runtime_allocator, reg_
+                );
+                try writer.print("{d}", .{op.inner_key.id});
+                try writer.writeAll(", reg_");
+                try writer.print("{d}", .{op.value.id});
+                try writer.writeAll(
+                    \\);
+                    \\        }
+                    \\
+                );
             },
             .array_push => |op| {
                 var array_buf: [32]u8 = undefined;
