@@ -73,7 +73,8 @@ pub fn intval(str: []const u8, base: u8) i64 {
     const parse_str = skipBasePrefix(s, actual_base);
 
     const result = std.fmt.parseInt(i64, parse_str, actual_base) catch {
-        return parsePartialInt(parse_str, actual_base);
+        const partial_result = parsePartialInt(parse_str, actual_base);
+        return if (negative) -partial_result else partial_result;
     };
 
     return if (negative) -result else result;
@@ -106,10 +107,16 @@ fn skipBasePrefix(s: []const u8, base: u8) []const u8 {
 
 fn parsePartialInt(s: []const u8, base: u8) i64 {
     var result: i64 = 0;
+    
     for (s) |c| {
-        const digit = charToDigit(c, base) orelse break;
-        result = result * @as(i64, base) + digit;
+        if (charToDigit(c, base)) |d| {
+            result = result * @as(i64, base) + d;
+        } else {
+            // 遇到非数字就停止（PHP 行为：只解析前导数字）
+            break;
+        }
     }
+    
     return result;
 }
 

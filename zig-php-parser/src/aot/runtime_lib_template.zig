@@ -4057,7 +4057,52 @@ pub fn php_pi() !Value {
 
 /// intval - 转换为整数
 pub fn php_intval(val: Value) !Value {
-    return Value.initInt(val.toInt());
+    // 使用完整的 PHP intval 语义
+    if (val.isInt()) return val;
+    if (val.isFloat()) return Value.initInt(@intFromFloat(val.asFloat()));
+    if (val.isBool()) return Value.initInt(if (val.asBool()) @as(i64, 1) else @as(i64, 0));
+    if (val.isString()) {
+        const str = val.asString().data;
+        // 内联 intval 逻辑
+        if (str.len == 0) return Value.initInt(0);
+        
+        var s = std.mem.trim(u8, str, " \t\n\r");
+        if (s.len == 0) return Value.initInt(0);
+        
+        var negative = false;
+        if (s[0] == '-') {
+            negative = true;
+            s = s[1..];
+        } else if (s[0] == '+') {
+            s = s[1..];
+        }
+        
+        if (s.len == 0) return Value.initInt(0);
+        
+        // 如果包含小数点，先解析为浮点数
+        if (std.mem.indexOf(u8, s, ".") != null) {
+            if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
+                return Value.initInt(@intFromFloat(float_val));
+            } else |_| {}
+        }
+        
+        // 尝试完整解析
+        if (std.fmt.parseInt(i64, s, 10)) |int_val| {
+            return Value.initInt(if (negative) -int_val else int_val);
+        } else |_| {
+            // 部分解析：提取前导数字
+            var result: i64 = 0;
+            for (s) |c| {
+                if (c >= '0' and c <= '9') {
+                    result = result * 10 + (c - '0');
+                } else {
+                    break;
+                }
+            }
+            return Value.initInt(if (negative) -result else result);
+        }
+    }
+    return Value.initInt(0);
 }
 
 /// floatval - 转换为浮点数

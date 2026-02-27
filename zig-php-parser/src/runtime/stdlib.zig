@@ -3973,16 +3973,45 @@ fn intvalFn(vm: *VM, args: []const Value) !Value {
         .boolean => if (args[0].asBool()) @as(i64, 1) else @as(i64, 0),
         .string => blk: {
             const str = args[0].getAsString().data.data;
-            // 先尝试解析为整数
-            if (std.fmt.parseInt(i64, str, 10)) |int_val| {
-                break :blk int_val;
-            } else |_| {
-                // 如果失败，尝试解析为浮点数再转整数
-                if (std.fmt.parseFloat(f64, str)) |float_val| {
+            if (str.len == 0) break :blk 0;
+            
+            // 去除前后空白
+            var s = std.mem.trim(u8, str, " \t\n\r");
+            if (s.len == 0) break :blk 0;
+            
+            // 处理符号
+            var negative = false;
+            if (s[0] == '-') {
+                negative = true;
+                s = s[1..];
+            } else if (s[0] == '+') {
+                s = s[1..];
+            }
+            
+            if (s.len == 0) break :blk 0;
+            
+            // 如果包含小数点，先解析为浮点数
+            if (std.mem.indexOf(u8, s, ".") != null) {
+                if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
                     break :blk @intFromFloat(float_val);
-                } else |_| {
-                    break :blk 0;
+                } else |_| {}
+            }
+            
+            // 尝试完整解析
+            if (std.fmt.parseInt(i64, s, 10)) |int_val| {
+                break :blk if (negative) -int_val else int_val;
+            } else |_| {
+                // 部分解析：提取前导数字
+                var result: i64 = 0;
+                for (s) |c| {
+                    if (c >= '0' and c <= '9') {
+                        result = result * 10 + (c - '0');
+                    } else {
+                        // 遇到非数字停止
+                        break;
+                    }
                 }
+                break :blk if (negative) -result else result;
             }
         },
         else => 0,
