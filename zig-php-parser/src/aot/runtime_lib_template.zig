@@ -2588,23 +2588,29 @@ pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
 
 /// echo语句
 pub fn php_echo(value: Value) !void {
+    const stdout_file = std.fs.File{ .handle = 1 };
+    
     if (value.isNull()) {
         // null不输出任何内容
         return;
     } else if (value.isBool()) {
         if (value.asBool()) {
-            std.debug.print("1", .{});
+            try stdout_file.writeAll("1");
         }
         // false不输出任何内容
     } else if (value.isInt()) {
-        std.debug.print("{d}", .{value.asInt()});
+        var buf: [32]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "{d}", .{value.asInt()});
+        try stdout_file.writeAll(str);
     } else if (value.isFloat()) {
-        std.debug.print("{d}", .{value.asFloat()});
+        var buf: [32]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "{d}", .{value.asFloat()});
+        try stdout_file.writeAll(str);
     } else if (value.isString()) {
         const str = value.asString();
-        std.debug.print("{s}", .{str.data});
+        try stdout_file.writeAll(str.data);
     } else if (value.isArray()) {
-        std.debug.print("Array", .{});
+        try stdout_file.writeAll("Array");
     }
 }
 
