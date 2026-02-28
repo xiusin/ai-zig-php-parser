@@ -1,0 +1,10 @@
+2,5,3,4,1
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 3
+GC collections: 0
+Execution time: 13000ns
+Peak memory usage: 114 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================

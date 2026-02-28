@@ -5225,7 +5225,7 @@ pub const VM = struct {
             .float_val => |f| Value.initFloat(f),
             .string_val => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
             // 复杂类型暂时返回null，后续可以扩展
-            .array_val, .object_val, .struct_val, .closure_val, .resource_val => Value.initNull(),
+            .array_val, .object_val, .struct_val, .closure_val, .resource_val, .iterator_val => Value.initNull(),
         };
     }
 

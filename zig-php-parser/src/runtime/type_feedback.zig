@@ -24,6 +24,7 @@ pub const TypeTag = enum(u8) {
     struct_type = 7,
     closure_type = 8,
     resource_type = 9,
+    iterator_type = 10,
     mixed_type = 255, // 未知或混合类型
 };
 

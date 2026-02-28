@@ -1,0 +1,1 @@
+InvalidOpcode: func='main' ip=8 opcode=0x42(identical) op1=0 op2=0 hint=0 tail=false gc=false stack_top=3 base=0

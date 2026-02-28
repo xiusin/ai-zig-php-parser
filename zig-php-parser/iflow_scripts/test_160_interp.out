@@ -1,0 +1,10 @@
+condition1
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 1
+GC collections: 0
+Execution time: 7000ns
+Peak memory usage: 34 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================

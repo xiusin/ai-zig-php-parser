@@ -693,10 +693,18 @@ pub const BytecodeGenerator = struct {
         try self.placeLabel(loop_start);
         try self.emit(.loop_start, 0, 0);
 
-        // 获取下一个元素
+        // 获取下一个元素（总是压入 key 和 value）
         try self.emitJump(.foreach_next, loop_end);
 
-        // 存储key（如果有）
+        // 存储 value（栈顶）
+        const value_node = self.getNode(foreach_data.value);
+        if (value_node.tag == .variable) {
+            const value_name = self.getString(value_node.data.variable.name);
+            const value_slot = try self.getOrCreateLocal(value_name);
+            try self.emit(.store_local, value_slot, 0);
+        }
+
+        // 存储 key（如果需要）
         if (foreach_data.key) |key_idx| {
             const key_node = self.getNode(key_idx);
             if (key_node.tag == .variable) {
@@ -704,14 +712,9 @@ pub const BytecodeGenerator = struct {
                 const key_slot = try self.getOrCreateLocal(key_name);
                 try self.emit(.store_local, key_slot, 0);
             }
-        }
-
-        // 存储value
-        const value_node = self.getNode(foreach_data.value);
-        if (value_node.tag == .variable) {
-            const value_name = self.getString(value_node.data.variable.name);
-            const value_slot = try self.getOrCreateLocal(value_name);
-            try self.emit(.store_local, value_slot, 0);
+        } else {
+            // 不需要 key，弹出它
+            try self.emit(.pop, 0, 0);
         }
 
         // 循环体

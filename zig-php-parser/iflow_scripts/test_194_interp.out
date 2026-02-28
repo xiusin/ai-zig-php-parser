@@ -1,0 +1,15 @@
+Bytecode execution failed: UndefinedFunction, falling back to tree-walking
+img2.png,img10.png,img1.pngUncaught UndefinedFunctionError: Call to undefined function natsort() in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_194.php:6
+Stack trace:
+#0 /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_194.php(6): main
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 0ns
+Peak memory usage: 0 bytes
+String intern pool size: 4
+Call stack depth: 0
+===============================================

@@ -1,0 +1,1 @@
+InvalidOpcode: func='maxArr' ip=5 opcode=0x7e(foreach_init) op1=0 op2=0 hint=0 tail=false gc=false stack_top=4 base=0

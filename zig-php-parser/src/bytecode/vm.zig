@@ -32,6 +32,7 @@ pub const Value = union(enum) {
     struct_val: *StructInstance,
     closure_val: *Closure,
     resource_val: *Resource,
+    iterator_val: *Iterator,
 
     pub const String = struct {
         data: []u8,
@@ -87,6 +88,15 @@ pub const Value = union(enum) {
         marked: bool,
     };
 
+    pub const Iterator = struct {
+        iterable: Value,           // 被遍历的数组/对象
+        current_index: i64,        // 当前索引
+        keys: ?[][]const u8,       // 键数组（关联数组）
+        is_done: bool,             // 是否完成
+        ref_count: u32,
+        marked: bool,
+    };
+
     /// 转换为布尔值
     pub fn toBool(self: Value) bool {
         return switch (self) {
@@ -137,6 +147,7 @@ pub const Value = union(enum) {
             .struct_val => .struct_type,
             .closure_val => .closure_type,
             .resource_val => .resource_type,
+            .iterator_val => .iterator_type,
         };
     }
 };
@@ -1628,6 +1639,118 @@ pub const BytecodeVM = struct {
                     switch (val) {
                         .string_val => |s| try self.push(.{ .int_val = @intCast(s.data.len) }),
                         else => try self.push(.{ .int_val = 0 }),
+                    }
+                },
+
+                // ========== foreach 循环 ==========
+                .foreach_init => {
+                    // 栈: [iterable] -> [iterator]
+                    const iterable = try self.pop();
+                    
+                    // 创建迭代器
+                    const iterator = self.allocator.create(Value.Iterator) catch return BytecodeVM.VMError.OutOfMemory;
+                    iterator.* = .{
+                        .iterable = iterable,
+                        .current_index = 0,
+                        .keys = null,
+                        .is_done = false,
+                        .ref_count = 1,
+                        .marked = false,
+                    };
+                    
+                    // 如果是关联数组，提取键
+                    switch (iterable) {
+                        .array_val => |arr| {
+                            if (arr.keys.count() > 0) {
+                                // 关联数组：提取所有键
+                                const keys = self.allocator.alloc([]const u8, arr.keys.count()) catch return BytecodeVM.VMError.OutOfMemory;
+                                var i: usize = 0;
+                                var iter = arr.keys.iterator();
+                                while (iter.next()) |entry| : (i += 1) {
+                                    keys[i] = entry.key_ptr.*;
+                                }
+                                iterator.keys = keys;
+                            }
+                            // 检查是否为空
+                            iterator.is_done = arr.elements.items.len == 0;
+                        },
+                        else => {
+                            // 不可迭代的类型，标记为完成
+                            iterator.is_done = true;
+                        },
+                    }
+                    
+                    try self.push(.{ .iterator_val = iterator });
+                },
+
+                .foreach_next => {
+                    // 栈: [iterator] -> [iterator, key, value] 或跳转
+                    // operand1 = 循环结束跳转目标
+                    const jump_target = inst.operand1;
+                    const iterator_val = self.peek(0);
+                    
+                    switch (iterator_val) {
+                        .iterator_val => |iterator| {
+                            if (iterator.is_done) {
+                                // 迭代完成，跳转到循环结束
+                                _ = try self.pop(); // 弹出迭代器
+                                frame.ip = jump_target;
+                            } else {
+                                // 获取当前键值对
+                                switch (iterator.iterable) {
+                                    .array_val => |arr| {
+                                        const idx: usize = @intCast(iterator.current_index);
+                                        
+                                        if (idx < arr.elements.items.len) {
+                                            // 获取键
+                                            const key: Value = if (iterator.keys) |keys| blk: {
+                                                // 关联数组：使用字符串键
+                                                const key_str = self.allocator.create(Value.String) catch return BytecodeVM.VMError.OutOfMemory;
+                                                const key_data = self.allocator.dupe(u8, keys[idx]) catch return BytecodeVM.VMError.OutOfMemory;
+                                                key_str.* = .{
+                                                    .data = key_data,
+                                                    .ref_count = 1,
+                                                    .marked = false,
+                                                };
+                                                self.string_pool.append(self.allocator, key_str) catch return BytecodeVM.VMError.OutOfMemory;
+                                                break :blk .{ .string_val = key_str };
+                                            } else blk: {
+                                                // 索引数组：使用整数键
+                                                break :blk .{ .int_val = iterator.current_index };
+                                            };
+                                            
+                                            // 获取值
+                                            const value = arr.elements.items[idx];
+                                            
+                                            // 压入键和值
+                                            try self.push(key);
+                                            try self.push(value);
+                                            
+                                            // 更新迭代器
+                                            iterator.current_index += 1;
+                                            if (idx + 1 >= arr.elements.items.len) {
+                                                iterator.is_done = true;
+                                            }
+                                        } else {
+                                            // 索引越界，标记完成
+                                            iterator.is_done = true;
+                                            _ = try self.pop();
+                                            frame.ip = jump_target;
+                                        }
+                                    },
+                                    else => {
+                                        // 不可迭代，跳转
+                                        iterator.is_done = true;
+                                        _ = try self.pop();
+                                        frame.ip = jump_target;
+                                    },
+                                }
+                            }
+                        },
+                        else => {
+                            // 不是迭代器，错误
+                            return BytecodeVM.VMError.TypeMismatch;
+                        },
                     }
                 },
 
@@ -3776,6 +3899,8 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.array_len)] = handleArrayLen;
     table[@intFromEnum(OpCode.array_exists)] = handleArrayExists;
     table[@intFromEnum(OpCode.array_unset)] = handleArrayUnset;
+    table[@intFromEnum(OpCode.foreach_init)] = handleForeachInit;
+    table[@intFromEnum(OpCode.foreach_next)] = handleForeachNext;
 
     // 对象操作
     table[@intFromEnum(OpCode.new_object)] = handleNewObject;
@@ -5079,6 +5204,118 @@ fn handleArrayUnset(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.V
             try vm.push(.{ .array_val = arr });
         },
         else => try vm.push(.null_val),
+    }
+    return .continue_execution;
+}
+
+// ========== foreach 循环处理函数 ==========
+
+fn handleForeachInit(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const iterable = try vm.pop();
+    
+    // 创建迭代器
+    const iterator = vm.allocator.create(Value.Iterator) catch return BytecodeVM.VMError.OutOfMemory;
+    iterator.* = .{
+        .iterable = iterable,
+        .current_index = 0,
+        .keys = null,
+        .is_done = false,
+        .ref_count = 1,
+        .marked = false,
+    };
+    
+    // 如果是关联数组，提取键
+    switch (iterable) {
+        .array_val => |arr| {
+            if (arr.keys.count() > 0) {
+                // 关联数组：提取所有键
+                const keys = vm.allocator.alloc([]const u8, arr.keys.count()) catch return BytecodeVM.VMError.OutOfMemory;
+                var i: usize = 0;
+                var iter = arr.keys.iterator();
+                while (iter.next()) |entry| : (i += 1) {
+                    keys[i] = entry.key_ptr.*;
+                }
+                iterator.keys = keys;
+            }
+            // 检查是否为空
+            iterator.is_done = arr.elements.items.len == 0;
+        },
+        else => {
+            // 不可迭代的类型，标记为完成
+            iterator.is_done = true;
+        },
+    }
+    
+    try vm.push(.{ .iterator_val = iterator });
+    return .continue_execution;
+}
+
+fn handleForeachNext(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    const jump_target = inst.operand1;
+    const iterator_val = vm.peek(0);
+    
+    switch (iterator_val) {
+        .iterator_val => |iterator| {
+            if (iterator.is_done) {
+                // 迭代完成，跳转到循环结束
+                _ = try vm.pop(); // 弹出迭代器
+                return .{ .jump_to = jump_target };
+            } else {
+                // 获取当前键值对
+                switch (iterator.iterable) {
+                    .array_val => |arr| {
+                        const idx: usize = @intCast(iterator.current_index);
+                        
+                        if (idx < arr.elements.items.len) {
+                            // 获取键
+                            const key: Value = if (iterator.keys) |keys| blk: {
+                                // 关联数组：使用字符串键
+                                const key_str = vm.allocator.create(Value.String) catch return BytecodeVM.VMError.OutOfMemory;
+                                const key_data = vm.allocator.dupe(u8, keys[idx]) catch return BytecodeVM.VMError.OutOfMemory;
+                                key_str.* = .{
+                                    .data = key_data,
+                                    .ref_count = 1,
+                                    .marked = false,
+                                };
+                                vm.string_pool.append(vm.allocator, key_str) catch return BytecodeVM.VMError.OutOfMemory;
+                                break :blk .{ .string_val = key_str };
+                            } else blk: {
+                                // 索引数组：使用整数键
+                                break :blk .{ .int_val = iterator.current_index };
+                            };
+                            
+                            // 获取值
+                            const value = arr.elements.items[idx];
+                            
+                            // 压入键和值
+                            try vm.push(key);
+                            try vm.push(value);
+                            
+                            // 更新迭代器
+                            iterator.current_index += 1;
+                            if (idx + 1 >= arr.elements.items.len) {
+                                iterator.is_done = true;
+                            }
+                        } else {
+                            // 索引越界，标记完成
+                            iterator.is_done = true;
+                            _ = try vm.pop();
+                            return .{ .jump_to = jump_target };
+                        }
+                    },
+                    else => {
+                        // 不可迭代，跳转
+                        iterator.is_done = true;
+                        _ = try vm.pop();
+                        return .{ .jump_to = jump_target };
+                    },
+                }
+            }
+        },
+        else => {
+            // 不是迭代器，错误
+            return BytecodeVM.VMError.TypeMismatch;
+        },
     }
     return .continue_execution;
 }

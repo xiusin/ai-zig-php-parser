@@ -1,0 +1,1 @@
+InvalidOpcode: func='main' ip=9 opcode=0x7e(foreach_init) op1=0 op2=0 hint=0 tail=false gc=false stack_top=3 base=0

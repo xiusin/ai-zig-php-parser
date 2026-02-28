@@ -1,0 +1,11 @@
+Bytecode execution failed: UndefinedFunction, falling back to tree-walking
+Num: %d, Str: %s
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 0ns
+Peak memory usage: 0 bytes
+String intern pool size: 2
+Call stack depth: 0
+===============================================

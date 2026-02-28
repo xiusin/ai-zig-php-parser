@@ -1,0 +1,15 @@
+Bytecode execution failed: UndefinedFunction, falling back to tree-walking
+Uncaught UndefinedFunctionError: Call to undefined function end() in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_164.php:4
+Stack trace:
+#0 /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_164.php(4): main
+Runtime error: UncaughtException
+
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 0ns
+Peak memory usage: 0 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================

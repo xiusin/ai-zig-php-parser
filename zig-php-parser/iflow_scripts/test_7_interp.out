@@ -1,0 +1,20 @@
+InvalidOpcode: func='main' ip=14 opcode=0x7e(foreach_init) op1=0 op2=0 hint=0 tail=false gc=false stack_top=5 base=0
+  bytecode window [11..18) (len=32)
+  [11] 0x0a(push_int_0) op1=0 op2=0 hint=0
+  [12] 0x0c(store_local) op1=1 op2=0 hint=0
+  [13] 0x02(push_local) op1=0 op2=0 hint=0
+  [14] 0x7e(foreach_init) op1=0 op2=0 hint=0
+  [15] 0x67(loop_start) op1=0 op2=0 hint=0
+  [16] 0x7f(foreach_next) op1=27 op2=0 hint=0
+  [17] 0x0c(store_local) op1=2 op2=0 hint=0
+Bytecode execution failed: InvalidOpcode, falling back to tree-walking
+6
+=== PHP Interpreter Performance Statistics ===
+Function calls: 0
+Memory allocations: 0
+GC collections: 0
+Execution time: 0ns
+Peak memory usage: 0 bytes
+String intern pool size: 3
+Call stack depth: 0
+===============================================

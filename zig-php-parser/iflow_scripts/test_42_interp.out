@@ -1,0 +1,10 @@
+Hello World, you are 25 years old.
+=== PHP Interpreter Performance Statistics ===
+Function calls: 1
+Memory allocations: 4
+GC collections: 0
+Execution time: 9000ns
+Peak memory usage: 128 bytes
+String intern pool size: 0
+Call stack depth: 0
+===============================================
