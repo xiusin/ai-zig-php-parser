@@ -442,11 +442,6 @@ pub const IRGenerator = struct {
         return result;
     }
 
-    /// Look up a variable's register
-    fn lookupVarRegister(self: *const Self, name: []const u8) ?Register {
-        return self.var_registers.get(name);
-    }
-
     /// Generate IR for variable access
     fn generateVariable(self: *Self, node: *const Node) !Register {
         const var_name = self.getString(node.data.variable.name);
@@ -459,11 +454,10 @@ pub const IRGenerator = struct {
             });
         }
 
-        // 检查是否是全局变量或在 __main__ 函数中
+        // 检查是否是全局变量（通过 global 声明的）
         const is_global = self.global_vars.contains(var_name);
-        const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
         
-        if (is_global or is_main) {
+        if (is_global) {
             // 从全局表读取
             return self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
         }
@@ -478,32 +472,15 @@ pub const IRGenerator = struct {
             // Load the value from the variable
             return self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = pointed_type } }, pointed_type);
         }
+        
+        // 如果变量不在局部作用域，尝试从全局表读取
+        // 这处理了在 __main__ 中直接使用未声明变量的情况
+        return self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
+    }
 
-        // Variable not found
-
-        // Check if it's a variable (starts with $)
-        if (var_name.len > 0 and var_name[0] == '$') {
-            // Undefined variable - create a null value
-            // TODO: Emit warning
-            return self.emitWithResult(.const_null, .php_value);
-        } else {
-            // It's a constant (identifier)
-            // Generate call to php_constant_get(name)
-
-            // Create string literal for name
-            const name_id = node.data.variable.name;
-            const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_value);
-
-            // Emit call
-            const args = try self.allocator.alloc(Register, 1);
-            args[0] = name_reg;
-
-            return self.emitWithResult(.{ .call = .{
-                .func_name = "php_constant_get",
-                .args = args,
-                .return_type = .php_value,
-            } }, .php_value);
-        }
+    /// Look up a variable's register
+    fn lookupVarRegister(self: *const Self, name: []const u8) ?Register {
+        return self.var_registers.get(name);
     }
 
     /// Check for unused variables and report errors

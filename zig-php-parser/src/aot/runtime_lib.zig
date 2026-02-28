@@ -3080,3 +3080,140 @@ test "Math functions" {
     defer php_gc_release(ceil_result);
     try std.testing.expectApproxEqAbs(@as(f64, 4.0), ceil_result.data.float_val, 0.001);
 }
+
+// ============================================================================
+// Array Iterator Support for foreach
+// ============================================================================
+
+/// Array iterator state
+pub const PHPArrayIterator = struct {
+    array: *PHPArray,
+    current: ?*ArrayEntry,
+    is_done: bool,
+
+    pub fn init(array: *PHPArray) PHPArrayIterator {
+        return .{
+            .array = array,
+            .current = array.first,
+            .is_done = array.first == null,
+        };
+    }
+};
+
+/// Initialize array iterator (returns iterator as PHPValue)
+export fn php_array_iter_init(iterable: *PHPValue) *PHPValue {
+    const allocator = getGlobalAllocator();
+    
+    // 如果不是数组，返回空迭代器
+    if (iterable.tag != .array or iterable.data.array_ptr == null) {
+        const iter_val = allocator.create(PHPValue) catch unreachable;
+        iter_val.* = .{
+            .tag = .null,
+            .data = .{ .int_val = 0 },
+            .ref_count = 1,
+        };
+        return iter_val;
+    }
+    
+    const array = iterable.data.array_ptr.?;
+    const iter = allocator.create(PHPArrayIterator) catch unreachable;
+    iter.* = PHPArrayIterator.init(array);
+    
+    // 将迭代器包装为 PHPValue（使用 resource 类型）
+    const iter_val = allocator.create(PHPValue) catch unreachable;
+    const iter_ptr: i64 = @bitCast(@intFromPtr(iter));
+    iter_val.* = .{
+        .tag = .resource,
+        .data = .{ .int_val = iter_ptr },
+        .ref_count = 1,
+    };
+    
+    return iter_val;
+}
+
+/// Check if iterator is valid
+export fn php_array_iter_valid(iter_val: *PHPValue) *PHPValue {
+    if (iter_val.tag != .resource) {
+        return php_value_create_bool(false);
+    }
+    
+    const iter_ptr: i64 = iter_val.data.int_val;
+    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
+    return php_value_create_bool(!iter.is_done);
+}
+
+/// Get current key
+export fn php_array_iter_key(iter_val: *PHPValue) *PHPValue {
+    if (iter_val.tag != .resource) {
+        return php_value_create_null();
+    }
+    
+    const iter_ptr: i64 = iter_val.data.int_val;
+    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
+    
+    if (iter.current) |entry| {
+        return switch (entry.key) {
+            .int => |i| php_value_create_int(i),
+            .string => |s| php_value_create_string(s.getData()),
+        };
+    }
+    
+    return php_value_create_null();
+}
+
+/// Get current value
+export fn php_array_iter_value(iter_val: *PHPValue) *PHPValue {
+    if (iter_val.tag != .resource) {
+        return php_value_create_null();
+    }
+    
+    const iter_ptr: i64 = iter_val.data.int_val;
+    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
+    
+    if (iter.current) |entry| {
+        php_gc_retain(entry.value);
+        return entry.value;
+    }
+    
+    return php_value_create_null();
+}
+
+/// Get current value by reference
+export fn php_array_iter_value_ref(iter_val: *PHPValue) *PHPValue {
+    // 对于 AOT，引用和值相同（都返回指针）
+    return php_array_iter_value(iter_val);
+}
+
+/// Move to next element
+export fn php_array_iter_next(iter_val: *PHPValue) *PHPValue {
+    if (iter_val.tag != .resource) {
+        return iter_val;
+    }
+    
+    const iter_ptr: i64 = iter_val.data.int_val;
+    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
+    
+    if (iter.current) |entry| {
+        iter.current = entry.next_order;
+        iter.is_done = iter.current == null;
+    } else {
+        iter.is_done = true;
+    }
+    
+    return iter_val;
+}
+
+/// Free iterator
+export fn php_array_iter_free(iter_val: *PHPValue) void {
+    if (iter_val.tag != .resource) {
+        return;
+    }
+    
+    const allocator = getGlobalAllocator();
+    const iter_ptr: i64 = iter_val.data.int_val;
+    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
+    allocator.destroy(iter);
+    
+    // 释放 iter_val 本身
+    php_gc_release(iter_val);
+}
