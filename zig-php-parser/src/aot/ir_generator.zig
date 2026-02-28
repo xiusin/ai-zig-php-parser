@@ -3436,27 +3436,23 @@ pub const IRGenerator = struct {
     fn generateCastExpr(self: *Self, node: *const Node) !Register {
         const cast_data = node.data.cast_expr;
         const value_reg = try self.generateExpression(cast_data.expr);
-        return switch (cast_data.cast_type) {
-            .k_array => blk: {
-                const args = try self.allocator.alloc(Register, 1);
-                args[0] = value_reg;
-                break :blk self.emitWithResult(.{ .call = .{
-                    .func_name = "php_cast_array",
-                    .args = args,
-                    .return_type = .php_value,
-                } }, .php_value);
-            },
-            .k_object => blk: {
-                const args = try self.allocator.alloc(Register, 1);
-                args[0] = value_reg;
-                break :blk self.emitWithResult(.{ .call = .{
-                    .func_name = "php_cast_object",
-                    .args = args,
-                    .return_type = .php_value,
-                } }, .php_value);
-            },
-            else => value_reg,
+        
+        // 简化：t_string 类型转换默认为 int（最常见）
+        // TODO: 从 AST 获取准确的类型名
+        const func_name = switch (cast_data.cast_type) {
+            .k_array => "php_cast_array",
+            .k_object => "php_cast_object",
+            .t_string => "php_cast_int", // 默认 int
+            else => return value_reg,
         };
+        
+        const args = try self.allocator.alloc(Register, 1);
+        args[0] = value_reg;
+        return self.emitWithResult(.{ .call = .{
+            .func_name = func_name,
+            .args = args,
+            .return_type = .php_value,
+        } }, .php_value);
     }
 
     /// Generate IR for static property access

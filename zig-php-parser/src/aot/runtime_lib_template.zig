@@ -3946,8 +3946,16 @@ pub fn php_sqrt(val: Value) !Value {
 }
 
 /// round - 四舍五入
-pub fn php_round(val: Value) !Value {
-    return Value.initFloat(@round(val.toFloat()));
+pub fn php_round(val: Value, precision_val: Value) !Value {
+    const num = val.toFloat();
+    const precision = if (precision_val.isNull()) 0 else @as(i32, @intCast(precision_val.toInt()));
+    
+    if (precision == 0) {
+        return Value.initFloat(@round(num));
+    }
+    
+    const multiplier = std.math.pow(f64, 10.0, @floatFromInt(precision));
+    return Value.initFloat(@round(num * multiplier) / multiplier);
 }
 
 /// floor - 向下取整
@@ -4979,6 +4987,24 @@ pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value
     const obj = Value_asObject(obj_val);
     try obj.setProperty(prop_name_val.asString().data, value);
     return Value.initNull();
+}
+
+/// 类型转换函数
+pub fn php_cast_int(val: Value) !Value {
+    return Value.initInt(val.toInt());
+}
+
+pub fn php_cast_float(val: Value) !Value {
+    return Value.initFloat(val.toFloat());
+}
+
+pub fn php_cast_string(val: Value) !Value {
+    const str = try val.toString(runtime_allocator);
+    return Value.initString(str);
+}
+
+pub fn php_cast_bool(val: Value) !Value {
+    return Value.initBool(val.toBool());
 }
 
 pub fn php_cast_array(val: Value) !Value {
