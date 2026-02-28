@@ -2477,8 +2477,42 @@ pub fn php_eq(lhs: Value, rhs: Value) !Value {
         return Value.initBool(std.mem.eql(u8, a.data, b.data));
     }
 
-    // 其他情况：转为字符串比较
+    // 数字和字符串比较：尝试将字符串转为数字
+    if ((lhs.isInt() or lhs.isFloat()) and rhs.isString()) {
+        const num_val = stringToNumber(rhs.asString().data);
+        return Value.initBool(lhs.toFloat() == num_val);
+    }
+    if (lhs.isString() and (rhs.isInt() or rhs.isFloat())) {
+        const num_val = stringToNumber(lhs.asString().data);
+        return Value.initBool(num_val == rhs.toFloat());
+    }
+
+    // 其他情况：false
     return Value.initBool(false);
+}
+
+// 辅助函数：字符串转数字（PHP 语义）
+fn stringToNumber(str: []const u8) f64 {
+    if (str.len == 0) return 0.0;
+    
+    // 跳过前导空格
+    var i: usize = 0;
+    while (i < str.len and std.ascii.isWhitespace(str[i])) : (i += 1) {}
+    if (i == str.len) return 0.0;
+    
+    const trimmed = str[i..];
+    
+    // 尝试解析为整数或浮点数
+    if (std.fmt.parseInt(i64, trimmed, 10)) |int_val| {
+        return @floatFromInt(int_val);
+    } else |_| {
+        if (std.fmt.parseFloat(f64, trimmed)) |float_val| {
+            return float_val;
+        } else |_| {
+            // PHP: 非数字字符串转为 0
+            return 0.0;
+        }
+    }
 }
 
 /// 不等于运算
