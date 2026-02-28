@@ -2477,13 +2477,14 @@ pub const Parser = struct {
 
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
             // 解析第一个表达式（可能是键或值）
-            const first_expr = try self.parseExpression(0);
+            // 使用优先级 1 避免解析逗号运算符
+            const first_expr = try self.parseExpression(1);
 
             // 检查是否有 => 符号（关联数组语法）
             if (self.curr.tag == .fat_arrow) {
                 // 有 => 符号，创建键值对节点
                 _ = try self.eat(.fat_arrow);
-                const value_expr = try self.parseExpression(0);
+                const value_expr = try self.parseExpression(1);
 
                 // 创建键值对节点
                 const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = token, .data = .{ .array_pair = .{ .key = first_expr, .value = value_expr } } });
@@ -2521,13 +2522,13 @@ pub const Parser = struct {
 
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             // JSON 对象的键必须是字符串
-            const key_expr = try self.parseExpression(0);
+            const key_expr = try self.parseExpression(1);
 
             // 检查是否有 : 符号（JSON 风格）或 => 符号（PHP 风格）
             if (self.curr.tag == .colon) {
                 // JSON 风格 "key": value
                 _ = try self.eat(.colon);
-                const value_expr = try self.parseExpression(0);
+                const value_expr = try self.parseExpression(1);
 
                 // 创建键值对节点
                 const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = token, .data = .{ .array_pair = .{ .key = key_expr, .value = value_expr } } });

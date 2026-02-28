@@ -1588,15 +1588,18 @@ pub const Value = struct {
             const ref_ptr = self.asRef();
             return ref_ptr.asArray();
         }
-        return @ptrFromInt(nanbox_abi.decodePtr(self.val));
+        const ptr_val = nanbox_abi.decodePtr(self.val);
+        return @ptrFromInt(@as(usize, @intCast(ptr_val)));
     }
 
     pub fn asFunction(self: Value) *PHPClosure {
-        return @ptrFromInt(nanbox_abi.decodePtr(self.val));
+        const ptr_val = nanbox_abi.decodePtr(self.val);
+        return @ptrFromInt(@as(usize, @intCast(ptr_val)));
     }
 
     pub fn asRef(self: Value) *Value {
-        return @ptrFromInt(nanbox_abi.decodePtr(self.val));
+        const ptr_val = nanbox_abi.decodePtr(self.val);
+        return @ptrFromInt(@as(usize, @intCast(ptr_val)));
     }
 
     /// 获取数组元素的引用（用于引用返回）
