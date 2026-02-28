@@ -74,7 +74,7 @@ pub const BytecodeGenerator = struct {
     };
 
     const LoopContext = struct {
-        continue_label: u32,
+        continue_label: ?u32, // switch 没有 continue
         break_label: u32,
     };
 
@@ -604,6 +604,14 @@ pub const BytecodeGenerator = struct {
         try self.visitNode(switch_data.expression);
 
         const end_label = self.newLabel();
+        
+        // 添加到 loop_stack 支持 break
+        try self.loop_stack.append(self.allocator, .{
+            .continue_label = null, // switch 没有 continue
+            .break_label = end_label,
+        });
+        defer _ = self.loop_stack.pop();
+        
         const case_labels = try self.allocator.alloc(u32, switch_data.cases.len);
         defer self.allocator.free(case_labels);
 
@@ -645,8 +653,9 @@ pub const BytecodeGenerator = struct {
             for (case_data.body) |stmt| {
                 try self.visitNode(stmt);
             }
-
-            try self.emitJump(.jmp, end_label);
+            
+            // 如果没有 break，fall through 到下一个 case 或 end
+            // break 会自动跳到 end_label
         }
 
         // default 分支
@@ -896,7 +905,9 @@ pub const BytecodeGenerator = struct {
         _ = index;
         if (self.loop_stack.items.len > 0) {
             const loop_ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
-            try self.emitJump(.jmp, loop_ctx.continue_label);
+            if (loop_ctx.continue_label) |label| {
+                try self.emitJump(.jmp, label);
+            }
         }
     }
 
