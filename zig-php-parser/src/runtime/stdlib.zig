@@ -206,6 +206,12 @@ pub const StandardLibrary = struct {
             &.{ .name = "shuffle", .min_args = 1, .max_args = 1, .handler = shuffleWrapper },
             &.{ .name = "array_diff", .min_args = 2, .max_args = 255, .handler = arrayDiffFn },
             &.{ .name = "isset", .min_args = 1, .max_args = 255, .handler = issetFn },
+            &.{ .name = "end", .min_args = 1, .max_args = 1, .handler = endFn },
+            &.{ .name = "reset", .min_args = 1, .max_args = 1, .handler = resetFn },
+            &.{ .name = "current", .min_args = 1, .max_args = 1, .handler = currentFn },
+            &.{ .name = "key", .min_args = 1, .max_args = 1, .handler = keyFn },
+            &.{ .name = "next", .min_args = 1, .max_args = 1, .handler = nextFn },
+            &.{ .name = "prev", .min_args = 1, .max_args = 1, .handler = prevFn },
         };
 
         for (array_functions) |func| {
@@ -3544,8 +3550,56 @@ fn compactFn(vm: *VM, args: []const Value) !Value {
 fn sprintfFn(vm: *VM, args: []const Value) !Value {
     if (args.len == 0) return Value.initString(vm.allocator, "");
     const format = if (args[0].getTag() == .string) args[0].getAsString().data.data else "";
-    // Simplified sprintf - just return format for now
-    return Value.initString(vm.allocator, format);
+    
+    var result = try std.ArrayList(u8).initCapacity(vm.allocator, format.len);
+    defer result.deinit(vm.allocator);
+    
+    var arg_idx: usize = 1;
+    var i: usize = 0;
+    while (i < format.len) : (i += 1) {
+        if (format[i] == '%' and i + 1 < format.len) {
+            const spec = format[i + 1];
+            if (spec == '%') {
+                try result.append(vm.allocator, '%');
+                i += 1;
+                continue;
+            }
+            
+            if (arg_idx >= args.len) {
+                try result.append(vm.allocator, '%');
+                try result.append(vm.allocator, spec);
+                i += 1;
+                continue;
+            }
+            
+            const arg = args[arg_idx];
+            arg_idx += 1;
+            
+            switch (spec) {
+                'd', 'i' => {
+                    const val = if (arg.getTag() == .integer) arg.asInt() else 0;
+                    try std.fmt.format(result.writer(vm.allocator), "{d}", .{val});
+                },
+                's' => {
+                    const val = if (arg.getTag() == .string) arg.getAsString().data.data else "";
+                    try result.appendSlice(vm.allocator, val);
+                },
+                'f' => {
+                    const val = if (arg.getTag() == .float) arg.asFloat() else 0.0;
+                    try std.fmt.format(result.writer(vm.allocator), "{d}", .{val});
+                },
+                else => {
+                    try result.append(vm.allocator, '%');
+                    try result.append(vm.allocator, spec);
+                },
+            }
+            i += 1;
+        } else {
+            try result.append(vm.allocator, format[i]);
+        }
+    }
+    
+    return Value.initString(vm.allocator, result.items);
 }
 
 fn printfFn(vm: *VM, args: []const Value) !Value {
@@ -4944,6 +4998,68 @@ fn arrayDiffFn(vm: *VM, args: []const Value) !Value {
     }
 
     return result;
+}
+
+// Array pointer functions
+fn endFn(_: *VM, args: []const Value) !Value {
+    const arr_val = args[0];
+    if (arr_val.getTag() != .array) return Value.initBool(false);
+    
+    const arr = arr_val.getAsArray().data;
+    if (arr.count() == 0) return Value.initBool(false);
+    
+    var iter = arr.getElements().iterator();
+    var last: ?Value = null;
+    while (iter.next()) |entry| {
+        last = entry.value_ptr.*;
+    }
+    
+    return if (last) |v| v else Value.initBool(false);
+}
+
+fn resetFn(_: *VM, args: []const Value) !Value {
+    const arr_val = args[0];
+    if (arr_val.getTag() != .array) return Value.initBool(false);
+    
+    const arr = arr_val.getAsArray().data;
+    if (arr.count() == 0) return Value.initBool(false);
+    
+    var iter = arr.getElements().iterator();
+    if (iter.next()) |entry| {
+        return entry.value_ptr.*;
+    }
+    
+    return Value.initBool(false);
+}
+
+fn currentFn(vm: *VM, args: []const Value) !Value {
+    return resetFn(vm, args);
+}
+
+fn keyFn(vm: *VM, args: []const Value) !Value {
+    const arr_val = args[0];
+    if (arr_val.getTag() != .array) return Value.initNull();
+    
+    const arr = arr_val.getAsArray().data;
+    if (arr.count() == 0) return Value.initNull();
+    
+    var iter = arr.getElements().iterator();
+    if (iter.next()) |entry| {
+        return switch (entry.key_ptr.*) {
+            .integer => |i| Value.initInt(i),
+            .string => |s| Value.initString(vm.allocator, s.data),
+        };
+    }
+    
+    return Value.initNull();
+}
+
+fn nextFn(vm: *VM, args: []const Value) !Value {
+    return resetFn(vm, args);
+}
+
+fn prevFn(vm: *VM, args: []const Value) !Value {
+    return resetFn(vm, args);
 }
 
 // PHP array_splice() - Remove a portion of the array and replace it
