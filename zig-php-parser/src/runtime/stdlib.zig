@@ -3821,10 +3821,47 @@ fn numberFormatFn(vm: *VM, args: []const Value) !Value {
         else => 0,
     };
     const decimals: u32 = if (args.len > 1 and args[1].getTag() == .integer) @intCast(@max(0, args[1].asInt())) else 0;
-    _ = decimals;
-    const result = try std.fmt.allocPrint(vm.allocator, "{d}", .{num});
-    defer vm.allocator.free(result);
-    return Value.initString(vm.allocator, result);
+    const dec_point = if (args.len > 2 and args[2].getTag() == .string) args[2].getAsString().data.data else ".";
+    const thousands_sep = if (args.len > 3 and args[3].getTag() == .string) args[3].getAsString().data.data else ",";
+    
+    // Format with decimals
+    const formatted = try std.fmt.allocPrint(vm.allocator, "{d:.2}", .{num});
+    defer vm.allocator.free(formatted);
+    
+    // Split into integer and decimal parts
+    var parts = std.mem.splitScalar(u8, formatted, '.');
+    const int_part = parts.next() orelse formatted;
+    const dec_part = parts.next();
+    
+    // Add thousands separator
+    var result = try std.ArrayList(u8).initCapacity(vm.allocator, formatted.len + 10);
+    defer result.deinit(vm.allocator);
+    
+    const int_len = int_part.len;
+    var i: usize = 0;
+    while (i < int_len) : (i += 1) {
+        if (i > 0 and (int_len - i) % 3 == 0) {
+            try result.appendSlice(vm.allocator, thousands_sep);
+        }
+        try result.append(vm.allocator, int_part[i]);
+    }
+    
+    if (decimals > 0) {
+        try result.appendSlice(vm.allocator, dec_point);
+        if (dec_part) |dp| {
+            const len = @min(dp.len, decimals);
+            try result.appendSlice(vm.allocator, dp[0..len]);
+            for (len..decimals) |_| {
+                try result.append(vm.allocator, '0');
+            }
+        } else {
+            for (0..decimals) |_| {
+                try result.append(vm.allocator, '0');
+            }
+        }
+    }
+    
+    return Value.initString(vm.allocator, result.items);
 }
 
 // Debug functions
@@ -5519,16 +5556,20 @@ fn arrayCountValuesFn(vm: *VM, args: []const Value) !Value {
     var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         const value = entry.value_ptr.*;
-
-        // Create a string key from the value
-        const key_str = try value.toString(vm.allocator);
-
+        
+        // Use value as key (integers and strings only)
+        const key: ArrayKey = switch (value.getTag()) {
+            .integer => .{ .integer = value.asInt() },
+            .string => .{ .string = value.getAsString().data },
+            else => continue,
+        };
+        
         // Check if key already exists and increment count
-        const existing = result.getElements().get(.{ .string = key_str });
+        const existing = result.getElements().get(key);
         if (existing) |count_val| {
-            try result.set(vm.allocator, .{ .string = key_str }, Value.initInt(count_val.asInt() + 1));
+            try result.set(vm.allocator, key, Value.initInt(count_val.asInt() + 1));
         } else {
-            try result.set(vm.allocator, .{ .string = key_str }, Value.initInt(1));
+            try result.set(vm.allocator, key, Value.initInt(1));
         }
     }
 
