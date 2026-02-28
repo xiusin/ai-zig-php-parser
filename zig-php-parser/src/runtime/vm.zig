@@ -4087,6 +4087,11 @@ pub const VM = struct {
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.condition])) return true;
                 if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
             },
+            .do_while_stmt => {
+                const data = _node.data.do_while_stmt;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.condition])) return true;
+                if (self.nodeOrChildrenContainYield(self.context.nodes.items[data.body])) return true;
+            },
             .for_stmt => {
                 const data = _node.data.for_stmt;
                 if (data.init) |init_node| {
@@ -6214,6 +6219,9 @@ pub const VM = struct {
             .while_stmt => {
                 return self.evaluateWhileStatement(ast_node.data.while_stmt);
             },
+            .do_while_stmt => {
+                return self.evaluateDoWhileStatement(ast_node.data.do_while_stmt);
+            },
             .for_stmt => {
                 return self.evaluateForStatement(ast_node.data.for_stmt);
             },
@@ -7953,6 +7961,35 @@ pub const VM = struct {
                 }
                 return err;
             };
+        }
+
+        return last_val;
+    }
+
+    fn evaluateDoWhileStatement(self: *VM, do_while_stmt: anytype) !Value {
+        var last_val = Value.initNull();
+
+        loop: while (true) {
+            self.releaseValue(last_val);
+            last_val = self.eval(do_while_stmt.body) catch |err| blk: {
+                if (err == error.Break) {
+                    self.break_level -= 1;
+                    if (self.break_level > 0) return error.Break;
+                    break :loop;
+                }
+                if (err == error.Continue) {
+                    self.continue_level -= 1;
+                    if (self.continue_level > 0) return error.Continue;
+                    break :blk Value.initNull();
+                }
+                return err;
+            };
+
+            const condition = try self.eval(do_while_stmt.condition);
+            const condition_bool = condition.toBool();
+            self.releaseValue(condition);
+
+            if (!condition_bool) break;
         }
 
         return last_val;
