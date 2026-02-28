@@ -2178,6 +2178,9 @@ pub const VM = struct {
 
     // Generator state for tracking yield execution
     generator_state: ?*GeneratorState = null,
+    
+    // Static variables storage (function-scoped)
+    static_vars: std.StringHashMap(Value),
 
     // Anonymous class counter for generating unique names
     anonymous_class_counter: u64 = 0,
@@ -2260,6 +2263,8 @@ pub const VM = struct {
             .fast_int_cache = fast_value.SmallIntCache.init(),
             .loop_optimizer = loop_optimizer.LoopOptimizer.init(allocator),
             .inline_cache = .{},
+            // Static variables storage
+            .static_vars = std.StringHashMap(Value).init(allocator),
         };
 
         // Initialize string pool (requires allocator)
@@ -2446,6 +2451,14 @@ pub const VM = struct {
             self.allocator.free(key.*);
         }
         self.included_files.deinit();
+        
+        // 9.5. Clean up static variables
+        var static_iter = self.static_vars.iterator();
+        while (static_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.releaseValue(entry.value_ptr.*);
+        }
+        self.static_vars.deinit();
 
         // 10. Clean up request arena
         self.request_arena.deinit();
@@ -2494,6 +2507,27 @@ pub const VM = struct {
     pub fn setVariable(self: *VM, name: []const u8, value: Value) !void {
         // Check cached current call frame first
         if (self.current_frame) |frame| {
+            // Check if this is a static variable
+            const func_name = frame.function_name;
+            const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{func_name, name});
+            defer self.allocator.free(static_key);
+            
+            if (self.static_vars.contains(static_key)) {
+                // Update static variable storage
+                if (self.static_vars.getPtr(static_key)) |static_val_ptr| {
+                    self.releaseValue(static_val_ptr.*);
+                    self.retainValue(value);
+                    static_val_ptr.* = value;
+                }
+                // Also update local reference
+                if (frame.locals.get(name)) |old_value| {
+                    self.releaseValue(old_value);
+                }
+                self.retainValue(value);
+                try frame.locals.put(name, value);
+                return;
+            }
+            
             // If variable is imported from global scope, update it there
             if (frame.imported_globals.contains(name)) {
                 try self.global.set(name, value);
@@ -6308,6 +6342,9 @@ pub const VM = struct {
             .global_stmt => {
                 return self.evaluateGlobalStatement(ast_node.data.global_stmt);
             },
+            .static_stmt => {
+                return self.evaluateStaticStatement(ast_node.data.static_stmt);
+            },
             .go_stmt => {
                 return self.evaluateGoStatement(ast_node.data.go_stmt);
             },
@@ -8679,6 +8716,69 @@ pub const VM = struct {
             }
         }
 
+        return Value.initNull();
+    }
+
+    fn evaluateStaticStatement(self: *VM, static_stmt: anytype) !Value {
+        // Static variables are function-scoped and persist across calls
+        // Get current function context (may be null if at global scope)
+        const func_name = if (self.current_frame) |frame| frame.function_name else "__global__";
+        
+        // Process each static variable declaration
+        for (static_stmt.vars) |var_idx| {
+            const var_node = self.context.nodes.items[var_idx];
+            
+            // Handle: static $x = value;
+            if (var_node.tag == .assignment) {
+                const target_idx = var_node.data.assignment.target;
+                const value_idx = var_node.data.assignment.value;
+                const target_node = self.context.nodes.items[target_idx];
+                
+                if (target_node.tag == .variable) {
+                    const name_id = target_node.data.variable.name;
+                    const var_name = self.context.string_pool.keys()[name_id];
+                    
+                    // Build static key: "func_name::var_name"
+                    const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{func_name, var_name});
+                    defer self.allocator.free(static_key);
+                    
+                    // Check if already initialized
+                    if (!self.static_vars.contains(static_key)) {
+                        // Initialize with value
+                        const init_val = try self.eval(value_idx);
+                        try self.static_vars.put(try self.allocator.dupe(u8, static_key), init_val);
+                    }
+                    
+                    // Set local/global reference to static variable
+                    const static_val = self.static_vars.get(static_key).?;
+                    if (self.current_frame) |frame| {
+                        try frame.locals.put(var_name, static_val.retain());
+                    } else {
+                        try self.global.set(var_name, static_val.retain());
+                    }
+                }
+            }
+            // Handle: static $x; (no initializer)
+            else if (var_node.tag == .variable) {
+                const name_id = var_node.data.variable.name;
+                const var_name = self.context.string_pool.keys()[name_id];
+                
+                const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{func_name, var_name});
+                defer self.allocator.free(static_key);
+                
+                if (!self.static_vars.contains(static_key)) {
+                    try self.static_vars.put(try self.allocator.dupe(u8, static_key), Value.initNull());
+                }
+                
+                const static_val = self.static_vars.get(static_key).?;
+                if (self.current_frame) |frame| {
+                    try frame.locals.put(var_name, static_val.retain());
+                } else {
+                    try self.global.set(var_name, static_val.retain());
+                }
+            }
+        }
+        
         return Value.initNull();
     }
 
