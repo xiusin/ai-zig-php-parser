@@ -931,6 +931,7 @@ pub const AOTCompiler = struct {
         self.ir_module = ir_gen.generateFromRoot(
             self.ast_nodes.?,
             self.string_table.?,
+            self.source.?,
             self.root_index,
             rel_path,
             rel_path,

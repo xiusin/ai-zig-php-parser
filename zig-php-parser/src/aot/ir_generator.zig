@@ -72,6 +72,8 @@ pub const IRGenerator = struct {
     nodes: ?[]const Node,
     /// String table for string lookups
     string_table: ?[]const []const u8,
+    /// Source code buffer for token text lookup
+    source_buffer: ?[]const u8,
     /// Current source location
     current_location: SourceLocation,
     /// Variable to register mapping for current function
@@ -130,6 +132,7 @@ pub const IRGenerator = struct {
             .diagnostics = diagnostics,
             .nodes = null,
             .string_table = null,
+            .source_buffer = null,
             .current_location = .{},
             .var_registers = .{},
             .ref_vars = .{},
@@ -184,12 +187,14 @@ pub const IRGenerator = struct {
         self: *Self,
         nodes: []const Node,
         string_table: []const []const u8,
+        source_buffer: []const u8,
         root_index: u32,
         module_name: []const u8,
         source_file: []const u8,
     ) !*Module {
         self.nodes = nodes;
         self.string_table = string_table;
+        self.source_buffer = source_buffer;
 
         // Create module
         const module = try self.allocator.create(Module);
@@ -3437,12 +3442,30 @@ pub const IRGenerator = struct {
         const cast_data = node.data.cast_expr;
         const value_reg = try self.generateExpression(cast_data.expr);
         
-        // 简化：t_string 类型转换默认为 int（最常见）
-        // TODO: 从 AST 获取准确的类型名
+        // 从 token 获取准确的类型名
         const func_name = switch (cast_data.cast_type) {
             .k_array => "php_cast_array",
             .k_object => "php_cast_object",
-            .t_string => "php_cast_int", // 默认 int
+            .t_string => blk: {
+                // 从 source_buffer 获取 token 文本
+                if (self.source_buffer) |buffer| {
+                    const token = node.main_token;
+                    if (token.loc.start < buffer.len and token.loc.end <= buffer.len) {
+                        const type_name = buffer[token.loc.start..token.loc.end];
+                        if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+                            break :blk "php_cast_int";
+                        } else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double") or std.mem.eql(u8, type_name, "real")) {
+                            break :blk "php_cast_float";
+                        } else if (std.mem.eql(u8, type_name, "string")) {
+                            break :blk "php_cast_string";
+                        } else if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+                            break :blk "php_cast_bool";
+                        }
+                    }
+                }
+                // 默认 int（最常见）
+                break :blk "php_cast_int";
+            },
             else => return value_reg,
         };
         
