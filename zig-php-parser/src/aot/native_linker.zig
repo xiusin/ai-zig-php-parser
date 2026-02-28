@@ -4879,6 +4879,31 @@ pub const NativeLinker = struct {
                     }
                 }
             },
+            .spaceship => |op| {
+                if (inst.result) |reg| {
+                    const lhs_corrected = if (self.current_register_types) |types|
+                        types.get(op.lhs.id) orelse op.lhs.type_
+                    else
+                        op.lhs.type_;
+                    const rhs_corrected = if (self.current_register_types) |types|
+                        types.get(op.rhs.id) orelse op.rhs.type_
+                    else
+                        op.rhs.type_;
+                    
+                    const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
+                    const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
+
+                    if (lhs_type_tag == .php_value and rhs_type_tag == .php_value) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_spaceship(reg_{d}, reg_{d});\n", .{ op.lhs.id, op.rhs.id });
+                    } else {
+                        try writer.print("    reg_{d} = try runtime.php_spaceship(", .{reg.id});
+                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                        try writer.writeAll(");\n");
+                    }
+                }
+            },
             .and_ => |op| {
                 if (inst.result) |reg| {
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);

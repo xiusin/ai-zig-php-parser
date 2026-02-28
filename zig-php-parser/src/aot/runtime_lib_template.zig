@@ -2607,6 +2607,23 @@ pub fn php_ge(lhs: Value, rhs: Value) !Value {
     return Value.initBool(lhs.toFloat() >= rhs.toFloat());
 }
 
+/// Spaceship 运算符 (<=>)
+/// 返回 -1 (lhs < rhs), 0 (lhs == rhs), 1 (lhs > rhs)
+pub fn php_spaceship(lhs: Value, rhs: Value) !Value {
+    if (lhs.isInt() and rhs.isInt()) {
+        const l = lhs.asInt();
+        const r = rhs.asInt();
+        if (l < r) return Value.initInt(-1);
+        if (l > r) return Value.initInt(1);
+        return Value.initInt(0);
+    }
+    const l = lhs.toFloat();
+    const r = rhs.toFloat();
+    if (l < r) return Value.initInt(-1);
+    if (l > r) return Value.initInt(1);
+    return Value.initInt(0);
+}
+
 // ============================================================================
 // 逻辑运算符
 // ============================================================================
