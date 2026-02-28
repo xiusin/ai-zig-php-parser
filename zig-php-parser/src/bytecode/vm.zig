@@ -5287,7 +5287,8 @@ fn handleForeachNext(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) Bytecode
                             // 获取值
                             const value = arr.elements.items[idx];
                             
-                            // 压入键和值
+                            // 压入 key 和 value，保持 iterator 在栈底
+                            // 栈布局：[iterator] -> [iterator, key, value]
                             try vm.push(key);
                             try vm.push(value);
                             

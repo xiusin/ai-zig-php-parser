@@ -693,8 +693,15 @@ pub const BytecodeGenerator = struct {
         try self.placeLabel(loop_start);
         try self.emit(.loop_start, 0, 0);
 
-        // 获取下一个元素（总是压入 key 和 value）
+        // 获取下一个元素
+        // foreach_next 将栈从 [iterator] 变成 [iterator, key, value]
         try self.emitJump(.foreach_next, loop_end);
+
+        // 保存当前栈深度
+        const saved_stack = self.current_stack;
+        
+        // 手动增加栈深度以反映 foreach_next 压入的 key 和 value
+        self.current_stack += 2;
 
         // 存储 value（栈顶）
         const value_node = self.getNode(foreach_data.value);
@@ -702,6 +709,7 @@ pub const BytecodeGenerator = struct {
             const value_name = self.getString(value_node.data.variable.name);
             const value_slot = try self.getOrCreateLocal(value_name);
             try self.emit(.store_local, value_slot, 0);
+            self.popStack(); // 手动减少栈深度
         }
 
         // 存储 key（如果需要）
@@ -711,14 +719,20 @@ pub const BytecodeGenerator = struct {
                 const key_name = self.getString(key_node.data.variable.name);
                 const key_slot = try self.getOrCreateLocal(key_name);
                 try self.emit(.store_local, key_slot, 0);
+                self.popStack(); // 手动减少栈深度
             }
         } else {
             // 不需要 key，弹出它
             try self.emit(.pop, 0, 0);
+            self.popStack(); // 手动减少栈深度
         }
 
-        // 循环体
+        // 现在 current_stack 应该等于 saved_stack
+        // 循环体执行时，栈深度是正确的
         try self.visitNode(foreach_data.body);
+
+        // 确保栈深度正确（防御性编程）
+        self.current_stack = saved_stack;
 
         try self.emitJump(.jmp, loop_start);
 

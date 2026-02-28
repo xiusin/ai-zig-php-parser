@@ -1773,3 +1773,111 @@ Fu | [编译错误] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optim
 | 1564 | test_1564.php | 表达式 |  |  | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 1 errors, 0 warning |
 | 1565 | test_1565.php | 表达式 |  |  | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 1 errors, 0 warning |
 | 1566 | test_1566.php | 表达式 |  |  | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 1 errors, 0 warning |
+| 1000000 | test_1000000.php | 循环 | 2870 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000001 | test_1000001.php | 循环 | 165 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000002 | test_1000002.php | 循环 | 35 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000003 | test_1000003.php | 循环 | 338350 | 338350 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000004 | test_1000004.php | 循环 | 610 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000005 | test_1000005.php | 函数 | 1 | 1 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000006 | test_1000006.php | 函数 | 9 | 9 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000007 | test_1000007.php | 函数 | 15 | 15 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000008 | test_1000008.php | 函数 | 720 | 720 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000009 | test_1000009.php | 函数 | 11 | 11 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000010 | test_1000010.php | 函数 | hello | hello | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000011 | test_1000011.php | 函数 | HELLO | HELLO | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000012 | test_1000012.php | 函数 | Hello World | Hello World | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000013 | test_1000013.php | 函数 | Hello | Hello | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000014 | test_1000014.php | 函数 | hELLO | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000015 | test_1000015.php | 函数 | olleh | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000016 | test_1000016.php | 函数 | 4 | 4 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000017 | test_1000017.php | 函数 | a-b-c | a-b-c | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000018 | test_1000018.php | 函数 | yes | yes | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=cond_br setTerminator: block=1, |
+| 1000019 | test_1000019.php | 函数 | yes | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=cond_br setTerminator: block=1, |
+| 1000020 | test_1000020.php | 函数 | 1,3,5,8,9 | 1,3,5,8,9 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000021 | test_1000021.php | 函数 | 9,8,5,3,1 | 9,8,5,3,1 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000022 | test_1000022.php | 函数 | a,b,c | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000023 | test_1000023.php | 函数 | 1,2,3 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000024 | test_1000024.php | 函数 | PHP Warning:  Array to string  | Array | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000025 | test_1000025.php | 函数 | 1,4,5 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000026 | test_1000026.php | 函数 | 1,2,3,4,5 | 1,2,3,4,5 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000027 | test_1000027.php | 函数 | 3,2,1 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000028 | test_1000028.php | 函数 | 9 | 15 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret setTerminator: block=0, ter |
+| 1000029 | test_1000029.php | 函数 | 3 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000030 | test_1000030.php | 函数 | 12 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000031 | test_1000031.php | 函数 | 3 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000032 | test_1000032.php | 表达式 | 2 | 2 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000033 | test_1000033.php | 函数 | 10 | 10 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000034 | test_1000034.php | 函数 | 3 | 3 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000035 | test_1000035.php | 函数 | 4 | 4 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000036 | test_1000036.php | 函数 | 4 | 4 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000037 | test_1000037.php | 函数 | 1024 | 1024 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000038 | test_1000038.php | 函数 | 4 | 4 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000039 | test_1000039.php | 函数 | 4 | Array | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000040 | test_1000040.php | 函数 | 1 | Array | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000041 | test_1000041.php | 表达式 | 6 | 6 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000042 | test_1000042.php | 表达式 | 6 | 5 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000043 | test_1000043.php | 表达式 | 17 | 17 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000044 | test_1000044.php | 表达式 | 7 | 7 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000045 | test_1000045.php | 表达式 | 12 | 12 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000046 | test_1000046.php | 表达式 | 4 | 4 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000047 | test_1000047.php | 表达式 | 1 | 1 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000048 | test_1000048.php | 表达式 | 1 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000049 | test_1000049.php | 表达式 | 0 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000050 | test_1000050.php | 表达式 |  |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000051 | test_1000051.php | 表达式 | 2 | 2 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000052 | test_1000052.php | 表达式 | 7 | 7 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000053 | test_1000053.php | 表达式 | 5 | 3 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000054 | test_1000054.php | 表达式 | 16 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000055 | test_1000055.php | 表达式 | 4 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000056 | test_1000056.php | 函数 | 3 | 3 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000057 | test_1000057.php | 函数 | 120 | 120 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000058 | test_1000058.php | 循环 | 156 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000059 | test_1000059.php | 循环 | 165 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000060 | test_1000060.php | 循环 | 180 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000061 | test_1000061.php | 循环 | 128 | 128 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000062 | test_1000062.php | 循环 | 1 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000063 | test_1000063.php | 循环 | 1 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000064 | test_1000064.php | 循环 | 9 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000065 | test_1000065.php | 表达式 | 20 | 20 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000066 | test_1000066.php | 表达式 | 150 | 150 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000067 | test_1000067.php | 表达式 | 5 | 5 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000068 | test_1000068.php | 函数 | a,b,c,d | a,b,c,d | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000069 | test_1000069.php | 函数 | 3,2,1 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000070 | test_1000070.php | 函数 | 3 | 3 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000071 | test_1000071.php | 函数 | 9 | 9 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000072 | test_1000072.php | 函数 | 97 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000073 | test_1000073.php | 函数 | F | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000074 | test_1000074.php | 循环 | 6 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000075 | test_1000075.php | 循环 | 15 | 15 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000076 | test_1000076.php | 循环 | 120 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000077 | test_1000077.php | 循环 | 2,4,6,8,10,12 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000078 | test_1000078.php | 循环 | found | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000079 | test_1000079.php | 循环 | 3 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000080 | test_1000080.php | 循环 | 45 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000081 | test_1000081.php | 函数 | 1,2,3 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000082 | test_1000082.php | 函数 | PHP Warning:  Array to string  | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000083 | test_1000083.php | 函数 | 2 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000084 | test_1000084.php | 函数 | a,b,c | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000085 | test_1000085.php | 函数 | hello | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000086 | test_1000086.php | 循环 | 1,4,9,16,25,36,49,64 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000087 | test_1000087.php | 函数 | 30 | 30 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000088 | test_1000088.php | 函数 | 25 | 25 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000089 | test_1000089.php | 函数 | 40 | 55 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret setTerminator: block=0, ter |
+| 1000090 | test_1000090.php | 函数 | 1,4,9,16,25,36,49,64 | 1,2,3,4,5,6,7,8 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret setTerminator: block=0, ter |
+| 1000091 | test_1000091.php | 函数 | 43 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000092 | test_1000092.php | 函数 | abc--- | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000093 | test_1000093.php | 函数 | ---abc | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000094 | test_1000094.php | 函数 | testtesttest | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000095 | test_1000095.php | 函数 | el | el | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000096 | test_1000096.php | 函数 | llo | llo | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000097 | test_1000097.php | 表达式 | 9 | 9 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000098 | test_1000098.php | 函数 | 3 | 0 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000099 | test_1000099.php | 表达式 | 75 | 75 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000100 | test_1000100.php | 表达式 | 23.333333333333 | 23.333333333333332 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000101 | test_1000101.php | 循环 | 15 | 15 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000102 | test_1000102.php | 循环 | 120 | foreach_init: iterable type =  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000103 | test_1000103.php | 循环 | 3628800 | 3628800 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000104 | test_1000104.php | 循环 | 1,1,2,3,5,8,13,21 |  | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=br setTerminator: block=1, term |
+| 1000105 | test_1000105.php | 函数 | 1,2,3,4,5,6,7,8,9 | 1,2,3,4,5,6,7,8,9 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000106 | test_1000106.php | 函数 | b,a,c | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1000107 | test_1000107.php | 函数 | a,b,c | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
