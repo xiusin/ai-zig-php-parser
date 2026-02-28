@@ -5922,7 +5922,6 @@ pub const VM = struct {
             .assignment => {
                 const target_idx = ast_node.data.assignment.target;
                 const target_node = self.context.nodes.items[target_idx];
-                std.debug.print("DEBUG VM assignment: target_node.tag = {}\n", .{target_node.tag});
 
                 const value = try self.eval(ast_node.data.assignment.value);
 
@@ -5941,16 +5940,14 @@ pub const VM = struct {
                     }
                     
                     const var_name_str = inner_value.getAsString().data.data;
-                    std.debug.print("DEBUG: var_name_str = '{s}'\n", .{var_name_str});
-                    // 添加 $ 前缀（如果没有）
+                    // 添加 $ 前缀（如果没有），并复制字符串
                     const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
-                        var_name_str
+                        try self.allocator.dupe(u8, var_name_str)
                     else
                         try std.fmt.allocPrint(self.allocator, "${s}", .{var_name_str});
-                    defer if (var_name.ptr != var_name_str.ptr) self.allocator.free(var_name);
-                    std.debug.print("DEBUG: setting variable '{s}' to value\n", .{var_name});
                     
-                    try self.setVariable(var_name, value);
+                    // Variable variables always set to global scope
+                    try self.global.set(var_name, value);
                 } else if (target_node.tag == .property_access) {
                     const obj_val = try self.eval(target_node.data.property_access.target);
                     defer self.releaseValue(obj_val);

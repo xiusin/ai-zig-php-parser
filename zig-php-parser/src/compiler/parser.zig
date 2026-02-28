@@ -1250,15 +1250,10 @@ pub const Parser = struct {
             return self.parseListAssignment();
         }
 
-        std.debug.print("DEBUG parseAssignment: parsing target\n", .{});
         const target = try self.parseExpression(100);
-        std.debug.print("DEBUG parseAssignment: target parsed, curr.tag = {}\n", .{self.curr.tag});
         const op = try self.eat(.equal);
-        std.debug.print("DEBUG parseAssignment: equal eaten\n", .{});
         const val = try self.parseExpression(0);
-        std.debug.print("DEBUG parseAssignment: value parsed\n", .{});
         _ = try self.eat(.semicolon);
-        std.debug.print("DEBUG parseAssignment: creating assignment node\n", .{});
         return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val } } });
     }
 
@@ -1870,10 +1865,8 @@ pub const Parser = struct {
             .t_variable => {
                 const t = try self.eat(.t_variable);
                 const var_name = self.lexer.buffer[t.loc.start..t.loc.end];
-                std.debug.print("DEBUG Parser: var_name = '{s}'\n", .{var_name});
                 // 检查是否是 $$var 形式（可变变量）
                 if (var_name.len >= 2 and var_name[0] == '$' and var_name[1] == '$') {
-                    std.debug.print("DEBUG Parser: detected variable_variable\n", .{});
                     // $$var -> variable_variable(variable($var))
                     const inner_name = var_name[1..]; // 去掉第一个 $，保留 $var
                     const inner_name_id = try self.context.intern(inner_name);
