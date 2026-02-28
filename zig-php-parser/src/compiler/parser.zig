@@ -1598,7 +1598,7 @@ pub const Parser = struct {
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken(); // skip name
                         self.nextToken(); // skip colon
-                        const value_expr = try self.parseExpression(0);
+                        const value_expr = try self.parseExpression(1);
                         const named_arg_node = try self.createNode(.{
                             .tag = .named_arg,
                             .main_token = name_tok,
@@ -1606,7 +1606,7 @@ pub const Parser = struct {
                         });
                         try args.append(self.allocator, named_arg_node);
                     } else {
-                        try args.append(self.allocator, try self.parseExpression(0));
+                        try args.append(self.allocator, try self.parseExpression(1));
                     }
                     if (self.curr.tag == .comma) self.nextToken();
                 }
@@ -1615,7 +1615,7 @@ pub const Parser = struct {
             } else if (tag == .l_bracket) {
                 var index: ?ast.Node.Index = null;
                 if (self.curr.tag != .r_bracket) {
-                    index = try self.parseExpression(0);
+                    index = try self.parseExpression(1);
                 }
                 _ = try self.eat(.r_bracket);
                 left = try self.createNode(.{ .tag = .array_access, .main_token = op, .data = .{ .array_access = .{ .target = left, .index = index } } });
@@ -1721,7 +1721,7 @@ pub const Parser = struct {
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken(); // skip name
                         self.nextToken(); // skip colon
-                        const value_expr = try self.parseExpression(0);
+                        const value_expr = try self.parseExpression(1);
                         const named_arg_node = try self.createNode(.{
                             .tag = .named_arg,
                             .main_token = name_tok,
@@ -1729,7 +1729,7 @@ pub const Parser = struct {
                         });
                         try args.append(self.allocator, named_arg_node);
                     } else {
-                        try args.append(self.allocator, try self.parseExpression(0));
+                        try args.append(self.allocator, try self.parseExpression(1));
                     }
                     if (self.curr.tag == .comma) self.nextToken();
                 }
@@ -1741,7 +1741,7 @@ pub const Parser = struct {
                 self.nextToken();
                 var index: ?ast.Node.Index = null;
                 if (self.curr.tag != .r_bracket) {
-                    index = try self.parseExpression(0);
+                    index = try self.parseExpression(1);
                 }
                 _ = try self.eat(.r_bracket);
                 left = try self.createNode(.{ .tag = .array_access, .main_token = op, .data = .{ .array_access = .{ .target = left, .index = index } } });
