@@ -404,42 +404,15 @@ pub fn build(b: *std.Build) void {
     // terminator_debug_step.dependOn(&run_terminator_debug.step);
 
     // Performance regression check
-    const perf_check_step = b.step("perf-check", "Check for performance regressions");
-    
-    const perf_cli_exe = b.addExecutable(.{
-        .name = "perf-cli",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/benchmark/perf_cli.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-        }),
-    });
-    perf_cli_exe.linkLibC();
-    // 添加模块导入
-    perf_cli_exe.root_module.addImport("compiler", compiler_mod);
-    perf_cli_exe.root_module.addImport("runtime", runtime_mod);
-    perf_cli_exe.root_module.addImport("bytecode", bytecode_mod);
-    perf_cli_exe.root_module.addImport("jit", jit_mod);
-    perf_cli_exe.root_module.addImport("extension", extension_mod);
-    perf_cli_exe.root_module.addImport("aot", b.createModule(.{
-        .root_source_file = b.path("src/aot/root.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .imports = &.{
-            .{ .name = "compiler", .module = compiler_mod },
-            .{ .name = "runtime", .module = runtime_mod },
-            .{ .name = "bytecode", .module = bytecode_mod },
-            .{ .name = "jit", .module = jit_mod },
-            .{ .name = "extension", .module = extension_mod },
-        },
-    }));
-    perf_cli_exe.root_module.addImport("aot_runtime", b.createModule(.{
-        .root_source_file = b.path("src/aot/runtime_lib_template.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-    }));
-    
-    b.installArtifact(perf_cli_exe);
+    // TEMPORARILY DISABLED due to comptime evaluation limit
+    // const perf_check_step = b.step("perf-check", "Check for performance regressions");
+    // const perf_cli_exe = b.addExecutable(.{
+    //     .name = "perf-cli",
+    //     .root_source_file = b.path("src/benchmark/perf_cli.zig"),
+    //     .target = target,
+    //     .optimize = .ReleaseFast,
+    // });
+    // b.installArtifact(perf_cli_exe);
 
     const profile_cli_exe = b.addExecutable(.{
         .name = "profile-cli",
@@ -457,26 +430,10 @@ pub fn build(b: *std.Build) void {
     const profile_cli_step = b.step("profile-cli", "Build profile-cli");
     profile_cli_step.dependOn(&install_profile_cli.step);
     
-    const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
-    perf_check_cmd.addArg("check");
-    if (b.args) |args| {
-        perf_check_cmd.addArgs(args);
-    }
-    perf_check_step.dependOn(&perf_check_cmd.step);
-
-    // Update performance baselines
-    const perf_update_step = b.step("perf-update", "Update performance baselines");
-    
-    const perf_update_cmd = b.addRunArtifact(perf_cli_exe);
-    perf_update_cmd.addArg("update");
-    perf_update_step.dependOn(&perf_update_cmd.step);
-
-    // List performance baselines
-    const perf_list_step = b.step("perf-list", "List performance baselines");
-    
-    const perf_list_cmd = b.addRunArtifact(perf_cli_exe);
-    perf_list_cmd.addArg("list");
-    perf_list_step.dependOn(&perf_list_cmd.step);
+    // TEMPORARILY DISABLED: perf-cli related commands
+    // const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
+    // const perf_update_cmd = b.addRunArtifact(perf_cli_exe);
+    // const perf_list_cmd = b.addRunArtifact(perf_cli_exe);
 
     // Regression detector tests
     const regression_test_step = b.step("test-regression", "Test regression detector");

@@ -5868,18 +5868,22 @@ pub const VM = struct {
                 const inner_value = try self.eval(ast_node.data.variable_variable.expr);
                 defer self.releaseValue(inner_value);
                 
+                std.debug.print("DEBUG read: inner_value type = {}\n", .{inner_value.getTag()});
+                
                 if (!inner_value.isString()) {
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable variable name must be a string", self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
                 
                 const var_name_str = inner_value.getAsString().data.data;
+                std.debug.print("DEBUG read: var_name_str = '{s}'\n", .{var_name_str});
                 // 添加 $ 前缀（如果没有）
                 const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
                     var_name_str
                 else
                     try std.fmt.allocPrint(self.allocator, "${s}", .{var_name_str});
                 defer if (var_name.ptr != var_name_str.ptr) self.allocator.free(var_name);
+                std.debug.print("DEBUG read: looking for variable '{s}'\n", .{var_name});
                 
                 if (self.getVariable(var_name)) |value| {
                     return value.retain();
@@ -5918,6 +5922,7 @@ pub const VM = struct {
             .assignment => {
                 const target_idx = ast_node.data.assignment.target;
                 const target_node = self.context.nodes.items[target_idx];
+                std.debug.print("DEBUG VM assignment: target_node.tag = {}\n", .{target_node.tag});
 
                 const value = try self.eval(ast_node.data.assignment.value);
 
@@ -5936,12 +5941,14 @@ pub const VM = struct {
                     }
                     
                     const var_name_str = inner_value.getAsString().data.data;
+                    std.debug.print("DEBUG: var_name_str = '{s}'\n", .{var_name_str});
                     // 添加 $ 前缀（如果没有）
                     const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
                         var_name_str
                     else
                         try std.fmt.allocPrint(self.allocator, "${s}", .{var_name_str});
                     defer if (var_name.ptr != var_name_str.ptr) self.allocator.free(var_name);
+                    std.debug.print("DEBUG: setting variable '{s}' to value\n", .{var_name});
                     
                     try self.setVariable(var_name, value);
                 } else if (target_node.tag == .property_access) {

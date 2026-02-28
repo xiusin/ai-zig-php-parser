@@ -530,15 +530,15 @@ pub const NativeLinker = struct {
             \\}
             \\
             \\pub fn getGlobalVarDynamic(name_val: runtime.Value) !runtime.Value {
-            \\    const name = try name_val.toString(runtime.runtime_allocator);
-            \\    defer runtime.runtime_allocator.free(name);
-            \\    return getGlobalVar(name);
+            \\    const name_str = try name_val.toString(runtime.runtime_allocator);
+            \\    defer name_str.release(runtime.runtime_allocator);
+            \\    return getGlobalVar(name_str.data);
             \\}
             \\
             \\pub fn setGlobalVarDynamic(name_val: runtime.Value, value: runtime.Value) !void {
-            \\    const name = try name_val.toString(runtime.runtime_allocator);
-            \\    defer runtime.runtime_allocator.free(name);
-            \\    try setGlobalVar(name, value);
+            \\    const name_str = try name_val.toString(runtime.runtime_allocator);
+            \\    defer name_str.release(runtime.runtime_allocator);
+            \\    try setGlobalVar(name_str.data, value);
             \\}
             \\
             \\pub fn main() !void {
@@ -3656,6 +3656,7 @@ pub const NativeLinker = struct {
 
     /// 生成指令（简化版）
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
+        @setEvalBranchQuota(10000); // 增加编译时求值限制
         // 🔥 LICM: 跳过已提升的指令
         if (self.isInstructionHoisted(inst)) {
             return;
