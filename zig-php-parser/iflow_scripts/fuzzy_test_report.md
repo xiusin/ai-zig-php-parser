@@ -1881,3 +1881,140 @@ Fu | [编译错误] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optim
 | 1000105 | test_1000105.php | 函数 | 1,2,3,4,5,6,7,8,9 | 1,2,3,4,5,6,7,8,9 | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
 | 1000106 | test_1000106.php | 函数 | b,a,c | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
 | 1000107 | test_1000107.php | 函数 | a,b,c | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | setTerminator: block=0, term=ret Optimizer: Starting optimiz |
+| 1137 | test_1137.php | 函数 | empty | not | empty | INTERP_MISMATCH | - |
+| 1142 | test_1142.php | 表达式 | 5 |  | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1143 | test_1143.php | 表达式 | 10 | 10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1144 | test_1144.php | 表达式 | 10 | 10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1145 | test_1145.php | 表达式 | 1 | 1 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1146 | test_1146.php | 表达式 | -1 | -1 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1147 | test_1147.php | 表达式 | 0 | 0 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1148 | test_1148.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1149 | test_1149.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1150 | test_1150.php | 函数 | 0 | Bytecode execution failed: Und | 0 | INTERP_MISMATCH | - |
+| 1151 | test_1151.php | 函数 | a | Bytecode execution failed: Und | a | INTERP_MISMATCH | - |
+| 1152 | test_1152.php | 函数 | 3 | Bytecode execution failed: Und | 3 | INTERP_MISMATCH | - |
+| 1153 | test_1153.php | 函数 | false | Bytecode execution failed: Und | false | INTERP_MISMATCH | - |
+| 1160 | test_1160.php | 表达式 | yes | yes | no | RESULT_MISMATCH | 结果不一致 |
+| 1163 | test_1163.php | 表达式 | yes |  |  | INTERP_MISMATCH | 结果不一致 |
+| 1167 | test_1167.php | 表达式 | not |  |  | INTERP_MISMATCH | 结果不一致 |
+| 1171 | test_1171.php | 表达式 | 13 | 7 | 13 | INTERP_MISMATCH | - |
+| 1172 | test_1172.php | 表达式 | -2 | 1 | -2 | INTERP_MISMATCH | - |
+| 1175 | test_1175.php | 表达式 | 8 | 1 | 1 | INTERP_MISMATCH | 结果不一致 |
+| 1176 | test_1176.php | 表达式 | 4 | 16 | 16 | INTERP_MISMATCH | 结果不一致 |
+| 1177 | test_1177.php | 表达式 | 1 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1178 | test_1178.php | 表达式 | 7 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1179 | test_1179.php | 表达式 | 6 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1192 | test_1192.php | 函数 | integer | Bytecode execution failed: Und | integer | INTERP_MISMATCH | - |
+| 1193 | test_1193.php | 函数 | double | Bytecode execution failed: Und | double | INTERP_MISMATCH | - |
+| 1194 | test_1194.php | 函数 | string | Bytecode execution failed: Und | string | INTERP_MISMATCH | - |
+| 1195 | test_1195.php | 函数 | boolean | Bytecode execution failed: Und | boolean | INTERP_MISMATCH | - |
+| 1196 | test_1196.php | 函数 | array | Bytecode execution failed: Und | array | INTERP_MISMATCH | - |
+| 1197 | test_1197.php | 函数 | NULL | Bytecode execution failed: Und | NULL | INTERP_MISMATCH | - |
+| 1201 | test_1201.php | 函数 |  | Bytecode execution failed: Und |  | INTERP_MISMATCH | - |
+| 1202 | test_1202.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1203 | test_1203.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1204 | test_1204.php | 函数 |  | Bytecode execution failed: Und |  | INTERP_MISMATCH | - |
+| 1205 | test_1205.php | 函数 | 3 | Bytecode execution failed: Und | 3 | INTERP_MISMATCH | - |
+| 1206 | test_1206.php | 函数 |  | Bytecode execution failed: Und |  | INTERP_MISMATCH | - |
+| 1207 | test_1207.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1208 | test_1208.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1209 | test_1209.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1210 | test_1210.php | 函数 | PHP Warning:  Array to string  | Bytecode execution failed: Und | Array | INTERP_MISMATCH | 结果不一致 |
+| 1211 | test_1211.php | 函数 | PHP Warning:  Array to string  | Bytecode execution failed: Und | Array | INTERP_MISMATCH | 结果不一致 |
+| 1216 | test_1216.php | 函数 | PHP Warning:  Array to string  | Array | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:87:24: error: expected  |
+| 1217 | test_1217.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1218 | test_1218.php | 函数 | 1,4,5 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:99:24: error: expected  |
+| 1219 | test_1219.php | 函数 | 1,9,2,3 | Bytecode execution failed: Und | 1,9,2,3 | INTERP_MISMATCH | - |
+| 1220 | test_1220.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1221 | test_1221.php | 函数 | PHP Warning:  Array to string  | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:89:13: error: use of un |
+| 1222 | test_1222.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1224 | test_1224.php | 函数 | 0,2,4,6,8,10 | 0,2,4,6,8,10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:61:24: error: expected  |
+| 1228 | test_1228.php | 函数 | 0.69314718055995 | Bytecode execution failed: Und | 0.6931471805599453 | INTERP_MISMATCH | 结果不一致 |
+| 1229 | test_1229.php | 函数 | 7.3890560989307 | Bytecode execution failed: Und | 7.38905609893065 | INTERP_MISMATCH | 结果不一致 |
+| 1230 | test_1230.php | 函数 | 3.1415926535898 | Bytecode execution failed: Und | 3.141592653589793 | INTERP_MISMATCH | 结果不一致 |
+| 1235 | test_1235.php | 函数 | 4 | 4 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:62:24: error: expected  |
+| 1236 | test_1236.php | 函数 | 3 | 4 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:62:24: error: expected  |
+| 1237 | test_1237.php | 函数 | 14 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:56:13: error: use of un |
+| 1137 | test_1137.php | 函数 | empty | not | empty | INTERP_MISMATCH | - |
+| 1142 | test_1142.php | 表达式 | 5 |  | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1143 | test_1143.php | 表达式 | 10 | 10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1144 | test_1144.php | 表达式 | 10 | 10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1145 | test_1145.php | 表达式 | 1 | 1 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1146 | test_1146.php | 表达式 | -1 | -1 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1147 | test_1147.php | 表达式 | 0 | 0 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1148 | test_1148.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1149 | test_1149.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1150 | test_1150.php | 函数 | 0 | Bytecode execution failed: Und | 0 | INTERP_MISMATCH | - |
+| 1151 | test_1151.php | 函数 | a | Bytecode execution failed: Und | a | INTERP_MISMATCH | - |
+| 1152 | test_1152.php | 函数 | 3 | Bytecode execution failed: Und | 3 | INTERP_MISMATCH | - |
+| 1153 | test_1153.php | 函数 | false | Bytecode execution failed: Und | false | INTERP_MISMATCH | - |
+| 1160 | test_1160.php | 表达式 | yes | yes | no | RESULT_MISMATCH | 结果不一致 |
+| 1163 | test_1163.php | 表达式 | yes |  |  | INTERP_MISMATCH | 结果不一致 |
+| 1167 | test_1167.php | 表达式 | not |  |  | INTERP_MISMATCH | 结果不一致 |
+| 1171 | test_1171.php | 表达式 | 13 | 7 | 13 | INTERP_MISMATCH | - |
+| 1172 | test_1172.php | 表达式 | -2 | 1 | -2 | INTERP_MISMATCH | - |
+| 1175 | test_1175.php | 表达式 | 8 | 1 | 1 | INTERP_MISMATCH | 结果不一致 |
+| 1176 | test_1176.php | 表达式 | 4 | 16 | 16 | INTERP_MISMATCH | 结果不一致 |
+| 1177 | test_1177.php | 表达式 | 1 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1178 | test_1178.php | 表达式 | 7 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1179 | test_1179.php | 表达式 | 6 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1192 | test_1192.php | 函数 | integer | Bytecode execution failed: Und | integer | INTERP_MISMATCH | - |
+| 1193 | test_1193.php | 函数 | double | Bytecode execution failed: Und | double | INTERP_MISMATCH | - |
+| 1194 | test_1194.php | 函数 | string | Bytecode execution failed: Und | string | INTERP_MISMATCH | - |
+| 1195 | test_1195.php | 函数 | boolean | Bytecode execution failed: Und | boolean | INTERP_MISMATCH | - |
+| 1196 | test_1196.php | 函数 | array | Bytecode execution failed: Und | array | INTERP_MISMATCH | - |
+| 1197 | test_1197.php | 函数 | NULL | Bytecode execution failed: Und | NULL | INTERP_MISMATCH | - |
+| 1201 | test_1201.php | 函数 |  | Bytecode execution failed: Und |  | INTERP_MISMATCH | - |
+| 1202 | test_1202.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1203 | test_1203.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1204 | test_1204.php | 函数 |  | Bytecode execution failed: Und |  | INTERP_MISMATCH | - |
+| 1205 | test_1205.php | 函数 | 3 | Bytecode execution failed: Und | 3 | INTERP_MISMATCH | - |
+| 1206 | test_1206.php | 函数 |  | Bytecode execution failed: Und |  | INTERP_MISMATCH | - |
+| 1207 | test_1207.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1208 | test_1208.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1209 | test_1209.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1210 | test_1210.php | 函数 | PHP Warning:  Array to string  | Bytecode execution failed: Und | Array | INTERP_MISMATCH | 结果不一致 |
+| 1211 | test_1211.php | 函数 | PHP Warning:  Array to string  | Bytecode execution failed: Und | Array | INTERP_MISMATCH | 结果不一致 |
+| 1216 | test_1216.php | 函数 | PHP Warning:  Array to string  | Array | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:87:24: error: expected  |
+| 1217 | test_1217.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1218 | test_1218.php | 函数 | 1,4,5 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:99:24: error: expected  |
+| 1219 | test_1219.php | 函数 | 1,9,2,3 | Bytecode execution failed: Und | 1,9,2,3 | INTERP_MISMATCH | - |
+| 1220 | test_1220.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1221 | test_1221.php | 函数 | PHP Warning:  Array to string  | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:89:13: error: use of un |
+| 1222 | test_1222.php | 函数 | PHP Warning:  Array to string  | Array | Array | INTERP_MISMATCH | 结果不一致 |
+| 1224 | test_1224.php | 函数 | 0,2,4,6,8,10 | 0,2,4,6,8,10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:61:24: error: expected  |
+| 1228 | test_1228.php | 函数 | 0.69314718055995 | Bytecode execution failed: Und | 0.6931471805599453 | INTERP_MISMATCH | 结果不一致 |
+| 1229 | test_1229.php | 函数 | 7.3890560989307 | Bytecode execution failed: Und | 7.38905609893065 | INTERP_MISMATCH | 结果不一致 |
+| 1230 | test_1230.php | 函数 | 3.1415926535898 | Bytecode execution failed: Und | 3.141592653589793 | INTERP_MISMATCH | 结果不一致 |
+| 1235 | test_1235.php | 函数 | 4 | 4 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:62:24: error: expected  |
+| 1236 | test_1236.php | 函数 | 3 | 4 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:62:24: error: expected  |
+| 1237 | test_1237.php | 函数 | 14 | Bytecode execution failed: Und | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:56:13: error: use of un |
+| 1137 | test_1137.php | 函数 | empty | not | empty | INTERP_MISMATCH | - |
+| 1142 | test_1142.php | 表达式 | 5 |  | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1143 | test_1143.php | 表达式 | 10 | 10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1144 | test_1144.php | 表达式 | 10 | 10 | [编译失败] | AOT_COMPILE_ERROR | .zigphp_aot_build/main.zig:60:28: error: incompati |
+| 1145 | test_1145.php | 表达式 | 1 | 1 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1146 | test_1146.php | 表达式 | -1 | -1 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1147 | test_1147.php | 表达式 | 0 | 0 | [编译失败] | AOT_COMPILE_ERROR | Error: Compilation failed with 2 errors, 0 warning |
+| 1148 | test_1148.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1149 | test_1149.php | 函数 | 1 | Bytecode execution failed: Und | 1 | INTERP_MISMATCH | - |
+| 1150 | test_1150.php | 函数 | 0 | Bytecode execution failed: Und | 0 | INTERP_MISMATCH | - |
+| 1151 | test_1151.php | 函数 | a | Bytecode execution failed: Und | a | INTERP_MISMATCH | - |
+| 1152 | test_1152.php | 函数 | 3 | Bytecode execution failed: Und | 3 | INTERP_MISMATCH | - |
+| 1153 | test_1153.php | 函数 | false | Bytecode execution failed: Und | false | INTERP_MISMATCH | - |
+| 1160 | test_1160.php | 表达式 | yes | yes | no | RESULT_MISMATCH | 结果不一致 |
+| 1163 | test_1163.php | 表达式 | yes |  |  | INTERP_MISMATCH | 结果不一致 |
+| 1167 | test_1167.php | 表达式 | not |  |  | INTERP_MISMATCH | 结果不一致 |
+| 1171 | test_1171.php | 表达式 | 13 | 7 | 13 | INTERP_MISMATCH | - |
+| 1172 | test_1172.php | 表达式 | -2 | 1 | -2 | INTERP_MISMATCH | - |
+| 1175 | test_1175.php | 表达式 | 8 | 1 | 1 | INTERP_MISMATCH | 结果不一致 |
+| 1176 | test_1176.php | 表达式 | 4 | 16 | 16 | INTERP_MISMATCH | 结果不一致 |
+| 1177 | test_1177.php | 表达式 | 1 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1178 | test_1178.php | 表达式 | 7 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1179 | test_1179.php | 表达式 | 6 | 5 | 5 | INTERP_MISMATCH | 结果不一致 |
+| 1192 | test_1192.php | 函数 | integer | Bytecode execution failed: Und | integer | INTERP_MISMATCH | - |
+| 1193 | test_1193.php | 函数 | double | Bytecode execution failed: Und | double | INTERP_MISMATCH | - |
+| 1194 | test_1194.php | 函数 | string | Bytecode execution failed: Und | string | INTERP_MISMATCH | - |
+| 1195 | test_1195.php | 函数 | boolean | Bytecode execution failed: Und | boolean | INTERP_MISMATCH | - |
+| 1196 | test_1196.php | 函数 | array | Bytecode execution failed: Und | array | INTERP_MISMATCH | - |
+| 1197 | test_1197.php | 函数 | NULL | Bytecode execution failed: Und | NULL | INTERP_MISMATCH | - |

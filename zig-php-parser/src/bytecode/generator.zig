@@ -321,6 +321,7 @@ pub const BytecodeGenerator = struct {
             .echo_stmt => try self.visitEcho(index),
             .expression_stmt => try self.visitExpressionStmt(index),
             .if_stmt => try self.visitIf(index),
+            .switch_stmt => try self.visitSwitch(index),
             .while_stmt => try self.visitWhile(index),
             .do_while_stmt => try self.visitDoWhile(index),
             .for_stmt => try self.visitFor(index),
@@ -591,6 +592,77 @@ pub const BytecodeGenerator = struct {
         }
 
         // 结束标签
+        try self.placeLabel(end_label);
+    }
+
+    /// 访问switch语句
+    fn visitSwitch(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const switch_data = node.data.switch_stmt;
+
+        // 计算 switch 表达式
+        try self.visitNode(switch_data.expression);
+
+        const end_label = self.newLabel();
+        const case_labels = try self.allocator.alloc(u32, switch_data.cases.len);
+        defer self.allocator.free(case_labels);
+
+        for (case_labels) |*label| {
+            label.* = self.newLabel();
+        }
+
+        const default_label = self.newLabel();
+
+        // 生成 case 比较链
+        for (switch_data.cases, 0..) |case_index, i| {
+            const case_node = self.getNode(case_index);
+            const case_data = case_node.data.case;
+
+            try self.emit(.dup, 0, 0);
+            self.pushStack();
+
+            try self.visitNode(case_data.condition);
+            try self.emit(.eq, 0, 0);
+            self.popStack();
+
+            try self.emitJump(.jnz, case_labels[i]);
+        }
+
+        // 都不匹配，跳到 default
+        try self.emitJump(.jmp, default_label);
+
+        // 生成各个 case 的代码
+        for (switch_data.cases, 0..) |case_index, i| {
+            try self.placeLabel(case_labels[i]);
+
+            // pop switch 值
+            try self.emit(.pop, 0, 0);
+            self.popStack();
+
+            const case_node = self.getNode(case_index);
+            const case_data = case_node.data.case;
+
+            for (case_data.body) |stmt| {
+                try self.visitNode(stmt);
+            }
+
+            try self.emitJump(.jmp, end_label);
+        }
+
+        // default 分支
+        try self.placeLabel(default_label);
+        try self.emit(.pop, 0, 0);
+        self.popStack();
+
+        if (switch_data.default) |default_index| {
+            const default_node = self.getNode(default_index);
+            const default_data = default_node.data.default;
+
+            for (default_data.body) |stmt| {
+                try self.visitNode(stmt);
+            }
+        }
+
         try self.placeLabel(end_label);
     }
 
@@ -954,6 +1026,7 @@ pub const BytecodeGenerator = struct {
             .spaceship => .spaceship,
             .ampersand => .bit_and,
             .pipe => .bit_or,
+            .caret => .bit_xor,
             .double_ampersand, .k_and => .logic_and,
             .double_pipe, .k_or => .logic_or,
             .k_xor => .logic_xor,
