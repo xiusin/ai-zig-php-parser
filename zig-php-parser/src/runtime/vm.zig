@@ -2796,6 +2796,11 @@ pub const VM = struct {
         try self.global.set("M_2_PI", Value.initFloat(2.0 / std.math.pi));
         try self.global.set("M_SQRT2", Value.initFloat(std.math.sqrt2));
         try self.global.set("M_SQRT1_2", Value.initFloat(1.0 / std.math.sqrt2));
+        
+        // String constants
+        try self.global.set("STR_PAD_LEFT", Value.initInt(0));
+        try self.global.set("STR_PAD_RIGHT", Value.initInt(1));
+        try self.global.set("STR_PAD_BOTH", Value.initInt(2));
     }
 
     /// Initialize the builtin function registry with core functions

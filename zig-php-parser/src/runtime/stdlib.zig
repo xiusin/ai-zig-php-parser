@@ -3714,6 +3714,14 @@ fn strPadFn(vm: *VM, args: []const Value) !Value {
         var i: usize = 0;
         while (i < pad_len) : (i += 1) result[i] = pad_str[i % pad_str.len];
         @memcpy(result[pad_len..], input);
+    } else if (pad_type == 2) { // STR_PAD_BOTH
+        const left_pad = pad_len / 2;
+        const right_pad = pad_len - left_pad;
+        var i: usize = 0;
+        while (i < left_pad) : (i += 1) result[i] = pad_str[i % pad_str.len];
+        @memcpy(result[left_pad..left_pad + input.len], input);
+        i = 0;
+        while (i < right_pad) : (i += 1) result[left_pad + input.len + i] = pad_str[i % pad_str.len];
     } else { // STR_PAD_RIGHT (default)
         @memcpy(result[0..input.len], input);
         var i: usize = 0;
@@ -5065,6 +5073,81 @@ fn arrayDiffFn(vm: *VM, args: []const Value) !Value {
 }
 
 // Array pointer functions
+fn arrayRandFn(vm: *VM, args: []const Value) !Value {
+    const arr_val = args[0];
+    if (arr_val.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "array_rand() expects parameter 1 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+    
+    const arr = arr_val.getAsArray().data;
+    const count = arr.count();
+    if (count == 0) return Value.initNull();
+    
+    const num = if (args.len > 1) @as(usize, @intCast(@max(1, args[1].asInt()))) else 1;
+    
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+    const random = prng.random();
+    
+    if (num == 1) {
+        // Return single key
+        const idx = random.intRangeAtMost(usize, 0, count - 1);
+        var iter = arr.getElements().iterator();
+        var i: usize = 0;
+        while (iter.next()) |entry| : (i += 1) {
+            if (i == idx) {
+                return switch (entry.key_ptr.*) {
+                    .integer => |int| Value.initInt(int),
+                    .string => |str| Value.initString(vm.allocator, str.data),
+                };
+            }
+        }
+    }
+    
+    // Return array of keys
+    const result = try vm.allocator.create(PHPArray);
+    result.* = PHPArray.init(vm.allocator);
+    
+    var selected = try std.ArrayList(usize).initCapacity(vm.allocator, num);
+    defer selected.deinit(vm.allocator);
+    
+    while (selected.items.len < @min(num, count)) {
+        const idx = random.intRangeAtMost(usize, 0, count - 1);
+        var found = false;
+        for (selected.items) |s| {
+            if (s == idx) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            try selected.append(vm.allocator, idx);
+        }
+    }
+    
+    var iter = arr.getElements().iterator();
+    var i: usize = 0;
+    var result_idx: i64 = 0;
+    while (iter.next()) |entry| : (i += 1) {
+        for (selected.items) |s| {
+            if (s == i) {
+                const key_val = switch (entry.key_ptr.*) {
+                    .integer => |int| Value.initInt(int),
+                    .string => |str| try Value.initString(vm.allocator, str.data),
+                };
+                try result.set(vm.allocator, .{ .integer = result_idx }, key_val);
+                result_idx += 1;
+                break;
+            }
+        }
+    }
+    
+    const box = try vm.allocator.create(types.gc.Box(*PHPArray));
+    box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result };
+    return Value.fromBox(box, Value.TYPE_ARRAY);
+}
+
 fn endFn(_: *VM, args: []const Value) !Value {
     const arr_val = args[0];
     if (arr_val.getTag() != .array) return Value.initBool(false);
