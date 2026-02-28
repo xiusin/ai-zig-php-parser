@@ -65,6 +65,8 @@ pub const BytecodeGenerator = struct {
     ast_to_alloc_id: std.AutoHashMapUnmanaged(ast.Node.Index, u32),
     /// 标量替换的字段槽位映射
     scalar_field_slots: std.StringHashMapUnmanaged(u16),
+    /// 是否在 foreach 循环体中（禁用 visitBlock 的栈清理）
+    in_foreach_body: bool,
 
     const PendingJump = struct {
         instruction_index: u32,
@@ -101,6 +103,7 @@ pub const BytecodeGenerator = struct {
             .enable_escape_optimization = false,
             .ast_to_alloc_id = .{},
             .scalar_field_slots = .{},
+            .in_foreach_body = false,
         };
     }
 
@@ -519,10 +522,22 @@ pub const BytecodeGenerator = struct {
     fn visitBlock(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
         const stmts = node.data.block.stmts;
+        
+        // 在 foreach 循环体中，保存初始栈深度
+        const initial_stack = if (self.in_foreach_body) self.current_stack else 0;
+        
         for (stmts) |stmt_idx| {
             const saved_stack = self.current_stack;
             try self.visitNode(stmt_idx);
-            while (self.current_stack > saved_stack) {
+            
+            // 清理栈上多余的值
+            // 但在 foreach 中，不要清理到 initial_stack 以下（保护 iterator）
+            const target_stack = if (self.in_foreach_body) 
+                @max(saved_stack, initial_stack)
+            else 
+                saved_stack;
+                
+            while (self.current_stack > target_stack) {
                 try self.emit(.pop, 0, 0);
                 self.popStack();
             }
@@ -688,6 +703,7 @@ pub const BytecodeGenerator = struct {
         try self.visitNode(foreach_data.iterable);
 
         // 初始化迭代器
+        // 栈：[iterable] -> [iterator]
         try self.emit(.foreach_init, 0, 0);
 
         try self.placeLabel(loop_start);
@@ -696,12 +712,10 @@ pub const BytecodeGenerator = struct {
         // 获取下一个元素
         // foreach_next 将栈从 [iterator] 变成 [iterator, key, value]
         try self.emitJump(.foreach_next, loop_end);
-
-        // 保存当前栈深度
-        const saved_stack = self.current_stack;
         
-        // 手动增加栈深度以反映 foreach_next 压入的 key 和 value
-        self.current_stack += 2;
+        // 现在栈上有：[iterator, key, value]
+        // current_stack 应该反映这个状态
+        self.current_stack += 2; // 加上 key 和 value
 
         // 存储 value（栈顶）
         const value_node = self.getNode(foreach_data.value);
@@ -709,7 +723,7 @@ pub const BytecodeGenerator = struct {
             const value_name = self.getString(value_node.data.variable.name);
             const value_slot = try self.getOrCreateLocal(value_name);
             try self.emit(.store_local, value_slot, 0);
-            self.popStack(); // 手动减少栈深度
+            self.popStack(); // value 被存储，栈：[iterator, key]
         }
 
         // 存储 key（如果需要）
@@ -719,25 +733,33 @@ pub const BytecodeGenerator = struct {
                 const key_name = self.getString(key_node.data.variable.name);
                 const key_slot = try self.getOrCreateLocal(key_name);
                 try self.emit(.store_local, key_slot, 0);
-                self.popStack(); // 手动减少栈深度
+                self.popStack(); // key 被存储，栈：[iterator]
             }
         } else {
             // 不需要 key，弹出它
             try self.emit(.pop, 0, 0);
-            self.popStack(); // 手动减少栈深度
+            self.popStack(); // key 被弹出，栈：[iterator]
         }
 
-        // 现在 current_stack 应该等于 saved_stack
-        // 循环体执行时，栈深度是正确的
+        // 现在 current_stack 应该等于 base_stack（只有 iterator 在栈上）
+        // 设置标志并执行循环体
+        const was_in_foreach = self.in_foreach_body;
+        self.in_foreach_body = true;
+        
         try self.visitNode(foreach_data.body);
+        
+        self.in_foreach_body = was_in_foreach;
 
-        // 确保栈深度正确（防御性编程）
-        self.current_stack = saved_stack;
-
+        // 跳转回循环开始
         try self.emitJump(.jmp, loop_start);
 
+        // 循环结束标签
         try self.emit(.loop_end, 0, 0);
         try self.placeLabel(loop_end);
+        
+        // foreach_next 在迭代完成时已经弹出了 iterator
+        // 所以我们需要更新 current_stack
+        self.popStack();
 
         _ = self.loop_stack.pop();
     }
