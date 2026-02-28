@@ -1082,10 +1082,24 @@ pub const Parser = struct {
         // Standard PHP for loop: for (...)
         _ = try self.eat(.l_paren);
 
-        // Parse initialization (expr1)
+        // Parse initialization (expr1, expr2, ...)
         var init_expr: ?ast.Node.Index = null;
         if (self.curr.tag != .semicolon) {
-            init_expr = try self.parseExpression(0);
+            var init_exprs = std.ArrayListUnmanaged(ast.Node.Index){};
+            while (true) {
+                try init_exprs.append(self.allocator, try self.parseExpression(5)); // 优先级 > 逗号
+                if (self.curr.tag != .comma) break;
+                self.nextToken(); // consume comma
+            }
+            // 如果只有一个表达式，直接使用；否则创建表达式列表节点
+            if (init_exprs.items.len == 1) {
+                init_expr = init_exprs.items[0];
+                init_exprs.deinit(self.allocator);
+            } else {
+                const exprs = try self.context.arena.allocator().dupe(ast.Node.Index, init_exprs.items);
+                init_exprs.deinit(self.allocator);
+                init_expr = try self.createNode(.{ .tag = .expr_list, .main_token = token, .data = .{ .expr_list = .{ .exprs = exprs } } });
+            }
         }
         _ = try self.eat(.semicolon);
 
@@ -1096,10 +1110,24 @@ pub const Parser = struct {
         }
         _ = try self.eat(.semicolon);
 
-        // Parse loop expression (expr3)
+        // Parse loop expression (expr3, expr4, ...)
         var loop: ?ast.Node.Index = null;
         if (self.curr.tag != .r_paren) {
-            loop = try self.parseExpression(0);
+            var loop_exprs = std.ArrayListUnmanaged(ast.Node.Index){};
+            while (true) {
+                try loop_exprs.append(self.allocator, try self.parseExpression(5)); // 优先级 > 逗号
+                if (self.curr.tag != .comma) break;
+                self.nextToken(); // consume comma
+            }
+            // 如果只有一个表达式，直接使用；否则创建表达式列表节点
+            if (loop_exprs.items.len == 1) {
+                loop = loop_exprs.items[0];
+                loop_exprs.deinit(self.allocator);
+            } else {
+                const exprs = try self.context.arena.allocator().dupe(ast.Node.Index, loop_exprs.items);
+                loop_exprs.deinit(self.allocator);
+                loop = try self.createNode(.{ .tag = .expr_list, .main_token = token, .data = .{ .expr_list = .{ .exprs = exprs } } });
+            }
         }
         _ = try self.eat(.r_paren);
 
@@ -2370,6 +2398,7 @@ pub const Parser = struct {
             .double_question => 8, // Null coalescing
             .question => 7, // Ternary
             .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal => 5,
+            .comma => 1, // Comma operator (lowest precedence)
             else => 0,
         };
     }

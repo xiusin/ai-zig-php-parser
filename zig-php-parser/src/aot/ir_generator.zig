@@ -562,6 +562,13 @@ pub const IRGenerator = struct {
             .const_decl => try self.generateConstDecl(node),
             .global_stmt => try self.generateGlobalStmt(node),
             .static_stmt => try self.generateStaticStmt(node),
+            .expr_list => {
+                // 表达式列表作为语句：顺序执行所有表达式
+                const exprs = node.data.expr_list.exprs;
+                for (exprs) |expr_idx| {
+                    _ = try self.generateExpression(expr_idx);
+                }
+            },
             else => {
                 _ = try self.generateExpression(index);
             },
@@ -1282,6 +1289,7 @@ pub const IRGenerator = struct {
         self.setCurrentBlock(cond_block);
         if (for_data.condition) |cond_idx| {
             const cond_reg = try self.generateExpression(cond_idx);
+            // 条件可能生成了新块（如短路逻辑），使用当前块设置终止符
             self.setTerminator(.{ .cond_br = .{
                 .cond = cond_reg,
                 .then_block = body_block,
@@ -2361,6 +2369,15 @@ pub const IRGenerator = struct {
             .clone_with_expr => self.generateCloneWithExpr(node),
             .named_arg => self.generateNamedArg(node),
             .cast_expr => self.generateCastExpr(node),
+            .expr_list => blk: {
+                // 表达式列表：顺序执行所有表达式，返回最后一个的值
+                const exprs = node.data.expr_list.exprs;
+                var last_reg: Register = try self.emitWithResult(.const_null, .php_value);
+                for (exprs) |expr_idx| {
+                    last_reg = try self.generateExpression(expr_idx);
+                }
+                break :blk last_reg;
+            },
 
             // $this 表达式 - 返回this参数寄存器
             .self_expr => blk: {
@@ -2639,6 +2656,9 @@ pub const IRGenerator = struct {
             // Null coalescing
             .double_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
             // .question_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
+
+            // Comma operator: evaluate both, return right
+            .comma => rhs_reg,
 
             else => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
         };
@@ -3791,7 +3811,7 @@ pub const IRGenerator = struct {
             const match_reg = try self.emitWithResult(.{ .identical = .{
                 .lhs = subject_reg,
                 .rhs = cond_reg,
-            } }, .bool);
+            } }, .php_value);
 
             // 下一个检查或 default
             const next_block = if (i + 1 < check_blocks.items.len)

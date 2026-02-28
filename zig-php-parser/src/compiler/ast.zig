@@ -113,6 +113,7 @@ pub const Node = struct {
         parent_expr,
         static_expr, // self, parent, static 关键字
         cast_expr, // 类型转换 (int), (object), etc.
+        expr_list, // 表达式列表（for 循环 init/loop）
     };
 
     pub const Modifier = packed struct {
@@ -208,6 +209,7 @@ pub const Node = struct {
         union_type: struct { types: []const Index },
         intersection_type: struct { types: []const Index },
         cast_expr: struct { cast_type: Token.Tag, expr: Index },
+        expr_list: struct { exprs: []const Index },
         none: void,
     };
 };
