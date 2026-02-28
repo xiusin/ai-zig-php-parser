@@ -322,6 +322,7 @@ pub const BytecodeGenerator = struct {
             .expression_stmt => try self.visitExpressionStmt(index),
             .if_stmt => try self.visitIf(index),
             .while_stmt => try self.visitWhile(index),
+            .do_while_stmt => try self.visitDoWhile(index),
             .for_stmt => try self.visitFor(index),
             .foreach_stmt => try self.visitForeach(index),
             .return_stmt => try self.visitReturn(index),
@@ -622,6 +623,38 @@ pub const BytecodeGenerator = struct {
         try self.emitJump(.jmp, loop_start);
 
         // 循环结束（确保跳转到退出点时也会执行）
+        try self.placeLabel(loop_end);
+        try self.emit(.loop_end, 0, 0);
+
+        _ = self.loop_stack.pop();
+    }
+
+    /// 访问do-while语句
+    fn visitDoWhile(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const do_while_data = node.data.do_while_stmt;
+
+        const loop_start = self.newLabel();
+        const loop_end = self.newLabel();
+
+        try self.loop_stack.append(self.allocator, .{
+            .continue_label = loop_start,
+            .break_label = loop_end,
+        });
+
+        // 循环开始标记
+        try self.placeLabel(loop_start);
+        try self.emit(.loop_start, 0, 0);
+
+        // 循环体（先执行）
+        try self.visitNode(do_while_data.body);
+
+        // 条件检查（后检查）
+        try self.visitNode(do_while_data.condition);
+        self.popStack();
+        try self.emitJump(.jnz, loop_start); // 条件为真则跳回
+
+        // 循环结束
         try self.placeLabel(loop_end);
         try self.emit(.loop_end, 0, 0);
 
