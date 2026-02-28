@@ -230,6 +230,7 @@ pub const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) anyerror!ast.Node.Index {
+        
         var attributes: []const ast.Node.Index = &.{};
         if (self.curr.tag == .t_attribute_start) attributes = try self.parseAttributes();
 
@@ -1051,7 +1052,8 @@ pub const Parser = struct {
         // Infinite loop: for { ... }
         if (self.curr.tag == .l_brace) {
             const body = try self.parseBlock();
-            return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = null, .condition = null, .loop = null, .body = body } } });
+            const result = try self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = null, .condition = null, .loop = null, .body = body } } });
+            return result;
         }
 
         // Range loop: for range 10, for $i range 10, or for range 10 as $i
@@ -1087,7 +1089,7 @@ pub const Parser = struct {
         if (self.curr.tag != .semicolon) {
             var init_exprs = std.ArrayListUnmanaged(ast.Node.Index){};
             while (true) {
-                try init_exprs.append(self.allocator, try self.parseExpression(5)); // 优先级 > 逗号
+                try init_exprs.append(self.allocator, try self.parseExpression(1)); // 优先级 > 逗号 (1)
                 if (self.curr.tag != .comma) break;
                 self.nextToken(); // consume comma
             }
@@ -1115,7 +1117,7 @@ pub const Parser = struct {
         if (self.curr.tag != .r_paren) {
             var loop_exprs = std.ArrayListUnmanaged(ast.Node.Index){};
             while (true) {
-                try loop_exprs.append(self.allocator, try self.parseExpression(5)); // 优先级 > 逗号
+                try loop_exprs.append(self.allocator, try self.parseExpression(1)); // 优先级 > 逗号 (1)
                 if (self.curr.tag != .comma) break;
                 self.nextToken(); // consume comma
             }
@@ -1133,7 +1135,8 @@ pub const Parser = struct {
 
         const body = try self.parseStatement();
 
-        return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = init_expr, .condition = condition, .loop = loop, .body = body } } });
+        const result = try self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = init_expr, .condition = condition, .loop = loop, .body = body } } });
+        return result;
     }
 
     fn parseGlobal(self: *Parser) anyerror!ast.Node.Index {

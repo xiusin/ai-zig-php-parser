@@ -529,6 +529,7 @@ pub const IRGenerator = struct {
     fn generateStatement(self: *Self, index: Node.Index) anyerror!void {
         const node = self.getNode(index) orelse return;
         self.updateLocation(node.main_token);
+        
 
         switch (node.tag) {
             .function_decl => try self.generateFunctionDecl(node),
