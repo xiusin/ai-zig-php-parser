@@ -641,10 +641,8 @@ pub const IRGenerator = struct {
         const entry = try func.createBlock("entry");
         self.setCurrentBlock(entry);
 
-        // Process parameters
-        for (func_data.params) |param_idx| {
-            try self.generateParameter(param_idx);
-        }
+        // Process parameters with unified control flow
+        try self.generateParameters(func_data.params);
 
         // Generate function body
         try self.generateStatement(func_data.body);
@@ -678,24 +676,36 @@ pub const IRGenerator = struct {
         self.current_block = prev_block;
     }
 
-    /// Generate IR for a function parameter
-    fn generateParameter(self: *Self, index: Node.Index) !void {
-        const node = self.getNode(index) orelse return;
-        if (node.tag != .parameter) return;
+    const ParamInfo = struct {
+        name: []const u8,
+        type_: Type,
+        alloca_reg: Register,
+        has_default: bool,
+        default_expr: ?Node.Index,
+    };
 
-        const param_data = node.data.parameter;
-        const param_name = self.getString(param_data.name);
+    /// Generate IR for all function parameters with unified control flow
+    fn generateParameters(self: *Self, param_indices: []const Node.Index) !void {
+        if (param_indices.len == 0) return;
 
-        // Determine parameter type
-        var param_type: Type = .php_value;
-        if (param_data.type) |type_idx| {
-            param_type = try self.resolveTypeNode(type_idx);
-        }
+        const func = self.current_function.?;
+        
+        // 收集参数信息
+        var params = try std.ArrayList(ParamInfo).initCapacity(self.allocator, param_indices.len);
+        defer params.deinit(self.allocator);
 
-        // Add parameter to function
-        var param_idx: u32 = 0;
-        if (self.current_function) |func| {
-            param_idx = @intCast(func.params.items.len);
+        for (param_indices) |param_idx| {
+            const node = self.getNode(param_idx) orelse continue;
+            if (node.tag != .parameter) continue;
+
+            const param_data = node.data.parameter;
+            const param_name = self.getString(param_data.name);
+
+            var param_type: Type = .php_value;
+            if (param_data.type) |type_idx| {
+                param_type = try self.resolveTypeNode(type_idx);
+            }
+
             try func.addParam(.{
                 .name = param_name,
                 .type_ = param_type,
@@ -703,46 +713,101 @@ pub const IRGenerator = struct {
                 .is_variadic = param_data.is_variadic,
                 .is_reference = param_data.is_reference,
             });
+
+            const alloca_reg = try self.getOrCreateVarRegister(param_name, param_type);
+            
+            try params.append(self.allocator, .{
+                .name = param_name,
+                .type_ = param_type,
+                .alloca_reg = alloca_reg,
+                .has_default = param_data.default_value != null,
+                .default_expr = param_data.default_value,
+            });
         }
 
-        // Create register for parameter (alloca)
-        const alloca_reg = try self.getOrCreateVarRegister(param_name, param_type);
+        // 检查是否有默认参数
+        var has_defaults = false;
+        for (params.items) |p| {
+            if (p.has_default) {
+                has_defaults = true;
+                break;
+            }
+        }
 
-        if (param_data.default_value) |default_expr_idx| {
-            // Has default value - generate conditional logic
-            const func = self.current_function.?;
+        if (!has_defaults) {
+            // 简单情况：无默认参数
+            for (params.items, 0..) |p, i| {
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+                _ = try self.emit(.{ .store = .{ .ptr = p.alloca_reg, .value = param_reg } }, null);
+            }
+            return;
+        }
 
-            const cond_reg = try self.emitWithResult(.{
-                .has_arg = .{ .index = param_idx },
-            }, .bool);
+        // 复杂情况：有默认参数，需要统一控制流
+        // 为每个参数创建 present/missing 值
+        var present_regs = try std.ArrayList(Register).initCapacity(self.allocator, params.items.len);
+        defer present_regs.deinit(self.allocator);
+        var missing_regs = try std.ArrayList(Register).initCapacity(self.allocator, params.items.len);
+        defer missing_regs.deinit(self.allocator);
 
-            // 3. Create blocks
-            const present_block = try func.createBlock("param_present");
-            const missing_block = try func.createBlock("param_missing");
-            const merge_block = try func.createBlock("param_merge");
+        // 创建块
+        const all_present_block = try func.createBlock("params_all_present");
+        const has_missing_block = try func.createBlock("params_has_missing");
+        const merge_block = try func.createBlock("params_merge");
 
-            // 4. Branch
-            self.current_block.?.setTerminator(.{ .cond_br = .{ .cond = cond_reg, .then_block = present_block, .else_block = missing_block } });
+        // 检查是否所有参数都提供
+        var all_present_cond: ?Register = null;
+        for (params.items, 0..) |p, i| {
+            if (!p.has_default) continue;
+            
+            const has_arg = try self.emitWithResult(.{ .has_arg = .{ .index = @intCast(i) } }, .bool);
+            if (all_present_cond) |prev| {
+                all_present_cond = try self.emitWithResult(.{ .and_ = .{ .lhs = prev, .rhs = has_arg } }, .bool);
+            } else {
+                all_present_cond = has_arg;
+            }
+        }
 
-            // 5. Present Block
-            self.current_block = present_block;
-            const param_val = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
-            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_val } }, null);
-            self.current_block.?.setTerminator(.{ .br = merge_block });
-
-            // 6. Missing Block
-            self.current_block = missing_block;
-            const default_val = try self.generateExpression(default_expr_idx);
-            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = default_val } }, null);
-            self.current_block.?.setTerminator(.{ .br = merge_block });
-
-            // 7. Merge Block
-            self.current_block = merge_block;
+        if (all_present_cond) |cond| {
+            self.current_block.?.setTerminator(.{ .cond_br = .{ .cond = cond, .then_block = all_present_block, .else_block = has_missing_block } });
         } else {
-            // Emit param instruction
-            const param_reg = try self.emitWithResult(.{ .param = .{ .index = param_idx, .name = param_name } }, param_type);
-            // Store param value to alloca
-            _ = try self.emit(.{ .store = .{ .ptr = alloca_reg, .value = param_reg } }, null);
+            self.current_block.?.setTerminator(.{ .br = all_present_block });
+        }
+
+        // all_present 块：所有参数都从 args 读取
+        self.setCurrentBlock(all_present_block);
+        for (params.items, 0..) |p, i| {
+            const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+            try present_regs.append(self.allocator, param_reg);
+        }
+        self.current_block.?.setTerminator(.{ .br = merge_block });
+
+        // has_missing 块：使用默认值
+        self.setCurrentBlock(has_missing_block);
+        for (params.items, 0..) |p, i| {
+            if (p.default_expr) |default_idx| {
+                // 有默认值：检查是否提供
+                const has_arg = try self.emitWithResult(.{ .has_arg = .{ .index = @intCast(i) } }, .bool);
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+                const default_reg = try self.generateExpression(default_idx);
+                const selected = try self.emitWithResult(.{ .select = .{ .cond = has_arg, .then_value = param_reg, .else_value = default_reg } }, p.type_);
+                try missing_regs.append(self.allocator, selected);
+            } else {
+                // 无默认值：直接读取
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+                try missing_regs.append(self.allocator, param_reg);
+            }
+        }
+        self.current_block.?.setTerminator(.{ .br = merge_block });
+
+        // merge 块：使用 phi 合并
+        self.setCurrentBlock(merge_block);
+        for (params.items, 0..) |p, i| {
+            const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
+            incoming[0] = .{ .value = present_regs.items[i], .block = all_present_block };
+            incoming[1] = .{ .value = missing_regs.items[i], .block = has_missing_block };
+            const phi_reg = try self.emitWithResult(.{ .phi = .{ .incoming = incoming } }, p.type_);
+            _ = try self.emit(.{ .store = .{ .ptr = p.alloca_reg, .value = phi_reg } }, null);
         }
     }
 
@@ -1083,9 +1148,7 @@ pub const IRGenerator = struct {
             }
 
             // Process parameters
-            for (method_data.params) |param_idx| {
-                try self.generateParameter(param_idx);
-            }
+            try self.generateParameters(method_data.params);
 
             // Generate body
             try self.generateStatement(body_idx);
@@ -3636,9 +3699,7 @@ pub const IRGenerator = struct {
         self.setCurrentBlock(entry);
 
         // Process parameters
-        for (closure_data.params) |param_idx| {
-            try self.generateParameter(param_idx);
-        }
+        try self.generateParameters(closure_data.params);
 
         // Process captures (inject into local scope)
         for (cap_names.items, 0..) |var_name, i| {
@@ -3726,9 +3787,8 @@ pub const IRGenerator = struct {
         const entry = try func.createBlock("entry");
         self.setCurrentBlock(entry);
 
-        for (arrow_data.params) |param_idx| {
-            try self.generateParameter(param_idx);
-        }
+        for (arrow_data.params) |_| {}
+        try self.generateParameters(arrow_data.params);
 
         // Inject captures into local scope
         for (cap_names.items, 0..) |cap_name, i| {
