@@ -2171,12 +2171,12 @@ pub const Parser = struct {
             if (self.curr.tag == .k_default) {
                 self.nextToken();
                 _ = try self.eat(.fat_arrow);
-                const body = try self.parseExpression(0);
+                const body = try self.parseExpression(1);  // 使用 1 避免解析逗号
                 default_arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{}, .body = body } } });
             } else {
-                const cond = try self.parseExpression(0);
+                const cond = try self.parseExpression(1);  // 使用 1 避免解析逗号
                 _ = try self.eat(.fat_arrow);
-                const body = try self.parseExpression(0);
+                const body = try self.parseExpression(1);  // 使用 1 避免解析逗号
                 // Use arena to allocate conditions array to avoid dangling pointer
                 const conditions = try arena.alloc(ast.Node.Index, 1);
                 conditions[0] = cond;

@@ -8476,7 +8476,7 @@ pub const VM = struct {
         return last_val;
     }
 
-    fn evaluateMatchExpression(self: *VM, match_expr: anytype) !Value {
+    fn evaluateMatchExpression(self: *VM, match_expr: anytype) anyerror!Value {
         const expr = try self.eval(match_expr.expression);
         defer self.releaseValue(expr);
 
