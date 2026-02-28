@@ -510,6 +510,8 @@ pub const NativeLinker = struct {
         try self.generateFunctionRegistration(writer, ir_module);
 
         // 生成主入口
+        const has_strings = ir_module.string_table.items.len > 0;
+        
         try writer.writeAll(
             \\
             \\// 全局变量表
@@ -544,9 +546,18 @@ pub const NativeLinker = struct {
             \\        global_vars.deinit();
             \\    }
             \\
-            \\    // 初始化静态字符串池（一次性开销）
-            \\    initStaticStrings();
-            \\
+        );
+        
+        // 只在有字符串表时调用 initStaticStrings
+        if (has_strings) {
+            try writer.writeAll(
+                \\    // 初始化静态字符串池（一次性开销）
+                \\    initStaticStrings();
+                \\
+            );
+        }
+        
+        try writer.writeAll(
             \\    var alloc_stats_enabled: bool = false;
             \\    if (std.process.getEnvVarOwned(allocator, "ZIGPHP_ALLOC_STATS")) |v| {
             \\        alloc_stats_enabled = true;
