@@ -1864,7 +1864,16 @@ pub const Parser = struct {
             },
             .t_variable => {
                 const t = try self.eat(.t_variable);
-                return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                const var_name = self.lexer.buffer[t.loc.start..t.loc.end];
+                // 检查是否是 $$var 形式（可变变量）
+                if (var_name.len >= 2 and var_name[0] == '$' and var_name[1] == '$') {
+                    // $$var -> variable_variable(variable($var))
+                    const inner_name = var_name[1..]; // 去掉第一个 $，保留 $var
+                    const inner_name_id = try self.context.intern(inner_name);
+                    const inner_var = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = inner_name_id } } });
+                    return self.createNode(.{ .tag = .variable_variable, .main_token = t, .data = .{ .variable_variable = .{ .expr = inner_var } } });
+                }
+                return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_name) } } });
             },
             .t_go_identifier => {
                 // Go mode: identifiers are variables, add $ prefix for VM compatibility

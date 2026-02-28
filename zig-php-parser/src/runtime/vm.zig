@@ -5863,6 +5863,31 @@ pub const VM = struct {
                     return self.throwException(exception);
                 }
             },
+            .variable_variable => {
+                // $$var: 先求值内层变量得到变量名，再查找该变量
+                const inner_value = try self.eval(ast_node.data.variable_variable.expr);
+                defer self.releaseValue(inner_value);
+                
+                if (!inner_value.isString()) {
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable variable name must be a string", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+                
+                const var_name_str = inner_value.getAsString().data.data;
+                // 添加 $ 前缀（如果没有）
+                const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
+                    var_name_str
+                else
+                    try std.fmt.allocPrint(self.allocator, "${s}", .{var_name_str});
+                defer if (var_name.ptr != var_name_str.ptr) self.allocator.free(var_name);
+                
+                if (self.getVariable(var_name)) |value| {
+                    return value.retain();
+                } else {
+                    const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, var_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            },
             .self_expr => {
                 // self should resolve to the current class name
                 if (self.current_class) |class| {
@@ -5900,6 +5925,25 @@ pub const VM = struct {
                     const name_id = target_node.data.variable.name;
                     const name = self.context.string_pool.keys()[name_id];
                     try self.setVariable(name, value);
+                } else if (target_node.tag == .variable_variable) {
+                    // $$var = value: 先求值内层变量得到变量名，再设置该变量
+                    const inner_value = try self.eval(target_node.data.variable_variable.expr);
+                    defer self.releaseValue(inner_value);
+                    
+                    if (!inner_value.isString()) {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable variable name must be a string", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    }
+                    
+                    const var_name_str = inner_value.getAsString().data.data;
+                    // 添加 $ 前缀（如果没有）
+                    const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
+                        var_name_str
+                    else
+                        try std.fmt.allocPrint(self.allocator, "${s}", .{var_name_str});
+                    defer if (var_name.ptr != var_name_str.ptr) self.allocator.free(var_name);
+                    
+                    try self.setVariable(var_name, value);
                 } else if (target_node.tag == .property_access) {
                     const obj_val = try self.eval(target_node.data.property_access.target);
                     defer self.releaseValue(obj_val);

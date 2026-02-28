@@ -85,6 +85,7 @@ pub const Node = struct {
         break_stmt,
         continue_stmt,
         variable,
+        variable_variable, // $$var 可变变量
         literal_int,
         literal_float,
         literal_string,
@@ -199,6 +200,7 @@ pub const Node = struct {
         function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index },
         block: struct { stmts: []const Index },
         variable: struct { name: StringId },
+        variable_variable: struct { expr: Index }, // $$var 的 expr 是内层变量
         literal_int: struct { value: i64 },
         literal_float: struct { value: f64 },
         magic_constant: struct { kind: MagicConstantKind },
