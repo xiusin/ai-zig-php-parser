@@ -858,6 +858,45 @@ pub const BytecodeGenerator = struct {
         const node = self.getNode(index);
         const binary_data = node.data.binary_expr;
 
+        // 短路求值：&& 和 ||
+        if (binary_data.op == .double_ampersand or binary_data.op == .k_and) {
+            // a && b: 如果 a 为 false，直接返回 false，不计算 b
+            const end_label = self.newLabel();
+            
+            try self.visitNode(binary_data.lhs);
+            try self.emit(.dup, 0, 0); // 复制左操作数
+            self.pushStack();
+            try self.emitJump(.jz, end_label); // 如果为 false，跳到结束
+            
+            self.popStack(); // 弹出复制的值
+            try self.emit(.pop, 0, 0);
+            self.popStack(); // 弹出原值
+            
+            try self.visitNode(binary_data.rhs);
+            
+            try self.placeLabel(end_label);
+            return;
+        }
+        
+        if (binary_data.op == .double_pipe or binary_data.op == .k_or) {
+            // a || b: 如果 a 为 true，直接返回 true，不计算 b
+            const end_label = self.newLabel();
+            
+            try self.visitNode(binary_data.lhs);
+            try self.emit(.dup, 0, 0); // 复制左操作数
+            self.pushStack();
+            try self.emitJump(.jnz, end_label); // 如果为 true，跳到结束
+            
+            self.popStack(); // 弹出复制的值
+            try self.emit(.pop, 0, 0);
+            self.popStack(); // 弹出原值
+            
+            try self.visitNode(binary_data.rhs);
+            
+            try self.placeLabel(end_label);
+            return;
+        }
+
         // 计算左操作数
         try self.visitNode(binary_data.lhs);
         // 计算右操作数
@@ -1268,20 +1307,20 @@ pub const BytecodeGenerator = struct {
 
         // 条件
         try self.visitNode(ternary_data.cond);
-        self.popStack();
         try self.emitJump(.jz, else_label);
 
         // true分支
         if (ternary_data.then_expr) |then_idx| {
+            self.popStack(); // 弹出条件值
             try self.visitNode(then_idx);
         } else {
-            // Elvis operator: ?:
-            try self.visitNode(ternary_data.cond);
+            // Elvis operator: ?: - 条件值本身就是结果，不需要弹出
         }
         try self.emitJump(.jmp, end_label);
 
         // false分支
         try self.placeLabel(else_label);
+        self.popStack(); // 弹出条件值
         try self.visitNode(ternary_data.else_expr);
 
         try self.placeLabel(end_label);

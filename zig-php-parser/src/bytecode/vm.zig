@@ -1827,12 +1827,57 @@ pub const BytecodeVM = struct {
             .int_val => |av| switch (b) {
                 .int_val => |bv| av == bv,
                 .float_val => |bv| @as(f64, @floatFromInt(av)) == bv,
+                .string_val => |bv| {
+                    // 尝试将字符串转换为数字
+                    const num = std.fmt.parseInt(i64, bv.data, 10) catch return false;
+                    return av == num;
+                },
                 else => false,
             },
             .float_val => |av| switch (b) {
                 .float_val => |bv| av == bv,
                 .int_val => |bv| av == @as(f64, @floatFromInt(bv)),
+                .string_val => |bv| {
+                    // 尝试将字符串转换为浮点数
+                    const num = std.fmt.parseFloat(f64, bv.data) catch return false;
+                    return av == num;
+                },
                 else => false,
+            },
+            .string_val => |av| switch (b) {
+                .string_val => |bv| std.mem.eql(u8, av.data, bv.data),
+                .int_val => |bv| {
+                    // 尝试将字符串转换为数字
+                    const num = std.fmt.parseInt(i64, av.data, 10) catch return false;
+                    return num == bv;
+                },
+                .float_val => |bv| {
+                    // 尝试将字符串转换为浮点数
+                    const num = std.fmt.parseFloat(f64, av.data) catch return false;
+                    return num == bv;
+                },
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    fn valuesIdentical(self: *BytecodeVM, a: Value, b: Value) bool {
+        _ = self;
+        // === 严格比较：类型和值都必须相同
+        return switch (a) {
+            .null_val => b == .null_val,
+            .bool_val => |av| switch (b) {
+                .bool_val => |bv| av == bv,
+                else => false,
+            },
+            .int_val => |av| switch (b) {
+                .int_val => |bv| av == bv,
+                else => false, // 不进行类型转换
+            },
+            .float_val => |av| switch (b) {
+                .float_val => |bv| av == bv,
+                else => false, // 不进行类型转换
             },
             .string_val => |av| switch (b) {
                 .string_val => |bv| std.mem.eql(u8, av.data, bv.data),
@@ -3849,6 +3894,8 @@ fn initDispatchTable() [256]DispatchFn {
     // 比较操作
     table[@intFromEnum(OpCode.eq)] = handleEq;
     table[@intFromEnum(OpCode.neq)] = handleNeq;
+    table[@intFromEnum(OpCode.identical)] = handleIdentical;
+    table[@intFromEnum(OpCode.not_identical)] = handleNotIdentical;
     table[@intFromEnum(OpCode.lt)] = handleLt;
     table[@intFromEnum(OpCode.gt)] = handleGt;
     table[@intFromEnum(OpCode.le)] = handleLe;
@@ -4418,6 +4465,20 @@ fn handleNeq(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!
     const b = try vm.pop();
     const a = try vm.pop();
     try vm.push(.{ .bool_val = !vm.valuesEqual(a, b) });
+    return .continue_execution;
+}
+
+fn handleIdentical(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = try vm.pop();
+    const a = try vm.pop();
+    try vm.push(.{ .bool_val = vm.valuesIdentical(a, b) });
+    return .continue_execution;
+}
+
+fn handleNotIdentical(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = try vm.pop();
+    const a = try vm.pop();
+    try vm.push(.{ .bool_val = !vm.valuesIdentical(a, b) });
     return .continue_execution;
 }
 
