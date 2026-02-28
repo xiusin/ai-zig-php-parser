@@ -2507,25 +2507,26 @@ pub const VM = struct {
     pub fn setVariable(self: *VM, name: []const u8, value: Value) !void {
         // Check cached current call frame first
         if (self.current_frame) |frame| {
-            // Check if this is a static variable
-            const func_name = frame.function_name;
-            const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{func_name, name});
-            defer self.allocator.free(static_key);
-            
-            if (self.static_vars.contains(static_key)) {
-                // Update static variable storage
-                if (self.static_vars.getPtr(static_key)) |static_val_ptr| {
-                    self.releaseValue(static_val_ptr.*);
+            // Check if this is a static variable (only if we have a function name)
+            if (frame.function_name.len > 0) {
+                const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{frame.function_name, name});
+                defer self.allocator.free(static_key);
+                
+                if (self.static_vars.contains(static_key)) {
+                    // Update static variable storage
+                    if (self.static_vars.getPtr(static_key)) |static_val_ptr| {
+                        self.releaseValue(static_val_ptr.*);
+                        self.retainValue(value);
+                        static_val_ptr.* = value;
+                    }
+                    // Also update local reference
+                    if (frame.locals.get(name)) |old_value| {
+                        self.releaseValue(old_value);
+                    }
                     self.retainValue(value);
-                    static_val_ptr.* = value;
+                    try frame.locals.put(name, value);
+                    return;
                 }
-                // Also update local reference
-                if (frame.locals.get(name)) |old_value| {
-                    self.releaseValue(old_value);
-                }
-                self.retainValue(value);
-                try frame.locals.put(name, value);
-                return;
             }
             
             // If variable is imported from global scope, update it there
