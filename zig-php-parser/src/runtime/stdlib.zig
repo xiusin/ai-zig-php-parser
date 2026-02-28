@@ -2248,39 +2248,40 @@ fn dateFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    // Simplified date formatting - would need full PHP date format support
     const format_str = format.getAsString().data.data;
-    const ts = timestamp.asInt();
-
-    // Basic implementation for common formats
-    var result_str: []const u8 = undefined;
-    if (std.mem.eql(u8, format_str, "Y-m-d H:i:s")) {
-        result_str = try std.fmt.allocPrint(vm.allocator, "2024-01-01 00:00:00", .{});
-    } else if (std.mem.eql(u8, format_str, "Y-m-d")) {
-        result_str = try std.fmt.allocPrint(vm.allocator, "2024-01-01", .{});
-    } else if (std.mem.eql(u8, format_str, "U")) {
-        result_str = try std.fmt.allocPrint(vm.allocator, "{d}", .{ts});
-    } else {
-        // Default format
-        result_str = try std.fmt.allocPrint(vm.allocator, "{d}", .{ts});
+    const ts: i64 = timestamp.asInt();
+    
+    // Convert timestamp to epoch seconds
+    const epoch_seconds: u64 = @intCast(ts);
+    const epoch_day = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
+    const day_seconds = epoch_day.getDaySeconds();
+    const year_day = epoch_day.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    
+    var result = try std.ArrayList(u8).initCapacity(vm.allocator, format_str.len * 2);
+    defer result.deinit(vm.allocator);
+    
+    var i: usize = 0;
+    while (i < format_str.len) : (i += 1) {
+        const c = format_str[i];
+        switch (c) {
+            'Y' => try result.writer(vm.allocator).print("{d:0>4}", .{year_day.year}),
+            'm' => try result.writer(vm.allocator).print("{d:0>2}", .{month_day.month.numeric()}),
+            'd' => try result.writer(vm.allocator).print("{d:0>2}", .{month_day.day_index + 1}),
+            'H' => try result.writer(vm.allocator).print("{d:0>2}", .{day_seconds.getHoursIntoDay()}),
+            'i' => try result.writer(vm.allocator).print("{d:0>2}", .{day_seconds.getMinutesIntoHour()}),
+            's' => try result.writer(vm.allocator).print("{d:0>2}", .{day_seconds.getSecondsIntoMinute()}),
+            'U' => try result.writer(vm.allocator).print("{d}", .{ts}),
+            else => try result.append(vm.allocator, c),
+        }
     }
-
-    const php_str = try PHPString.init(vm.allocator, result_str);
-    vm.allocator.free(result_str);
-
-    const box = try vm.allocator.create(types.gc.Box(*PHPString));
-    box.* = .{
-        .ref_count = 1,
-        .gc_info = .{},
-        .data = php_str,
-    };
-
-    return Value.fromBox(box, Value.TYPE_STRING);
+    
+    return Value.initString(vm.allocator, result.items);
 }
 
 fn strtotimeFn(vm: *VM, args: []const Value) !Value {
     const time_str = args[0];
-    const now = if (args.len > 1) args[1] else Value.initInt(std.time.timestamp());
+    const now = if (args.len > 1) args[1].asInt() else std.time.timestamp();
 
     if (time_str.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "strtotime() expects parameter 1 to be string", "builtin", 0);
@@ -2288,22 +2289,48 @@ fn strtotimeFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    // Simplified implementation - would need full PHP strtotime parsing
     const time_string = time_str.getAsString().data.data;
-
-    if (std.mem.eql(u8, time_string, "now")) {
-        return Value.initInt(std.time.timestamp());
-    } else if (std.mem.eql(u8, time_string, "+1 day")) {
-        return Value.initInt(now.asInt() + 86400);
-    } else if (std.mem.eql(u8, time_string, "-1 day")) {
-        return Value.initInt(now.asInt() - 86400);
-    } else {
-        // Try to parse as timestamp
-        const parsed = std.fmt.parseInt(i64, time_string, 10) catch {
+    
+    // Parse relative time strings
+    if (std.mem.startsWith(u8, time_string, "+")) {
+        var parts = std.mem.splitScalar(u8, time_string[1..], ' ');
+        const num_str = parts.next() orelse return Value.initBool(false);
+        const unit = parts.next() orelse return Value.initBool(false);
+        
+        const num = std.fmt.parseInt(i64, num_str, 10) catch return Value.initBool(false);
+        const seconds: i64 = if (std.mem.eql(u8, unit, "day") or std.mem.eql(u8, unit, "days"))
+            num * 86400
+        else if (std.mem.eql(u8, unit, "hour") or std.mem.eql(u8, unit, "hours"))
+            num * 3600
+        else if (std.mem.eql(u8, unit, "minute") or std.mem.eql(u8, unit, "minutes"))
+            num * 60
+        else if (std.mem.eql(u8, unit, "week") or std.mem.eql(u8, unit, "weeks"))
+            num * 604800
+        else
             return Value.initBool(false);
-        };
-        return Value.initInt(parsed);
+        
+        return Value.initInt(now + seconds);
+    } else if (std.mem.startsWith(u8, time_string, "-")) {
+        var parts = std.mem.splitScalar(u8, time_string[1..], ' ');
+        const num_str = parts.next() orelse return Value.initBool(false);
+        const unit = parts.next() orelse return Value.initBool(false);
+        
+        const num = std.fmt.parseInt(i64, num_str, 10) catch return Value.initBool(false);
+        const seconds: i64 = if (std.mem.eql(u8, unit, "day") or std.mem.eql(u8, unit, "days"))
+            num * 86400
+        else if (std.mem.eql(u8, unit, "hour") or std.mem.eql(u8, unit, "hours"))
+            num * 3600
+        else
+            return Value.initBool(false);
+        
+        return Value.initInt(now - seconds);
+    } else if (std.mem.eql(u8, time_string, "now")) {
+        return Value.initInt(now);
     }
+    
+    // Try to parse as timestamp
+    const parsed = std.fmt.parseInt(i64, time_string, 10) catch return Value.initBool(false);
+    return Value.initInt(parsed);
 }
 
 fn mktimeFn(vm: *VM, args: []const Value) !Value {
