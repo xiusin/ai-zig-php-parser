@@ -3900,6 +3900,7 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.gt)] = handleGt;
     table[@intFromEnum(OpCode.le)] = handleLe;
     table[@intFromEnum(OpCode.ge)] = handleGe;
+    table[@intFromEnum(OpCode.spaceship)] = handleSpaceship;
     table[@intFromEnum(OpCode.lt_int)] = handleLtInt;
     table[@intFromEnum(OpCode.gt_int)] = handleGtInt;
     table[@intFromEnum(OpCode.lt_float)] = handleLtFloat;
@@ -4553,6 +4554,44 @@ fn handleGt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!D
         else => false,
     };
     vm.pushFast(.{ .bool_val = result });
+    return .continue_execution;
+}
+
+/// Spaceship operator <=> - returns -1, 0, or 1
+fn handleSpaceship(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = vm.popFast();
+    const a = vm.popFast();
+    const result: i64 = switch (a) {
+        .int_val => |a_int| switch (b) {
+            .int_val => |b_int| if (a_int < b_int) @as(i64, -1) else if (a_int > b_int) @as(i64, 1) else @as(i64, 0),
+            .float_val => |b_float| blk: {
+                const a_f = @as(f64, @floatFromInt(a_int));
+                break :blk if (a_f < b_float) @as(i64, -1) else if (a_f > b_float) @as(i64, 1) else @as(i64, 0);
+            },
+            else => 0,
+        },
+        .float_val => |a_float| switch (b) {
+            .int_val => |b_int| blk: {
+                const b_f = @as(f64, @floatFromInt(b_int));
+                break :blk if (a_float < b_f) @as(i64, -1) else if (a_float > b_f) @as(i64, 1) else @as(i64, 0);
+            },
+            .float_val => |b_float| if (a_float < b_float) @as(i64, -1) else if (a_float > b_float) @as(i64, 1) else @as(i64, 0),
+            else => 0,
+        },
+        .string_val => |a_str| switch (b) {
+            .string_val => |b_str| blk: {
+                const cmp = std.mem.order(u8, a_str.data, b_str.data);
+                break :blk switch (cmp) {
+                    .lt => @as(i64, -1),
+                    .gt => @as(i64, 1),
+                    .eq => @as(i64, 0),
+                };
+            },
+            else => 0,
+        },
+        else => 0,
+    };
+    vm.pushFast(.{ .int_val = result });
     return .continue_execution;
 }
 
