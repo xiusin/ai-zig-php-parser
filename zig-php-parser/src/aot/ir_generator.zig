@@ -488,6 +488,18 @@ pub const IRGenerator = struct {
         return self.var_registers.get(name);
     }
 
+    fn generateVariableVariable(self: *Self, node: *const Node) !Register {
+        // $$var: 先求值内层变量得到变量名，再查找该变量
+        const inner_expr = node.data.variable_variable.expr;
+        
+        // 求值内层表达式得到变量名
+        const name_reg = try self.generateExpression(inner_expr);
+        
+        // 调用运行时函数获取动态变量
+        // 使用 global_get_dynamic 指令，传入变量名寄存器
+        return self.emitWithResult(.{ .global_get_dynamic = .{ .name_reg = name_reg } }, .php_value);
+    }
+
     /// Check for unused variables and report errors
     fn checkUnusedVariables(self: *Self) !void {
         var iter = self.var_usage.iterator();
@@ -2400,6 +2412,7 @@ pub const IRGenerator = struct {
 
             // Variables
             .variable => self.generateVariable(node),
+            .variable_variable => self.generateVariableVariable(node),
 
             // Expressions
             .binary_expr => self.generateBinaryExpr(node),

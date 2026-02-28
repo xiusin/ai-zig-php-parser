@@ -2867,6 +2867,13 @@ pub const IROptimizer = struct {
                     try self.used_registers.put(val.id, {});
                 }
             },
+            .global_get_dynamic => |op| {
+                try self.used_registers.put(op.name_reg.id, {});
+            },
+            .global_set_dynamic => |op| {
+                try self.used_registers.put(op.name_reg.id, {});
+                try self.used_registers.put(op.value.id, {});
+            },
             // Concurrency operations
             .go_spawn => |op| {
                 for (op.args) |arg| {
@@ -2942,6 +2949,8 @@ pub const IROptimizer = struct {
             // Global variable operations
             .global_get => false,
             .global_set => true,
+            .global_get_dynamic => false,
+            .global_set_dynamic => true,
 
             // Operations with side effects
             .store => true,
