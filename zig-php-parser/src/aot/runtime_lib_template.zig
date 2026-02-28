@@ -2477,6 +2477,23 @@ pub fn php_eq(lhs: Value, rhs: Value) !Value {
         return Value.initBool(std.mem.eql(u8, a.data, b.data));
     }
 
+    // 数组比较
+    if (lhs.isArray() and rhs.isArray()) {
+        const a = lhs.asArray();
+        const b = rhs.asArray();
+        if (a.elements.count() != b.elements.count()) return Value.initBool(false);
+        
+        var iter = a.elements.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            const other_val = b.elements.get(key) orelse return Value.initBool(false);
+            const eq = try php_eq(val, other_val);
+            if (!eq.asBool()) return Value.initBool(false);
+        }
+        return Value.initBool(true);
+    }
+
     // 数字和字符串比较：尝试将字符串转为数字
     if ((lhs.isInt() or lhs.isFloat()) and rhs.isString()) {
         const num_val = stringToNumber(rhs.asString().data);
