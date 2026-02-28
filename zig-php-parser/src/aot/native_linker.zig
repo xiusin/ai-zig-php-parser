@@ -526,7 +526,14 @@ pub const NativeLinker = struct {
             \\
             \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
             \\    if (!global_vars_initialized) return;
-            \\    try global_vars.put(name, value);
+            \\    // Check if key already exists
+            \\    const gop = try global_vars.getOrPut(name);
+            \\    if (!gop.found_existing) {
+            \\        // Need to duplicate the key for new entries
+            \\        const key_copy = try runtime.runtime_allocator.dupe(u8, name);
+            \\        gop.key_ptr.* = key_copy;
+            \\    }
+            \\    gop.value_ptr.* = value;
             \\}
             \\
             \\pub fn getGlobalVarDynamic(name_val: runtime.Value) !runtime.Value {
@@ -538,7 +545,14 @@ pub const NativeLinker = struct {
             \\pub fn setGlobalVarDynamic(name_val: runtime.Value, value: runtime.Value) !void {
             \\    const name_str = try name_val.toString(runtime.runtime_allocator);
             \\    defer name_str.release(runtime.runtime_allocator);
-            \\    try setGlobalVar(name_str.data, value);
+            \\    // Add $ prefix if not present
+            \\    if (name_str.data.len > 0 and name_str.data[0] == '$') {
+            \\        try setGlobalVar(name_str.data, value);
+            \\    } else {
+            \\        const prefixed = try std.fmt.allocPrint(runtime.runtime_allocator, "${s}", .{name_str.data});
+            \\        defer runtime.runtime_allocator.free(prefixed);
+            \\        try setGlobalVar(prefixed, value);
+            \\    }
             \\}
             \\
             \\pub fn main() !void {
