@@ -895,7 +895,7 @@ pub const Parser = struct {
         var default_value: ?ast.Node.Index = null;
         if (self.curr.tag == .equal) {
             self.nextToken();
-            default_value = try self.parseExpression(0);
+            default_value = try self.parseExpression(1); // 避免解析逗号运算符
         }
 
         return self.createNode(.{ .tag = .parameter, .main_token = name_tok, .data = .{ .parameter = .{ .attributes = attributes, .name = name_id, .type = type_node, .default_value = default_value, .is_promoted = modifiers.is_public or modifiers.is_protected or modifiers.is_private, .modifiers = modifiers, .is_variadic = is_variadic, .is_reference = is_reference } } });

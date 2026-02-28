@@ -3068,7 +3068,7 @@ pub const NativeLinker = struct {
 
         const effective_tag = inferred_tag orelse register_tag;
 
-        if (effective_tag == .bool) return writer.print("reg_{d}", .{reg_id});
+        if (effective_tag == .bool) return writer.print("reg_{d}.toBool()", .{reg_id});
         if (effective_tag == .i64) return writer.print("(reg_{d} != 0)", .{reg_id});
         if (effective_tag == .f64) return writer.print("(reg_{d} != 0.0)", .{reg_id});
         return writer.print("reg_{d}.toBool()", .{reg_id});
