@@ -529,6 +529,18 @@ pub const NativeLinker = struct {
             \\    try global_vars.put(name, value);
             \\}
             \\
+            \\pub fn getGlobalVarDynamic(name_val: runtime.Value) !runtime.Value {
+            \\    const name = try name_val.toString(runtime.runtime_allocator);
+            \\    defer runtime.runtime_allocator.free(name);
+            \\    return getGlobalVar(name);
+            \\}
+            \\
+            \\pub fn setGlobalVarDynamic(name_val: runtime.Value, value: runtime.Value) !void {
+            \\    const name = try name_val.toString(runtime.runtime_allocator);
+            \\    defer runtime.runtime_allocator.free(name);
+            \\    try setGlobalVar(name, value);
+            \\}
+            \\
             \\pub fn main() !void {
             \\    const allocator = std.heap.page_allocator;
             \\
@@ -5674,6 +5686,26 @@ pub const NativeLinker = struct {
                 if (op.value) |val| {
                     try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ op.name, val.id });
                 }
+            },
+            .global_get_dynamic => |op| {
+                // 动态全局变量读取：$$var
+                if (inst.result) |reg| {
+                    try writer.writeAll("    reg_");
+                    try writer.print("{d}", .{reg.id});
+                    try writer.writeAll(".release(runtime.runtime_allocator);\n    reg_");
+                    try writer.print("{d}", .{reg.id});
+                    try writer.writeAll(" = try getGlobalVarDynamic(reg_");
+                    try writer.print("{d}", .{op.name_reg.id});
+                    try writer.writeAll(");\n");
+                }
+            },
+            .global_set_dynamic => |op| {
+                // 动态全局变量写入：$$var = value
+                try writer.writeAll("    try setGlobalVarDynamic(reg_");
+                try writer.print("{d}", .{op.name_reg.id});
+                try writer.writeAll(", reg_");
+                try writer.print("{d}", .{op.value.id});
+                try writer.writeAll(");\n");
             },
             .cast => |op| {
                 // cast: 类型转换

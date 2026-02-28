@@ -2081,6 +2081,12 @@ pub const IRGenerator = struct {
                 // Update symbol table
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
             },
+            .variable_variable => {
+                // $$var = value: 动态变量赋值
+                const inner_expr = target_node.data.variable_variable.expr;
+                const name_reg = try self.generateExpression(inner_expr);
+                _ = try self.emit(.{ .global_set_dynamic = .{ .name_reg = name_reg, .value = value_reg } }, null);
+            },
             .array_access => {
                 // 递归收集所有嵌套的键
                 var keys: std.ArrayList(Register) = .empty;
