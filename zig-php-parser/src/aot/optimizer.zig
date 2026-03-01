@@ -410,7 +410,7 @@ pub const IROptimizer = struct {
 
     /// Optimize an IR module
     pub fn optimize(self: *Self, module: *Module) !void {
-        std.debug.print("Optimizer: Starting optimization (mem2reg={}, max_iter={})\n", .{ self.config.mem2reg, self.config.max_iterations });
+        // std.debug.print("Optimizer: Starting optimization (mem2reg={}, max_iter={})\n", .{ self.config.mem2reg, self.config.max_iterations });
 
         self.current_module = module;
         defer self.current_module = null;
@@ -436,7 +436,7 @@ pub const IROptimizer = struct {
             }
 
             // 类型推断和特化（在 mem2reg 后运行）
-            std.debug.print("Optimizer: Running type inference and specialization...\n", .{});
+            // std.debug.print("Optimizer: Running type inference and specialization...\n", .{});
             if (try self.runTypeInferenceAndSpecialization(module)) {
                 changed = true;
             }
@@ -587,7 +587,7 @@ pub const IROptimizer = struct {
 
         // 优化完成后，最后一次运行类型推断并保存结果
         const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
-        std.debug.print("Optimizer: Final type inference pass...\n", .{});
+        // std.debug.print("Optimizer: Final type inference pass...\n", .{});
 
         for (module.functions.items) |func| {
             var type_inference = TypeInferencePass.init(self.allocator);

@@ -186,7 +186,7 @@ pub const Node = struct {
         return_stmt: struct { expr: ?Index },
         break_stmt: struct { level: ?Index },
         continue_stmt: struct { level: ?Index },
-        assignment: struct { target: Index, value: Index },
+        assignment: struct { target: Index, value: Index, is_reference: bool = false },
         compound_assignment: struct { target: Index, op: Token.Tag, value: Index },
         binary_expr: struct { lhs: Index, op: Token.Tag, rhs: Index },
         unary_expr: struct { op: Token.Tag, expr: Index },
@@ -197,7 +197,7 @@ pub const Node = struct {
         clone_with_expr: struct { object: Index, properties: Index },
         struct_instantiation: struct { struct_type: Index, args: []const Index },
         object_instantiation: struct { class_name: Index, args: []const Index },
-        function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index },
+        function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index, returns_reference: bool = false },
         block: struct { stmts: []const Index },
         variable: struct { name: StringId },
         variable_variable: struct { expr: Index }, // $$var 的 expr 是内层变量

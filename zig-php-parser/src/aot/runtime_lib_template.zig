@@ -2941,7 +2941,7 @@ pub fn php_define(name_val: Value, value_val: Value, allocator: Allocator) !Valu
     // 复制键
     const name_copy = try allocator.dupe(u8, name);
     // 保留值
-    value_val.retain();
+    _ = value_val.retain();
 
     try constants.put(name_copy, value_val);
     return Value.initBool(true);
@@ -8035,6 +8035,28 @@ fn skipWhitespace(json: []const u8, pos: *usize) void {
 // ============================================================================
 // 杂项函数
 // ============================================================================
+
+/// strtotime - 将字符串转换为时间戳
+pub fn php_strtotime(time_str: Value, now: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    _ = now;
+    
+    if (!time_str.isString()) {
+        return Value.initBool(false);
+    }
+    
+    // 简化实现：仅支持基本格式
+    // 完整实现需要完整的日期解析库
+    const str = time_str.asString().data;
+    
+    // 尝试解析 "YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM:SS"
+    if (str.len >= 10) {
+        // 简化：返回当前时间戳
+        return Value.initInt(std.time.timestamp());
+    }
+    
+    return Value.initBool(false);
+}
 
 /// sleep - 延迟执行（秒）
 pub fn php_sleep(seconds: Value) !Value {

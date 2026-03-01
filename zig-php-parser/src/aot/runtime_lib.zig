@@ -208,6 +208,21 @@ pub const PHPValue = extern struct {
     pub fn toBool(self: *const Self) bool {
         return self.isTruthy();
     }
+    
+    /// Retain (increment ref count) - for AOT generated code
+    pub fn retain(self: Self) Self {
+        var copy = self;
+        copy.ref_count += 1;
+        return copy;
+    }
+    
+    /// Release (decrement ref count) - for AOT generated code
+    pub fn release(self: *Self, allocator: Allocator) void {
+        _ = allocator;
+        if (self.ref_count > 0) {
+            self.ref_count -= 1;
+        }
+    }
 };
 
 // ============================================================================
@@ -3217,3 +3232,107 @@ export fn php_array_iter_free(iter_val: *PHPValue) void {
     // 释放 iter_val 本身
     php_gc_release(iter_val);
 }
+
+// ============================================================================
+// Math Functions
+// ============================================================================
+
+export fn php_round(value: *PHPValue, precision: *PHPValue) *PHPValue {
+    const num = php_value_to_float(value);
+    const prec = @as(i32, @intCast(php_value_to_int(precision)));
+    const multiplier = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(prec)));
+    const rounded = @round(num * multiplier) / multiplier;
+    return php_value_create_float(rounded);
+}
+
+// ============================================================================
+// Time Functions
+// ============================================================================
+
+export fn php_microtime(get_as_float: *PHPValue) *PHPValue {
+    const as_float = php_value_to_bool(get_as_float);
+    const now = std.time.microTimestamp();
+    
+    if (as_float) {
+        const seconds = @as(f64, @floatFromInt(now)) / 1_000_000.0;
+        return php_value_create_float(seconds);
+    }
+    
+    const sec = @divFloor(now, 1_000_000);
+    const usec = @mod(now, 1_000_000);
+    const allocator = getGlobalAllocator();
+    const str = std.fmt.allocPrint(allocator, "0.{d:0>6} {d}", .{ usec, sec }) catch return php_value_create_null();
+    return php_value_create_string(str);
+}
+
+export fn php_date(format: *PHPValue, timestamp: *PHPValue) *PHPValue {
+    _ = format;
+    const ts = if (timestamp.tag == .null) std.time.timestamp() else php_value_to_int(timestamp);
+    
+    const allocator = getGlobalAllocator();
+    const epoch_seconds: u64 = @intCast(ts);
+    
+    // 简化实现：只返回 Y-m-d 格式
+    // 1970-01-01 00:00:00 UTC 是 epoch 0
+    const days_since_epoch = epoch_seconds / 86400;
+    const year = 1970 + @divFloor(days_since_epoch, 365);
+    const month: u8 = 1;
+    const day: u8 = 1;
+    
+    const result = std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, month, day }) catch return php_value_create_null();
+    
+    return php_value_create_string(result);
+}
+
+export fn php_strtotime(time_str: *PHPValue, now: *PHPValue) *PHPValue {
+    _ = time_str;
+    _ = now;
+    return php_value_create_int(std.time.timestamp());
+}
+
+// ============================================================================
+// Constant Functions
+// ============================================================================
+
+pub var constants_map: ?std.StringHashMap(*PHPValue) = null;
+
+export fn php_define(name: *PHPValue, value: *PHPValue) *PHPValue {
+    const allocator = getGlobalAllocator();
+    
+    if (constants_map == null) {
+        constants_map = std.StringHashMap(*PHPValue).init(allocator);
+    }
+    
+    if (name.tag != .string or name.data.string_ptr == null) {
+        return php_value_create_bool(false);
+    }
+    
+    const name_str = name.data.string_ptr.?.getData();
+    const name_copy = allocator.dupe(u8, name_str) catch return php_value_create_bool(false);
+    
+    php_gc_retain(value);
+    constants_map.?.put(name_copy, value) catch return php_value_create_bool(false);
+    
+    return php_value_create_bool(true);
+}
+
+export fn php_constant(name: *PHPValue) *PHPValue {
+    if (constants_map == null) {
+        return php_value_create_null();
+    }
+    
+    if (name.tag != .string or name.data.string_ptr == null) {
+        return php_value_create_null();
+    }
+    
+    const name_str = name.data.string_ptr.?.getData();
+    if (constants_map.?.get(name_str)) |val| {
+        php_gc_retain(val);
+        return val;
+    }
+    
+    return php_value_create_null();
+}
+
+// Value type alias for AOT generated code
+pub const Value = PHPValue;

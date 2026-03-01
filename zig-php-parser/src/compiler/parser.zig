@@ -820,6 +820,13 @@ pub const Parser = struct {
             try self.eat(.k_fn)
         else
             try self.eat(.k_function);
+        
+        // Check for reference return (&)
+        const returns_reference = if (self.curr.tag == .ampersand) blk: {
+            self.nextToken();
+            break :blk true;
+        } else false;
+        
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         _ = try self.eat(.l_paren);
@@ -838,7 +845,7 @@ pub const Parser = struct {
         }
 
         const body = try self.parseBlock();
-        return self.createNode(.{ .tag = .function_decl, .main_token = token, .data = .{ .function_decl = .{ .attributes = attributes, .name = name_id, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .body = body } } });
+        return self.createNode(.{ .tag = .function_decl, .main_token = token, .data = .{ .function_decl = .{ .attributes = attributes, .name = name_id, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .body = body, .returns_reference = returns_reference } } });
     }
 
     fn parseParameter(self: *Parser) anyerror!ast.Node.Index {
@@ -1252,9 +1259,16 @@ pub const Parser = struct {
 
         const target = try self.parseExpression(100);
         const op = try self.eat(.equal);
+        
+        // Check for reference assignment (&)
+        const is_reference = if (self.curr.tag == .ampersand) blk: {
+            self.nextToken();
+            break :blk true;
+        } else false;
+        
         const val = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val } } });
+        return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val, .is_reference = is_reference } } });
     }
 
     /// Parse array destructuring assignment: [$a, $b] = $arr
@@ -1580,7 +1594,7 @@ pub const Parser = struct {
                         self.nextToken();
                         var args = std.ArrayListUnmanaged(ast.Node.Index){};
                         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                            try args.append(self.allocator, try self.parseExpression(0));
+                            try args.append(self.allocator, try self.parseExpression(1));
                             if (self.curr.tag == .comma) self.nextToken();
                         }
                         _ = try self.eat(.r_paren);
@@ -2457,11 +2471,11 @@ pub const Parser = struct {
 
         var elements = std.ArrayListUnmanaged(ast.Node.Index){};
         while (self.curr.tag != .r_paren) {
-            // Check for key => value syntax
-            const first_expr = try self.parseExpression(0);
+            // 使用优先级 1 来避免解析逗号运算符（逗号优先级为 0）
+            const first_expr = try self.parseExpression(1);
             if (self.curr.tag == .fat_arrow) {
                 self.nextToken();
-                const value_expr = try self.parseExpression(0);
+                const value_expr = try self.parseExpression(1);
                 const pair = try self.createNode(.{ .tag = .array_pair, .main_token = token, .data = .{ .array_pair = .{ .key = first_expr, .value = value_expr } } });
                 try elements.append(self.allocator, pair);
             } else {

@@ -36,6 +36,10 @@ pub const Environment = struct {
     pub fn get(self: *Environment, name: []const u8) ?Value {
         return self.vars.get(name);
     }
+    
+    pub fn getPtr(self: *Environment, name: []const u8) ?*Value {
+        return self.vars.getPtr(name);
+    }
 
     pub fn remove(self: *Environment, name: []const u8) bool {
         if (self.vars.fetchRemove(name)) |entry| {

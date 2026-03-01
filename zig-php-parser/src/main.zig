@@ -495,6 +495,7 @@ pub fn main() !void {
     }
     defer vm_instance.deinit();
 
+    std.debug.print("DEBUG: About to run VM...\n", .{});
     const result = vm_instance.run(program) catch |err| {
         if (err == error.Return) {
             const ret = vm_instance.return_value orelse Value.initNull();

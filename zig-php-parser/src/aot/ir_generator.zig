@@ -96,6 +96,10 @@ pub const IRGenerator = struct {
     constant_cache: std.StringHashMapUnmanaged(TypeDef.ConstantValue),
     /// 全局变量集合（在函数中通过 global 声明的变量）
     global_vars: std.StringHashMapUnmanaged(void),
+    /// 当前函数是否有 this 参数（用于方法）
+    current_has_this_param: bool = false,
+    /// 引用参数集合（参数名 -> void）
+    reference_params: std.StringHashMapUnmanaged(void),
 
     const Self = @This();
 
@@ -143,6 +147,7 @@ pub const IRGenerator = struct {
             .try_stack = .{},
             .constant_cache = .{},
             .global_vars = .{},
+            .reference_params = .{},
         };
     }
 
@@ -154,6 +159,7 @@ pub const IRGenerator = struct {
         self.entry_allocas.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
+        self.reference_params.deinit(self.allocator);
         self.constant_cache.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
     }
@@ -374,17 +380,6 @@ pub const IRGenerator = struct {
     fn setTerminator(self: *Self, term: Terminator) void {
         if (self.current_block) |block| {
             if (!block.isTerminated()) {
-                // 获取块索引用于调试
-                var block_idx: usize = 0;
-                if (self.current_function) |func| {
-                    for (func.blocks.items, 0..) |blk, i| {
-                        if (blk == block) {
-                            block_idx = i;
-                            break;
-                        }
-                    }
-                }
-                std.debug.print("setTerminator: block={d}, term={s}\n", .{ block_idx, @tagName(term) });
                 block.setTerminator(term);
             }
         }
@@ -726,6 +721,11 @@ pub const IRGenerator = struct {
                 .is_reference = param_data.is_reference,
             });
 
+            // 记录引用参数
+            if (param_data.is_reference) {
+                try self.reference_params.put(self.allocator, param_name, {});
+            }
+
             const alloca_reg = try self.getOrCreateVarRegister(param_name, param_type);
             
             try params.append(self.allocator, .{
@@ -748,8 +748,11 @@ pub const IRGenerator = struct {
 
         if (!has_defaults) {
             // 简单情况：无默认参数
+            // 如果有 this 参数，其他参数索引从 1 开始
+            const param_offset: usize = if (self.current_has_this_param) 1 else 0;
             for (params.items, 0..) |p, i| {
-                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+                const param_index = i + param_offset;
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(param_index), .name = p.name } }, p.type_);
                 _ = try self.emit(.{ .store = .{ .ptr = p.alloca_reg, .value = param_reg } }, null);
             }
             return;
@@ -767,12 +770,16 @@ pub const IRGenerator = struct {
         const has_missing_block = try func.createBlock("params_has_missing");
         const merge_block = try func.createBlock("params_merge");
 
+        // 如果有 this 参数，其他参数索引从 1 开始
+        const param_offset: usize = if (self.current_has_this_param) 1 else 0;
+
         // 检查是否所有参数都提供
         var all_present_cond: ?Register = null;
         for (params.items, 0..) |p, i| {
             if (!p.has_default) continue;
             
-            const has_arg = try self.emitWithResult(.{ .has_arg = .{ .index = @intCast(i) } }, .bool);
+            const param_index = i + param_offset;
+            const has_arg = try self.emitWithResult(.{ .has_arg = .{ .index = @intCast(param_index) } }, .bool);
             if (all_present_cond) |prev| {
                 all_present_cond = try self.emitWithResult(.{ .and_ = .{ .lhs = prev, .rhs = has_arg } }, .bool);
             } else {
@@ -789,7 +796,8 @@ pub const IRGenerator = struct {
         // all_present 块：所有参数都从 args 读取
         self.setCurrentBlock(all_present_block);
         for (params.items, 0..) |p, i| {
-            const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+            const param_index = i + param_offset;
+            const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(param_index), .name = p.name } }, p.type_);
             try present_regs.append(self.allocator, param_reg);
         }
         self.current_block.?.setTerminator(.{ .br = merge_block });
@@ -797,16 +805,17 @@ pub const IRGenerator = struct {
         // has_missing 块：使用默认值
         self.setCurrentBlock(has_missing_block);
         for (params.items, 0..) |p, i| {
+            const param_index = i + param_offset;
             if (p.default_expr) |default_idx| {
                 // 有默认值：检查是否提供
-                const has_arg = try self.emitWithResult(.{ .has_arg = .{ .index = @intCast(i) } }, .bool);
-                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+                const has_arg = try self.emitWithResult(.{ .has_arg = .{ .index = @intCast(param_index) } }, .bool);
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(param_index), .name = p.name } }, p.type_);
                 const default_reg = try self.generateExpression(default_idx);
                 const selected = try self.emitWithResult(.{ .select = .{ .cond = has_arg, .then_value = param_reg, .else_value = default_reg } }, p.type_);
                 try missing_regs.append(self.allocator, selected);
             } else {
                 // 无默认值：直接读取
-                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(i), .name = p.name } }, p.type_);
+                const param_reg = try self.emitWithResult(.{ .param = .{ .index = @intCast(param_index), .name = p.name } }, p.type_);
                 try missing_regs.append(self.allocator, param_reg);
             }
         }
@@ -1149,6 +1158,8 @@ pub const IRGenerator = struct {
                     .is_reference = false,
                 });
 
+                self.current_has_this_param = true;  // 设置标志
+
                 // Emit param instruction
                 const param_reg = try self.emitWithResult(.{ .param = .{ .index = 0, .name = "this" } }, Type{ .php_object = class_name });
 
@@ -1169,6 +1180,7 @@ pub const IRGenerator = struct {
                 self.setTerminator(.{ .ret = null });
             }
 
+            self.current_has_this_param = false;  // 重置标志
             self.var_registers.deinit(self.allocator);
             self.var_registers = prev_var_registers;
             self.current_function = prev_function;
@@ -3011,7 +3023,8 @@ pub const IRGenerator = struct {
                 if (self.var_registers.get(var_name)) |reg| {
                     indirect_callee = try self.emitWithResult(.{ .load = .{ .ptr = reg, .type_ = .php_value } }, .php_value);
                 } else {
-                    indirect_callee = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    // 从全局变量读取
+                    indirect_callee = try self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
                 }
             } else {
                 func_name = self.getString(name_node.data.variable.name);
@@ -3346,6 +3359,16 @@ pub const IRGenerator = struct {
                     padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_bool = false }, .bool);
                     args = padded;
                 }
+            } else if (std.mem.eql(u8, func_name, "array_splice")) {
+                // array_splice(array &$array, int $offset, ?int $length = null, mixed $replacement = []): array
+                if (args.len < 4) {
+                    const padded = try self.allocator.alloc(Register, 4);
+                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
             }
         }
 
@@ -3357,11 +3380,25 @@ pub const IRGenerator = struct {
             } }, .php_value);
         }
 
-        return self.emitWithResult(.{ .call = .{
+        const result = try self.emitWithResult(.{ .call = .{
             .func_name = func_name,
             .args = args,
             .return_type = .php_value,
         } }, .php_value);
+
+        // Special handling for array_splice: write modified array back to variable
+        if (std.mem.eql(u8, func_name, "array_splice") and call_data.args.len > 0) {
+            const first_arg_idx = call_data.args[0];
+            const first_arg_node = self.getNode(first_arg_idx);
+            if (first_arg_node != null and first_arg_node.?.tag == .variable) {
+                _ = self.getString(first_arg_node.?.data.variable.name);
+                // array_splice modifies the first argument in-place
+                // The modified array is still in args[0], so we don't need to do anything
+                // The runtime function already modified the array object
+            }
+        }
+
+        return result;
     }
 
     /// Generate IR for method call

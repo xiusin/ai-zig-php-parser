@@ -4,6 +4,7 @@ const ast = compiler.ast;
 const Token = compiler.Token;
 const Environment = @import("environment.zig").Environment;
 const types = @import("types.zig");
+const nanbox_abi = @import("nanbox_abi");
 const Value = types.Value;
 const parser_mod = compiler.parser;
 const PHPContext = parser_mod.PHPContext;
@@ -1041,6 +1042,7 @@ fn emptyFn(vm: *VM, args: []const Value) !Value {
             break :blk str_data.len == 0 or std.mem.eql(u8, str_data, "0");
         },
         .array => arg.getAsArray().data.count() == 0,
+        .reference => false, // References are never empty
         .object, .struct_instance, .resource => false, // Objects are never empty
         .native_function, .user_function, .closure, .arrow_function => false, // Functions are never empty
     };
@@ -2181,6 +2183,9 @@ pub const VM = struct {
     
     // Static variables storage (function-scoped)
     static_vars: std.StringHashMap(Value),
+    
+    // Reference hash -> key mapping
+    ref_hash_to_key: std.AutoHashMap(u64, []const u8),
 
     // Anonymous class counter for generating unique names
     anonymous_class_counter: u64 = 0,
@@ -2265,6 +2270,8 @@ pub const VM = struct {
             .inline_cache = .{},
             // Static variables storage
             .static_vars = std.StringHashMap(Value).init(allocator),
+            // Reference hash to key mapping
+            .ref_hash_to_key = std.AutoHashMap(u64, []const u8).init(allocator),
         };
 
         // Initialize string pool (requires allocator)
@@ -2387,6 +2394,9 @@ pub const VM = struct {
         // Must be done before classes/strings because objects might refer to them
         self.global.deinit();
         self.allocator.destroy(self.global);
+        
+        // 4.5. Clean up reference hash mapping
+        self.ref_hash_to_key.deinit();
 
         // 5. Clean up standard library
         self.stdlib.deinit();
@@ -2493,20 +2503,60 @@ pub const VM = struct {
         if (self.current_frame) |frame| {
             // If variable is imported from global scope, fetch it from there
             if (frame.imported_globals.contains(name)) {
-                return self.global.get(name);
+                const val = self.global.get(name);
+                // Dereference if it's a reference
+                if (val) |v| {
+                    if (v.isReference()) {
+                        const hash = v.asReferenceHash();
+                        if (self.ref_hash_to_key.get(hash)) |key| {
+                            return self.static_vars.get(key);
+                        }
+                    }
+                }
+                return val;
             }
             if (frame.locals.get(name)) |value| {
+                // Dereference if it's a reference
+                if (value.isReference()) {
+                    const hash = value.asReferenceHash();
+                    if (self.ref_hash_to_key.get(hash)) |key| {
+                        return self.static_vars.get(key);
+                    }
+                }
                 return value;
             }
         }
 
         // Then check global scope
-        return self.global.get(name);
+        const val = self.global.get(name);
+        if (val) |v| {
+            if (v.isReference()) {
+                const hash = v.asReferenceHash();
+                if (self.ref_hash_to_key.get(hash)) |key| {
+                    return self.static_vars.get(key);
+                }
+            }
+        }
+        return val;
     }
 
     pub fn setVariable(self: *VM, name: []const u8, value: Value) !void {
         // Check cached current call frame first
         if (self.current_frame) |frame| {
+            // Check if variable exists and is a reference (check raw storage)
+            if (frame.locals.getPtr(name)) |existing_ptr| {
+                if (existing_ptr.isReference()) {
+                    // Update the referenced value
+                    const hash = existing_ptr.asReferenceHash();
+                    if (self.ref_hash_to_key.get(hash)) |key| {
+                        if (self.static_vars.getPtr(key)) |static_ptr| {
+                            static_ptr.* = value;
+                            return;
+                        }
+                    }
+                }
+            }
+            
             // Check if this is a static variable (only if we have a function name)
             if (frame.function_name.len > 0) {
                 const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{frame.function_name, name});
@@ -2529,8 +2579,19 @@ pub const VM = struct {
                 }
             }
             
-            // If variable is imported from global scope, update it there
+            // If variable is imported from global scope, check if it's a reference there
             if (frame.imported_globals.contains(name)) {
+                if (self.global.getPtr(name)) |global_ptr| {
+                    if (global_ptr.isReference()) {
+                        const hash = global_ptr.asReferenceHash();
+                        if (self.ref_hash_to_key.get(hash)) |key| {
+                            if (self.static_vars.getPtr(key)) |static_ptr| {
+                                static_ptr.* = value;
+                                return;
+                            }
+                        }
+                    }
+                }
                 try self.global.set(name, value);
                 return;
             }
@@ -2546,7 +2607,20 @@ pub const VM = struct {
             return;
         }
 
-        // Then set in global scope
+        // Then set in global scope - check if it's a reference
+        if (self.global.getPtr(name)) |global_ptr| {
+            if (global_ptr.isReference()) {
+                const hash = global_ptr.asReferenceHash();
+                if (self.ref_hash_to_key.get(hash)) |key| {
+                    if (self.static_vars.getPtr(key)) |static_ptr| {
+                        static_ptr.* = value;
+                        return;
+                    } else {
+                    }
+                } else {
+                }
+            }
+        }
         try self.global.set(name, value);
     }
 
@@ -4548,7 +4622,7 @@ pub const VM = struct {
 
     /// Inline for 2-operand binary ops: $a + $b, $a - $b, $a * $b
     inline fn tryInlineBinaryIntOp2(self: *VM, node_idx: ast.Node.Index, p1: []const u8, p2: []const u8, arg1: Value, arg2: Value) ?Value {
-        if (node_idx == 0 or node_idx >= self.context.nodes.items.len) {
+        if (node_idx >= self.context.nodes.items.len) {
             return null;
         }
 
@@ -4690,7 +4764,7 @@ pub const VM = struct {
     /// Handles: $x * n, return $x * n, { return $x * n; }
     /// Returns null if pattern doesn't match
     inline fn tryInlineBinaryIntOp(self: *VM, node_idx: ast.Node.Index, param_name: []const u8, arg: Value) ?Value {
-        if (node_idx == 0 or node_idx >= self.context.nodes.items.len) {
+        if (node_idx >= self.context.nodes.items.len) {
             return null;
         }
 
@@ -5137,21 +5211,31 @@ pub const VM = struct {
     /// 使用字节码VM执行AST
     /// 字节码生成器类型问题已修复，现在可以正常使用字节码执行
     fn runBytecode(self: *VM, node: ast.Node.Index) !Value {
+        std.debug.print("DEBUG: runBytecode called\n", .{});
         // 初始化字节码VM
         const bvm = self.ensureBytecodeVM() catch |err| {
             std.debug.print("Bytecode VM init failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
+        std.debug.print("DEBUG: BytecodeVM initialized\n", .{});
 
         // 创建字节码生成器并编译AST
         var generator = BytecodeGenerator.init(self.allocator, self.context);
         defer generator.deinit();
 
+        std.debug.print("DEBUG: About to compile AST to bytecode\n", .{});
         const compiled_func = generator.compile(node) catch |err| {
             std.debug.print("Bytecode compilation failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
         defer compiled_func.deinit(self.allocator);
+        std.debug.print("DEBUG: Bytecode compilation successful\n", .{});
+        
+        // 打印生成的字节码
+        std.debug.print("DEBUG: Generated bytecode ({} instructions):\n", .{compiled_func.bytecode.len});
+        for (compiled_func.bytecode, 0..) |inst, i| {
+            std.debug.print("  [{}] {s} (op1={}, op2={})\n", .{ i, @tagName(inst.opcode), inst.operand1, inst.operand2 });
+        }
 
         // 注册用户定义的函数到BytecodeVM
         const user_funcs = generator.getUserFunctions();
@@ -5163,10 +5247,12 @@ pub const VM = struct {
         }
 
         // 执行字节码
+        std.debug.print("DEBUG: About to execute bytecode\n", .{});
         const result = bvm.execute(compiled_func) catch |err| {
             std.debug.print("Bytecode execution failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
+        std.debug.print("DEBUG: Bytecode execution completed\n", .{});
 
         // 输出 BytecodeVM 的 echo/print 结果
         const output = bvm.getOutput();
@@ -5189,6 +5275,7 @@ pub const VM = struct {
 
     /// 使用树遍历解释器执行AST
     fn runTreeWalking(self: *VM, node: ast.Node.Index) !Value {
+        std.debug.print("DEBUG: runTreeWalking called\n", .{});
         return self.eval(node);
     }
 
@@ -5286,6 +5373,7 @@ pub const VM = struct {
 
     /// 主执行入口 - 支持执行模式切换
     pub fn run(self: *VM, node: ast.Node.Index) !Value {
+        std.debug.print("DEBUG: run() called, execution_mode={s}\n", .{@tagName(self.execution_mode)});
         defer _ = self.request_arena.reset(.retain_capacity);
 
         const result = switch (self.execution_mode) {
@@ -5326,10 +5414,34 @@ pub const VM = struct {
         const lhs_idx = binary_expr.lhs;
         const rhs_idx = binary_expr.rhs;
 
-        if (lhs_idx == 0 or lhs_idx >= self.context.nodes.items.len or
-            rhs_idx == 0 or rhs_idx >= self.context.nodes.items.len)
+        if (lhs_idx >= self.context.nodes.items.len or
+            rhs_idx >= self.context.nodes.items.len)
         {
             return Value.initNull();
+        }
+
+        // 短路求值：&& 和 ||
+        if (binary_expr.op == .double_ampersand or binary_expr.op == .double_pipe) {
+            const left = self.evaluateNodeFast(lhs_idx);
+            defer self.releaseValue(left);
+            
+            const left_bool = left.toBool();
+            
+            // && 短路：左边为 false 则不求值右边
+            if (binary_expr.op == .double_ampersand and !left_bool) {
+                return Value.initBool(false);
+            }
+            
+            // || 短路：左边为 true 则不求值右边
+            if (binary_expr.op == .double_pipe and left_bool) {
+                return Value.initBool(true);
+            }
+            
+            // 需要求值右边
+            const right = self.evaluateNodeFast(rhs_idx);
+            defer self.releaseValue(right);
+            
+            return Value.initBool(right.toBool());
         }
 
         // Fast path: inline literal operands to avoid eval() overhead
@@ -5473,7 +5585,7 @@ pub const VM = struct {
     /// Fast path to evaluate a node without retain/release overhead
     /// Used for temporary values in expressions - returns null on error
     inline fn evaluateNodeFast(self: *VM, node_idx: ast.Node.Index) Value {
-        if (node_idx == 0 or node_idx >= self.context.nodes.items.len) {
+        if (node_idx >= self.context.nodes.items.len) {
             return Value.initNull();
         }
 
@@ -5823,9 +5935,11 @@ pub const VM = struct {
         }
         self.recursion_depth += 1;
         defer self.recursion_depth -= 1;
-        // std.debug.print("Depth: {}\n", .{self.recursion_depth});
 
         const ast_node = &self.context.nodes.items[node];
+        
+        // 每次调用都打印
+        std.debug.print("eval: depth={} tag={s}\n", .{self.recursion_depth, @tagName(ast_node.tag)});
 
         // Update current line for error reporting - 安全检查
         // main_token is a Token struct, not an index
@@ -5903,7 +6017,6 @@ pub const VM = struct {
                 const inner_value = try self.eval(ast_node.data.variable_variable.expr);
                 defer self.releaseValue(inner_value);
                 
-                std.debug.print("DEBUG read: inner_value type = {}\n", .{inner_value.getTag()});
                 
                 if (!inner_value.isString()) {
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable variable name must be a string", self.current_file, self.current_line);
@@ -5911,14 +6024,12 @@ pub const VM = struct {
                 }
                 
                 const var_name_str = inner_value.getAsString().data.data;
-                std.debug.print("DEBUG read: var_name_str = '{s}'\n", .{var_name_str});
                 // 添加 $ 前缀（如果没有）
                 const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
                     var_name_str
                 else
                     try std.fmt.allocPrint(self.allocator, "${s}", .{var_name_str});
                 defer if (var_name.ptr != var_name_str.ptr) self.allocator.free(var_name);
-                std.debug.print("DEBUG read: looking for variable '{s}'\n", .{var_name});
                 
                 if (self.getVariable(var_name)) |value| {
                     return value.retain();
@@ -5957,13 +6068,28 @@ pub const VM = struct {
             .assignment => {
                 const target_idx = ast_node.data.assignment.target;
                 const target_node = self.context.nodes.items[target_idx];
+                const is_reference = ast_node.data.assignment.is_reference;
 
                 const value = try self.eval(ast_node.data.assignment.value);
 
                 if (target_node.tag == .variable) {
                     const name_id = target_node.data.variable.name;
                     const name = self.context.string_pool.keys()[name_id];
-                    try self.setVariable(name, value);
+                    
+                    if (is_reference) {
+                        // Reference assignment: $ref = &expr
+                        // If expr already returns a reference, use it directly
+                        if (value.isReference()) {
+                            _ = value.asReferenceHash();
+                            try self.setVariable(name, value);
+                        } else {
+                            // For now, only support reference returns from functions
+                            // Direct variable references like $ref = &$var not yet supported
+                            try self.setVariable(name, value);
+                        }
+                    } else {
+                        try self.setVariable(name, value);
+                    }
                 } else if (target_node.tag == .variable_variable) {
                     // $$var = value: 先求值内层变量得到变量名，再设置该变量
                     const inner_value = try self.eval(target_node.data.variable_variable.expr);
@@ -6208,8 +6334,18 @@ pub const VM = struct {
                 // Handle multiple expressions in echo statement
                 const exprs = ast_node.data.echo_stmt.exprs;
                 for (exprs) |expr_idx| {
-                    const value = try self.eval(expr_idx);
+                    var value = try self.eval(expr_idx);
                     defer self.releaseValue(value);
+                    
+                    // 如果是引用，解引用获取实际值
+                    if (value.isReference()) {
+                        const hash = value.asReferenceHash();
+                        if (self.ref_hash_to_key.get(hash)) |key| {
+                            if (self.static_vars.get(key)) |actual_value| {
+                                value = actual_value;
+                            }
+                        }
+                    }
 
                     try value.print();
                 }
@@ -6405,7 +6541,6 @@ pub const VM = struct {
                                 return Value.initNull();
                             };
                             defer self.allocator.free(full_path);
-                            std.debug.print("DEBUG: require fallback full_path='{s}'\n", .{full_path});
 
                             const file2 = std.fs.cwd().openFile(full_path, .{}) catch {
                                 if (ast_node.tag == .require_stmt) {
@@ -6443,7 +6578,6 @@ pub const VM = struct {
                 // Generator support - collect yielded values and return Generator object
                 const yield_data = ast_node.data.yield_expr;
 
-                std.debug.print("DEBUG_YIELD: Got yield_expr, self.generator_state={?}\n", .{self.generator_state});
 
                 // Get the generator state for this execution context
                 const generator_state = if (self.generator_state) |state| state else {
@@ -6463,7 +6597,6 @@ pub const VM = struct {
                 generator_state.current_value = yield_value.retain();
                 generator_state.has_started = true;
 
-                std.debug.print("DEBUG_YIELD: Stored value, returning error\n", .{});
 
                 // Pause execution by throwing YieldOutsideGenerator
                 return error.YieldOutsideGenerator;
@@ -6473,7 +6606,6 @@ pub const VM = struct {
                 return Value.initNull();
             },
             else => {
-                std.debug.print("DEBUG: Unsupported AST node type: {any}\n", .{ast_node.tag});
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported AST node type", self.current_file, self.current_line);
                 return self.throwException(exception);
             },
@@ -6574,14 +6706,12 @@ pub const VM = struct {
                             return self.callFunctionByName(func_name, args.items);
                         },
                         else => {
-                            std.debug.print("DEBUG: Value is not callable. Tag: {any}\n", .{val.getTag()});
                             const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
                             return self.throwException(exception);
                         },
                     }
                 } else {
                     // Undefined variable
-                    std.debug.print("DEBUG: Variable function call: Undefined variable '{s}'\n", .{name});
                     const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
@@ -7490,7 +7620,6 @@ pub const VM = struct {
                 _ = self.retainValue(new_val);
                 return new_val;
             } else {
-                std.debug.print("DEBUG: Inc/Dec on non-variable tag={any}\n", .{expr_node.tag});
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables", self.current_file, self.current_line);
                 return self.throwException(exception);
             }
@@ -7978,6 +8107,7 @@ pub const VM = struct {
         user_function.return_type = null;
         user_function.attributes = try self.convertAttributes(func_decl.attributes);
         user_function.body = @ptrFromInt(func_decl.body);
+        user_function.returns_reference = func_decl.returns_reference;
 
         // Check if any parameter is variadic and count required parameters
         var is_variadic = false;
@@ -8618,6 +8748,39 @@ pub const VM = struct {
             if (self.return_value) |val| {
                 self.releaseValue(val);
             }
+            
+            // Check if we're in a reference-returning function
+            if (self.current_frame) |frame| {
+                // Get function from global scope
+                if (self.global.get(frame.function_name)) |func_val| {
+                    if (func_val.getTag() == .user_function) {
+                        const func = func_val.getAsUserFunc().data;
+                        if (func.returns_reference) {
+                            // For reference return, we need to return a reference to the variable
+                            const expr_node = self.context.nodes.items[expr];
+                            if (expr_node.tag == .variable) {
+                                const var_name = self.context.string_pool.keys()[expr_node.data.variable.name];
+                                // Check if it's a static variable
+                                const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{frame.function_name, var_name});
+                                
+                                
+                                if (self.static_vars.getPtr(static_key)) |_| {
+                                    // 创建引用 Value（使用哈希值）
+                                    const ref_value = Value.fromReference(static_key);
+                                    const hash = ref_value.asReferenceHash();
+                                    // 记录哈希到 key 的映射
+                                    try self.ref_hash_to_key.put(hash, static_key);
+                                    self.return_value = ref_value;
+                                    return error.Return;
+                                } else {
+                                    self.allocator.free(static_key);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
             self.return_value = try self.eval(expr);
         } else {
             if (self.return_value) |val| {
@@ -8981,6 +9144,21 @@ pub const VM = struct {
             const l = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
             const r = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
             return l == r;
+        }
+
+        // PHP 类型转换：数字 vs 字符串
+        if ((left_tag == .integer or left_tag == .float) and right_tag == .string) {
+            const left_num = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+            const right_str = right.getAsString().data.data;
+            const right_num = std.fmt.parseFloat(f64, right_str) catch return false;
+            return left_num == right_num;
+        }
+
+        if (left_tag == .string and (right_tag == .integer or right_tag == .float)) {
+            const left_str = left.getAsString().data.data;
+            const left_num = std.fmt.parseFloat(f64, left_str) catch return false;
+            const right_num = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+            return left_num == right_num;
         }
 
         if (left_tag == .string and right_tag == .string) {

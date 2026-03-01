@@ -818,9 +818,22 @@ pub const BytecodeVM = struct {
     /// 主执行循环 - 使用计算跳转表优化
     /// 通过函数指针数组替代switch语句，减少分支预测失败
     fn runOptimized(self: *BytecodeVM) VMError!Value {
+        std.debug.print("DEBUG: BytecodeVM runOptimized started\n", .{});
         var frame = &self.frames[self.frame_count - 1];
+        std.debug.print("DEBUG: bytecode length = {}\n", .{frame.function.bytecode.len});
 
+        var instruction_count: usize = 0;
         while (true) {
+            instruction_count += 1;
+            if (instruction_count % 1000 == 0) {
+                std.debug.print("DEBUG: executed {} instructions, ip={}\n", .{ instruction_count, frame.ip });
+            }
+            
+            if (frame.ip >= frame.function.bytecode.len) {
+                std.debug.print("DEBUG: ip out of bounds: {} >= {}\n", .{ frame.ip, frame.function.bytecode.len });
+                return .null_val;
+            }
+            
             const inst = frame.function.bytecode[frame.ip];
             frame.ip += 1;
 
@@ -5164,10 +5177,30 @@ fn handleArrayGet(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VME
 }
 
 /// OPT-008: 数组设置内联优化 - 使用快速栈操作
-fn handleArraySet(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
-    const value = vm.popFast();
+fn handleArraySet(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    // 检查是否是数组追加操作（operand1 = 1 表示追加）
+    const is_append = inst.operand1 == 1;
+    
+    if (is_append) {
+        // 数组追加：栈顺序 [值, 数组]
+        const arr_val = vm.popFast();
+        const value = vm.popFast();
+        
+        if (arr_val == .array_val) {
+            const arr = arr_val.array_val;
+            arr.elements.append(vm.allocator, value) catch
+                return BytecodeVM.VMError.OutOfMemory;
+            vm.pushFast(.{ .array_val = arr });
+        } else {
+            vm.pushFast(.null_val);
+        }
+        return .continue_execution;
+    }
+    
+    // 数组索引设置：栈顺序 [值, 数组, 索引]
     const index = vm.popFast();
     const arr_val = vm.popFast();
+    const value = vm.popFast();
 
     // 快速路径：整数索引设置
     if (arr_val == .array_val and index == .int_val) {

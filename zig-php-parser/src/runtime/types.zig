@@ -780,38 +780,48 @@ pub const PHPArray = struct {
         // 转换为 mixed 模式处理（简化实现）
         self.convertToMixed() catch return 0;
 
-        var removed_count: usize = 0;
-        var new_idx: i64 = 0;
-
-        // 收集要保留的元素
-        var to_keep = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
-        defer {
-            for (to_keep.items) |item| {
-                item.value.release(allocator);
-            }
-            to_keep.deinit(allocator);
-        }
+        // 收集所有整数键元素并排序
+        var int_items = std.ArrayList(struct { key: i64, value: Value }).initCapacity(allocator, 0) catch return 0;
+        defer int_items.deinit(allocator);
+        
+        var string_items = std.ArrayList(struct { key: *PHPString, value: Value }).initCapacity(allocator, 0) catch return 0;
+        defer string_items.deinit(allocator);
 
         var iter = self.storage.mixed_data.iterator();
-        var idx: i64 = 0;
         while (iter.next()) |entry| {
-            if (idx >= start and idx < end) {
-                entry.value_ptr.release(allocator);
-                removed_count += 1;
+            if (entry.key_ptr.* == .integer) {
+                int_items.append(allocator, .{ .key = entry.key_ptr.integer, .value = entry.value_ptr.* }) catch {};
             } else {
-                to_keep.append(allocator, .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* }) catch {};
+                string_items.append(allocator, .{ .key = entry.key_ptr.string, .value = entry.value_ptr.* }) catch {};
             }
-            idx += 1;
         }
 
+        // 按键排序
+        std.mem.sort(@TypeOf(int_items.items[0]), int_items.items, {}, struct {
+            fn lessThan(_: void, a: @TypeOf(int_items.items[0]), b: @TypeOf(int_items.items[0])) bool {
+                return a.key < b.key;
+            }
+        }.lessThan);
+
+        var removed_count: usize = 0;
         self.storage.mixed_data.clearRetainingCapacity();
 
-        for (to_keep.items) |item| {
-            if (item.key == .string) {
-                item.key.string.release(allocator);
+        // 重新插入，跳过要删除的范围
+        var new_idx: i64 = 0;
+        for (int_items.items, 0..) |item, idx| {
+            const i: i64 = @intCast(idx);
+            if (i >= start and i < end) {
+                item.value.release(allocator);
+                removed_count += 1;
+            } else {
+                self.set(allocator, ArrayKey{ .integer = new_idx }, item.value) catch {};
+                new_idx += 1;
             }
-            self.set(allocator, ArrayKey{ .integer = new_idx }, item.value) catch {};
-            new_idx += 1;
+        }
+
+        // 重新插入字符串键
+        for (string_items.items) |item| {
+            self.set(allocator, ArrayKey{ .string = item.key }, item.value) catch {};
         }
 
         return removed_count;
@@ -819,43 +829,52 @@ pub const PHPArray = struct {
 
     /// 插入元素到指定位置
     pub fn insertAt(self: *PHPArray, allocator: std.mem.Allocator, index: i64, value: Value) !void {
-        // 转换为 mixed 模式处理
         try self.convertToMixed();
 
-        var new_idx: i64 = 0;
-
-        var to_keep = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
-        defer {
-            for (to_keep.items) |item| {
-                item.value.release(allocator);
-            }
-            to_keep.deinit(allocator);
-        }
+        // 收集所有整数键元素
+        var int_items = std.ArrayList(struct { key: i64, value: Value }).initCapacity(allocator, 0) catch return;
+        defer int_items.deinit(allocator);
+        
+        var string_items = std.ArrayList(struct { key: *PHPString, value: Value }).initCapacity(allocator, 0) catch return;
+        defer string_items.deinit(allocator);
 
         var iter = self.storage.mixed_data.iterator();
         while (iter.next()) |entry| {
-            to_keep.append(allocator, .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* }) catch {};
+            if (entry.key_ptr.* == .integer) {
+                int_items.append(allocator, .{ .key = entry.key_ptr.integer, .value = entry.value_ptr.* }) catch {};
+            } else {
+                string_items.append(allocator, .{ .key = entry.key_ptr.string, .value = entry.value_ptr.* }) catch {};
+            }
         }
+
+        // 按键排序
+        std.mem.sort(@TypeOf(int_items.items[0]), int_items.items, {}, struct {
+            fn lessThan(_: void, a: @TypeOf(int_items.items[0]), b: @TypeOf(int_items.items[0])) bool {
+                return a.key < b.key;
+            }
+        }.lessThan);
 
         self.storage.mixed_data.clearRetainingCapacity();
 
-        for (to_keep.items) |item| {
+        // 重新插入，在指定位置插入新元素
+        var new_idx: i64 = 0;
+        for (int_items.items) |item| {
             if (new_idx == index) {
-                if (item.key == .string) {
-                    item.key.string.release(allocator);
-                }
-                try self.set(allocator, ArrayKey{ .integer = new_idx }, value);
+                self.set(allocator, ArrayKey{ .integer = new_idx }, value) catch {};
                 new_idx += 1;
             }
-            if (item.key == .string) {
-                item.key.string.release(allocator);
-            }
-            try self.set(allocator, ArrayKey{ .integer = new_idx }, item.value);
+            self.set(allocator, ArrayKey{ .integer = new_idx }, item.value) catch {};
             new_idx += 1;
         }
 
-        if (index == new_idx) {
-            try self.set(allocator, ArrayKey{ .integer = new_idx }, value);
+        // 如果插入位置在末尾
+        if (new_idx == index) {
+            self.set(allocator, ArrayKey{ .integer = new_idx }, value) catch {};
+        }
+
+        // 重新插入字符串键
+        for (string_items.items) |item| {
+            self.set(allocator, ArrayKey{ .string = item.key }, item.value) catch {};
         }
     }
 
@@ -1881,6 +1900,7 @@ pub const Method = struct {
                 .struct_instance => std.mem.eql(u8, type_name, "struct") or
                     std.mem.eql(u8, type_name, value.getAsStruct().data.struct_type.name.data),
                 .resource => std.mem.eql(u8, type_name, "resource"),
+                .reference => false, // References are transparent
                 .native_function, .user_function, .closure, .arrow_function => std.mem.eql(u8, type_name, "callable"),
             };
 
@@ -2467,6 +2487,8 @@ pub const TypeInfo = struct {
     }
 };
 
+// Reference 现在直接用字符串指针表示，不需要单独的结构体
+
 pub const Value = struct {
     val: u64,
 
@@ -2495,6 +2517,9 @@ pub const Value = struct {
     pub const TYPE_RESOURCE: u64 = 0x0003000000000000; // 110
     pub const TYPE_USER_FUNC: u64 = 0x0003800000000000; // 111
     pub const TYPE_NATIVE_FUNC: u64 = 0x0000000000000000; // 000 (default for pointers)
+    
+    // Reference uses bit 46 (separate from main type tags)
+    pub const TYPE_REFERENCE: u64 = 0x0003000000000000; // Use TYPE_MASK range
 
     pub fn initNull() Value {
         return .{ .val = QNAN | TAG_NIL };
@@ -2547,9 +2572,22 @@ pub const Value = struct {
         return .{ .val = nanbox_abi.encodePtr(addr, type_tag) };
     }
 
-    fn initPtr(ptr: anytype, type_tag: u64) Value {
+    pub fn initPtr(ptr: anytype, type_tag: u64) Value {
         const addr = @intFromPtr(ptr);
         return .{ .val = nanbox_abi.encodePtr(addr, type_tag) };
+    }
+    
+    /// 创建引用值（存储 static_key 字符串的哈希值）
+    /// 注意：key 必须已经存在于 static_vars 中
+    pub fn fromReference(key: []const u8) Value {
+        // 使用字符串的哈希值作为引用标识
+        const hash = std.hash.Wyhash.hash(0, key);
+        return .{ .val = nanbox_abi.encodePtr(hash, TYPE_REFERENCE) };
+    }
+    
+    /// 获取引用的哈希值
+    pub fn asReferenceHash(self: Value) u64 {
+        return nanbox_abi.decodePtr(self.val);
     }
 
     pub fn initString(allocator: std.mem.Allocator, str: []const u8) !Value {
@@ -2562,6 +2600,8 @@ pub const Value = struct {
         };
         return initPtr(box, TYPE_STRING);
     }
+    
+    // initReference 已废弃，使用 fromReference 代替
 
     pub fn initStringWithManager(mm: anytype, str: []const u8) !Value {
         const box = try mm.allocString(str);
@@ -2650,6 +2690,9 @@ pub const Value = struct {
     pub fn isResource(self: Value) bool {
         return (self.val & (TAG_PTR | TYPE_MASK)) == (TAG_PTR | TYPE_RESOURCE);
     }
+    pub fn isReference(self: Value) bool {
+        return (self.val & (TAG_PTR | TYPE_MASK)) == (TAG_PTR | TYPE_REFERENCE);
+    }
     pub fn isNativeFunction(self: Value) bool {
         return (self.val & (TAG_PTR | TYPE_MASK)) == (TAG_PTR | TYPE_NATIVE_FUNC);
     }
@@ -2695,7 +2738,7 @@ pub const Value = struct {
         return @ptrFromInt(nanbox_abi.decodePtr(self.val));
     }
 
-    pub const Tag = enum { null, boolean, integer, float, string, array, object, struct_instance, resource, user_function, closure, arrow_function, native_function };
+    pub const Tag = enum { null, boolean, integer, float, string, array, object, struct_instance, resource, user_function, closure, arrow_function, native_function, reference };
 
     pub fn getTag(self: Value) Tag {
         if (self.isFloat()) return .float;
@@ -2708,6 +2751,7 @@ pub const Value = struct {
         if (self.isStruct()) return .struct_instance;
         if (self.isClosure()) return .closure;
         if (self.isResource()) return .resource;
+        if (self.isReference()) return .reference;
         if ((self.val & (TAG_PTR | TYPE_MASK)) == (TAG_PTR | TYPE_USER_FUNC)) return .user_function;
         if (self.isNativeFunction()) return .native_function;
         return .null;
@@ -2743,6 +2787,10 @@ pub const Value = struct {
     }
 
     pub fn retain(self: Value) Value {
+        // 引用类型不需要 retain，且必须先检查以避免错误的指针解引用
+        if (self.isReference()) {
+            return self;
+        }
         switch (self.getTag()) {
             .string => _ = self.getAsString().retain(),
             .array => _ = self.getAsArray().retain(),
@@ -2757,6 +2805,10 @@ pub const Value = struct {
     }
 
     pub fn release(self: Value, allocator: std.mem.Allocator) void {
+        // 引用类型不需要 release
+        if (self.isReference()) {
+            return;
+        }
         switch (self.getTag()) {
             .string => self.getAsString().release(allocator),
             .array => self.getAsArray().release(allocator),
@@ -3163,6 +3215,7 @@ pub const UserFunction = struct {
     is_variadic: bool,
     min_args: u32,
     max_args: ?u32, // null means unlimited (for variadic functions)
+    returns_reference: bool = false,
 
     pub fn init(name: *PHPString) UserFunction {
         return UserFunction{
@@ -3174,6 +3227,7 @@ pub const UserFunction = struct {
             .is_variadic = false,
             .min_args = 0,
             .max_args = 0,
+            .returns_reference = false,
         };
     }
 
