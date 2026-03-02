@@ -1,2 +1,0 @@
-<?php
-$arr = array(1, 2, 3, 4, 5); echo array_slice($arr, 1, 3);?>

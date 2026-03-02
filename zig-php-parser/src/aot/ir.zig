@@ -879,6 +879,7 @@ pub const Instruction = struct {
     pub const AllocaOp = struct {
         type_: Type,
         count: u32, // Number of elements (for arrays)
+        no_optimize: bool = false, // Prevent mem2reg optimization
     };
 
     /// Load from memory

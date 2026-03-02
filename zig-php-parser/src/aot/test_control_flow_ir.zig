@@ -67,6 +67,7 @@ const TestContext = struct {
         self.module = try self.gen_ptr.generateFromRoot(
             self.php_ctx.nodes.items,
             keys,
+            source,
             root_idx,
             "test_module",
             "test.php"
@@ -169,14 +170,15 @@ test "Optimizer: Mem2Reg on If-Else" {
 
     const source = 
         \\<?php
-        \\$cond = true;
-        \\if ($cond) {
-        \\    $x = 10;
-        \\} else {
-        \\    $x = 20;
+        \\function test_func($cond) {
+        \\    if ($cond) {
+        \\        $x = 10;
+        \\    } else {
+        \\        $x = 20;
+        \\    }
+        \\    $y = $x; 
+        \\    return $y;
         \\}
-        \\$y = $x; 
-        \\return $y;
     ;
 
     const module = try ctx.compile(source);
@@ -207,12 +209,21 @@ test "Optimizer: Mem2Reg on If-Else" {
     // try printer.printModule(module);
     // std.debug.print("--- AFTER ---\n{s}\n", .{list.items});
     
-    const func = module.functions.items[0];
+    // Find test_func (not __main__)
+    var func: ?*IR.Function = null;
+    for (module.functions.items) |f| {
+        if (std.mem.eql(u8, f.name, "test_func")) {
+            func = f;
+            break;
+        }
+    }
+    
+    try std.testing.expect(func != null);
     
     // Check for Phi nodes
     // The variable $x should be converted to a Phi node in the merge block
     var found_phi = false;
-    for (func.blocks.items) |block| {
+    for (func.?.blocks.items) |block| {
         for (block.instructions.items) |inst| {
             if (inst.op == .phi) {
                 found_phi = true;

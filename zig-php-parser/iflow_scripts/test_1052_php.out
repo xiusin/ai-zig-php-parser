@@ -1,9 +1,0 @@
-PHP Deprecated:  str_getcsv(): the $escape parameter must be provided as its default value will change in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_1052.php on line 2
-
-Deprecated: str_getcsv(): the $escape parameter must be provided as its default value will change in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_1052.php on line 2
-Array
-(
-    [0] => 1
-    [1] => 2
-    [2] => 3
-)

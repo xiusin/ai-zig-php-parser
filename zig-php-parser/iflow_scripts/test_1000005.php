@@ -1,2 +1,0 @@
-<?php
-$arr = array(3, 7, 2, 9, 1, 5, 8, 4); sort($arr); echo $arr[0];?>

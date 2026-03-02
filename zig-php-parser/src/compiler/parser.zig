@@ -2352,7 +2352,8 @@ pub const Parser = struct {
         if (self.curr.tag == .l_paren) {
             self.nextToken();
             while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                try args.append(self.allocator, try self.parseExpression(0));
+                // 使用优先级2，跳过逗号运算符（优先级1）
+                try args.append(self.allocator, try self.parseExpression(2));
                 if (self.curr.tag == .comma) self.nextToken();
             }
             _ = try self.eat(.r_paren);

@@ -1,9 +1,0 @@
-PHP Fatal error:  Uncaught Error: Call to undefined function each() in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_453.php:2
-Stack trace:
-#0 {main}
-  thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_453.php on line 2
-
-Fatal error: Uncaught Error: Call to undefined function each() in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_453.php:2
-Stack trace:
-#0 {main}
-  thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/iflow_scripts/test_453.php on line 2

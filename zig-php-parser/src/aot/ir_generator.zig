@@ -182,10 +182,11 @@ pub const IRGenerator = struct {
         self: *Self,
         nodes: []const Node,
         string_table: []const []const u8,
+        source_buffer: []const u8,
         module_name: []const u8,
         source_file: []const u8,
     ) !*Module {
-        return self.generateFromRoot(nodes, string_table, 0, module_name, source_file);
+        return self.generateFromRoot(nodes, string_table, source_buffer, 0, module_name, source_file);
     }
 
     /// Generate IR module from AST with explicit root node index
@@ -726,7 +727,28 @@ pub const IRGenerator = struct {
                 try self.reference_params.put(self.allocator, param_name, {});
             }
 
-            const alloca_reg = try self.getOrCreateVarRegister(param_name, param_type);
+            // 为引用参数创建no_optimize alloca
+            const alloca_reg = if (param_data.is_reference) blk: {
+                const alloca_type = param_type;
+                const type_ptr = try self.allocator.create(Type);
+                type_ptr.* = alloca_type;
+                const ptr_type = Type{ .ptr = type_ptr };
+                const reg = func.newRegister(ptr_type);
+                
+                const alloca_inst = try self.allocator.create(Instruction);
+                alloca_inst.* = .{
+                    .result = reg,
+                    .op = .{ .alloca = .{ 
+                        .type_ = alloca_type, 
+                        .count = 1, 
+                        .no_optimize = true  // 防止mem2reg优化
+                    } },
+                    .location = self.current_location,
+                };
+                try self.entry_allocas.append(self.allocator, alloca_inst);
+                try self.var_registers.put(self.allocator, param_name, reg);
+                break :blk reg;
+            } else try self.getOrCreateVarRegister(param_name, param_type);
             
             try params.append(self.allocator, .{
                 .name = param_name,
@@ -2072,22 +2094,31 @@ pub const IRGenerator = struct {
             .variable => {
                 const var_name = self.getString(target_node.data.variable.name);
                 
-                // 检查是否是全局变量或在 __main__ 函数中
-                const is_global = self.global_vars.contains(var_name);
-                const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                // 检查是否是引用参数
+                const is_ref_param = self.reference_params.contains(var_name);
                 
-                if (is_global or is_main) {
-                    // 写入全局表
-                    _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = value_reg } }, null);
-                    
-                    // 如果在 __main__ 中，也标记为全局变量
-                    if (is_main and !is_global) {
-                        try self.global_vars.put(self.allocator, var_name, {});
-                    }
-                } else {
-                    // 普通局部变量
-                    const var_reg = try self.getOrCreateVarRegister(var_name, value_reg.type_);
+                if (is_ref_param) {
+                    // 引用参数：写入引用
+                    const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
                     _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = value_reg } }, null);
+                } else {
+                    // 检查是否是全局变量或在 __main__ 函数中
+                    const is_global = self.global_vars.contains(var_name);
+                    const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                    
+                    if (is_global or is_main) {
+                        // 写入全局表
+                        _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = value_reg } }, null);
+                        
+                        // 如果在 __main__ 中，也标记为全局变量
+                        if (is_main and !is_global) {
+                            try self.global_vars.put(self.allocator, var_name, {});
+                        }
+                    } else {
+                        // 普通局部变量
+                        const var_reg = try self.getOrCreateVarRegister(var_name, value_reg.type_);
+                        _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = value_reg } }, null);
+                    }
                 }
 
                 // Update symbol table
@@ -2979,17 +3010,29 @@ pub const IRGenerator = struct {
 
         // Generate then expression
         self.setCurrentBlock(then_block);
-        const then_reg = if (ternary_data.then_expr) |then_idx|
+        var then_reg = if (ternary_data.then_expr) |then_idx|
             try self.generateExpression(then_idx)
         else
             cond_reg; // Elvis operator: $a ?: $b
-        const then_end_block = self.current_block.?; // 记录 then 分支结束的块
+        
+        // 转换为php_value以统一类型
+        if (then_reg.type_ != .php_value) {
+            then_reg = try self.emitWithResult(.{ .box = .{ .value = then_reg, .from_type = then_reg.type_ } }, .php_value);
+        }
+        
+        const then_end_block = self.current_block.?;
         self.setTerminator(.{ .br = merge_block });
 
         // Generate else expression
         self.setCurrentBlock(else_block);
-        const else_reg = try self.generateExpression(ternary_data.else_expr);
-        const else_end_block = self.current_block.?; // 记录 else 分支结束的块
+        var else_reg = try self.generateExpression(ternary_data.else_expr);
+        
+        // 转换为php_value以统一类型
+        if (else_reg.type_ != .php_value) {
+            else_reg = try self.emitWithResult(.{ .box = .{ .value = else_reg, .from_type = else_reg.type_ } }, .php_value);
+        }
+        
+        const else_end_block = self.current_block.?;
         self.setTerminator(.{ .br = merge_block });
 
         // Merge with phi node
@@ -3156,10 +3199,67 @@ pub const IRGenerator = struct {
                         const chosen_node = self.getNode(expr_idx);
                         if (chosen_node != null and chosen_node.?.tag == .variable) {
                             const var_name = self.getString(chosen_node.?.data.variable.name);
-                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                            const r = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
-                            try final_args.append(self.allocator, r);
-                            continue;
+                            
+                            // 检查是否是全局变量或main函数中的变量
+                            const is_global = self.global_vars.contains(var_name);
+                            const is_main = if (self.current_function) |func| 
+                                std.mem.eql(u8, func.name, "__main__") 
+                            else 
+                                false;
+                            
+                            if (is_global or is_main) {
+                                // 创建临时volatile alloca
+                                const temp_var_name = try std.fmt.allocPrint(
+                                    self.allocator, 
+                                    "__ref_temp_{s}", 
+                                    .{var_name}
+                                );
+                                
+                                const func = self.current_function orelse return error.NoCurrentFunction;
+                                const alloca_type = Type{ .php_value = {} };
+                                const type_ptr = try self.allocator.create(Type);
+                                type_ptr.* = alloca_type;
+                                const ptr_type = Type{ .ptr = type_ptr };
+                                const temp_reg = func.newRegister(ptr_type);
+                                
+                                // 创建no_optimize alloca
+                                const alloca_inst = try self.allocator.create(Instruction);
+                                alloca_inst.* = .{
+                                    .result = temp_reg,
+                                    .op = .{ .alloca = .{ 
+                                        .type_ = alloca_type, 
+                                        .count = 1, 
+                                        .no_optimize = true 
+                                    } },
+                                    .location = self.current_location,
+                                };
+                                try self.entry_allocas.append(self.allocator, alloca_inst);
+                                try self.var_registers.put(self.allocator, temp_var_name, temp_reg);
+                                
+                                // Load全局变量并store到临时变量
+                                const load_reg = try self.emitWithResult(
+                                    .{ .global_get = .{ .name = var_name } }, 
+                                    .php_value
+                                );
+                                _ = try self.emit(
+                                    .{ .store = .{ .ptr = temp_reg, .value = load_reg } }, 
+                                    null
+                                );
+                                
+                                // 创建引用
+                                const r = try self.emitWithResult(
+                                    .{ .make_ref = .{ .ptr = temp_reg } }, 
+                                    .php_value
+                                );
+                                try final_args.append(self.allocator, r);
+                                continue;
+                            } else {
+                                // 局部变量：直接使用alloca
+                                const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                                const r = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                                try final_args.append(self.allocator, r);
+                                continue;
+                            }
                         }
                     }
                     const r = try self.generateExpression(expr_idx);
@@ -3182,16 +3282,75 @@ pub const IRGenerator = struct {
                 const arg_node = self.getNode(arg_idx);
                 const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) arg_node.?.data.named_arg.value else arg_idx;
 
-                // 暂时禁用引用参数检查，因为它导致 segmentation fault
-                // TODO: 修复 symbol table 的内存管理问题
-                const is_ref = false;
+                // 检查是否是引用参数
+                const is_ref = if (func_symbol) |fs| blk: {
+                    if (fs.metadata == .function and i < fs.metadata.function.params.len) {
+                        break :blk fs.metadata.function.params[i].is_reference;
+                    }
+                    break :blk false;
+                } else false;
 
                 if (is_ref) {
                     const real_node = self.getNode(expr_idx);
                     if (real_node != null and real_node.?.tag == .variable) {
                         const var_name = self.getString(real_node.?.data.variable.name);
-                        const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                        args[i] = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                        
+                        // 检查是否是全局变量或main函数中的变量
+                        const is_global = self.global_vars.contains(var_name);
+                        const is_main = if (self.current_function) |func| 
+                            std.mem.eql(u8, func.name, "__main__") 
+                        else 
+                            false;
+                        
+                        if (is_global or is_main) {
+                            // 创建临时volatile alloca
+                            const temp_var_name = try std.fmt.allocPrint(
+                                self.allocator, 
+                                "__ref_temp_{s}", 
+                                .{var_name}
+                            );
+                            
+                            const func = self.current_function orelse return error.NoCurrentFunction;
+                            const alloca_type = Type{ .php_value = {} };
+                            const type_ptr = try self.allocator.create(Type);
+                            type_ptr.* = alloca_type;
+                            const ptr_type = Type{ .ptr = type_ptr };
+                            const temp_reg = func.newRegister(ptr_type);
+                            
+                            // 创建no_optimize alloca
+                            const alloca_inst = try self.allocator.create(Instruction);
+                            alloca_inst.* = .{
+                                .result = temp_reg,
+                                .op = .{ .alloca = .{ 
+                                    .type_ = alloca_type, 
+                                    .count = 1, 
+                                    .no_optimize = true 
+                                } },
+                                .location = self.current_location,
+                            };
+                            try self.entry_allocas.append(self.allocator, alloca_inst);
+                            try self.var_registers.put(self.allocator, temp_var_name, temp_reg);
+                            
+                            // Load全局变量并store到临时变量
+                            const load_reg = try self.emitWithResult(
+                                .{ .global_get = .{ .name = var_name } }, 
+                                .php_value
+                            );
+                            _ = try self.emit(
+                                .{ .store = .{ .ptr = temp_reg, .value = load_reg } }, 
+                                null
+                            );
+                            
+                            // 创建引用
+                            args[i] = try self.emitWithResult(
+                                .{ .make_ref = .{ .ptr = temp_reg } }, 
+                                .php_value
+                            );
+                        } else {
+                            // 局部变量：直接使用alloca
+                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                            args[i] = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                        }
                     } else {
                         args[i] = try self.generateExpression(expr_idx);
                     }
@@ -3385,6 +3544,54 @@ pub const IRGenerator = struct {
             .args = args,
             .return_type = .php_value,
         } }, .php_value);
+
+        // 写回引用参数到全局变量
+        if (func_symbol) |fs| {
+            if (fs.metadata == .function) {
+                const params = fs.metadata.function.params;
+                for (call_data.args, 0..) |arg_idx, i| {
+                    if (i >= params.len) break;
+                    if (!params[i].is_reference) continue;
+                    
+                    const arg_node = self.getNode(arg_idx);
+                    const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) 
+                        arg_node.?.data.named_arg.value 
+                    else 
+                        arg_idx;
+                    const real_node = self.getNode(expr_idx);
+                    
+                    if (real_node != null and real_node.?.tag == .variable) {
+                        const var_name = self.getString(real_node.?.data.variable.name);
+                        const is_global = self.global_vars.contains(var_name);
+                        const is_main = if (self.current_function) |func| 
+                            std.mem.eql(u8, func.name, "__main__") 
+                        else 
+                            false;
+                        
+                        if (is_global or is_main) {
+                            // 写回全局变量
+                            const temp_var_name = try std.fmt.allocPrint(
+                                self.allocator, 
+                                "__ref_temp_{s}", 
+                                .{var_name}
+                            );
+                            defer self.allocator.free(temp_var_name);
+                            
+                            if (self.var_registers.get(temp_var_name)) |temp_reg| {
+                                const load_back = try self.emitWithResult(
+                                    .{ .load = .{ .ptr = temp_reg, .type_ = .php_value } }, 
+                                    .php_value
+                                );
+                                _ = try self.emit(
+                                    .{ .global_set = .{ .name = var_name, .value = load_back } }, 
+                                    null
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Special handling for array_splice: write modified array back to variable
         if (std.mem.eql(u8, func_name, "array_splice") and call_data.args.len > 0) {
@@ -4325,8 +4532,9 @@ test "IRGenerator simple module generation" {
     };
 
     const string_table = [_][]const u8{};
+    const source_buffer = "";
 
-    const module = try generator.generate(&nodes, &string_table, "test_module", "test.php");
+    const module = try generator.generate(&nodes, &string_table, source_buffer, "test_module", "test.php");
     defer {
         module.deinit();
         allocator.destroy(module);

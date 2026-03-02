@@ -285,7 +285,8 @@ test "数学 - sqrt" {
 
 test "数学 - round" {
     const val = Value.initFloat(3.7);
-    const result = try runtime.php_round(val);
+    const precision = Value.initInt(0);
+    const result = try runtime.php_round(val, precision);
     try testing.expectApproxEqAbs(@as(f64, 4.0), result.asFloat(), 0.001);
 }
 
@@ -305,10 +306,11 @@ test "数学 - min/max" {
     const a = Value.initInt(10);
     const b = Value.initInt(20);
 
-    const min_result = try runtime.php_min(a, b);
+    const args = [_]Value{ a, b };
+    const min_result = try runtime.php_min(&args);
     try testing.expectEqual(@as(i64, 10), min_result.asInt());
 
-    const max_result = try runtime.php_max(a, b);
+    const max_result = try runtime.php_max(&args);
     try testing.expectEqual(@as(i64, 20), max_result.asInt());
 }
 

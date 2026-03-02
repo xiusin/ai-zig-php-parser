@@ -2001,6 +2001,11 @@ pub const IROptimizer = struct {
 
     /// Check if alloca is promotable
     fn isPromotable(self: *Self, alloca: *Instruction, func: *Function) bool {
+        // Check if marked as no_optimize
+        if (alloca.op == .alloca and alloca.op.alloca.no_optimize) {
+            return false;
+        }
+        
         // Result must be used
         const result_reg = alloca.result orelse return false;
         const result_id = result_reg.id;

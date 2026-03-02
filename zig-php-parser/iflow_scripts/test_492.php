@@ -1,2 +1,0 @@
-<?php
-echo number_format(1234567.891, 2);?>

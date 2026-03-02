@@ -934,11 +934,15 @@ pub const BytecodeGenerator = struct {
                 try self.visitNode(access_data.target);
                 if (access_data.index) |idx| {
                     try self.visitNode(idx);
+                    try self.emit(.array_set, 0, 0); // 索引设置
+                } else {
+                    try self.emit(.array_set, 1, 0); // 数组追加 (operand1=1)
                 }
-                try self.emit(.array_set, 0, 0);
                 self.popStack();
                 self.popStack();
-                self.popStack();
+                if (access_data.index != null) {
+                    self.popStack();
+                }
             },
             .property_access => {
                 // 属性赋值
@@ -1287,11 +1291,23 @@ pub const BytecodeGenerator = struct {
             const elem_node = self.getNode(elem_idx);
             if (elem_node.tag == .array_pair) {
                 // key => value
-                try self.visitNode(elem_node.data.array_pair.key);
+                // array_set 期望栈顺序（从栈底到栈顶）：[value, array, key]
+                // 当前栈：[array]
+                
+                // 1. push value: [array, value]
                 try self.visitNode(elem_node.data.array_pair.value);
+                
+                // 2. swap: [value, array]
+                try self.emit(.swap, 0, 0);
+                
+                // 3. push key: [value, array, key]
+                try self.visitNode(elem_node.data.array_pair.key);
+                
+                // 4. array_set 消耗 3 个元素，推回 array
                 try self.emit(.array_set, 0, 0);
-                self.popStack();
-                self.popStack();
+                self.popStack(); // key
+                self.popStack(); // array (但会被推回)
+                // value 已经被消耗，array 被推回，所以净效果是 -2
             } else {
                 // 只有value
                 try self.visitNode(elem_idx);

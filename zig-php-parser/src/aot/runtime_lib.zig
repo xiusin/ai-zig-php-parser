@@ -3334,5 +3334,39 @@ export fn php_constant(name: *PHPValue) *PHPValue {
     return php_value_create_null();
 }
 
+/// count() - 计算数组元素个数
+/// @param arr 要计数的数组
+/// @param mode 可选，COUNT_RECURSIVE(1)表示递归计数
+pub fn php_count(arr: Value, mode: Value) !Value {
+    const mode_int = if (mode.tag == .int) mode.data.int_val else 0;
+    
+    if (arr.tag != .array or arr.data.array_ptr == null) {
+        return Value.initInt(0);
+    }
+    
+    const arr_ptr = arr.data.array_ptr.?;
+    
+    // COUNT_RECURSIVE = 1
+    if (mode_int == 1) {
+        return Value.initInt(@intCast(countRecursive(arr_ptr)));
+    }
+    
+    return Value.initInt(@intCast(arr_ptr.count()));
+}
+
+fn countRecursive(arr: *PHPArray) usize {
+    var total: usize = arr.count();
+    
+    var iter = arr.iterator();
+    while (iter.next()) |entry| {
+        const val = entry.value_ptr.*;
+        if (val.tag == .array and val.data.array_ptr != null) {
+            total += countRecursive(val.data.array_ptr.?);
+        }
+    }
+    
+    return total;
+}
+
 // Value type alias for AOT generated code
 pub const Value = PHPValue;

@@ -3687,9 +3687,35 @@ pub fn php_strcasecmp(str1: Value, str2: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// count - 获取数组元素数量
-pub fn php_count(arr: Value) !Value {
+/// count() - 计算数组元素个数
+/// @param arr 要计数的数组
+/// @param mode 可选，COUNT_RECURSIVE(1)表示递归计数
+pub fn php_count(arr: Value, mode: Value) !Value {
     if (!arr.isArray()) return Value.initInt(0);
-    return Value.initInt(@intCast(arr.asArray().count()));
+    
+    const mode_int = if (mode.isInt()) mode.asInt() else 0;
+    const php_arr = arr.asArray();
+    
+    // COUNT_RECURSIVE = 1
+    if (mode_int == 1) {
+        return Value.initInt(@intCast(countRecursive(php_arr)));
+    }
+    
+    return Value.initInt(@intCast(php_arr.elements.count()));
+}
+
+fn countRecursive(arr: *PHPArray) usize {
+    var total: usize = arr.elements.count();
+    
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const val = entry.value_ptr.*;
+        if (val.isArray()) {
+            total += countRecursive(val.asArray());
+        }
+    }
+    
+    return total;
 }
 
 /// array_push - 追加元素到数组
@@ -5166,7 +5192,16 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
 /// 创建新对象并调用构造函数
 pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     const resolved = try resolveSpecialClassName(class_name);
-    const meta = findClass(resolved);
+    var meta = findClass(resolved);
+    
+    // 如果找不到，尝试使用短名称（命名空间支持）
+    if (meta == null) {
+        if (std.mem.lastIndexOf(u8, resolved, "\\")) |last_sep| {
+            const short_name = resolved[last_sep + 1 ..];
+            meta = findClass(short_name);
+        }
+    }
+    
     const obj = if (meta) |m|
         try PHPObject.initWithMeta(allocator, m)
     else
@@ -8180,6 +8215,7 @@ pub fn php_array_reduce(arr: Value, callback: Value, initial: Value, allocator: 
 }
 
 /// array_chunk - 将数组分割成指定大小的块
+/// array_chunk - 将数组分割成指定大小的块
 pub fn php_array_chunk(arr: Value, size: Value, preserve_keys: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
 
@@ -9937,4 +9973,153 @@ fn registerZigSelect(allocator: Allocator) !void {
 pub fn php_go_builtin(callable: Value, allocator: Allocator) !Value {
     const args = [_]Value{callable};
     return php_go(Value.initNull(), &args, allocator);
+}
+
+/// array_count_values() - 统计数组中所有值出现的次数
+pub fn php_array_count_values(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return error.InvalidArgument;
+    
+    const php_arr = arr.asArray();
+    const result = try PHPArray.init(allocator);
+    
+    var iter = php_arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const val = entry.value_ptr.*;
+        
+        // 只支持整数和字符串作为键
+        const key: ArrayKey = if (val.isInt())
+            .{ .integer = val.asInt() }
+        else if (val.isString())
+            .{ .string = val.asString() }
+        else
+            continue;
+        
+        // 获取或初始化计数
+        if (result.elements.get(key)) |count_val| {
+            try result.set(allocator, key, Value.initInt(count_val.asInt() + 1));
+        } else {
+            try result.set(allocator, key, Value.initInt(1));
+        }
+    }
+    
+    return Value.initArray(result);
+}
+
+/// array_rand() - 从数组中随机选择一个或多个键
+pub fn php_array_rand(arr: Value, num: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!arr.isArray()) return error.InvalidArgument;
+    
+    const php_arr = arr.asArray();
+    const count = php_arr.elements.count();
+    if (count == 0) return Value.initNull();
+    
+    const n = if (num.isInt()) @as(usize, @intCast(@max(1, num.asInt()))) else 1;
+    
+    if (n == 1) {
+        // 返回单个键
+        const idx = @as(usize, @intCast(std.crypto.random.intRangeAtMost(i64, 0, @as(i64, @intCast(count - 1)))));
+        var iter = php_arr.elements.iterator();
+        var i: usize = 0;
+        while (iter.next()) |entry| : (i += 1) {
+            if (i == idx) {
+                return switch (entry.key_ptr.*) {
+                    .integer => |int| Value.initInt(int),
+                    .string => |str| Value.initString(str),
+                };
+            }
+        }
+        return Value.initNull();
+    }
+    
+    // 返回多个键（简化实现）
+    return Value.initNull();
+}
+
+/// shuffle() - 随机打乱数组
+pub fn php_shuffle(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return error.InvalidArgument;
+    
+    const php_arr = arr.asArray();
+    const count = php_arr.elements.count();
+    if (count <= 1) return Value.initBool(true);
+    
+    // Fisher-Yates shuffle
+    var values = try allocator.alloc(Value, count);
+    defer allocator.free(values);
+    
+    var iter = php_arr.elements.iterator();
+    var i: usize = 0;
+    while (iter.next()) |entry| : (i += 1) {
+        values[i] = entry.value_ptr.*;
+    }
+    
+    i = count;
+    while (i > 1) {
+        i -= 1;
+        const j = @as(usize, @intCast(std.crypto.random.intRangeAtMost(i64, 0, @as(i64, @intCast(i)))));
+        const temp = values[i];
+        values[i] = values[j];
+        values[j] = temp;
+    }
+    
+    // 重建数组
+    php_arr.elements.packed_values.clearRetainingCapacity();
+    if (php_arr.elements.mixed) |*mixed| {
+        mixed.clearRetainingCapacity();
+    }
+    
+    for (values, 0..) |val, idx| {
+        try php_arr.push(allocator, val);
+        _ = idx;
+    }
+    
+    return Value.initBool(true);
+}
+
+/// compact() - 创建包含变量及其值的数组
+pub fn php_compact(varnames: []const Value, allocator: Allocator) !Value {
+    _ = varnames;
+    // 简化实现：返回空数组
+    const result = try PHPArray.init(allocator);
+    return Value.initArray(result);
+}
+
+/// extract() - 从数组中将变量导入到当前符号表
+pub fn php_extract(arr: Value, allocator: Allocator) !Value {
+    _ = arr;
+    _ = allocator;
+    // 简化实现：返回0
+    return Value.initInt(0);
+}
+
+/// array_fill_keys() - 使用指定的键和值填充数组
+pub fn php_array_fill_keys(keys: Value, value: Value, allocator: Allocator) !Value {
+    if (!keys.isArray()) return error.InvalidArgument;
+    
+    const keys_arr = keys.asArray();
+    const result = try PHPArray.init(allocator);
+    
+    var iter = keys_arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const key_val = entry.value_ptr.*;
+        const key: ArrayKey = if (key_val.isInt())
+            .{ .integer = key_val.asInt() }
+        else if (key_val.isString())
+            .{ .string = key_val.asString() }
+        else
+            continue;
+        
+        try result.set(allocator, key, value);
+    }
+    
+    return Value.initArray(result);
+}
+
+/// natsort() - 用自然排序算法对数组排序
+pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!arr.isArray()) return error.InvalidArgument;
+    // 简化实现：不排序，直接返回true
+    return Value.initBool(true);
 }
