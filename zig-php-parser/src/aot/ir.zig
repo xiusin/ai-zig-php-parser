@@ -230,6 +230,8 @@ pub const Function = struct {
     has_multi_level_break: bool = false,
     /// Global variables used in this function
     global_vars: std.ArrayListUnmanaged([]const u8) = .{},
+    /// Reference parameter indices (0-based)
+    ref_params: std.ArrayListUnmanaged(u32) = .{},
 
     const Self = @This();
 
@@ -258,6 +260,7 @@ pub const Function = struct {
         }
         self.blocks.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
+        self.ref_params.deinit(self.allocator);
     }
 
     /// Add a parameter

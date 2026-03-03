@@ -1276,6 +1276,10 @@ pub const NativeLinker = struct {
         .{ "key", bi(.{ .runtime_name = "php_key", .needs_allocator = true }) },
         .{ "each", bi(.{ .runtime_name = "php_each", .needs_allocator = true }) },
 
+        // Object functions
+        .{ "php_object_new", bi(.{ .runtime_name = "php_object_new", .needs_allocator = true }) },
+        .{ "php_object_new_with_constructor", bi(.{ .runtime_name = "php_object_new_with_constructor", .needs_allocator = true }) },
+
         .{ "abs", bi(.{ .runtime_name = "php_abs", .needs_allocator = false }) },
         .{ "sqrt", .{ .runtime_name = "php_sqrt", .needs_allocator = false } },
         .{ "round", .{ .runtime_name = "php_round", .needs_allocator = false } },

@@ -7,6 +7,7 @@
 - 100 % 通过基础安全检查（无恶意代码、无敏感数据泄露）  
 - 100 % 遵循编程规范与工程原则（SOLID、KISS、DRY、YAGNI）
 - 禁止使用cat做命令输出 `cat > xxxx << 'EOF'`的方式；
+- 系统不对PHP生成器功能做深度研究，优先级最低；
 - ArrayList API最新为：// ✅ 新 API (Zig 0.15.2)
     var list = try std.ArrayList(T).initCapacity(allocator, 0);
     defer list.deinit(allocator);  // 需要 allocator
