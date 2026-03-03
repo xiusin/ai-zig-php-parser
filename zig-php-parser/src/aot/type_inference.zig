@@ -698,8 +698,15 @@ pub fn getBuiltinReturnType(name: []const u8) ?InferredType {
     if (std.mem.eql(u8, name, "is_null")) return .{ .concrete = .bool };
     if (std.mem.eql(u8, name, "is_numeric")) return .{ .concrete = .bool };
     if (std.mem.eql(u8, name, "is_callable")) return .{ .concrete = .bool };
+    if (std.mem.eql(u8, name, "is_resource")) return .{ .concrete = .bool };
     if (std.mem.eql(u8, name, "isset")) return .{ .concrete = .bool };
     if (std.mem.eql(u8, name, "empty")) return .{ .concrete = .bool };
+
+    // File I/O functions
+    if (std.mem.eql(u8, name, "fopen")) return .{ .concrete = .mixed };
+    if (std.mem.eql(u8, name, "fclose")) return .{ .concrete = .bool };
+    if (std.mem.eql(u8, name, "fread")) return .{ .concrete = .string };
+    if (std.mem.eql(u8, name, "fwrite")) return .{ .concrete = .int };
 
     // Conversion functions
     if (std.mem.eql(u8, name, "intval")) return .{ .concrete = .int };

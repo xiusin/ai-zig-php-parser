@@ -352,6 +352,7 @@ pub const BytecodeGenerator = struct {
             .arrow_function => try self.visitArrowFunction(index),
             .function_decl => try self.visitFunctionDecl(index),
             .postfix_expr => try self.visitPostfixExpr(index),
+            .match_expr => try self.visitMatchExpr(index),
             else => {},
         }
     }
@@ -369,6 +370,7 @@ pub const BytecodeGenerator = struct {
             .asterisk_equal => .mul_int,
             .slash_equal => .div_int,
             .percent_equal => .mod_int,
+            .star_star_equal => .pow_int,
             .dot_equal => .concat,
             else => .nop,
         };
@@ -1030,6 +1032,7 @@ pub const BytecodeGenerator = struct {
             .asterisk => .mul_int,
             .slash => .div_int,
             .percent => .mod_int,
+            .star_star => .pow_int,
             .equal_equal => .eq,
             .bang_equal => .neq,
             .equal_equal_equal => .identical,
@@ -1042,6 +1045,8 @@ pub const BytecodeGenerator = struct {
             .ampersand => .bit_and,
             .pipe => .bit_or,
             .caret => .bit_xor,
+            .less_less => .shl,
+            .greater_greater => .shr,
             .double_ampersand, .k_and => .logic_and,
             .double_pipe, .k_or => .logic_or,
             .k_xor => .logic_xor,
@@ -1460,6 +1465,83 @@ pub const BytecodeGenerator = struct {
     }
 
     /// 访问try语句
+
+    /// 访问match表达式
+    fn visitMatchExpr(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const match_data = node.data.match_expr;
+        
+        // 计算match的表达式值
+        try self.visitNode(match_data.expression);
+        
+        const end_label = self.newLabel();
+        
+        // 生成每个arm的比较和跳转
+        for (match_data.arms) |arm_idx| {
+            const arm_node = self.getNode(arm_idx);
+            const arm_data = arm_node.data.match_arm;
+            
+            const next_arm_label = self.newLabel();
+            const body_label = self.newLabel();
+            
+            // 对于每个条件值，任一匹配就执行body
+            for (arm_data.conditions) |cond_idx| {
+                // 复制match表达式的值
+                try self.emit(.dup, 0, 0);
+                self.pushStack();
+                
+                // 计算条件值
+                try self.visitNode(cond_idx);
+                
+                // 比较
+                try self.emit(.eq, 0, 0);
+                self.popStack();
+                
+                // 如果相等，跳到body
+                try self.emitJump(.jnz, body_label);
+                self.popStack();
+            }
+            
+            // 所有条件都不匹配，跳到下一个arm
+            try self.emitJump(.jmp, next_arm_label);
+            
+            // 执行body
+            try self.placeLabel(body_label);
+            self.popStack();  // 弹出比较结果
+            
+            // 弹出match表达式的值
+            try self.emit(.pop, 0, 0);
+            self.popStack();
+            
+            // 计算body
+            try self.visitNode(arm_data.body);
+            
+            // 跳到结束
+            try self.emitJump(.jmp, end_label);
+            
+            try self.placeLabel(next_arm_label);
+        }
+        
+        // 处理default分支
+        if (match_data.default) |default_idx| {
+            // 弹出match表达式的值
+            try self.emit(.pop, 0, 0);
+            self.popStack();
+            
+            // default是match_arm节点，需要访问它的body
+            const default_node = self.getNode(default_idx);
+            const default_data = default_node.data.match_arm;
+            try self.visitNode(default_data.body);
+        } else {
+            // 没有default，弹出match表达式的值并push null
+            try self.emit(.pop, 0, 0);
+            self.popStack();
+            try self.emit(.push_null, 0, 0);
+            self.pushStack();
+        }
+        
+        try self.placeLabel(end_label);
+    }
     fn visitTry(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
         const try_data = node.data.try_stmt;

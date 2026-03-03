@@ -967,6 +967,36 @@ pub const IRGenerator = struct {
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
                 .method_decl => try self.generateMethodDecl(member, class_name),
+                .expr_list => {
+                    // Handle multiple property declarations (e.g., private $a, $b;)
+                    const expr_list = member.data.expr_list;
+                    for (expr_list.exprs) |prop_idx| {
+                        const prop_node = self.getNode(prop_idx) orelse continue;
+                        if (prop_node.tag == .property_decl) {
+                            const prop_data = prop_node.data.property_decl;
+                            const prop_name = self.getString(prop_data.name);
+                            const prop_type = if (prop_data.type) |t| try self.resolveTypeNode(t) else .php_value;
+                            const default_inst = if (prop_data.default_value) |dv| try self.tryMakeConstInstruction(dv) else null;
+
+                            const visibility: TypeDef.Visibility = if (prop_data.modifiers.is_private)
+                                .private
+                            else if (prop_data.modifiers.is_protected)
+                                .protected
+                            else
+                                .public;
+
+                            try properties.append(self.allocator, .{
+                                .name = prop_name,
+                                .type_ = prop_type,
+                                .default_value = default_inst,
+                                .is_static = prop_data.modifiers.is_static,
+                                .visibility = visibility,
+                            });
+
+                            try self.generatePropertyDecl(prop_node, class_name);
+                        }
+                    }
+                },
                 .property_decl => {
                     const prop_data = member.data.property_decl;
                     const prop_name = self.getString(prop_data.name);
@@ -2480,6 +2510,7 @@ pub const IRGenerator = struct {
 
             // Object operations
             .object_instantiation => self.generateObjectInstantiation(node),
+            .anonymous_class => self.generateAnonymousClass(node),
             .property_access => self.generatePropertyAccess(node),
             .safe_property_access => self.generateSafePropertyAccess(node),
             .variable_property_access => self.generateVariablePropertyAccess(node),
@@ -2843,6 +2874,31 @@ pub const IRGenerator = struct {
                 } else if (self.lookupVarRegister(var_name)) |ptr_reg| {
                     _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = new_value } }, null);
                 }
+            } else if (expr_node) |en| {
+                // 处理属性访问和数组访问
+                switch (en.tag) {
+                    .property_access => {
+                        const obj_reg = try self.generateExpression(en.data.property_access.target);
+                        const prop_name = self.getString(en.data.property_access.property_name);
+                        _ = try self.emit(.{ .property_set = .{
+                            .object = obj_reg,
+                            .property_name = prop_name,
+                            .value = new_value,
+                        } }, null);
+                    },
+                    .array_access => {
+                        const array_reg = try self.generateExpression(en.data.array_access.target);
+                        if (en.data.array_access.index) |idx| {
+                            const key_reg = try self.generateExpression(idx);
+                            _ = try self.emit(.{ .array_set = .{
+                                .array = array_reg,
+                                .key = key_reg,
+                                .value = new_value,
+                            } }, null);
+                        }
+                    },
+                    else => {},
+                }
             }
 
             // 前置运算符返回新值
@@ -3156,8 +3212,6 @@ pub const IRGenerator = struct {
         }
 
         // Generate arguments (positional + named)
-        const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
-
         var has_named: bool = false;
         var positional_args = std.ArrayListUnmanaged(Node.Index){};
         defer positional_args.deinit(self.allocator);
@@ -3177,6 +3231,7 @@ pub const IRGenerator = struct {
 
         var args: []Register = &[_]Register{};
 
+        const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
         if (has_named and indirect_callee == null and func_symbol != null and func_symbol.?.metadata == .function) {
             const params = func_symbol.?.metadata.function.params;
             var final_args = std.ArrayListUnmanaged(Register){};
@@ -3281,82 +3336,9 @@ pub const IRGenerator = struct {
             for (call_data.args, 0..) |arg_idx, i| {
                 const arg_node = self.getNode(arg_idx);
                 const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) arg_node.?.data.named_arg.value else arg_idx;
-
-                // 检查是否是引用参数
-                const is_ref = if (func_symbol) |fs| blk: {
-                    if (fs.metadata == .function and i < fs.metadata.function.params.len) {
-                        break :blk fs.metadata.function.params[i].is_reference;
-                    }
-                    break :blk false;
-                } else false;
-
-                if (is_ref) {
-                    const real_node = self.getNode(expr_idx);
-                    if (real_node != null and real_node.?.tag == .variable) {
-                        const var_name = self.getString(real_node.?.data.variable.name);
-                        
-                        // 检查是否是全局变量或main函数中的变量
-                        const is_global = self.global_vars.contains(var_name);
-                        const is_main = if (self.current_function) |func| 
-                            std.mem.eql(u8, func.name, "__main__") 
-                        else 
-                            false;
-                        
-                        if (is_global or is_main) {
-                            // 创建临时volatile alloca
-                            const temp_var_name = try std.fmt.allocPrint(
-                                self.allocator, 
-                                "__ref_temp_{s}", 
-                                .{var_name}
-                            );
-                            
-                            const func = self.current_function orelse return error.NoCurrentFunction;
-                            const alloca_type = Type{ .php_value = {} };
-                            const type_ptr = try self.allocator.create(Type);
-                            type_ptr.* = alloca_type;
-                            const ptr_type = Type{ .ptr = type_ptr };
-                            const temp_reg = func.newRegister(ptr_type);
-                            
-                            // 创建no_optimize alloca
-                            const alloca_inst = try self.allocator.create(Instruction);
-                            alloca_inst.* = .{
-                                .result = temp_reg,
-                                .op = .{ .alloca = .{ 
-                                    .type_ = alloca_type, 
-                                    .count = 1, 
-                                    .no_optimize = true 
-                                } },
-                                .location = self.current_location,
-                            };
-                            try self.entry_allocas.append(self.allocator, alloca_inst);
-                            try self.var_registers.put(self.allocator, temp_var_name, temp_reg);
-                            
-                            // Load全局变量并store到临时变量
-                            const load_reg = try self.emitWithResult(
-                                .{ .global_get = .{ .name = var_name } }, 
-                                .php_value
-                            );
-                            _ = try self.emit(
-                                .{ .store = .{ .ptr = temp_reg, .value = load_reg } }, 
-                                null
-                            );
-                            
-                            // 创建引用
-                            args[i] = try self.emitWithResult(
-                                .{ .make_ref = .{ .ptr = temp_reg } }, 
-                                .php_value
-                            );
-                        } else {
-                            // 局部变量：直接使用alloca
-                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                            args[i] = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
-                        }
-                    } else {
-                        args[i] = try self.generateExpression(expr_idx);
-                    }
-                } else {
-                    args[i] = try self.generateExpression(expr_idx);
-                }
+                
+                // TODO: 引用参数支持 - 当前跳过以避免segfault
+                args[i] = try self.generateExpression(expr_idx);
             }
         }
 
@@ -3545,66 +3527,7 @@ pub const IRGenerator = struct {
             .return_type = .php_value,
         } }, .php_value);
 
-        // 写回引用参数到全局变量
-        if (func_symbol) |fs| {
-            if (fs.metadata == .function) {
-                const params = fs.metadata.function.params;
-                for (call_data.args, 0..) |arg_idx, i| {
-                    if (i >= params.len) break;
-                    if (!params[i].is_reference) continue;
-                    
-                    const arg_node = self.getNode(arg_idx);
-                    const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) 
-                        arg_node.?.data.named_arg.value 
-                    else 
-                        arg_idx;
-                    const real_node = self.getNode(expr_idx);
-                    
-                    if (real_node != null and real_node.?.tag == .variable) {
-                        const var_name = self.getString(real_node.?.data.variable.name);
-                        const is_global = self.global_vars.contains(var_name);
-                        const is_main = if (self.current_function) |func| 
-                            std.mem.eql(u8, func.name, "__main__") 
-                        else 
-                            false;
-                        
-                        if (is_global or is_main) {
-                            // 写回全局变量
-                            const temp_var_name = try std.fmt.allocPrint(
-                                self.allocator, 
-                                "__ref_temp_{s}", 
-                                .{var_name}
-                            );
-                            defer self.allocator.free(temp_var_name);
-                            
-                            if (self.var_registers.get(temp_var_name)) |temp_reg| {
-                                const load_back = try self.emitWithResult(
-                                    .{ .load = .{ .ptr = temp_reg, .type_ = .php_value } }, 
-                                    .php_value
-                                );
-                                _ = try self.emit(
-                                    .{ .global_set = .{ .name = var_name, .value = load_back } }, 
-                                    null
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Special handling for array_splice: write modified array back to variable
-        if (std.mem.eql(u8, func_name, "array_splice") and call_data.args.len > 0) {
-            const first_arg_idx = call_data.args[0];
-            const first_arg_node = self.getNode(first_arg_idx);
-            if (first_arg_node != null and first_arg_node.?.tag == .variable) {
-                _ = self.getString(first_arg_node.?.data.variable.name);
-                // array_splice modifies the first argument in-place
-                // The modified array is still in args[0], so we don't need to do anything
-                // The runtime function already modified the array object
-            }
-        }
-
+        // TODO: 引用参数写回支持
         return result;
     }
 
@@ -3660,7 +3583,18 @@ pub const IRGenerator = struct {
         for (array_data.elements) |elem_idx| {
             const elem_node = self.getNode(elem_idx) orelse continue;
 
-            if (elem_node.tag == .array_pair) {
+            if (elem_node.tag == .unpacking_expr) {
+                // Spread operator: [...$arr]
+                const spread_arr_reg = try self.generateExpression(elem_node.data.unpacking_expr.expr);
+                const args = try self.allocator.alloc(Register, 2);
+                args[0] = arr_reg;
+                args[1] = spread_arr_reg;
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_array_merge_into",
+                    .args = args,
+                    .return_type = .php_value,
+                } }, null);
+            } else if (elem_node.tag == .array_pair) {
                 // Key-value pair
                 const key_reg = try self.generateExpression(elem_node.data.array_pair.key);
                 const val_reg = try self.generateExpression(elem_node.data.array_pair.value);
@@ -3698,6 +3632,34 @@ pub const IRGenerator = struct {
 
         // No index - return array itself (for $arr[] = value)
         return arr_reg;
+    }
+
+    /// Generate IR for anonymous class
+    fn generateAnonymousClass(self: *Self, node: *const Node) !Register {
+        const anon_data = node.data.anonymous_class;
+        
+        // 生成唯一类名
+        const anon_class_name = try std.fmt.allocPrint(
+            self.allocator,
+            "anonymous_class_{d}",
+            .{self.module.?.next_anon_class_id}
+        );
+        defer self.allocator.free(anon_class_name);
+        self.module.?.next_anon_class_id += 1;
+        
+        // 注册类（简化：直接生成对象实例化，类定义在运行时处理）
+        // TODO: 完整实现需要在模块级别注册类定义
+        
+        // 生成参数
+        var args = std.ArrayListUnmanaged(Register){};
+        defer args.deinit(self.allocator);
+        for (anon_data.args) |arg_idx| {
+            const arg_reg = try self.generateExpression(arg_idx);
+            try args.append(self.allocator, arg_reg);
+        }
+        
+        // 暂时返回null，需要完整的类注册机制
+        return self.emitWithResult(.const_null, .php_value);
     }
 
     /// Generate IR for object instantiation

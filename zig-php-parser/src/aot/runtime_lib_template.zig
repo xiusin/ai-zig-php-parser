@@ -303,6 +303,10 @@ pub fn initRuntime(allocator: Allocator) void {
     runtime_allocator = stats_allocator.allocator();
 
     initClassRegistry(runtime_allocator);
+    registerArrayIterator(runtime_allocator) catch {};
+    registerSplFixedArray(runtime_allocator) catch {};
+    registerSplStack(runtime_allocator) catch {};
+    registerSplQueue(runtime_allocator) catch {};
     registerZigChannel(runtime_allocator) catch {};
     registerZigSelect(runtime_allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
@@ -1705,9 +1709,23 @@ pub const Value = struct {
             return PHPString.init(allocator, str);
         }
         if (self.isFloat()) {
-            const str = try std.fmt.allocPrint(allocator, "{d}", .{self.asFloat()});
-            defer allocator.free(str);
-            return PHPString.init(allocator, str);
+            const f = self.asFloat();
+            // PHP兼容的浮点数格式化（默认精度14位，但实际输出会截断）
+            var buf: [64]u8 = undefined;
+            const str = std.fmt.bufPrint(&buf, "{d:.13}", .{f}) catch {
+                const fallback = try std.fmt.allocPrint(allocator, "{d}", .{f});
+                defer allocator.free(fallback);
+                return PHPString.init(allocator, fallback);
+            };
+            
+            // 去除尾部的0和小数点
+            var end = str.len;
+            if (std.mem.indexOfScalar(u8, str, '.')) |_| {
+                while (end > 0 and str[end - 1] == '0') : (end -= 1) {}
+                if (end > 0 and str[end - 1] == '.') end -= 1;
+            }
+            
+            return PHPString.init(allocator, str[0..end]);
         }
         if (self.isString()) {
             // 对于已经是字符串的值，创建一个新副本
@@ -1918,7 +1936,8 @@ fn wrapBuiltin_count(ctx: Value, args: []const Value, allocator: Allocator) !Val
     _ = ctx;
     _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
-    return php_count(args[0]);
+    const mode = if (args.len >= 2) args[1] else Value.initInt(0);
+    return php_count(args[0], mode);
 }
 
 fn wrapBuiltin_sqrt(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -2617,6 +2636,16 @@ pub fn php_spaceship(lhs: Value, rhs: Value) !Value {
         if (l > r) return Value.initInt(1);
         return Value.initInt(0);
     }
+    if (lhs.isString() and rhs.isString()) {
+        const l = lhs.asString();
+        const r = rhs.asString();
+        const cmp = std.mem.order(u8, l.data[0..l.length], r.data[0..r.length]);
+        return Value.initInt(switch (cmp) {
+            .lt => -1,
+            .gt => 1,
+            .eq => 0,
+        });
+    }
     const l = lhs.toFloat();
     const r = rhs.toFloat();
     if (l < r) return Value.initInt(-1);
@@ -2636,6 +2665,13 @@ pub fn php_and(lhs: Value, rhs: Value) !Value {
 /// 逻辑或运算
 pub fn php_or(lhs: Value, rhs: Value) !Value {
     return Value.initBool(lhs.toBool() or rhs.toBool());
+}
+
+/// 逻辑异或运算
+pub fn php_xor(lhs: Value, rhs: Value) !Value {
+    const l = lhs.toBool();
+    const r = rhs.toBool();
+    return Value.initBool((l and !r) or (!l and r));
 }
 
 /// 逻辑非运算
@@ -2671,12 +2707,12 @@ pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// echo语句
-pub fn php_echo(value: Value) !void {
+pub fn php_echo(value: Value) !Value {
     const stdout_file = std.fs.File{ .handle = 1 };
     
     if (value.isNull()) {
         // null不输出任何内容
-        return;
+        return Value.initNull();
     } else if (value.isBool()) {
         if (value.asBool()) {
             try stdout_file.writeAll("1");
@@ -2696,6 +2732,7 @@ pub fn php_echo(value: Value) !void {
     } else if (value.isArray()) {
         try stdout_file.writeAll("Array");
     }
+    return Value.initNull();
 }
 
 /// print语句（返回1）
@@ -2705,7 +2742,7 @@ pub fn php_print(value: Value) !Value {
 }
 
 /// var_dump函数
-pub fn php_var_dump(value: Value) !void {
+pub fn php_var_dump(value: Value) !Value {
     if (value.isNull()) {
         std.debug.print("NULL\n", .{});
     } else if (value.isBool()) {
@@ -2729,10 +2766,11 @@ pub fn php_var_dump(value: Value) !void {
                 .string => |s| std.debug.print("[\"{s}\"]", .{s.data}),
             }
             std.debug.print(" =>\n  ", .{});
-            php_var_dump(entry.value_ptr.*);
+            _ = php_var_dump(entry.value_ptr.*) catch {};
         }
         std.debug.print("}}\n", .{});
     }
+    return Value.initNull();
 }
 
 pub fn var_dump(value: Value) !Value {
@@ -2979,6 +3017,26 @@ pub const ArrayIterator = struct {
 };
 
 pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
+    // 检测是否是Iterator对象
+    if (Value_isObject(array_val)) {
+        const obj = Value_asObject(array_val);
+        if (obj.class_meta) |meta| {
+            if (meta.findMethod("rewind") != null and
+                meta.findMethod("valid") != null and
+                meta.findMethod("current") != null and
+                meta.findMethod("key") != null and
+                meta.findMethod("next") != null)
+            {
+                // 是Iterator，调用rewind()
+                _ = try php_object_call(array_val, "rewind", &[_]Value{});
+                // 返回对象本身
+                _ = array_val.retain();
+                return array_val;
+            }
+        }
+    }
+    
+    // 普通数组
     if (!array_val.isArray()) return Value.initInt(0);
     const array = array_val.asArray();
     const iter = try allocator.create(ArrayIterator);
@@ -2988,6 +3046,14 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_array_iter_valid(iter_val: Value) !Value {
+    // 检测是否是Iterator对象
+    if (Value_isObject(iter_val)) {
+        const result = try php_object_call(iter_val, "valid", &[_]Value{});
+        defer result.release(runtime_allocator);
+        return Value.initBool(result.toBool());
+    }
+    
+    // 普通数组迭代器
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initBool(false);
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
@@ -2995,6 +3061,12 @@ pub fn php_array_iter_valid(iter_val: Value) !Value {
 }
 
 pub fn php_array_iter_key(iter_val: Value, allocator: Allocator) !Value {
+    // 检测是否是Iterator对象
+    if (Value_isObject(iter_val)) {
+        return try php_object_call(iter_val, "key", &[_]Value{});
+    }
+    
+    // 普通数组迭代器
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
@@ -3012,6 +3084,12 @@ pub fn php_array_iter_key(iter_val: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_array_iter_value(iter_val: Value) !Value {
+    // 检测是否是Iterator对象
+    if (Value_isObject(iter_val)) {
+        return try php_object_call(iter_val, "current", &[_]Value{});
+    }
+    
+    // 普通数组迭代器
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
@@ -3047,16 +3125,25 @@ pub fn php_deref(ref_val: Value) !Value {
 }
 
 /// 引用赋值：将值写入引用指向的位置
-pub fn php_ref_assign(ref_val: Value, new_val: Value) !void {
+pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
     if (ref_val.isRef()) {
         const ptr = ref_val.asRef();
         ptr.release(runtime_allocator);
         _ = new_val.retain();
         ptr.* = new_val;
     }
+    return Value.initNull();
 }
 
 pub fn php_array_iter_next(iter_val: Value) !Value {
+    // 检测是否是Iterator对象
+    if (Value_isObject(iter_val)) {
+        _ = try php_object_call(iter_val, "next", &[_]Value{});
+        _ = iter_val.retain();
+        return iter_val;
+    }
+    
+    // 普通数组迭代器
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initInt(0);
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
@@ -3064,11 +3151,683 @@ pub fn php_array_iter_next(iter_val: Value) !Value {
     return Value.initInt(iter_addr);
 }
 
-pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !void {
+// Iterator接口支持
+pub fn php_is_iterator(val: Value) bool {
+    if (!Value_isObject(val)) return false;
+    const obj = Value_asObject(val);
+    const meta = obj.class_meta orelse return false;
+    return meta.findMethod("rewind") != null and
+           meta.findMethod("valid") != null and
+           meta.findMethod("current") != null and
+           meta.findMethod("key") != null and
+           meta.findMethod("next") != null;
+}
+
+pub fn php_iterator_init(obj_val: Value) !Value {
+    if (!Value_isObject(obj_val)) return Value.initNull();
+    _ = try php_object_call(obj_val, "rewind", &[_]Value{});
+    _ = obj_val.retain();
+    return obj_val;
+}
+
+pub fn php_iterator_valid(iter_val: Value) !Value {
+    if (!Value_isObject(iter_val)) return Value.initBool(false);
+    const result = try php_object_call(iter_val, "valid", &[_]Value{});
+    defer result.release(runtime_allocator);
+    return Value.initBool(result.toBool());
+}
+
+pub fn php_iterator_key(iter_val: Value) !Value {
+    if (!Value_isObject(iter_val)) return Value.initNull();
+    return try php_object_call(iter_val, "key", &[_]Value{});
+}
+
+pub fn php_iterator_current(iter_val: Value) !Value {
+    if (!Value_isObject(iter_val)) return Value.initNull();
+    return try php_object_call(iter_val, "current", &[_]Value{});
+}
+
+pub fn php_iterator_next(iter_val: Value) !Value {
+    if (!Value_isObject(iter_val)) return Value.initNull();
+    _ = try php_object_call(iter_val, "next", &[_]Value{});
+    _ = iter_val.retain();
+    return iter_val;
+}
+
+pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
+    // Iterator对象不需要释放（由GC管理）
+    if (Value_isObject(iter_val)) {
+        iter_val.release(runtime_allocator);
+        return Value.initNull();
+    }
+    
+    // 普通数组迭代器
     const iter_addr = iter_val.asInt();
-    if (iter_addr == 0) return;
+    if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     allocator.destroy(iter);
+    return Value.initNull();
+}
+
+// ============================================================================
+// ArrayIterator类（SPL）
+// ============================================================================
+
+/// ArrayIterator构造函数
+fn arrayIterator_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initNull();
+    
+    const obj = Value_asObject(ctx);
+    const array_val = args[0];
+    
+    // 存储数组到_array属性
+    _ = array_val.retain();
+    try obj.properties.put("_array", array_val);
+    
+    // 初始化位置为0
+    try obj.properties.put("_position", Value.initInt(0));
+    
+    return Value.initNull();
+}
+
+/// ArrayIterator::rewind
+fn arrayIterator_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    try obj.properties.put("_position", Value.initInt(0));
+    return Value.initNull();
+}
+
+/// ArrayIterator::valid
+fn arrayIterator_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const array_val = obj.properties.get("_array") orelse return Value.initBool(false);
+    if (!array_val.isArray()) return Value.initBool(false);
+    
+    const position = obj.properties.get("_position") orelse return Value.initBool(false);
+    const pos = position.asInt();
+    
+    const array = array_val.asArray();
+    return Value.initBool(pos >= 0 and pos < @as(i64, @intCast(array.elements.count())));
+}
+
+/// ArrayIterator::current
+fn arrayIterator_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    if (!array_val.isArray()) return Value.initNull();
+    
+    const position = obj.properties.get("_position") orelse return Value.initNull();
+    const pos = position.asInt();
+    
+    const array = array_val.asArray();
+    var iter = array.elements.iterator();
+    var i: i64 = 0;
+    while (iter.next()) |entry| {
+        if (i == pos) {
+            _ = entry.value_ptr.retain();
+            return entry.value_ptr.*;
+        }
+        i += 1;
+    }
+    return Value.initNull();
+}
+
+/// ArrayIterator::key
+fn arrayIterator_key(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = args;
+    const obj = Value_asObject(ctx);
+    
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    if (!array_val.isArray()) return Value.initNull();
+    
+    const position = obj.properties.get("_position") orelse return Value.initNull();
+    const pos = position.asInt();
+    
+    const array = array_val.asArray();
+    var iter = array.elements.iterator();
+    var i: i64 = 0;
+    while (iter.next()) |entry| {
+        if (i == pos) {
+            switch (entry.key_ptr.*) {
+                .integer => |int_key| return Value.initInt(int_key),
+                .string => |str_key| {
+                    str_key.retain();
+                    return Value.initString(str_key);
+                },
+            }
+        }
+        i += 1;
+    }
+    return Value.initNull();
+}
+
+/// ArrayIterator::next
+fn arrayIterator_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const position = obj.properties.get("_position") orelse return Value.initNull();
+    const pos = position.asInt();
+    try obj.properties.put("_position", Value.initInt(pos + 1));
+    
+    return Value.initNull();
+}
+
+/// 注册ArrayIterator类
+pub fn registerArrayIterator(allocator: Allocator) !void {
+    const meta = try allocator.create(ClassMeta);
+    const name = try allocator.dupe(u8, "ArrayIterator");
+    meta.* = .{
+        .name = name,
+        .parent = null,
+        .methods = std.StringHashMap(ClassMethod).init(allocator),
+        .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .static_properties = std.StringHashMap(Value).init(allocator),
+        .interfaces = &.{},
+        .is_abstract = false,
+        .allocator = allocator,
+    };
+    
+    // 注册方法
+    try meta.methods.put("__construct", .{
+        .name = "__construct",
+        .func = arrayIterator_construct,
+        .is_public = true,
+    });
+    
+    try meta.methods.put("rewind", .{
+        .name = "rewind",
+        .func = arrayIterator_rewind,
+        .is_public = true,
+    });
+    
+    try meta.methods.put("valid", .{
+        .name = "valid",
+        .func = arrayIterator_valid,
+        .is_public = true,
+    });
+    
+    try meta.methods.put("current", .{
+        .name = "current",
+        .func = arrayIterator_current,
+        .is_public = true,
+    });
+    
+    try meta.methods.put("key", .{
+        .name = "key",
+        .func = arrayIterator_key,
+        .is_public = true,
+    });
+    
+    try meta.methods.put("next", .{
+        .name = "next",
+        .func = arrayIterator_next,
+        .is_public = true,
+    });
+    
+    meta.magic_construct = arrayIterator_construct;
+    
+    try registerClass(meta);
+}
+
+// ============================================================================
+// SplFixedArray类（SPL）
+// ============================================================================
+
+/// SplFixedArray构造函数
+fn splFixedArray_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    const size = if (args.len > 0) args[0].asInt() else 0;
+    
+    const obj = Value_asObject(ctx);
+    
+    // 创建固定大小的数组
+    const array = try PHPArray.init(runtime_allocator);
+    for (0..@intCast(size)) |i| {
+        try array.elements.put(.{ .integer = @intCast(i) }, Value.initNull());
+    }
+    
+    const array_val = Value.initArray(array);
+    try obj.properties.put("_array", array_val);
+    try obj.properties.put("_size", Value.initInt(size));
+    try obj.properties.put("_position", Value.initInt(0));
+    
+    return Value.initNull();
+}
+
+/// SplFixedArray::getSize
+fn splFixedArray_getSize(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    return obj.properties.get("_size") orelse Value.initInt(0);
+}
+
+/// SplFixedArray::setSize
+fn splFixedArray_setSize(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initNull();
+    
+    const obj = Value_asObject(ctx);
+    const new_size = args[0].asInt();
+    const old_size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
+    
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    if (new_size > old_size) {
+        // 扩展：添加null元素
+        for (@intCast(old_size)..@intCast(new_size)) |i| {
+            try array.elements.put(.{ .integer = @intCast(i) }, Value.initNull());
+        }
+    } else if (new_size < old_size) {
+        // 缩小：删除多余元素
+        for (@intCast(new_size)..@intCast(old_size)) |i| {
+            if (array.elements.get(.{ .integer = @intCast(i) })) |val| {
+                val.release(runtime_allocator);
+            }
+            _ = array.elements.remove(.{ .integer = @intCast(i) });
+        }
+    }
+    
+    try obj.properties.put("_size", Value.initInt(new_size));
+    return Value.initNull();
+}
+
+/// SplFixedArray::toArray
+fn splFixedArray_toArray(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    const obj = Value_asObject(ctx);
+    
+    const size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    const src_array = array_val.asArray();
+    
+    // 创建新数组，只包含有效范围内的元素
+    const new_array = try PHPArray.init(allocator);
+    for (0..@intCast(size)) |i| {
+        if (src_array.elements.get(.{ .integer = @intCast(i) })) |val| {
+            _ = val.retain();
+            try new_array.elements.put(.{ .integer = @intCast(i) }, val);
+        }
+    }
+    
+    return Value.initArray(new_array);
+}
+
+/// SplFixedArray::offsetExists
+fn splFixedArray_offsetExists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initBool(false);
+    
+    const obj = Value_asObject(ctx);
+    const index = args[0].asInt();
+    const size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
+    
+    return Value.initBool(index >= 0 and index < size);
+}
+
+/// SplFixedArray::offsetGet
+fn splFixedArray_offsetGet(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initNull();
+    
+    const obj = Value_asObject(ctx);
+    const index = args[0].asInt();
+    
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    const val = array.elements.get(.{ .integer = index }) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+/// SplFixedArray::offsetSet
+fn splFixedArray_offsetSet(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 2) return Value.initNull();
+    
+    const obj = Value_asObject(ctx);
+    const index = args[0].asInt();
+    const value = args[1];
+    
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    _ = value.retain();
+    try array.elements.put(.{ .integer = index }, value);
+    
+    return Value.initNull();
+}
+
+/// SplFixedArray::offsetUnset
+fn splFixedArray_offsetUnset(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initNull();
+    
+    const obj = Value_asObject(ctx);
+    const index = args[0].asInt();
+    
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    try array.elements.put(.{ .integer = index }, Value.initNull());
+    
+    return Value.initNull();
+}
+
+/// SplFixedArray::count
+fn splFixedArray_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    return obj.properties.get("_size") orelse Value.initInt(0);
+}
+
+/// SplFixedArray::rewind
+fn splFixedArray_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    try obj.properties.put("_position", Value.initInt(0));
+    return Value.initNull();
+}
+
+/// SplFixedArray::valid
+fn splFixedArray_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const position = (obj.properties.get("_position") orelse Value.initInt(0)).asInt();
+    const size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
+    
+    return Value.initBool(position >= 0 and position < size);
+}
+
+/// SplFixedArray::current
+fn splFixedArray_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const position = (obj.properties.get("_position") orelse Value.initInt(0)).asInt();
+    const array_val = obj.properties.get("_array") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    const val = array.elements.get(.{ .integer = position }) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+/// SplFixedArray::key
+fn splFixedArray_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    return obj.properties.get("_position") orelse Value.initInt(0);
+}
+
+/// SplFixedArray::next
+fn splFixedArray_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const position = (obj.properties.get("_position") orelse Value.initInt(0)).asInt();
+    try obj.properties.put("_position", Value.initInt(position + 1));
+    
+    return Value.initNull();
+}
+
+/// 注册SplFixedArray类
+pub fn registerSplFixedArray(allocator: Allocator) !void {
+    const meta = try allocator.create(ClassMeta);
+    const name = try allocator.dupe(u8, "SplFixedArray");
+    meta.* = .{
+        .name = name,
+        .parent = null,
+        .methods = std.StringHashMap(ClassMethod).init(allocator),
+        .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .static_properties = std.StringHashMap(Value).init(allocator),
+        .interfaces = &.{},
+        .is_abstract = false,
+        .allocator = allocator,
+    };
+    
+    // 注册方法
+    try meta.methods.put("__construct", .{ .name = "__construct", .func = splFixedArray_construct, .is_public = true });
+    try meta.methods.put("getSize", .{ .name = "getSize", .func = splFixedArray_getSize, .is_public = true });
+    try meta.methods.put("setSize", .{ .name = "setSize", .func = splFixedArray_setSize, .is_public = true });
+    try meta.methods.put("toArray", .{ .name = "toArray", .func = splFixedArray_toArray, .is_public = true });
+    try meta.methods.put("count", .{ .name = "count", .func = splFixedArray_count, .is_public = true });
+    
+    // ArrayAccess接口
+    try meta.methods.put("offsetExists", .{ .name = "offsetExists", .func = splFixedArray_offsetExists, .is_public = true });
+    try meta.methods.put("offsetGet", .{ .name = "offsetGet", .func = splFixedArray_offsetGet, .is_public = true });
+    try meta.methods.put("offsetSet", .{ .name = "offsetSet", .func = splFixedArray_offsetSet, .is_public = true });
+    try meta.methods.put("offsetUnset", .{ .name = "offsetUnset", .func = splFixedArray_offsetUnset, .is_public = true });
+    
+    // Iterator接口
+    try meta.methods.put("rewind", .{ .name = "rewind", .func = splFixedArray_rewind, .is_public = true });
+    try meta.methods.put("valid", .{ .name = "valid", .func = splFixedArray_valid, .is_public = true });
+    try meta.methods.put("current", .{ .name = "current", .func = splFixedArray_current, .is_public = true });
+    try meta.methods.put("key", .{ .name = "key", .func = splFixedArray_key, .is_public = true });
+    try meta.methods.put("next", .{ .name = "next", .func = splFixedArray_next, .is_public = true });
+    
+    meta.magic_construct = splFixedArray_construct;
+    
+    try registerClass(meta);
+}
+
+// ============================================================================
+// SplStack类（SPL）
+// ============================================================================
+
+/// SplStack构造函数
+fn splStack_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    // 创建内部数组
+    const array = try PHPArray.init(runtime_allocator);
+    const array_val = Value.initArray(array);
+    try obj.properties.put("_data", array_val);
+    
+    return Value.initNull();
+}
+
+/// SplStack::push
+fn splStack_push(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initNull();
+    
+    const obj = Value_asObject(ctx);
+    const value = args[0];
+    
+    const array_val = obj.properties.get("_data") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    // 添加到数组末尾
+    const count = array.elements.count();
+    _ = value.retain();
+    try array.elements.put(.{ .integer = @intCast(count) }, value);
+    
+    return Value.initNull();
+}
+
+/// SplStack::pop
+fn splStack_pop(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const array_val = obj.properties.get("_data") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    const count = array.elements.count();
+    if (count == 0) return Value.initNull();
+    
+    // 从末尾取出
+    const last_key = ArrayKey{ .integer = @intCast(count - 1) };
+    const val = array.elements.get(last_key) orelse return Value.initNull();
+    _ = val.retain();
+    _ = array.elements.remove(last_key);
+    
+    return val;
+}
+
+/// SplStack::isEmpty
+fn splStack_isEmpty(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const array_val = obj.properties.get("_data") orelse return Value.initBool(true);
+    const array = array_val.asArray();
+    
+    return Value.initBool(array.elements.count() == 0);
+}
+
+/// 注册SplStack类
+pub fn registerSplStack(allocator: Allocator) !void {
+    const meta = try allocator.create(ClassMeta);
+    const name = try allocator.dupe(u8, "SplStack");
+    meta.* = .{
+        .name = name,
+        .parent = null,
+        .methods = std.StringHashMap(ClassMethod).init(allocator),
+        .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .static_properties = std.StringHashMap(Value).init(allocator),
+        .interfaces = &.{},
+        .is_abstract = false,
+        .allocator = allocator,
+    };
+    
+    try meta.methods.put("__construct", .{ .name = "__construct", .func = splStack_construct, .is_public = true });
+    try meta.methods.put("push", .{ .name = "push", .func = splStack_push, .is_public = true });
+    try meta.methods.put("pop", .{ .name = "pop", .func = splStack_pop, .is_public = true });
+    try meta.methods.put("isEmpty", .{ .name = "isEmpty", .func = splStack_isEmpty, .is_public = true });
+    
+    meta.magic_construct = splStack_construct;
+    
+    try registerClass(meta);
+}
+
+// ============================================================================
+// SplQueue类（SPL）
+// ============================================================================
+
+/// SplQueue构造函数
+fn splQueue_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    // 创建内部数组
+    const array = try PHPArray.init(runtime_allocator);
+    const array_val = Value.initArray(array);
+    try obj.properties.put("_data", array_val);
+    
+    return Value.initNull();
+}
+
+/// SplQueue::enqueue
+fn splQueue_enqueue(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initNull();
+    
+    const obj = Value_asObject(ctx);
+    const value = args[0];
+    
+    const array_val = obj.properties.get("_data") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    // 添加到数组末尾
+    const count = array.elements.count();
+    _ = value.retain();
+    try array.elements.put(.{ .integer = @intCast(count) }, value);
+    
+    return Value.initNull();
+}
+
+/// SplQueue::dequeue
+fn splQueue_dequeue(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const array_val = obj.properties.get("_data") orelse return Value.initNull();
+    const array = array_val.asArray();
+    
+    const count = array.elements.count();
+    if (count == 0) return Value.initNull();
+    
+    // 从开头取出
+    const first_val = array.elements.get(.{ .integer = 0 }) orelse return Value.initNull();
+    _ = first_val.retain();
+    
+    // 重新索引：将所有元素向前移动
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        if (array.elements.get(.{ .integer = @intCast(i) })) |val| {
+            try array.elements.put(.{ .integer = @intCast(i - 1) }, val);
+        }
+    }
+    
+    // 删除最后一个位置
+    _ = array.elements.remove(.{ .integer = @intCast(count - 1) });
+    
+    return first_val;
+}
+
+/// SplQueue::isEmpty
+fn splQueue_isEmpty(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    
+    const array_val = obj.properties.get("_data") orelse return Value.initBool(true);
+    const array = array_val.asArray();
+    
+    return Value.initBool(array.elements.count() == 0);
+}
+
+/// 注册SplQueue类
+pub fn registerSplQueue(allocator: Allocator) !void {
+    const meta = try allocator.create(ClassMeta);
+    const name = try allocator.dupe(u8, "SplQueue");
+    meta.* = .{
+        .name = name,
+        .parent = null,
+        .methods = std.StringHashMap(ClassMethod).init(allocator),
+        .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .static_properties = std.StringHashMap(Value).init(allocator),
+        .interfaces = &.{},
+        .is_abstract = false,
+        .allocator = allocator,
+    };
+    
+    try meta.methods.put("__construct", .{ .name = "__construct", .func = splQueue_construct, .is_public = true });
+    try meta.methods.put("enqueue", .{ .name = "enqueue", .func = splQueue_enqueue, .is_public = true });
+    try meta.methods.put("dequeue", .{ .name = "dequeue", .func = splQueue_dequeue, .is_public = true });
+    try meta.methods.put("isEmpty", .{ .name = "isEmpty", .func = splQueue_isEmpty, .is_public = true });
+    
+    meta.magic_construct = splQueue_construct;
+    
+    try registerClass(meta);
 }
 
 // ============================================================================
@@ -3079,6 +3838,34 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !void {
 pub fn php_strlen(str: Value) !Value {
     if (!str.isString()) return Value.initInt(0);
     return Value.initInt(@intCast(str.asString().length));
+}
+
+/// str_word_count - 统计单词数量
+pub fn php_str_word_count(str: Value, format: Value, charlist: Value) !Value {
+    _ = charlist;
+    if (!str.isString()) return Value.initInt(0);
+    
+    const s = str.asString().data;
+    const fmt = if (format.isInt()) format.asInt() else 0;
+    
+    if (fmt != 0) return Value.initInt(0); // 简化：只支持format=0
+    
+    var count: i64 = 0;
+    var in_word = false;
+    
+    for (s) |c| {
+        const is_alpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9');
+        if (is_alpha) {
+            if (!in_word) {
+                count += 1;
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+        }
+    }
+    
+    return Value.initInt(count);
 }
 
 /// substr - 获取子字符串
@@ -3342,6 +4129,25 @@ pub fn php_str_pad(str: Value, length: Value, pad_str: Value, pad_type: Value, a
 
     const result = try PHPString.init(allocator, buffer);
     allocator.free(buffer);
+    return Value.initString(result);
+}
+
+/// strstr - 查找字符串首次出现的位置并返回剩余部分
+pub fn php_strstr(haystack: Value, needle: Value, allocator: Allocator) !Value {
+    if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
+    
+    const h = haystack.asString();
+    const n = needle.asString();
+    if (n.length == 0) return Value.initBool(false);
+    
+    const pos = std.mem.indexOf(u8, h.data[0..h.length], n.data[0..n.length]) orelse return Value.initBool(false);
+    
+    const result_len = h.length - pos;
+    const buffer = try allocator.alloc(u8, result_len);
+    @memcpy(buffer, h.data[pos..h.length]);
+    
+    const result = try allocator.create(PHPString);
+    result.* = .{ .data = buffer, .length = result_len, .ref_count = 1, .is_static = false };
     return Value.initString(result);
 }
 
@@ -3691,6 +4497,16 @@ pub fn php_strcasecmp(str1: Value, str2: Value, allocator: Allocator) !Value {
 /// @param arr 要计数的数组
 /// @param mode 可选，COUNT_RECURSIVE(1)表示递归计数
 pub fn php_count(arr: Value, mode: Value) !Value {
+    // 检测Countable对象
+    if (Value_isObject(arr)) {
+        const obj = Value_asObject(arr);
+        if (obj.class_meta) |meta| {
+            if (meta.findMethod("count")) |_| {
+                return try php_object_call(arr, "count", &[_]Value{});
+            }
+        }
+    }
+    
     if (!arr.isArray()) return Value.initInt(0);
     
     const mode_int = if (mode.isInt()) mode.asInt() else 0;
@@ -3908,7 +4724,38 @@ pub fn php_array_merge(arrays: []const Value, allocator: Allocator) !Value {
     }
 
     result.next_index = next_int_key;
+
     return Value.initArray(result);
+}
+
+/// Merge array into target (for spread operator)
+pub fn php_array_merge_into(target: Value, source: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!target.isArray()) return target;
+    if (!source.isArray()) return target;
+    
+    const target_arr = target.asArray();
+    const source_arr = source.asArray();
+    
+    // 安全检查：确保source_arr有效
+    if (source_arr.elements.mixed) |*m| {
+        // 检查mixed map是否有效
+        if (m.count() > 1000000) {  // 不合理的大小
+            return target;
+        }
+    }
+    
+    // 遍历源数组的所有元素
+    var iter = source_arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const value = entry.value_ptr.*.retain();
+        // 使用整数键追加到目标数组
+        const new_key = ArrayKey{ .integer = target_arr.next_index };
+        try target_arr.elements.put(new_key, value);
+        target_arr.next_index += 1;
+    }
+    
+    return target;
 }
 
 /// array_keys - 返回数组中所有的键
@@ -4296,6 +5143,74 @@ pub fn php_is_numeric(val: Value) !Value {
     }
     return Value.initBool(false);
 }
+
+/// is_callable - 检查是否可调用（简化实现）
+pub fn php_is_callable(val: Value) !Value {
+    return Value.initBool(val.isString() or val.isArray() or val.isFunction());
+}
+
+/// unset - 删除变量（AOT中返回null）
+pub fn php_unset(_: Value) !Value {
+    return Value.initNull();
+}
+
+// ============================================================================
+// 文件I/O函数
+// ============================================================================
+
+/// fopen - 打开文件
+pub fn php_fopen(filename: Value, mode: Value) !Value {
+    const fname = filename.asString();
+    const fmode = mode.asString();
+    
+    // 特殊处理 php://memory 和 php://temp
+    if (std.mem.startsWith(u8, fname.data, "php://")) {
+        return Value.initInt(1); // 虚拟句柄
+    }
+    
+    // 尝试打开文件验证存在性
+    _ = std.fs.cwd().openFile(fname.data, .{
+        .mode = if (std.mem.indexOf(u8, fmode.data, "r") != null) .read_only else .read_write,
+    }) catch {
+        return Value.initBool(false);
+    };
+    
+    // 简化：返回虚拟句柄
+    return Value.initInt(1);
+}
+
+/// fclose - 关闭文件
+pub fn php_fclose(handle: Value) !Value {
+    _ = handle;
+    // 简化：总是返回成功
+    return Value.initBool(true);
+}
+
+/// fread - 读取文件
+pub fn php_fread(handle: Value, length: Value) !Value {
+    _ = handle;
+    _ = length;
+    // 简化：返回空字符串
+    return Value.initString("");
+}
+
+/// fwrite - 写入文件
+pub fn php_fwrite(handle: Value, data: Value) !Value {
+    _ = handle;
+    const str = data.asString();
+    return Value.initInt(@intCast(str.data.len));
+}
+
+/// is_resource - 检查是否为资源
+pub fn php_is_resource(val: Value) !Value {
+    // 简化：检查是否为正整数（文件句柄）
+    if (val.isInt()) {
+        const i = val.asInt();
+        return Value.initBool(i > 0);
+    }
+    return Value.initBool(false);
+}
+
 // ============================================================================
 // 字符串插值函数
 // ============================================================================
@@ -4696,12 +5611,8 @@ pub fn findClass(name: []const u8) ?*ClassMeta {
 
 /// 清理所有注册的类和对象
 pub fn cleanupAllClasses() void {
-    // 清理所有对象
+    // 清空对象注册表（不释放，由全局变量cleanup处理）
     if (global_object_registry) |*registry| {
-        while (registry.items.len > 0) {
-            const obj = registry.pop().?;
-            obj.release();
-        }
         registry.deinit(runtime_allocator);
         global_object_registry = null;
     }
@@ -4770,12 +5681,13 @@ pub const PHPObject = struct {
             alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
         }
 
-        // 初始化默认属性值
+        // 初始化默认属性值（直接设置，不触发__set）
         var prop_iter = meta.properties.iterator();
         while (prop_iter.next()) |entry| {
             if (!entry.value_ptr.is_static) {
                 if (entry.value_ptr.default_value) |default| {
-                    try obj.setProperty(entry.key_ptr.*, default);
+                    _ = default.retain();
+                    try obj.properties.put(entry.key_ptr.*, default);
                 }
             }
         }
@@ -4841,14 +5753,23 @@ pub const PHPObject = struct {
     }
 
     /// 获取属性（支持 __get 魔法函数）
+// 防止magic method递归调用的标志
+threadlocal var in_magic_method: bool = false;
+
     pub fn getProperty(self: *PHPObject, name: []const u8) ?Value {
         if (self.properties.get(name)) |val| {
             _ = val.retain();
             return val;
         }
+        // 防止递归调用__get
+        if (in_magic_method) return null;
+        
         // 调用 __get 魔法函数
         if (self.class_meta) |meta| {
             if (meta.findMethodLookup("__get")) |lookup| {
+                in_magic_method = true;
+                defer in_magic_method = false;
+                
                 const this_val = Value_initObject(self);
                 const name_str = PHPString.init(self.allocator, name) catch return null;
                 const name_val = Value.initString(name_str);
@@ -4863,21 +5784,36 @@ pub const PHPObject = struct {
         return null;
     }
 
+    /// 直接获取属性（不触发__get）
+    pub fn getPropertyDirect(self: *PHPObject, name: []const u8) ?Value {
+        if (self.properties.get(name)) |val| {
+            _ = val.retain();
+            return val;
+        }
+        return null;
+    }
+
     /// 设置属性（支持 __set 魔法函数）
     pub fn setProperty(self: *PHPObject, name: []const u8, value: Value) !void {
-        // 检查是否有 __set 魔法函数且属性不存在
-        if (self.properties.get(name) == null) {
-            if (self.class_meta) |meta| {
-                if (meta.findMethodLookup("__set")) |lookup| {
-                    const this_val = Value_initObject(self);
-                    const name_str = try PHPString.init(self.allocator, name);
-                    const name_val = Value.initString(name_str);
-                    defer name_val.release(self.allocator);
-                    const args = [_]Value{ name_val, value };
-                    const guard = ClassContext.init(meta, lookup.owner);
-                    defer guard.deinit();
-                    _ = try lookup.method.func(this_val, &args, self.allocator);
-                    return;
+        // 防止递归调用__set
+        if (!in_magic_method) {
+            // 检查是否有 __set 魔法函数且属性不存在
+            if (self.properties.get(name) == null) {
+                if (self.class_meta) |meta| {
+                    if (meta.findMethodLookup("__set")) |lookup| {
+                        in_magic_method = true;
+                        defer in_magic_method = false;
+                        
+                        const this_val = Value_initObject(self);
+                        const name_str = try PHPString.init(self.allocator, name);
+                        const name_val = Value.initString(name_str);
+                        defer name_val.release(self.allocator);
+                        const args = [_]Value{ name_val, value };
+                        const guard = ClassContext.init(meta, lookup.owner);
+                        defer guard.deinit();
+                        _ = try lookup.method.func(this_val, &args, self.allocator);
+                        return;
+                    }
                 }
             }
         }
@@ -5018,6 +5954,15 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     return obj.getProperty(property_name) orelse Value.initNull();
 }
 
+pub fn php_object_get_direct(obj_val: Value, property_name: []const u8) !Value {
+    if (!Value_isObject(obj_val)) {
+        return error.NotAnObject;
+    }
+
+    const obj = Value_asObject(obj_val);
+    return obj.getPropertyDirect(property_name) orelse Value.initNull();
+}
+
 pub fn php_object_get_safe_value(obj_val: Value, prop_name_val: Value) !Value {
     if (!Value_isObject(obj_val)) {
         return Value.initNull();
@@ -5037,7 +5982,8 @@ pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
         return error.InvalidPropertyName;
     }
     const obj = Value_asObject(obj_val);
-    return obj.getProperty(prop_name_val.asString().data) orelse Value.initNull();
+    const prop_str = prop_name_val.asString();
+    return obj.getProperty(prop_str.data) orelse Value.initNull();
 }
 
 pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value) !Value {
@@ -5048,7 +5994,8 @@ pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value
         return error.InvalidPropertyName;
     }
     const obj = Value_asObject(obj_val);
-    try obj.setProperty(prop_name_val.asString().data, value);
+    const prop_str = prop_name_val.asString();
+    try obj.setProperty(prop_str.data, value);
     return Value.initNull();
 }
 
@@ -5091,8 +6038,10 @@ pub fn php_cast_object(val: Value) !Value {
                 },
                 .integer => |idx| {
                     const key_str = try std.fmt.allocPrint(runtime_allocator, "{d}", .{idx});
-                    defer runtime_allocator.free(key_str);
-                    try obj.setProperty(key_str, entry.value_ptr.*);
+                    errdefer runtime_allocator.free(key_str);
+                    const key_copy = try runtime_allocator.dupe(u8, key_str);
+                    runtime_allocator.free(key_str);
+                    try obj.properties.put(key_copy, entry.value_ptr.*.retain());
                 },
             }
         }
@@ -5106,13 +6055,14 @@ pub fn php_cast_object(val: Value) !Value {
 /// @param obj_val 对象Value
 /// @param property_name 属性名
 /// @param value 属性值
-pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !void {
+pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !Value {
     if (!Value_isObject(obj_val)) {
         return error.NotAnObject;
     }
 
     const obj = Value_asObject(obj_val);
     try obj.setProperty(property_name, value);
+    return Value.initNull();
 }
 
 /// 调用对象方法
@@ -5371,11 +6321,16 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
 pub fn php_get_static_property(class_name: []const u8, property_name: []const u8) !Value {
     const meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
-            const scope = getCurrentScopeClass();
-            if (scope == null) {
-                std.debug.print("ERROR: getCurrentScopeClass() returned null\n", .{});
+            // 尝试从当前作用域获取
+            if (getCurrentScopeClass()) |scope| {
+                break :blk scope;
             }
-            break :blk scope orelse return error.ClassNotFound;
+            // 如果没有作用域，尝试从调用类获取
+            if (getCurrentCalledClass()) |called| {
+                break :blk called;
+            }
+            std.debug.print("ERROR: getCurrentScopeClass() returned null for 'self'\n", .{});
+            return error.ClassNotFound;
         }
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
@@ -5394,7 +6349,7 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
 }
 
 /// 设置静态属性
-pub fn php_set_static_property(class_name: []const u8, property_name: []const u8, value: Value) !void {
+pub fn php_set_static_property(class_name: []const u8, property_name: []const u8, value: Value) !Value {
     var meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
             break :blk @constCast(getCurrentScopeClass() orelse return error.ClassNotFound);
@@ -5409,6 +6364,7 @@ pub fn php_set_static_property(class_name: []const u8, property_name: []const u8
         break :blk findClass(class_name) orelse return error.ClassNotFound;
     };
     try meta.setStaticProperty(property_name, value);
+    return Value.initNull();
 }
 
 fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: Allocator) !void {
@@ -5890,22 +6846,24 @@ pub fn php_date(format: Value, timestamp: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// 线程局部随机数生成器状态
-threadlocal var rng_state: u64 = 0;
+// C标准库rand/srand
+extern fn srand(seed: c_uint) void;
+extern fn rand() c_int;
+
 threadlocal var rng_initialized: bool = false;
 
 /// 初始化随机数生成器
 fn ensureRngInitialized() void {
     if (!rng_initialized) {
-        rng_state = @as(u64, @intCast(std.time.timestamp()));
+        srand(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
         rng_initialized = true;
     }
 }
 
-/// 简单的线性同余生成器
+/// 使用系统rand()
 fn nextRandom() u64 {
     ensureRngInitialized();
-    rng_state = rng_state *% 1103515245 +% 12345;
-    return rng_state;
+    return @intCast(rand());
 }
 
 /// rand - 生成随机整数
@@ -5950,9 +6908,9 @@ pub fn php_mt_rand(min: Value, max: Value) !Value {
 /// @param seed 种子值（可选）
 pub fn php_srand(seed: Value) !Value {
     if (seed.isNull()) {
-        rng_state = @as(u64, @intCast(std.time.timestamp()));
+        srand(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
     } else {
-        rng_state = @as(u64, @intCast(@abs(seed.toInt())));
+        srand(@intCast(@as(u64, @intCast(@abs(seed.toInt()))) & 0xFFFFFFFF));
     }
     rng_initialized = true;
     return Value.initNull();
@@ -6875,44 +7833,22 @@ fn invokeUserCompare(callback: Value, a: Value, b: Value, allocator: Allocator) 
 }
 
 fn quickSortValuesWithCallback(values: []Value, callback: Value, allocator: Allocator, descending: bool) !void {
+    // 使用冒泡排序，简单可靠
     if (values.len < 2) return;
-
-    const pivot = values[values.len / 2];
+    
     var i: usize = 0;
-    var j: usize = values.len - 1;
-
-    while (i <= j) {
-        while (true) {
-            const cmp = try invokeUserCompare(callback, values[i], pivot, allocator);
-            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
-                i += 1;
-                if (i >= values.len) break;
-                continue;
+    while (i < values.len) : (i += 1) {
+        var j: usize = 0;
+        while (j < values.len - 1 - i) : (j += 1) {
+            const cmp = try invokeUserCompare(callback, values[j], values[j + 1], allocator);
+            const should_swap = if (descending) cmp < 0 else cmp > 0;
+            if (should_swap) {
+                const tmp = values[j];
+                values[j] = values[j + 1];
+                values[j + 1] = tmp;
             }
-            break;
-        }
-        while (true) {
-            const cmp = try invokeUserCompare(callback, values[j], pivot, allocator);
-            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
-                if (j == 0) break;
-                j -= 1;
-                continue;
-            }
-            break;
-        }
-
-        if (i <= j) {
-            const tmp = values[i];
-            values[i] = values[j];
-            values[j] = tmp;
-            i += 1;
-            if (j == 0) break;
-            j -= 1;
         }
     }
-
-    if (j > 0) try quickSortValuesWithCallback(values[0 .. j + 1], callback, allocator, descending);
-    if (i < values.len) try quickSortValuesWithCallback(values[i..], callback, allocator, descending);
 }
 
 fn quickSortEntriesByValueWithCallback(items: []KV, callback: Value, allocator: Allocator, descending: bool) !void {
@@ -8592,6 +9528,28 @@ pub fn php_bin2hex(str: Value, allocator: Allocator) !Value {
     }
 
     const php_str = try PHPString.init(allocator, hex_str);
+    return Value.initString(php_str);
+}
+
+/// decbin - 十进制转二进制
+pub fn php_decbin(num: Value, allocator: Allocator) !Value {
+    const n = if (num.isInt()) num.asInt() else @as(i64, @intFromFloat(num.asFloat()));
+    if (n == 0) {
+        const php_str = try PHPString.init(allocator, "0");
+        return Value.initString(php_str);
+    }
+    
+    var abs_n: u64 = if (n < 0) @intCast(-n) else @intCast(n);
+    var buf: [64]u8 = undefined;
+    var len: usize = 0;
+    
+    while (abs_n > 0) : (abs_n >>= 1) {
+        buf[63 - len] = if (abs_n & 1 == 1) '1' else '0';
+        len += 1;
+    }
+    
+    const result = buf[64 - len..];
+    const php_str = try PHPString.init(allocator, result);
     return Value.initString(php_str);
 }
 

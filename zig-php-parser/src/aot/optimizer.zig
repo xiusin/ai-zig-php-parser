@@ -929,7 +929,7 @@ pub const IROptimizer = struct {
             .add, .sub, .mul, .div, .mod, .pow => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
             .bit_and, .bit_or, .bit_xor, .shl, .shr => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
-            .and_, .or_, .concat => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
+            .and_, .or_, .xor_, .concat => |op| return self.isInvariant(op.lhs, loop) and self.isInvariant(op.rhs, loop),
             .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type => |op| return self.isInvariant(op.operand, loop),
             .load => |op| {
                 // Load is invariant if pointer is invariant AND memory is not modified in loop.
@@ -2058,7 +2058,7 @@ pub const IROptimizer = struct {
             .add, .sub, .mul, .div, .mod, .pow => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
             .bit_and, .bit_or, .bit_xor, .shl, .shr => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
-            .and_, .or_, .concat => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
+            .and_, .or_, .xor_, .concat => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
             .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type => |op| return op.operand.id == reg_id,
             .call => |op| {
                 for (op.args) |arg| if (arg.id == reg_id) return true;
@@ -2554,7 +2554,7 @@ pub const IROptimizer = struct {
                     try worklist.append(self.allocator, op.rhs.id);
                 }
             },
-            .and_, .or_, .concat => |op| {
+            .and_, .or_, .xor_, .concat => |op| {
                 if (!self.used_registers.contains(op.lhs.id)) {
                     try self.used_registers.put(op.lhs.id, {});
                     try worklist.append(self.allocator, op.lhs.id);
@@ -2722,7 +2722,7 @@ pub const IROptimizer = struct {
                 try self.used_registers.put(op.lhs.id, {});
                 try self.used_registers.put(op.rhs.id, {});
             },
-            .and_, .or_, .concat => |op| {
+            .and_, .or_, .xor_, .concat => |op| {
                 try self.used_registers.put(op.lhs.id, {});
                 try self.used_registers.put(op.rhs.id, {});
             },
@@ -2937,7 +2937,7 @@ pub const IROptimizer = struct {
             .add, .sub, .mul, .div, .mod, .pow => false,
             .bit_and, .bit_or, .bit_xor, .bit_not, .shl, .shr => false,
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => false,
-            .and_, .or_, .not => false,
+            .and_, .or_, .xor_, .not => false,
             .neg => false,
             .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => false,
             .param, .capture_get, .arg_count, .has_arg => false,

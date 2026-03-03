@@ -995,6 +995,13 @@ pub const BytecodeVM = struct {
                     self.stack[idx] = .{ .int_val = val - 1 };
                 },
 
+                .pow_int => {
+                    const b = (try self.pop()).toInt();
+                    const a = (try self.pop()).toInt();
+                    const result = std.math.pow(i64, a, @intCast(b));
+                    try self.push(.{ .int_val = result });
+                },
+
                 .bit_and => {
                     const b = (try self.pop()).toInt();
                     const a = (try self.pop()).toInt();
@@ -3889,6 +3896,7 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.neg_int)] = handleNegInt;
     table[@intFromEnum(OpCode.inc_int)] = handleIncInt;
     table[@intFromEnum(OpCode.dec_int)] = handleDecInt;
+    table[@intFromEnum(OpCode.pow_int)] = handlePowInt;
     table[@intFromEnum(OpCode.bit_and)] = handleBitAnd;
     table[@intFromEnum(OpCode.bit_or)] = handleBitOr;
     table[@intFromEnum(OpCode.bit_xor)] = handleBitXor;
@@ -4375,6 +4383,14 @@ fn handleDecInt(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeV
     const idx = frame.base_pointer + inst.operand1;
     const val = vm.stack[idx].toInt();
     vm.stack[idx] = .{ .int_val = val - 1 };
+    return .continue_execution;
+}
+
+fn handlePowInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const b = (try vm.pop()).toInt();
+    const a = (try vm.pop()).toInt();
+    const result = std.math.pow(i64, a, @intCast(b));
+    try vm.push(.{ .int_val = result });
     return .continue_execution;
 }
 

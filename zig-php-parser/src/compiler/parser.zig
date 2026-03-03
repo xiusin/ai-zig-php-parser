@@ -523,6 +523,10 @@ pub const Parser = struct {
             }
 
             // In Go mode, property names can be t_go_identifier (without $ prefix)
+            var properties = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer properties.deinit(self.allocator);
+            
+            // Parse first property
             var name_str: []const u8 = undefined;
             if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
                 const name_tok = try self.eat(.t_go_identifier);
@@ -548,10 +552,56 @@ pub const Parser = struct {
                 self.nextToken();
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
                 _ = try self.eat(.r_brace);
-            } else if (self.curr.tag == .semicolon) {
+            }
+            
+            const first_prop = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+            try properties.append(self.allocator, first_prop);
+            
+            // Parse additional properties if comma-separated
+            while (self.curr.tag == .comma) {
+                self.nextToken();
+                
+                var prop_name_str: []const u8 = undefined;
+                if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
+                    const name_tok = try self.eat(.t_go_identifier);
+                    prop_name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+                } else {
+                    const name_tok = try self.eat(.t_variable);
+                    prop_name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+                    if (prop_name_str.len > 0 and prop_name_str[0] == '$') {
+                        prop_name_str = prop_name_str[1..];
+                    }
+                }
+                const prop_name_id = try self.context.intern(prop_name_str);
+                
+                var prop_default: ?ast.Node.Index = null;
+                if (self.curr.tag == .equal) {
+                    self.nextToken();
+                    prop_default = try self.parseExpression(0);
+                }
+                
+                var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+                if (self.curr.tag == .l_brace) {
+                    self.nextToken();
+                    while (self.curr.tag != .r_brace) try prop_hooks.append(self.allocator, try self.parsePropertyHook());
+                    _ = try self.eat(.r_brace);
+                }
+                
+                const prop_node = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = prop_name_id, .modifiers = modifiers, .type = type_node, .default_value = prop_default, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, prop_hooks.items) } } });
+                try properties.append(self.allocator, prop_node);
+            }
+            
+            if (self.curr.tag == .semicolon) {
                 self.nextToken();
             }
-            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+            
+            // If only one property, return it directly
+            if (properties.items.len == 1) {
+                return properties.items[0];
+            }
+            
+            // Multiple properties: return as expr_list
+            return self.createNode(.{ .tag = .expr_list, .main_token = token, .data = .{ .expr_list = .{ .exprs = try self.context.arena.allocator().dupe(ast.Node.Index, properties.items) } } });
         }
     }
 
@@ -654,6 +704,10 @@ pub const Parser = struct {
             }
 
             // In Go mode, property names can be t_go_identifier (without $ prefix)
+            var properties = std.ArrayListUnmanaged(ast.Node.Index){};
+            defer properties.deinit(self.allocator);
+            
+            // Parse first property
             var name_str: []const u8 = undefined;
             if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
                 const name_tok = try self.eat(.t_go_identifier);
@@ -679,10 +733,56 @@ pub const Parser = struct {
                 self.nextToken();
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
                 _ = try self.eat(.r_brace);
-            } else if (self.curr.tag == .semicolon) {
+            }
+            
+            const first_prop = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+            try properties.append(self.allocator, first_prop);
+            
+            // Parse additional properties if comma-separated
+            while (self.curr.tag == .comma) {
+                self.nextToken();
+                
+                var prop_name_str: []const u8 = undefined;
+                if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
+                    const name_tok = try self.eat(.t_go_identifier);
+                    prop_name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+                } else {
+                    const name_tok = try self.eat(.t_variable);
+                    prop_name_str = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+                    if (prop_name_str.len > 0 and prop_name_str[0] == '$') {
+                        prop_name_str = prop_name_str[1..];
+                    }
+                }
+                const prop_name_id = try self.context.intern(prop_name_str);
+                
+                var prop_default: ?ast.Node.Index = null;
+                if (self.curr.tag == .equal) {
+                    self.nextToken();
+                    prop_default = try self.parseExpression(0);
+                }
+                
+                var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+                if (self.curr.tag == .l_brace) {
+                    self.nextToken();
+                    while (self.curr.tag != .r_brace) try prop_hooks.append(self.allocator, try self.parsePropertyHook());
+                    _ = try self.eat(.r_brace);
+                }
+                
+                const prop_node = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = prop_name_id, .modifiers = modifiers, .type = type_node, .default_value = prop_default, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, prop_hooks.items) } } });
+                try properties.append(self.allocator, prop_node);
+            }
+            
+            if (self.curr.tag == .semicolon) {
                 self.nextToken();
             }
-            return self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
+            
+            // If only one property, return it directly
+            if (properties.items.len == 1) {
+                return properties.items[0];
+            }
+            
+            // Multiple properties: return as expr_list
+            return self.createNode(.{ .tag = .expr_list, .main_token = token, .data = .{ .expr_list = .{ .exprs = try self.context.arena.allocator().dupe(ast.Node.Index, properties.items) } } });
         }
     }
 
@@ -1494,6 +1594,15 @@ pub const Parser = struct {
             const op = self.curr;
             self.nextToken();
             if (tag == .arrow) {
+                // Check for dynamic property access: $obj->{'expr'}
+                if (self.curr.tag == .l_brace) {
+                    self.nextToken();
+                    const expr_node = try self.parseExpression(0);
+                    _ = try self.eat(.r_brace);
+                    left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = expr_node } } });
+                    continue;
+                }
+                
                 // 方法名可以是标识符，也可以是某些关键字（如 set, get）
                 // In Go mode, member names are t_go_identifier; in PHP mode, they are t_string
                 const member_name_tok = if (self.curr.tag == .t_string)
@@ -1763,6 +1872,15 @@ pub const Parser = struct {
                 // Method call or property access: $obj->method(...) or $obj->property
                 const op = self.curr;
                 self.nextToken();
+
+                // Check for dynamic property access: $obj->{'expr'}
+                if (self.curr.tag == .l_brace) {
+                    self.nextToken();
+                    const expr_node = try self.parseExpression(0);
+                    _ = try self.eat(.r_brace);
+                    left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = expr_node } } });
+                    continue;
+                }
 
                 // Parse method/property name
                 const member_name_tok = if (self.curr.tag == .t_string)
@@ -2412,6 +2530,7 @@ pub const Parser = struct {
             .safe_dot => 100, // 安全导航操作符 ?. (Go 模式)
             .double_colon => 100, // Static access has same precedence as instance access
             .pipe_greater => 90, // Pipe operator has high precedence
+            .star_star => 70, // Exponentiation (higher than multiplication)
             .asterisk, .slash, .percent => 60,
             .plus, .minus, .dot => 50, // String concatenation has same precedence as addition/subtraction
             .less, .greater, .less_equal, .greater_equal, .spaceship => 40,
@@ -2424,7 +2543,7 @@ pub const Parser = struct {
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
             .question => 7, // Ternary
-            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal => 5,
+            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal, .star_star_equal => 5,
             .comma => 1, // Comma operator (lowest precedence)
             else => 0,
         };

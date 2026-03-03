@@ -35,6 +35,8 @@ pub const Module = struct {
     string_table: std.ArrayListUnmanaged([]const u8),
     /// 类型推断结果：函数名 -> (寄存器ID -> 推断类型)
     inferred_types: std.StringHashMap(std.AutoHashMap(usize, Type)),
+    /// 匿名类计数器
+    next_anon_class_id: u32 = 0,
 
     const Self = @This();
 
@@ -106,8 +108,9 @@ pub const Module = struct {
                 return @intCast(i);
             }
         }
-        // Add new string
-        try self.string_table.append(self.allocator, str);
+        // Add new string (must dupe to ensure lifetime)
+        const duped = try self.allocator.dupe(u8, str);
+        try self.string_table.append(self.allocator, duped);
         return @intCast(self.string_table.items.len - 1);
     }
 
@@ -674,6 +677,8 @@ pub const Instruction = struct {
         and_: BinaryOp,
         /// Logical OR
         or_: BinaryOp,
+        /// Logical XOR
+        xor_: BinaryOp,
         /// Logical NOT
         not: UnaryOp,
 
@@ -1357,6 +1362,7 @@ pub const IRPrinter = struct {
             // Logical
             .and_ => |op| try self.print("and {any}, {any}", .{ op.lhs, op.rhs }),
             .or_ => |op| try self.print("or {any}, {any}", .{ op.lhs, op.rhs }),
+            .xor_ => |op| try self.print("xor {any}, {any}", .{ op.lhs, op.rhs }),
             .not => |op| try self.print("not {any}", .{op.operand}),
 
             // Memory
