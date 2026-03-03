@@ -120,6 +120,8 @@ pub const NativeLinker = struct {
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
     current_inferred_types: ?*const std.AutoHashMap(usize, IR.Type) = null, // 类型推断结果
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
+    ir_module: ?*const IR.Module = null, // 当前IR模块（用于查找函数）
+    param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
 
     const Self = @This();
 
@@ -299,6 +301,11 @@ pub const NativeLinker = struct {
     /// 将 IR 模块转换为 Zig 代码
     pub fn generateZigCode(self: *Self, ir_module: *const IR.Module) ![]const u8 {
         std.debug.print("=== generateZigCode: {d} functions ===\n", .{ir_module.functions.items.len});
+        
+        // 设置当前IR模块
+        self.ir_module = ir_module;
+        defer self.ir_module = null;
+        
         var code = std.ArrayList(u8){};
         errdefer code.deinit(self.allocator);
 
@@ -1381,6 +1388,12 @@ pub const NativeLinker = struct {
         self.current_function_has_this = has_this;
         self.current_function_for_resolve = func;
         defer self.current_function_for_resolve = null;
+        
+        // 初始化参数寄存器映射
+        var param_regs = std.StringHashMap(usize).init(self.allocator);
+        defer param_regs.deinit();
+        self.param_registers = &param_regs;
+        defer self.param_registers = null;
 
         // 验证函数名
         if (func.name.len == 0 or !std.unicode.utf8ValidateSlice(func.name)) {
@@ -1566,6 +1579,11 @@ pub const NativeLinker = struct {
                         else => {},
                     }
 
+                    // alloca指令的类型不应该被修正
+                    if (inst.op == .alloca) {
+                        corrected_type = reg.type_;
+                    }
+
                     try all_registers.put(reg.id, corrected_type);
                     if (inst.op == .alloca) {
                         try alloca_registers.put(reg.id, {});
@@ -1729,6 +1747,7 @@ pub const NativeLinker = struct {
                         .const_string, .const_null,
                         .array_new, .new_object, .call, .call_indirect,
                         .array_get, .property_get,
+                        .alloca, // alloca类型不应该被修改
                         => {
                             try definite_types.put(reg.id, {});
                         },
@@ -2026,6 +2045,40 @@ pub const NativeLinker = struct {
             if (block.terminator) |term| {
                 switch (term) {
                     .ret => |ret_val| {
+                        // 引用参数写回
+                        if (func.ref_params.items.len > 0) {
+                            try code.appendSlice(self.allocator, "\n    // Write back reference parameters\n");
+                            const func_has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
+                            for (func.ref_params.items) |ref_idx| {
+                                const param = func.params.items[ref_idx];
+                                const args_index = if (func_has_this) (if (ref_idx > 0) ref_idx - 1 else 0) else ref_idx;
+                                
+                                // 查找param指令对应的alloca
+                                for (func.blocks.items[0].instructions.items) |inst| {
+                                    if (inst.op == .param and inst.result != null) {
+                                        if (std.mem.eql(u8, inst.op.param.name, param.name)) {
+                                            const param_reg_id = inst.result.?.id;
+                                            // 找到对应的store指令
+                                            for (func.blocks.items[0].instructions.items) |store_inst| {
+                                                if (store_inst.op == .store and store_inst.op.store.value.id == param_reg_id) {
+                                                    const alloca_reg_id = store_inst.op.store.ptr.id;
+                                                    try code.writer(self.allocator).print("    if (args.len > {d} and args[{d}].isRef()) {{\n", .{ args_index, args_index });
+                                                    if (alloca_registers.contains(alloca_reg_id)) {
+                                                        try code.writer(self.allocator).print("        args[{d}].asRef().* = reg_{d}.*;\n", .{ args_index, alloca_reg_id });
+                                                    } else {
+                                                        try code.writer(self.allocator).print("        args[{d}].asRef().* = reg_{d};\n", .{ args_index, alloca_reg_id });
+                                                    }
+                                                    try code.appendSlice(self.allocator, "    }\n");
+                                                    break;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
                         // 在return之前执行cleanup，但跳过即将返回的寄存器
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
@@ -3207,14 +3260,59 @@ pub const NativeLinker = struct {
         writer: anytype,
         args: []const IR.Register,
     ) !void {
+        return self.writeValueArgsArrayWithRefs(writer, args, null, &[_]u32{});
+    }
+
+    fn writeValueArgsArrayWithRefs(
+        self: *Self,
+        writer: anytype,
+        args: []const IR.Register,
+        func_name: ?[]const u8,
+        ref_params: []const u32,
+    ) !void {
         if (args.len > 0) {
             std.debug.print("writeValueArgsArray: args.len={d}, first_arg.id={d}\n", .{ args.len, args[0].id });
         } else {
             std.debug.print("writeValueArgsArray: args.len=0\n", .{});
         }
+        
+        _ = func_name; // 暂时未使用
+        
         try writer.writeAll("&[_]runtime.Value{");
         if (args.len > 0) {
-            try self.writeValueArgs(writer, args);
+            for (args, 0..) |arg, i| {
+                if (i > 0) try writer.writeAll(", ");
+                
+                // 检查是否是引用参数
+                var is_ref = false;
+                for (ref_params) |ref_idx| {
+                    if (ref_idx == i) {
+                        is_ref = true;
+                        break;
+                    }
+                }
+                
+                if (is_ref) {
+                    // 引用参数：生成initRef
+                    const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                    if (arg_type == .ptr) {
+                        // 已经是指针，直接initRef
+                        try writer.print("runtime.Value.initRef(&reg_{d}", .{arg.id});
+                        if (self.current_alloca_regs) |alloca_regs| {
+                            if (alloca_regs.contains(arg.id)) {
+                                try writer.writeAll(".*");
+                            }
+                        }
+                        try writer.writeAll(")");
+                    } else {
+                        // 不是指针，按普通参数处理
+                        try self.writeRegRef(writer, arg.id);
+                    }
+                } else {
+                    // 普通参数
+                    try self.writeRegRef(writer, arg.id);
+                }
+            }
         }
         try writer.writeAll("}");
     }
@@ -3224,6 +3322,51 @@ pub const NativeLinker = struct {
         var writer = code.writer(self.allocator);
         switch (term) {
             .ret => |ret_val| {
+                // 引用参数写回
+                if (func.ref_params.items.len > 0 and self.param_registers != null) {
+                    try code.appendSlice(self.allocator, "                // Write back reference parameters\n");
+                    const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
+                    for (func.ref_params.items) |ref_idx| {
+                        const param = func.params.items[ref_idx];
+                        const args_index = if (has_this) (if (ref_idx > 0) ref_idx - 1 else 0) else ref_idx;
+                        
+                        // 引用参数对应的是alloca寄存器（指针）
+                        // 需要找到对应的alloca并load其值
+                        // 参数名在IR中是"$name"格式
+                        const param_name_with_dollar = if (param.name.len > 0 and param.name[0] == '$') 
+                            param.name 
+                        else 
+                            param.name;
+                        
+                        // 遍历所有指令找到param指令对应的alloca
+                        for (func.blocks.items[0].instructions.items) |inst| {
+                            if (inst.op == .param and inst.result != null) {
+                                if (std.mem.eql(u8, inst.op.param.name, param_name_with_dollar)) {
+                                    const param_reg_id = inst.result.?.id;
+                                    // 找到对应的store指令，获取alloca寄存器
+                                    for (func.blocks.items[0].instructions.items) |store_inst| {
+                                        if (store_inst.op == .store) {
+                                            const val_reg = store_inst.op.store.value;
+                                            if (val_reg.id == param_reg_id) {
+                                                const alloca_reg_id = store_inst.op.store.ptr.id;
+                                                try writer.print("                if (args.len > {d} and args[{d}].isRef()) {{\n", .{ args_index, args_index });
+                                                if (alloca_regs.contains(alloca_reg_id)) {
+                                                    try writer.print("                    args[{d}].asRef().* = reg_{d}.*;\n", .{ args_index, alloca_reg_id });
+                                                } else {
+                                                    try writer.print("                    args[{d}].asRef().* = reg_{d};\n", .{ args_index, alloca_reg_id });
+                                                }
+                                                try writer.print("                }}\n", .{});
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 if (cleanup_regs.len > 0) {
                     // 收集当前块的phi incoming值（不应释放）
                     var phi_incoming_regs = std.AutoHashMap(usize, void).init(self.allocator);
@@ -4623,19 +4766,39 @@ pub const NativeLinker = struct {
                         // args数组索引：0=第一个参数, 1=第二个参数...
                         const args_index = if (has_this) (if (op.index > 0) op.index - 1 else 0) else op.index;
                         
-                        // 检查是否是可变参数
-                        const is_variadic = blk: {
+                        // 检查是否是引用参数
+                        const is_ref_param = blk: {
                             if (self.current_function_for_resolve) |func| {
-                                if (op.index < func.params.items.len) {
-                                    const param = func.params.items[op.index];
-                                    // DEBUG: param info
-                                    break :blk param.is_variadic;
+                                for (func.ref_params.items) |ref_idx| {
+                                    if (ref_idx == op.index) break :blk true;
                                 }
                             }
                             break :blk false;
                         };
                         
-                        if (is_variadic) {
+                        if (is_ref_param) {
+                            // 引用参数：从args中的引用读取值
+                            // args[i]是Value.initRef(&var)，需要解引用
+                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef().* else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, args_index });
+                            
+                            // 记录参数寄存器（用于写回）
+                            if (self.param_registers) |param_regs| {
+                                try param_regs.put(op.name, reg.id);
+                            }
+                        } else {
+                            // 检查是否是可变参数
+                            const is_variadic = blk: {
+                                if (self.current_function_for_resolve) |func| {
+                                    if (op.index < func.params.items.len) {
+                                        const param = func.params.items[op.index];
+                                        // DEBUG: param info
+                                        break :blk param.is_variadic;
+                                    }
+                                }
+                                break :blk false;
+                            };
+                            
+                            if (is_variadic) {
                             // 可变参数：收集从 args_index 开始的所有参数到数组
                             try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                             try writer.print("    {{\n", .{});
@@ -4660,6 +4823,7 @@ pub const NativeLinker = struct {
                             } else {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
                             }
+                        }
                         }
                     }
                 }
@@ -5453,29 +5617,33 @@ pub const NativeLinker = struct {
                         // 用户定义函数 - 检查是否返回值
                         const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
                         const in_try_block = self.current_exception_handler != null;
+                        
+                        // 查找函数的引用参数信息
+                        const target_func = if (self.ir_module) |module| module.findFunction(op.func_name) else null;
+                        const ref_params = if (target_func) |func| func.ref_params.items else &[_]u32{};
 
                         if (func_has_return_value) {
                             // 函数返回Value
                             if (in_try_block) {
                                 // 在 try 块中，捕获错误但不传播
                                 try writer.print("    reg_{d} = @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, op.func_name });
-                                try self.writeValueArgsArray(writer, op.args);
+                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                 try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
                             } else {
                                 // 不在 try 块中，使用 try 传播错误
                                 try writer.print("    reg_{d} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, op.func_name });
-                                try self.writeValueArgsArray(writer, op.args);
+                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             }
                         } else {
                             // 函数返回void
                             if (in_try_block) {
                                 try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                                try self.writeValueArgsArray(writer, op.args);
+                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                 try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
                             } else {
                                 try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                                try self.writeValueArgsArray(writer, op.args);
+                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             }
                             try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
