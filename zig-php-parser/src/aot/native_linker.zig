@@ -3270,13 +3270,7 @@ pub const NativeLinker = struct {
         func_name: ?[]const u8,
         ref_params: []const u32,
     ) !void {
-        if (args.len > 0) {
-            std.debug.print("writeValueArgsArray: args.len={d}, first_arg.id={d}\n", .{ args.len, args[0].id });
-        } else {
-            std.debug.print("writeValueArgsArray: args.len=0\n", .{});
-        }
-        
-        _ = func_name; // 暂时未使用
+        _ = func_name;
         
         try writer.writeAll("&[_]runtime.Value{");
         if (args.len > 0) {

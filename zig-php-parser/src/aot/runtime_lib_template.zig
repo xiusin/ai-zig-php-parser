@@ -6842,28 +6842,61 @@ pub fn php_date(format: Value, timestamp: Value, allocator: Allocator) !Value {
 }
 
 // ============================================================================
-// 随机数函数（从VM实现复用）
+// 随机数函数（MT19937实现，PHP兼容）
 // ============================================================================
 
-/// 线程局部随机数生成器状态
-// C标准库rand/srand
-extern fn srand(seed: c_uint) void;
-extern fn rand() c_int;
-
-threadlocal var rng_initialized: bool = false;
-
-/// 初始化随机数生成器
-fn ensureRngInitialized() void {
-    if (!rng_initialized) {
-        srand(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
-        rng_initialized = true;
+/// MT19937状态
+const MT19937 = struct {
+    state: [624]u32 = undefined,
+    index: usize = 624,
+    
+    fn init(seed: u32) MT19937 {
+        var mt = MT19937{};
+        mt.state[0] = seed;
+        var i: usize = 1;
+        while (i < 624) : (i += 1) {
+            mt.state[i] = 1812433253 *% (mt.state[i-1] ^ (mt.state[i-1] >> 30)) +% @as(u32, @intCast(i));
+        }
+        mt.index = 624;
+        return mt;
     }
-}
+    
+    fn generate(self: *MT19937) u32 {
+        if (self.index >= 624) {
+            self.twist();
+        }
+        var y = self.state[self.index];
+        self.index += 1;
+        
+        y ^= (y >> 11);
+        y ^= (y << 7) & 0x9D2C5680;
+        y ^= (y << 15) & 0xEFC60000;
+        y ^= (y >> 18);
+        
+        return y;
+    }
+    
+    fn twist(self: *MT19937) void {
+        var i: usize = 0;
+        while (i < 624) : (i += 1) {
+            const x = (self.state[i] & 0x80000000) + (self.state[(i + 1) % 624] & 0x7FFFFFFF);
+            var xA = x >> 1;
+            if ((x & 1) != 0) {
+                xA ^= 0x9908B0DF;
+            }
+            self.state[i] = self.state[(i + 397) % 624] ^ xA;
+        }
+        self.index = 0;
+    }
+};
 
-/// 使用系统rand()
+threadlocal var mt_state: ?MT19937 = null;
+
 fn nextRandom() u64 {
-    ensureRngInitialized();
-    return @intCast(rand());
+    if (mt_state == null) {
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
+    }
+    return @as(u64, mt_state.?.generate());
 }
 
 /// rand - 生成随机整数
@@ -6908,11 +6941,10 @@ pub fn php_mt_rand(min: Value, max: Value) !Value {
 /// @param seed 种子值（可选）
 pub fn php_srand(seed: Value) !Value {
     if (seed.isNull()) {
-        srand(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
     } else {
-        srand(@intCast(@as(u64, @intCast(@abs(seed.toInt()))) & 0xFFFFFFFF));
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(@abs(seed.toInt()))) & 0xFFFFFFFF));
     }
-    rng_initialized = true;
     return Value.initNull();
 }
 
