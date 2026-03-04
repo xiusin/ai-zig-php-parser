@@ -277,11 +277,13 @@ pub const NativeLinker = struct {
         // 使用固定的临时目录名
         const temp_name = ".zigphp_aot_build";
 
-        // 如果目录已存在，先删除
-        std.fs.cwd().deleteTree(temp_name) catch {};
+        // 不删除已存在的目录，让zig使用增量编译缓存
+        // std.fs.cwd().deleteTree(temp_name) catch {};
 
-        // 创建目录
-        try std.fs.cwd().makeDir(temp_name);
+        // 创建目录（如果不存在）
+        std.fs.cwd().makeDir(temp_name) catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
         
         // 返回绝对路径
         const abs_path = try std.fs.cwd().realpathAlloc(self.allocator, temp_name);
@@ -11913,7 +11915,21 @@ pub const NativeLinker = struct {
             try debug_file.writeAll(zig_code);
         }
 
-        {
+        // 检查文件是否需要更新（内容是否改变）
+        var need_update = true;
+        if (std.fs.cwd().openFile(zig_file_path, .{})) |existing_file| {
+            defer existing_file.close();
+            const existing_content = existing_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch null;
+            if (existing_content) |content| {
+                defer self.allocator.free(content);
+                need_update = !std.mem.eql(u8, content, zig_code);
+            }
+        } else |_| {
+            need_update = true;
+        }
+
+        // 只在内容改变时写入
+        if (need_update) {
             const file = try std.fs.cwd().createFile(zig_file_path, .{});
             defer file.close();
             try file.writeAll(zig_code);
