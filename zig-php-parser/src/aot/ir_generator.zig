@@ -2793,8 +2793,13 @@ pub const IRGenerator = struct {
             return folded_reg;
         }
 
-        // 短路求值：&& 和 ||
-        if (bin_data.op == .k_and or bin_data.op == .double_ampersand or bin_data.op == .k_or or bin_data.op == .double_pipe) {
+        // 短路求值：&&, ||, ??
+        if (bin_data.op == .k_and or bin_data.op == .double_ampersand or 
+            bin_data.op == .k_or or bin_data.op == .double_pipe or
+            bin_data.op == .double_question) {
+            if (bin_data.op == .double_question) {
+                return try self.generateNullCoalesceShortCircuit(bin_data.lhs, bin_data.rhs);
+            }
             return try self.generateShortCircuitLogical(bin_data.lhs, bin_data.rhs, bin_data.op);
         }
 
@@ -2846,9 +2851,8 @@ pub const IRGenerator = struct {
             // String concatenation
             .dot => self.emitWithResult(.{ .concat = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_string),
 
-            // Null coalescing
-            .double_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
-            // .question_question => self.generateNullCoalesce(lhs_reg, rhs_reg),
+            // Null coalescing (handled above as short-circuit)
+            .double_question => unreachable,
 
             // Comma operator: evaluate both, return right
             .comma => rhs_reg,
@@ -2857,20 +2861,72 @@ pub const IRGenerator = struct {
         };
     }
 
-    /// Generate null coalescing operator
-    fn generateNullCoalesce(self: *Self, lhs_reg: Register, rhs_reg: Register) !Register {
-        // Check if lhs is null
-        const is_null = try self.emitWithResult(.{ .type_check = .{
-            .value = lhs_reg,
-            .expected_type = .php_value,
-        } }, .bool);
-
-        // Select based on null check
-        return self.emitWithResult(.{ .select = .{
+    /// Generate null coalescing operator with short-circuit evaluation
+    fn generateNullCoalesceShortCircuit(self: *Self, lhs_idx: Node.Index, rhs_idx: Node.Index) !Register {
+        // Generate left operand
+        const lhs_reg = try self.generateExpression(lhs_idx);
+        
+        // Create blocks for null check
+        const rhs_block = try self.createBlock("coalesce_rhs");
+        const merge_block = try self.createBlock("coalesce_merge");
+        
+        // Check if lhs is null: lhs === null
+        const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+        const is_null = try self.emitWithResult(.{ .identical = .{ .lhs = lhs_reg, .rhs = null_reg } }, .php_value);
+        
+        // if (is_null) goto rhs_block else goto merge_block
+        self.setTerminator(.{ .cond_br = .{
             .cond = is_null,
-            .then_value = rhs_reg,
-            .else_value = lhs_reg,
-        } }, .php_value);
+            .then_block = rhs_block,
+            .else_block = merge_block,
+        } });
+        const lhs_end_block = self.current_block.?;
+        
+        // RHS block: evaluate rhs only if lhs is null
+        self.setCurrentBlock(rhs_block);
+        const rhs_reg = try self.generateExpression(rhs_idx);
+        self.setTerminator(.{ .br = merge_block });
+        const rhs_end_block = self.current_block.?;
+        
+        // Merge with phi
+        self.setCurrentBlock(merge_block);
+        const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
+        incoming[0] = .{ .value = lhs_reg, .block = lhs_end_block }; // not null: use lhs
+        incoming[1] = .{ .value = rhs_reg, .block = rhs_end_block }; // null: use rhs
+        
+        return self.emitWithResult(.{ .phi = .{ .incoming = incoming } }, .php_value);
+    }
+
+    /// Generate null coalescing operator (deprecated, use generateNullCoalesceShortCircuit)
+    fn generateNullCoalesce(self: *Self, lhs_reg: Register, rhs_reg: Register) !Register {
+        // Create blocks for null check
+        const rhs_block = try self.createBlock("coalesce_rhs");
+        const merge_block = try self.createBlock("coalesce_merge");
+        
+        // Check if lhs is null: lhs === null
+        const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+        const is_null = try self.emitWithResult(.{ .identical = .{ .lhs = lhs_reg, .rhs = null_reg } }, .php_value);
+        
+        // if (is_null) goto rhs_block else goto merge_block
+        self.setTerminator(.{ .cond_br = .{
+            .cond = is_null,
+            .then_block = rhs_block,
+            .else_block = merge_block,
+        } });
+        const lhs_end_block = self.current_block.?;
+        
+        // RHS block: use rhs value
+        self.setCurrentBlock(rhs_block);
+        self.setTerminator(.{ .br = merge_block });
+        const rhs_end_block = self.current_block.?;
+        
+        // Merge with phi
+        self.setCurrentBlock(merge_block);
+        const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
+        incoming[0] = .{ .value = lhs_reg, .block = lhs_end_block }; // not null: use lhs
+        incoming[1] = .{ .value = rhs_reg, .block = rhs_end_block }; // null: use rhs
+        
+        return self.emitWithResult(.{ .phi = .{ .incoming = incoming } }, .php_value);
     }
 
     /// Generate IR for unary expression
