@@ -1245,7 +1245,6 @@ pub const IRGenerator = struct {
 
     /// Generate IR for property declaration
     fn generatePropertyDecl(self: *Self, node: *const Node, class_name: []const u8) !void {
-        _ = class_name;
         const prop_data = node.data.property_decl;
         const prop_name = self.getString(prop_data.name);
 
@@ -1257,6 +1256,40 @@ pub const IRGenerator = struct {
         }
 
         try self.symbol_table.defineVariable(prop_name, prop_type, self.current_location);
+        
+        // 添加到TypeDef
+        if (self.module) |module| {
+            for (module.types.items) |type_def_ptr| {
+                if (std.mem.eql(u8, type_def_ptr.name, class_name)) {
+                    const is_public = prop_data.modifiers.is_public;
+                    const is_static = prop_data.modifiers.is_static;
+                    
+                    const prop_def = TypeDef.Property{
+                        .name = prop_name,
+                        .visibility = if (is_public) .public else if (prop_data.modifiers.is_protected) .protected else .private,
+                        .is_static = is_static,
+                        .type_ = if (prop_data.type) |type_idx| try self.resolveTypeNode(type_idx) else .php_value,
+                        .default_value = if (prop_data.default_value) |val_idx| blk: {
+                            const val_reg = try self.generateExpression(val_idx);
+                            _ = val_reg;
+                            const block = self.current_block orelse break :blk null;
+                            if (block.instructions.items.len == 0) break :blk null;
+                            const inst = block.instructions.items[block.instructions.items.len - 1];
+                            break :blk inst;
+                        } else null,
+                    };
+                    
+                    const new_props = try self.allocator.alloc(TypeDef.Property, type_def_ptr.properties.len + 1);
+                    @memcpy(new_props[0..type_def_ptr.properties.len], type_def_ptr.properties);
+                    new_props[type_def_ptr.properties.len] = prop_def;
+                    if (type_def_ptr.properties.len > 0) {
+                        self.allocator.free(type_def_ptr.properties);
+                    }
+                    type_def_ptr.properties = new_props;
+                    break;
+                }
+            }
+        }
     }
 
     /// Generate IR for class constant declaration
