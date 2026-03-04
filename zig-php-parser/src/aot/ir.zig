@@ -213,6 +213,8 @@ pub const Function = struct {
     allocator: Allocator,
     /// Function name
     name: []const u8,
+    /// Whether the name was allocated (needs to be freed)
+    name_owned: bool = false,
     /// Function parameters
     params: std.ArrayListUnmanaged(Parameter),
     /// Return type
@@ -256,6 +258,11 @@ pub const Function = struct {
 
     /// Deinitialize and free resources
     pub fn deinit(self: *Self) void {
+        // 释放name（如果是分配的）
+        if (self.name_owned) {
+            self.allocator.free(self.name);
+        }
+        
         self.params.deinit(self.allocator);
         for (self.blocks.items) |block| {
             block.deinit();

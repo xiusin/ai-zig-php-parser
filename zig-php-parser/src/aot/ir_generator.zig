@@ -1195,6 +1195,7 @@ pub const IRGenerator = struct {
 
         const func = try self.allocator.create(Function);
         func.* = Function.init(self.allocator, name_copy);
+        func.name_owned = true;  // 标记name需要释放
         func.is_method = true;
         func.class_name = class_name;
         func.location = self.current_location;
@@ -4152,6 +4153,7 @@ pub const IRGenerator = struct {
 
         const func = try self.allocator.create(Function);
         func.* = Function.init(self.allocator, name_copy);
+        func.name_owned = true;  // 标记name需要释放
         func.location = self.current_location;
 
         if (self.module) |module| {
@@ -4242,6 +4244,7 @@ pub const IRGenerator = struct {
 
         const func = try self.allocator.create(Function);
         func.* = Function.init(self.allocator, name_copy);
+        func.name_owned = true;  // 标记name需要释放
         func.location = self.current_location;
 
         if (self.module) |module| {
