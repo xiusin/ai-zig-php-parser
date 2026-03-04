@@ -1728,7 +1728,7 @@ pub fn php_string_implode(glue: *PHPValue, pieces: *PHPValue) *PHPValue {
 // ============================================================================
 
 /// Echo a value (output without newline)
-pub fn php_echo(val: *PHPValue) void {
+pub fn php_echo(val: *PHPValue) !void {
     const str_val = php_value_to_string(val);
     defer php_gc_release(str_val);
 

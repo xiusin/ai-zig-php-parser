@@ -2737,12 +2737,12 @@ pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// echo语句
-pub fn php_echo(value: Value) !Value {
+pub fn php_echo(value: Value) !void {
     const stdout_file = std.fs.File{ .handle = 1 };
     
     if (value.isNull()) {
         // null不输出任何内容
-        return Value.initNull();
+        return;
     } else if (value.isBool()) {
         if (value.asBool()) {
             try stdout_file.writeAll("1");
@@ -2762,7 +2762,6 @@ pub fn php_echo(value: Value) !Value {
     } else if (value.isArray()) {
         try stdout_file.writeAll("Array");
     }
-    return Value.initNull();
 }
 
 /// print语句（返回1）
