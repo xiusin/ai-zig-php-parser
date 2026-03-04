@@ -5385,13 +5385,16 @@ pub const ClassMeta = struct {
     }
 
     pub fn deinit(self: *ClassMeta) void {
-        self.methods.deinit();
-        self.properties.deinit();
+        // 先释放静态属性（可能包含对象引用）
         var iter = self.static_properties.iterator();
         while (iter.next()) |entry| {
             entry.value_ptr.release(self.allocator);
         }
         self.static_properties.deinit();
+        
+        // 再释放其他资源
+        self.methods.deinit();
+        self.properties.deinit();
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
@@ -5711,13 +5714,20 @@ pub const PHPObject = struct {
             alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
         }
 
-        // 初始化默认属性值（直接设置，不触发__set）
+        // 初始化默认属性值
         var prop_iter = meta.properties.iterator();
         while (prop_iter.next()) |entry| {
             if (!entry.value_ptr.is_static) {
                 if (entry.value_ptr.default_value) |default| {
-                    _ = default.retain();
-                    try obj.properties.put(entry.key_ptr.*, default);
+                    // 对于数组类型，每个对象创建新实例
+                    if (default.isArray()) {
+                        const new_array = try PHPArray.init(allocator);
+                        try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
+                    } else {
+                        // 其他类型可以共享（int/float/bool/string是不可变的）
+                        _ = default.retain();
+                        try obj.properties.put(entry.key_ptr.*, default);
+                    }
                 }
             }
         }
@@ -5748,12 +5758,16 @@ pub const PHPObject = struct {
         }
 
         // 调用 __destruct 魔法函数
+        // 注意：在程序清理阶段，class_meta可能已被释放，需要检查
         if (self.class_meta) |meta| {
-            if (meta.findMethodLookup("__destruct")) |lookup| {
-                const this_val = Value_initObject(self);
-                const guard = ClassContext.init(meta, lookup.owner);
-                defer guard.deinit();
-                _ = lookup.method.func(this_val, &.{}, self.allocator) catch {};
+            // 简单检查：如果class_registry已被清理，跳过__destruct
+            if (class_registry != null) {
+                if (meta.findMethodLookup("__destruct")) |lookup| {
+                    const this_val = Value_initObject(self);
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    _ = lookup.method.func(this_val, &.{}, self.allocator) catch {};
+                }
             }
         }
 
