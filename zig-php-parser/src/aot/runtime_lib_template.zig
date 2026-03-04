@@ -1593,17 +1593,17 @@ pub const Value = struct {
             return ref_ptr.asArray();
         }
         const ptr_val = nanbox_abi.decodePtr(self.val);
-        return @ptrFromInt(@as(usize, @intCast(ptr_val)));
+        return @ptrFromInt(ptr_val);
     }
 
     pub fn asFunction(self: Value) *PHPClosure {
         const ptr_val = nanbox_abi.decodePtr(self.val);
-        return @ptrFromInt(@as(usize, @intCast(ptr_val)));
+        return @ptrFromInt(ptr_val);
     }
 
     pub fn asRef(self: Value) *Value {
         const ptr_val = nanbox_abi.decodePtr(self.val);
-        return @ptrFromInt(@as(usize, @intCast(ptr_val)));
+        return @ptrFromInt(ptr_val);
     }
 
     /// 获取数组元素的引用（用于引用返回）
@@ -5714,22 +5714,33 @@ pub const PHPObject = struct {
             alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
         }
 
-        // 初始化默认属性值
-        var prop_iter = meta.properties.iterator();
-        while (prop_iter.next()) |entry| {
-            if (!entry.value_ptr.is_static) {
-                if (entry.value_ptr.default_value) |default| {
-                    // 对于数组类型，每个对象创建新实例
-                    if (default.isArray()) {
-                        const new_array = try PHPArray.init(allocator);
-                        try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
-                    } else {
-                        // 其他类型可以共享（int/float/bool/string是不可变的）
-                        _ = default.retain();
-                        try obj.properties.put(entry.key_ptr.*, default);
+        // 初始化默认属性值（包括父类）
+        var current_meta: ?*const ClassMeta = meta;
+        while (current_meta) |m| {
+            var prop_iter = m.properties.iterator();
+            while (prop_iter.next()) |entry| {
+                if (!entry.value_ptr.is_static) {
+                    // 只初始化还不存在的属性（避免覆盖子类的属性）
+                    if (obj.properties.get(entry.key_ptr.*) == null) {
+                        if (entry.value_ptr.default_value) |default| {
+                            // 检查是否是数组标记（initInt(-1)）
+                            if (default.isInt() and default.asInt() == -1) {
+                                const new_array = try PHPArray.init(allocator);
+                                try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
+                            } else if (default.isArray()) {
+                                // 旧代码路径：如果是数组，创建新实例
+                                const new_array = try PHPArray.init(allocator);
+                                try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
+                            } else {
+                                // 其他类型可以共享（int/float/bool/string是不可变的）
+                                _ = default.retain();
+                                try obj.properties.put(entry.key_ptr.*, default);
+                            }
+                        }
                     }
                 }
             }
+            current_meta = m.parent;
         }
         return obj;
     }

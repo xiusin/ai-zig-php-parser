@@ -174,15 +174,17 @@ pub const CompileOptions = struct {
             return try allocator.dupe(u8, out);
         }
 
-        const base = std.fs.path.basename(self.input_file);
-        const stem = if (std.mem.endsWith(u8, base, ".php") and base.len > 4) base[0 .. base.len - 4] else base;
-        if (stem.len == 0) {
-            return try allocator.dupe(u8, "a.out");
+        // 使用输入文件的完整路径（去掉.php后缀）
+        const input = self.input_file;
+        if (std.mem.endsWith(u8, input, ".php") and input.len > 4) {
+            return try allocator.dupe(u8, input[0 .. input.len - 4]);
         }
+        
+        // 如果没有.php后缀，添加默认后缀
         if (self.target.os == .windows) {
-            return try std.fmt.allocPrint(allocator, "{s}.exe", .{stem});
+            return try std.fmt.allocPrint(allocator, "{s}.exe", .{input});
         }
-        return try allocator.dupe(u8, stem);
+        return try allocator.dupe(u8, input);
     }
 };
 

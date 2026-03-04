@@ -155,6 +155,7 @@ pub const DependencyResolver = struct {
         // Free all file nodes
         var it = self.files.iterator();
         while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
             var node = entry.value_ptr;
             node.deinit(self.allocator);
         }
@@ -178,7 +179,7 @@ pub const DependencyResolver = struct {
         // Free visit stack
         self.visit_stack.deinit(self.allocator);
 
-        self.allocator.destroy(self);
+        // Don't destroy self - caller will do it
     }
 
     /// Set the base directory for resolving relative paths
@@ -231,8 +232,11 @@ pub const DependencyResolver = struct {
         // Create or get file node
         const gop = try self.files.getOrPut(self.allocator, file_path);
         if (!gop.found_existing) {
+            // 复制key以确保生命周期
+            const owned_path = try self.allocator.dupe(u8, file_path);
+            gop.key_ptr.* = owned_path;
             gop.value_ptr.* = FileNode.init();
-            gop.value_ptr.path = file_path;
+            gop.value_ptr.path = owned_path;
         }
 
         // Mark as in progress

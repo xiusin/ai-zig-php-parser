@@ -177,7 +177,6 @@ pub fn main() !void {
         .enable_memory_limit = false,
         .safety = false,
     }){};
-    defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -585,10 +584,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         };
         
         var diagnostics = aot.DiagnosticEngine.init(allocator);
-        defer diagnostics.deinit();
-        
         var multi_compiler = try aot.MultiFileCompiler.init(allocator, options, &diagnostics);
-        defer multi_compiler.deinit();
         
         const result = multi_compiler.compile(options.input_file, output_path) catch |err| {
             std.debug.print("Error: Multi-file compilation failed: {s}\n", .{@errorName(err)});

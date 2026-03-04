@@ -103,6 +103,8 @@ pub const OptimizeLevel = enum {
 
 /// 原生链接器
 pub const NativeLinker = struct {
+    const Self = @This();
+    
     allocator: Allocator,
     config: NativeLinkerConfig,
     diagnostics: *DiagnosticEngine,
@@ -122,8 +124,6 @@ pub const NativeLinker = struct {
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
     ir_module: ?*const IR.Module = null, // 当前IR模块（用于查找函数）
     param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
-
-    const Self = @This();
 
     /// 检查寄存器是否需要 release（排除优化的 alloca）
     fn shouldReleaseReg(self: *Self, reg_id: usize) bool {
@@ -260,20 +260,12 @@ pub const NativeLinker = struct {
     /// 释放资源
     pub fn deinit(self: *Self) void {
         if (self.temp_dir) |dir| {
-            // 清理临时目录（调试时可以注释掉以保留生成的代码）
-            // 暂时保留生成的代码以便调试
-            // if (!self.config.verbose) {
-            //     std.fs.cwd().deleteTree(dir) catch {};
-            // }
             self.allocator.free(dir);
         }
-        // 清空 HashMap（不释放 key，因为 key 属于 IR 模块）
-        self.func_return_types.clearRetainingCapacity();
         self.func_return_types.deinit();
         if (self.hoisted_instructions) |*map| {
             map.deinit();
         }
-        self.allocator.destroy(self);
     }
 
     /// 创建临时目录
@@ -934,6 +926,8 @@ pub const NativeLinker = struct {
                                         "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
                                         .{sid},
                                     ),
+                                    // 数组默认值标记为特殊值，在对象初始化时创建
+                                    .array_new => try writer.writeAll("runtime.Value.initInt(-1)"),
                                     else => try writer.writeAll("runtime.Value.initNull()"),
                                 }
                             } else {
@@ -953,6 +947,8 @@ pub const NativeLinker = struct {
                                             "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
                                             .{sid},
                                         ),
+                                        // 静态数组需要创建实例
+                                        .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
                                         else => try writer.writeAll("runtime.Value.initNull()"),
                                     }
                                 } else {
@@ -12152,7 +12148,7 @@ pub const NativeLinker = struct {
         var child = std.process.Child.init(args.items, self.allocator);
         child.stdout_behavior = .Inherit;
         child.stderr_behavior = .Inherit;
-        child.cwd = temp_dir; // 设置工作目录为临时目录
+        child.cwd = temp_dir;
 
         const term = try child.spawnAndWait();
         switch (term) {

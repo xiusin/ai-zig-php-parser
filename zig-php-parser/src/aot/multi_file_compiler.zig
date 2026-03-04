@@ -77,7 +77,13 @@ pub const MultiFileCompiler = struct {
         self.dependency_resolver.deinit();
         self.allocator.destroy(self.dependency_resolver);
         
-        // 2. 清理 compiled_files（包含原始模块）
+        // 2. 清理 merged_module
+        if (self.merged_module) |module| {
+            module.deinit();
+            self.allocator.destroy(module);
+        }
+        
+        // 3. 清理 compiled_files
         var it = self.compiled_files.iterator();
         while (it.next()) |entry| {
             const compiler = entry.value_ptr.aot_compiler;
@@ -85,17 +91,6 @@ pub const MultiFileCompiler = struct {
             self.allocator.destroy(compiler);
         }
         self.compiled_files.deinit();
-        
-        // 3. 清理 merged_module（只清理容器，不清理内容，因为内容属于原始模块）
-        if (self.merged_module) |module| {
-            // 只释放容器，不释放内容（functions/types/globals 属于原始模块）
-            module.inferred_types.deinit();
-            module.functions.deinit(self.allocator);
-            module.globals.deinit(self.allocator);
-            module.types.deinit(self.allocator);
-            module.string_table.deinit(self.allocator);
-            self.allocator.destroy(module);
-        }
     }
 
     /// 编译多文件项目
@@ -293,7 +288,7 @@ pub const MultiFileCompiler = struct {
                 try string_index_map.put(old_idx, new_idx);
             }
             
-            // 合并函数并更新字符串索引
+            // 合并函数并更新字符串索引（转移所有权）
             for (source_module.functions.items) |func| {
                 const new_func = func;
                 // 更新函数中的所有 const_string 指令
@@ -310,15 +305,21 @@ pub const MultiFileCompiler = struct {
                 try merged.functions.append(self.allocator, new_func);
             }
             
-            // 合并类型定义
+            // 合并类型定义（转移所有权）
             for (source_module.types.items) |type_def| {
                 try merged.types.append(self.allocator, type_def);
             }
             
-            // 合并全局变量
+            // 合并全局变量（转移所有权）
             for (source_module.globals.items) |global| {
                 try merged.globals.append(self.allocator, global);
             }
+            
+            // 清空原始module的容器（所有权已转移，避免双重释放）
+            source_module.functions.clearRetainingCapacity();
+            source_module.types.clearRetainingCapacity();
+            source_module.globals.clearRetainingCapacity();
+            source_module.string_table.clearRetainingCapacity();
         }
 
         if (self.options.verbose) {
