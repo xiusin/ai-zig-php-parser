@@ -2037,9 +2037,17 @@ pub const NativeLinker = struct {
             // 单基本块：直接生成线性代码
             try code.appendSlice(self.allocator, "    // Instructions\n");
             const block = func.blocks.items[0];
+            
+            // 禁用异常跳转（单块函数没有状态机）
+            const prev_handler = self.current_exception_handler;
+            self.current_exception_handler = null;
+            
             for (block.instructions.items) |inst| {
                 try self.generateInstructionSimple(code, inst);
             }
+            
+            // 恢复异常处理器
+            self.current_exception_handler = prev_handler;
 
             // 生成terminator（return指令）
             if (block.terminator) |term| {
@@ -6538,11 +6546,18 @@ pub const NativeLinker = struct {
             if (is_simple_return) {
                 // 单块函数优化：直接生成线性代码
                 try writer.writeAll("    // Single-block function: linear code generation (optimized)\n");
+                
+                // 禁用异常跳转（单块函数没有状态机）
+                const prev_handler = self.current_exception_handler;
+                self.current_exception_handler = null;
 
                 // 生成所有指令
                 for (block.instructions.items) |inst| {
                     try self.generateInstruction(writer, inst);
                 }
+                
+                // 恢复异常处理器
+                self.current_exception_handler = prev_handler;
 
                 // 生成return语句
                 if (block.terminator) |term| {
