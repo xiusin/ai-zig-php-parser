@@ -609,6 +609,11 @@ Current limitations (to be addressed):
 - Certain edge cases in type coercion
 - Performance optimization opportunities
 
+**AOT Compiler Known Issues**: See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for detailed information about:
+- 🔴 Nested try-catch variable lifecycle issues
+- ⚠️ Exception handling order differences
+- 📋 Missing features (rand(), generators)
+
 ## Development
 
 ### Project Structure
