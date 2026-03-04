@@ -1853,6 +1853,10 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "array_map", wrapBuiltin_array_map },
     .{ "array_filter", wrapBuiltin_array_filter },
     .{ "array_reduce", wrapBuiltin_array_reduce },
+    .{ "array_merge", wrapBuiltin_array_merge },
+    .{ "array_sum", wrapBuiltin_array_sum },
+    .{ "round", wrapBuiltin_round },
+    .{ "usort", wrapBuiltin_usort },
     .{ "select", wrapBuiltin_select },
     .{ "get_class_methods", wrapBuiltin_get_class_methods },
     .{ "get_class_vars", wrapBuiltin_get_class_vars },
@@ -1911,6 +1915,32 @@ fn wrapBuiltin_strlen(ctx: Value, args: []const Value, allocator: Allocator) !Va
     _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_strlen(args[0]);
+}
+
+fn wrapBuiltin_array_merge(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_array_merge(args, allocator);
+}
+
+fn wrapBuiltin_array_sum(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_sum(args[0]);
+}
+
+fn wrapBuiltin_round(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const precision = if (args.len >= 2) args[1] else Value.initInt(0);
+    return php_round(args[0], precision);
+}
+
+fn wrapBuiltin_usort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_usort(args[0], args[1], allocator);
 }
 
 fn wrapBuiltin_strtoupper(ctx: Value, args: []const Value, allocator: Allocator) !Value {
