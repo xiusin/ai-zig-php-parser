@@ -31,7 +31,8 @@ pub fn getGlobalAllocator() Allocator {
 }
 
 /// Initialize the runtime with a custom allocator (for testing)
-pub fn initRuntime() void {
+pub fn initRuntime(allocator: Allocator) void {
+    _ = allocator; // 忽略传入的allocator，使用内部GPA
     if (global_gpa == null) {
         global_gpa = std.heap.GeneralPurposeAllocator(.{}){};
     }
@@ -39,21 +40,16 @@ pub fn initRuntime() void {
 
 /// Deinitialize the runtime and free all resources
 pub fn deinitRuntime() void {
-    // Free global mutex if it was allocated dynamically (not the static fallback)
-    if (global_mutex) |mutex| {
-        // Only free if it's not the static fallback mutex
-        // We detect this by checking if it was allocated with the GPA
-        // Since we can't easily check, we just try to destroy it
-        if (global_gpa != null) {
-            const allocator = global_gpa.?.allocator();
-            allocator.destroy(mutex);
-        }
-        global_mutex = null;
-    }
+    // Reset global mutex pointer (will be freed by GPA deinit)
+    global_mutex = null;
 
     // Free the global allocator and all its resources
+    // This will automatically free all allocations including global_mutex
     if (global_gpa) |*gpa| {
-        _ = gpa.deinit();
+        const leak_check = gpa.deinit();
+        if (leak_check == .leak) {
+            std.debug.print("WARNING: Memory leak detected\n", .{});
+        }
         global_gpa = null;
     }
 }

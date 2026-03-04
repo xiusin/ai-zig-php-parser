@@ -529,6 +529,8 @@ pub fn main() !void {
     _ = vm_instance.memory_manager.gc.collect();
 
     // Clean up AOT runtime library resources to prevent memory leaks
+    // Note: Only call this in interpreter mode, not in AOT compilation mode
+    // (AOT compiled binaries handle their own cleanup)
     aot_runtime.deinitRuntime();
 }
 
