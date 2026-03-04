@@ -356,7 +356,13 @@ pub const IRGenerator = struct {
 
     /// Emit an instruction to the current block
     fn emit(self: *Self, op: Instruction.Op, result_type: ?Type) !?Register {
-        const block = self.current_block orelse return error.NoCurrentBlock;
+        const block = self.current_block orelse {
+            std.debug.print("\n=== NoCurrentBlock Error ===\n", .{});
+            std.debug.print("Operation: {s}\n", .{@tagName(op)});
+            std.debug.print("Current function: {s}\n", .{if (self.current_function) |f| f.name else "none"});
+            std.debug.print("Last location: {any}\n", .{self.current_location});
+            return error.NoCurrentBlock;
+        };
 
         const result = if (result_type) |t| try self.newRegister(t) else null;
 
@@ -899,12 +905,12 @@ pub const IRGenerator = struct {
                 inst.op = .{ .const_string = id };
             },
             .array_init => {
-                // 对于空数组初始化，生成 array_new 指令
+                // 空数组可以作为编译时常量（在类注册时初始化）
                 const array_data = expr_node.data.array_init;
                 if (array_data.elements.len == 0) {
                     inst.op = .{ .array_new = .{ .capacity = 0 } };
                 } else {
-                    // 非空数组不能作为常量
+                    // 非空数组需要在运行时初始化
                     self.allocator.destroy(inst);
                     return null;
                 }
@@ -1270,12 +1276,8 @@ pub const IRGenerator = struct {
                         .is_static = is_static,
                         .type_ = if (prop_data.type) |type_idx| try self.resolveTypeNode(type_idx) else .php_value,
                         .default_value = if (prop_data.default_value) |val_idx| blk: {
-                            const val_reg = try self.generateExpression(val_idx);
-                            _ = val_reg;
-                            const block = self.current_block orelse break :blk null;
-                            if (block.instructions.items.len == 0) break :blk null;
-                            const inst = block.instructions.items[block.instructions.items.len - 1];
-                            break :blk inst;
+                            // 只处理编译时常量，运行时表达式在构造函数中初始化
+                            break :blk try self.tryMakeConstInstruction(val_idx);
                         } else null,
                     };
                     
