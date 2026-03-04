@@ -1874,6 +1874,15 @@ pub const IRGenerator = struct {
     fn generateTryStmt(self: *Self, node: *const Node) !void {
         const try_data = node.data.try_stmt;
 
+        // 检测嵌套try-catch（可能存在执行顺序差异）
+        if (self.try_stack.items.len > 0) {
+            self.diagnostics.reportWarning(
+                self.current_location,
+                "Nested try-catch detected: exception handling order may differ from PHP interpreter",
+                .{},
+            );
+        }
+
         // Create blocks
         const try_block = try self.createBlock("try_body");
         const catch_block = try self.createBlock("catch");
