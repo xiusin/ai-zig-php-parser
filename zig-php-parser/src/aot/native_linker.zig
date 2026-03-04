@@ -3896,6 +3896,8 @@ pub const NativeLinker = struct {
 
                     if (self.regMayHeap(reg_id)) {
                         try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                        // 重新初始化为null，避免悬垂指针
+                        try writer.print("        reg_{d} = runtime.Value.initNull();\n", .{reg_id});
                     }
                 }
             }
