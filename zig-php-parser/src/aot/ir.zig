@@ -724,6 +724,8 @@ pub const Instruction = struct {
         type_check: TypeCheckOp,
         /// Get type tag of PHP value
         get_type: UnaryOp,
+        /// instanceof operator
+        instanceof: InstanceOfOp,
 
         // ============ Global Variable Operations ============
         /// Get global variable
@@ -774,8 +776,6 @@ pub const Instruction = struct {
         method_call: MethodCallOp,
         /// Clone object
         clone: UnaryOp,
-        /// Check instanceof
-        instanceof: InstanceofOp,
         /// Static method call
         static_method_call: StaticMethodCallOp,
         /// Static property get
@@ -948,6 +948,12 @@ pub const Instruction = struct {
         expected_type: Type,
     };
 
+    /// instanceof operator
+    pub const InstanceOfOp = struct {
+        object: Register,
+        class_name: Register,
+    };
+
     /// Create new array
     pub const ArrayNewOp = struct {
         /// Initial capacity
@@ -1026,11 +1032,6 @@ pub const Instruction = struct {
     };
 
     /// Instanceof check
-    pub const InstanceofOp = struct {
-        object: Register,
-        class_name: []const u8,
-    };
-
     /// Static method call
     pub const StaticMethodCallOp = struct {
         class_name: []const u8,
@@ -1404,6 +1405,7 @@ pub const IRPrinter = struct {
             .cast => |op| try self.print("cast {any} from {any} to {any}", .{ op.value, op.from_type, op.to_type }),
             .move => |op| try self.print("move {any}", .{op.operand}),
             .type_check => |op| try self.print("type_check {any} is {any}", .{ op.value, op.expected_type }),
+            .instanceof => |op| try self.print("instanceof {any} {any}", .{ op.object, op.class_name }),
             .get_type => |op| try self.print("get_type {any}", .{op.operand}),
 
             // Global variable operations
@@ -1460,7 +1462,6 @@ pub const IRPrinter = struct {
                 try self.write(")");
             },
             .clone => |op| try self.print("clone {any}", .{op.operand}),
-            .instanceof => |op| try self.print("instanceof {any} is {s}", .{ op.object, op.class_name }),
             .implements_interface => |op| try self.print("implements {any} is {s}", .{ op.object, op.interface_name }),
             .static_method_call => |op| {
                 try self.print("static.call {s}::{s}(", .{ op.class_name, op.method_name });

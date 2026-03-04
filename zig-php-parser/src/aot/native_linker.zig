@@ -4842,6 +4842,11 @@ pub const NativeLinker = struct {
                     try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d}.isNull());\n", .{op.value.id});
                 }
             },
+            .instanceof => |op| {
+                if (inst.result) |reg| {
+                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_instanceof(reg_{d}, reg_{d});\n", .{ op.object.id, op.class_name.id });
+                }
+            },
             .select => |op| {
                 if (inst.result) |reg| {
                     // 总是使用完整if语句，避免类型不匹配

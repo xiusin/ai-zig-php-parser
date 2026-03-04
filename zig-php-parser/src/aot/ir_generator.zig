@@ -2856,11 +2856,33 @@ pub const IRGenerator = struct {
             // Null coalescing (handled above as short-circuit)
             .double_question => unreachable,
 
+            // instanceof operator
+            .k_instanceof => try self.generateInstanceOf(lhs_reg, bin_data.rhs),
+
             // Comma operator: evaluate both, return right
             .comma => rhs_reg,
 
             else => self.emitWithResult(.{ .add = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
         };
+    }
+
+    /// Generate instanceof operator
+    fn generateInstanceOf(self: *Self, obj_reg: Register, class_name_idx: Node.Index) !Register {
+        // Get class name from AST node
+        const class_node = self.getNode(class_name_idx) orelse return error.InvalidNode;
+        const class_name = switch (class_node.tag) {
+            .variable => self.getString(class_node.data.variable.name),
+            .named_type => self.getString(class_node.data.named_type.name),
+            .literal_string => self.getString(class_node.data.literal_string.value),
+            else => return error.InvalidInstanceOfOperand,
+        };
+        
+        // Intern class name as string
+        const class_name_id = try self.module.?.internString(class_name);
+        const class_name_reg = try self.emitWithResult(.{ .const_string = class_name_id }, .php_string);
+        
+        // Generate instanceof check
+        return self.emitWithResult(.{ .instanceof = .{ .object = obj_reg, .class_name = class_name_reg } }, .php_value);
     }
 
     /// Generate null coalescing operator with short-circuit evaluation
