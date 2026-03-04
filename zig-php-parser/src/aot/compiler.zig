@@ -548,6 +548,7 @@ pub const AOTCompiler = struct {
         // Free native linker
         if (self.native_linker) |nl| {
             nl.deinit();
+            self.allocator.destroy(nl);
         }
 
         // Free AST nodes

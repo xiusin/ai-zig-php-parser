@@ -81,7 +81,10 @@ pub const Module = struct {
         }
         self.types.deinit(self.allocator);
 
-        // Free string table
+        // Free string table contents
+        for (self.string_table.items) |str| {
+            self.allocator.free(str);
+        }
         self.string_table.deinit(self.allocator);
     }
 

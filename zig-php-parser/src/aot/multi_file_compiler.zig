@@ -206,12 +206,7 @@ pub const MultiFileCompiler = struct {
         
         // 构建字符串表
         var string_table = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
-        defer {
-            for (string_table.items) |s| {
-                self.allocator.free(s);
-            }
-            string_table.deinit(self.allocator);
-        }
+        defer string_table.deinit(self.allocator);  // 只释放容器，不释放内容（所有权转移给ir_module）
         
         for (context.string_pool.keys()) |str| {
             const str_copy = try self.allocator.dupe(u8, str);

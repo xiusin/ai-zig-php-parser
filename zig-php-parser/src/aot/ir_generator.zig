@@ -160,7 +160,14 @@ pub const IRGenerator = struct {
         self.loop_stack.deinit(self.allocator);
         self.try_stack.deinit(self.allocator);
         self.reference_params.deinit(self.allocator);
+        
+        // 释放constant_cache的key
+        var it = self.constant_cache.keyIterator();
+        while (it.next()) |key| {
+            self.allocator.free(key.*);
+        }
         self.constant_cache.deinit(self.allocator);
+        
         self.global_vars.deinit(self.allocator);
     }
 
