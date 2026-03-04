@@ -1103,6 +1103,33 @@ pub const IRGenerator = struct {
         const iface_data = node.data.container_decl;
         const iface_name = self.getString(iface_data.name);
 
+        // 检查是否与PHP内置接口冲突
+        const builtin_interfaces = [_][]const u8{
+            "Traversable",
+            "Iterator",
+            "IteratorAggregate",
+            "Throwable",
+            "ArrayAccess",
+            "Serializable",
+            "Closure",
+            "Generator",
+            "DateTimeInterface",
+            "JsonSerializable",
+            "Countable",
+            "Stringable",
+        };
+        
+        for (builtin_interfaces) |builtin| {
+            if (std.mem.eql(u8, iface_name, builtin)) {
+                self.diagnostics.reportError(
+                    self.current_location,
+                    "Cannot redeclare built-in interface '{s}'",
+                    .{iface_name},
+                );
+                return error.BuiltinInterfaceConflict;
+            }
+        }
+
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
             .name = iface_name,
