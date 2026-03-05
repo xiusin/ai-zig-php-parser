@@ -6183,8 +6183,16 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_class);
                     const escaped_prop = try self.escapeString(op.property_name);
                     defer self.allocator.free(escaped_prop);
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
+                    
+                    // 设置ClassContext以支持self/static/parent
+                    try writer.print("    {{\n", .{});
+                    try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
+                    try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                    try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                    
+                    try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    try writer.print("        reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
+                    try writer.writeAll("    }\n");
                 }
             },
             .static_property_set => |op| {
@@ -6194,9 +6202,17 @@ pub const NativeLinker = struct {
                 defer self.allocator.free(escaped_class);
                 const escaped_prop = try self.escapeString(op.property_name);
                 defer self.allocator.free(escaped_prop);
-                try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
+                
+                // 设置ClassContext以支持self/static/parent
+                try writer.print("    {{\n", .{});
+                try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
+                try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                
+                try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
                 try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
                 try writer.writeAll(");\n");
+                try writer.writeAll("    }\n");
             },
             // ============ 异常处理指令 ============
             .try_begin => {

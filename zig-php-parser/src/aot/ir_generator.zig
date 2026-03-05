@@ -2322,8 +2322,22 @@ pub const IRGenerator = struct {
                 } }, null);
             },
             .static_property_access => {
-                const class_name = self.getString(target_node.data.static_property_access.class_name);
+                var class_name = self.getString(target_node.data.static_property_access.class_name);
                 const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                
+                // 解析特殊类名 (self/static/parent)
+                if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+                    // 从当前函数名推断类名 (格式: ClassName::methodName)
+                    if (self.current_function) |func| {
+                        if (std.mem.indexOf(u8, func.name, "::")) |pos| {
+                            class_name = func.name[0..pos];
+                        }
+                    }
+                } else if (std.mem.eql(u8, class_name, "parent")) {
+                    // parent:: 暂不支持，需要类继承信息
+                    // 保持原样，运行时处理
+                }
+                
                 _ = try self.emit(.{ .static_property_set = .{
                     .class_name = class_name,
                     .property_name = prop_name,
@@ -2455,8 +2469,20 @@ pub const IRGenerator = struct {
                 } }, null);
             },
             .static_property_access => {
-                const class_name = self.getString(target_node.data.static_property_access.class_name);
+                var class_name = self.getString(target_node.data.static_property_access.class_name);
                 const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                
+                // 解析特殊类名 (self/static/parent)
+                if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+                    if (self.current_function) |func| {
+                        if (std.mem.indexOf(u8, func.name, "::")) |pos| {
+                            class_name = func.name[0..pos];
+                        }
+                    }
+                } else if (std.mem.eql(u8, class_name, "parent")) {
+                    // parent:: 保持原样，运行时处理
+                }
+                
                 _ = try self.emit(.{ .static_property_set = .{
                     .class_name = class_name,
                     .property_name = prop_name,
@@ -2705,8 +2731,20 @@ pub const IRGenerator = struct {
                         } }, null);
                     },
                     .static_property_access => {
-                        const class_name = self.getString(target_node.data.static_property_access.class_name);
+                        var class_name = self.getString(target_node.data.static_property_access.class_name);
                         const prop_name = self.getString(target_node.data.static_property_access.property_name);
+                        
+                        // 解析特殊类名 (self/static/parent)
+                        if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+                            if (self.current_function) |func| {
+                                if (std.mem.indexOf(u8, func.name, "::")) |pos| {
+                                    class_name = func.name[0..pos];
+                                }
+                            }
+                        } else if (std.mem.eql(u8, class_name, "parent")) {
+                            // parent:: 保持原样，运行时处理
+                        }
+                        
                         _ = try self.emit(.{ .static_property_set = .{
                             .class_name = class_name,
                             .property_name = prop_name,
@@ -4073,8 +4111,20 @@ pub const IRGenerator = struct {
     /// Generate IR for static property access
     fn generateStaticPropertyAccess(self: *Self, node: *const Node) !Register {
         const access_data = node.data.static_property_access;
-        const class_name = self.getString(access_data.class_name);
+        var class_name = self.getString(access_data.class_name);
         const prop_name = self.getString(access_data.property_name);
+
+        // 解析特殊类名 (self/static/parent)
+        if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+            // 从当前函数名推断类名 (格式: ClassName::methodName)
+            if (self.current_function) |func| {
+                if (std.mem.indexOf(u8, func.name, "::")) |pos| {
+                    class_name = func.name[0..pos];
+                }
+            }
+        } else if (std.mem.eql(u8, class_name, "parent")) {
+            // parent:: 保持原样，运行时处理
+        }
 
         return self.emitWithResult(.{ .static_property_get = .{
             .class_name = class_name,
