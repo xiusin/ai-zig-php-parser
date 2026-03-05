@@ -3119,6 +3119,7 @@ pub const IRGenerator = struct {
             .bang => self.emitWithResult(.{ .not = .{ .operand = operand_reg } }, .php_value), // 返回 Value，不是 bool
             .tilde => self.emitWithResult(.{ .bit_not = .{ .operand = operand_reg } }, .i64),
             .plus => operand_reg, // Unary plus is a no-op
+            .k_clone => self.emitWithResult(.{ .clone = .{ .operand = operand_reg } }, .php_value),
             else => operand_reg,
         };
     }

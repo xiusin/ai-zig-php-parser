@@ -5185,6 +5185,42 @@ pub fn php_unset(val: Value) !Value {
     return Value.initNull();
 }
 
+/// clone - 克隆对象
+pub fn php_clone(val: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(val)) {
+        return error.InvalidArgument;
+    }
+    
+    const orig_obj = Value_asObject(val);
+    
+    // 创建新对象
+    const new_obj = try PHPObject.init(allocator, orig_obj.class_name);
+    
+    // 复制属性
+    var iter = orig_obj.properties.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+        try new_obj.properties.put(key, value.retain());
+    }
+    
+    // 复制class_meta
+    new_obj.class_meta = orig_obj.class_meta;
+    
+    const new_val = Value_initObject(new_obj);
+    
+    // 调用__clone魔术方法
+    if (new_obj.class_meta) |meta| {
+        if (meta.findMethodLookup("__clone")) |lookup| {
+            const guard = ClassContext.init(meta, lookup.owner);
+            defer guard.deinit();
+            _ = try lookup.method.func(new_val, &.{}, allocator);
+        }
+    }
+    
+    return new_val;
+}
+
 // ============================================================================
 // 文件I/O函数
 // ============================================================================

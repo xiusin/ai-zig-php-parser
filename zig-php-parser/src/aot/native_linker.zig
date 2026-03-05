@@ -5392,6 +5392,11 @@ pub const NativeLinker = struct {
                     }
                 }
             },
+            .clone => |op| {
+                if (inst.result) |reg| {
+                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_clone(reg_{d}, runtime.runtime_allocator);\n", .{op.operand.id});
+                }
+            },
             .bit_not => |op| {
                 if (inst.result) |reg| {
                     const operand_type_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
