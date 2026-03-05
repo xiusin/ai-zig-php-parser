@@ -3067,6 +3067,23 @@ pub const IRGenerator = struct {
             } else if (expr_node) |en| {
                 // 处理属性访问和数组访问
                 switch (en.tag) {
+                    .static_property_access => {
+                        var class_name = self.getString(en.data.static_property_access.class_name);
+                        const prop_name = self.getString(en.data.static_property_access.property_name);
+                        
+                        // 解析特殊类名
+                        if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+                            if (self.current_class) |cls| {
+                                class_name = cls;
+                            }
+                        }
+                        
+                        _ = try self.emit(.{ .static_property_set = .{
+                            .class_name = class_name,
+                            .property_name = prop_name,
+                            .value = new_value,
+                        } }, null);
+                    },
                     .property_access => {
                         const obj_reg = try self.generateExpression(en.data.property_access.target);
                         const prop_name = self.getString(en.data.property_access.property_name);

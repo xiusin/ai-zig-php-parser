@@ -1817,7 +1817,9 @@ pub const Parser = struct {
             .plus_plus, .minus_minus => {
                 const token = self.curr;
                 self.nextToken();
-                const expr = try self.parseUnary();
+                // 使用parseExpression(0)解析操作数，允许解析所有运算符
+                // 这样可以正确解析self::$prop等复杂表达式
+                const expr = try self.parseExpression(0);
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
             },
             .k_clone => return self.parseCloneExpression(),
