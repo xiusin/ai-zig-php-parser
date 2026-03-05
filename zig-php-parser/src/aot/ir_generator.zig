@@ -60,6 +60,8 @@ pub const IRGenerator = struct {
     module: ?*Module,
     /// Current function being generated
     current_function: ?*Function,
+    /// Current class being generated (for resolving self/static/parent)
+    current_class: ?[]const u8,
     /// Current basic block being generated
     current_block: ?*BasicBlock,
     /// Symbol table for variable tracking
@@ -130,6 +132,7 @@ pub const IRGenerator = struct {
             .allocator = allocator,
             .module = null,
             .current_function = null,
+            .current_class = null,
             .current_block = null,
             .symbol_table = symbol_table,
             .type_inferencer = type_inferencer,
@@ -1234,10 +1237,12 @@ pub const IRGenerator = struct {
         // Generate method body if present
         if (method_data.body) |body_idx| {
             const prev_function = self.current_function;
+            const prev_class = self.current_class;
             const prev_block = self.current_block;
             const prev_var_registers = self.var_registers;
 
             self.current_function = func;
+            self.current_class = class_name;
             self.var_registers = .{};
             self.block_counter = 0;
 
@@ -1280,6 +1285,7 @@ pub const IRGenerator = struct {
             self.var_registers.deinit(self.allocator);
             self.var_registers = prev_var_registers;
             self.current_function = prev_function;
+            self.current_class = prev_class;
             self.current_block = prev_block;
         }
     }
@@ -2327,15 +2333,9 @@ pub const IRGenerator = struct {
                 
                 // 解析特殊类名 (self/static/parent)
                 if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
-                    // 从当前函数名推断类名 (格式: ClassName::methodName)
-                    if (self.current_function) |func| {
-                        if (std.mem.indexOf(u8, func.name, "::")) |pos| {
-                            class_name = func.name[0..pos];
-                        }
+                    if (self.current_class) |cls| {
+                        class_name = cls;
                     }
-                } else if (std.mem.eql(u8, class_name, "parent")) {
-                    // parent:: 暂不支持，需要类继承信息
-                    // 保持原样，运行时处理
                 }
                 
                 _ = try self.emit(.{ .static_property_set = .{
@@ -2474,13 +2474,9 @@ pub const IRGenerator = struct {
                 
                 // 解析特殊类名 (self/static/parent)
                 if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
-                    if (self.current_function) |func| {
-                        if (std.mem.indexOf(u8, func.name, "::")) |pos| {
-                            class_name = func.name[0..pos];
-                        }
+                    if (self.current_class) |cls| {
+                        class_name = cls;
                     }
-                } else if (std.mem.eql(u8, class_name, "parent")) {
-                    // parent:: 保持原样，运行时处理
                 }
                 
                 _ = try self.emit(.{ .static_property_set = .{
@@ -2736,13 +2732,9 @@ pub const IRGenerator = struct {
                         
                         // 解析特殊类名 (self/static/parent)
                         if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
-                            if (self.current_function) |func| {
-                                if (std.mem.indexOf(u8, func.name, "::")) |pos| {
-                                    class_name = func.name[0..pos];
-                                }
+                            if (self.current_class) |cls| {
+                                class_name = cls;
                             }
-                        } else if (std.mem.eql(u8, class_name, "parent")) {
-                            // parent:: 保持原样，运行时处理
                         }
                         
                         _ = try self.emit(.{ .static_property_set = .{
@@ -3151,8 +3143,16 @@ pub const IRGenerator = struct {
                     }
                 },
                 .static_property_access => {
-                    const class_name = self.getString(en.data.static_property_access.class_name);
+                    var class_name = self.getString(en.data.static_property_access.class_name);
                     const prop_name = self.getString(en.data.static_property_access.property_name);
+                    
+                    // 解析特殊类名
+                    if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+                        if (self.current_class) |cls| {
+                            class_name = cls;
+                        }
+                    }
+                    
                     _ = try self.emit(.{ .static_property_set = .{
                         .class_name = class_name,
                         .property_name = prop_name,
@@ -4116,11 +4116,8 @@ pub const IRGenerator = struct {
 
         // 解析特殊类名 (self/static/parent)
         if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
-            // 从当前函数名推断类名 (格式: ClassName::methodName)
-            if (self.current_function) |func| {
-                if (std.mem.indexOf(u8, func.name, "::")) |pos| {
-                    class_name = func.name[0..pos];
-                }
+            if (self.current_class) |cls| {
+                class_name = cls;
             }
         } else if (std.mem.eql(u8, class_name, "parent")) {
             // parent:: 保持原样，运行时处理

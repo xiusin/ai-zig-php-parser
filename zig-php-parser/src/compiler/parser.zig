@@ -2574,7 +2574,8 @@ pub const Parser = struct {
         }
 
         _ = try self.eat(.fat_arrow);
-        const body = try self.parseExpression(0);
+        // 使用优先级1避免解析逗号运算符（逗号优先级为1，我们需要>1）
+        const body = try self.parseExpression(2);
 
         const arena = self.context.arena.allocator();
         const params_slice = try arena.dupe(ast.Node.Index, params.items);
