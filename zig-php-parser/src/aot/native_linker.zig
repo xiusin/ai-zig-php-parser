@@ -1237,6 +1237,7 @@ pub const NativeLinker = struct {
         .{ "array_filter", bi(.{ .runtime_name = "php_array_filter", .needs_allocator = true }) },
         .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true }) },
         .{ "array_chunk", bi(.{ .runtime_name = "php_array_chunk", .needs_allocator = true }) },
+        .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
         .{ "array_sum", bi(.{ .runtime_name = "php_array_sum", .needs_allocator = false }) },
         .{ "array_product", bi(.{ .runtime_name = "php_array_product", .needs_allocator = false }) },
         .{ "array_search", bi(.{ .runtime_name = "php_array_search", .needs_allocator = false }) },

@@ -9279,7 +9279,11 @@ pub fn php_array_chunk(arr: Value, size: Value, preserve_keys: Value, allocator:
 }
 
 /// array_column - 返回数组中指定列的值
-pub fn php_array_column(arr: Value, column_key: Value, index_key: Value, allocator: Allocator) !Value {
+pub fn php_array_column(arr: Value, column_key: Value, allocator: Allocator) !Value {
+    return php_array_column_with_index(arr, column_key, Value.initNull(), allocator);
+}
+
+pub fn php_array_column_with_index(arr: Value, column_key: Value, index_key: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
 
     const php_arr = arr.asArray();
@@ -11167,3 +11171,5 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
     // 简化实现：不排序，直接返回true
     return Value.initBool(true);
 }
+
+
