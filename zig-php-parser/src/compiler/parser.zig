@@ -2120,7 +2120,23 @@ pub const Parser = struct {
                             .t_variable => blk: {
                                 const t = self.curr;
                                 self.nextToken();
-                                break :blk try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                                const var_text = self.lexer.buffer[t.loc.start..t.loc.end];
+                                
+                                // 检查是否包含 -> (格式: $var->prop)
+                                if (std.mem.indexOf(u8, var_text, "->")) |arrow_pos| {
+                                    // 分割变量名和属性名
+                                    const var_part = var_text[0..arrow_pos]; // $var
+                                    const prop_part = var_text[arrow_pos + 2..]; // prop
+                                    
+                                    // 创建变量节点
+                                    const var_node = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_part) } } });
+                                    
+                                    // 创建属性访问节点
+                                    break :blk try self.createNode(.{ .tag = .property_access, .main_token = t, .data = .{ .property_access = .{ .target = var_node, .property_name = try self.context.intern(prop_part) } } });
+                                } else {
+                                    // 普通变量
+                                    break :blk try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_text) } } });
+                                }
                             },
                             .t_curly_open => blk: {
                                 self.nextToken(); // skip {
@@ -2215,7 +2231,23 @@ pub const Parser = struct {
                 },
                 .t_variable => {
                     const t = try self.eat(.t_variable);
-                    part = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(self.lexer.buffer[t.loc.start..t.loc.end]) } } });
+                    const var_text = self.lexer.buffer[t.loc.start..t.loc.end];
+                    
+                    // 检查是否包含 -> (格式: $var->prop)
+                    if (std.mem.indexOf(u8, var_text, "->")) |arrow_pos| {
+                        // 分割变量名和属性名
+                        const var_part = var_text[0..arrow_pos]; // $var
+                        const prop_part = var_text[arrow_pos + 2..]; // prop
+                        
+                        // 创建变量节点
+                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_part) } } });
+                        
+                        // 创建属性访问节点
+                        part = try self.createNode(.{ .tag = .property_access, .main_token = t, .data = .{ .property_access = .{ .target = var_node, .property_name = try self.context.intern(prop_part) } } });
+                    } else {
+                        // 普通变量
+                        part = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_text) } } });
+                    }
                 },
                 .t_curly_open => {
                     self.nextToken(); // Consume {$

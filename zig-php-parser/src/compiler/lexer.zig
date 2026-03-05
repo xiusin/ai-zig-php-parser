@@ -165,7 +165,7 @@ pub const Lexer = struct {
                     return .{ .tag = .t_dollar_open_curly_brace, .loc = .{ .start = start, .end = self.pos } };
                 }
                 if (std.ascii.isAlphabetic(self.buffer[self.pos + 1]) or self.buffer[self.pos + 1] == '_') {
-                    return self.lexVariable(start);
+                    return self.lexVariableInInterpolation(start);
                 }
             }
         }
@@ -304,6 +304,29 @@ pub const Lexer = struct {
     fn lexVariable(self: *Lexer, start: usize) Token {
         if (self.buffer[self.pos] == '$') self.pos += 1;
         while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) self.pos += 1;
+        return .{ .tag = .t_variable, .loc = .{ .start = start, .end = self.pos } };
+    }
+
+    fn lexVariableInInterpolation(self: *Lexer, start: usize) Token {
+        // 在字符串插值中识别变量，支持 $var->prop 和 $var[key]
+        if (self.buffer[self.pos] == '$') self.pos += 1;
+        
+        // 识别变量名
+        while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
+            self.pos += 1;
+        }
+        
+        // 检查是否有 -> 属性访问
+        if (self.pos + 1 < self.buffer.len and self.buffer[self.pos] == '-' and self.buffer[self.pos + 1] == '>') {
+            self.pos += 2; // skip ->
+            
+            // 识别属性名
+            while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
+                self.pos += 1;
+            }
+        }
+        // TODO: 支持 $var[key] 语法
+        
         return .{ .tag = .t_variable, .loc = .{ .start = start, .end = self.pos } };
     }
 
