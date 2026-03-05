@@ -5178,8 +5178,10 @@ pub fn php_is_callable(val: Value) !Value {
     return Value.initBool(val.isString() or val.isArray() or val.isFunction());
 }
 
-/// unset - 删除变量（AOT中返回null）
-pub fn php_unset(_: Value) !Value {
+/// unset - 删除变量（立即释放引用）
+pub fn php_unset(val: Value) !Value {
+    // 调用release减少引用计数，如果为0则触发析构
+    val.release(runtime_allocator);
     return Value.initNull();
 }
 
