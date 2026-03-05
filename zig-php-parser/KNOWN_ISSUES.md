@@ -79,6 +79,39 @@
 
 ---
 
+## 测试脚本问题（非AOT bug）
+
+### 7. level_10测试脚本错误
+
+**问题**：测试脚本访问protected属性
+```php
+$results[] = [
+    'name' => $shape->name,  // ❌ name是protected
+```
+
+**PHP错误**：
+```
+Fatal error: Cannot access protected property Rectangle::$name
+```
+
+**状态**：测试脚本需要修复，添加getter或改为public
+
+### 8. lifecycle_05测试脚本错误
+
+**问题**：重新声明内置接口
+```php
+class Serializable {  // ❌ Serializable是内置接口
+```
+
+**PHP错误**：
+```
+Fatal error: Cannot redeclare interface Serializable
+```
+
+**状态**：测试脚本需要重命名类
+
+---
+
 ## 功能缺失
 
 ### 6. rand()函数未实现
