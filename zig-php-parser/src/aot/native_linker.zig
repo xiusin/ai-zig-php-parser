@@ -5601,9 +5601,17 @@ pub const NativeLinker = struct {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.Value.initNull(), runtime.runtime_allocator);\n", .{runtime_name});
                                 }
                             } else if (op.args.len > 0) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                // 特殊处理：file_put_contents只接受2个参数+allocator
+                                if (std.mem.eql(u8, runtime_name, "php_file_put_contents")) {
+                                    const max_args = @min(op.args.len, 2);
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgs(writer, op.args[0..max_args]);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                }
                             } else {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
                             }
@@ -11615,7 +11623,14 @@ pub const NativeLinker = struct {
                         } else {
                             try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
                         }
-                        for (op.args, 0..) |arg, i| {
+                        
+                        // 特殊处理：file_put_contents只接受2个参数+allocator，忽略可选的flags
+                        const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents")) 
+                            @min(op.args.len, 2) 
+                        else 
+                            op.args.len;
+                        
+                        for (op.args[0..max_args], 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
                             // 统一使用 writeRegRef 处理 alloca 解引用
                             try self.writeRegRef(writer, arg.id);
