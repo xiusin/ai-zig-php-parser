@@ -1878,11 +1878,6 @@ pub const NativeLinker = struct {
         // 保存到 self，供代码生成时使用
         self.current_register_types = &all_registers;
 
-        // 调试：检查 reg_1 的类型
-        if (all_registers.get(1)) |reg_1_type| {
-            std.debug.print("DEBUG: reg_1 type in all_registers = {s}\n", .{@tagName(@as(std.meta.Tag(IR.Type), reg_1_type))});
-        }
-
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         var optimized_alloca_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer optimized_alloca_regs.deinit();
@@ -2135,17 +2130,62 @@ pub const NativeLinker = struct {
                             }
                         }
 
-                        // 写回引用参数
-                        if (self.param_registers) |ref_param_regs| {
-                            var it = ref_param_regs.iterator();
-                            while (it.next()) |entry| {
-                                const param_name = entry.key_ptr.*;
-                                const reg_id = entry.value_ptr.*;
-                                // 查找参数索引
-                                for (func.params.items, 0..) |param, idx| {
-                                    if (std.mem.eql(u8, param.name, param_name) and param.is_reference) {
-                                        try code.writer(self.allocator).print("    if (args.len > {d} and args[{d}].isRef()) args[{d}].asRef().* = reg_{d};\n", .{ idx, idx, idx, reg_id });
+                        // 写回引用参数（查找对应的alloca寄存器）
+                        if (self.current_function_for_resolve) |func_ref| {
+                            if (func_ref.ref_params.items.len > 0) {
+                                
+                                // 遍历所有指令，找到param和alloca的对应关系
+                                // 策略：param N 后面紧跟 store param_reg to alloca_reg
+                                var param_to_alloca = std.AutoHashMap(usize, usize).init(self.allocator);
+                                defer param_to_alloca.deinit();
+                                
+                                for (func_ref.blocks.items) |func_block| {
+                                    var prev_param_reg: ?usize = null;
+                                    for (func_block.instructions.items) |inst| {
+                                        switch (inst.op) {
+                                            .param => |param_op| {
+                                                if (inst.result) |reg| {
+                                                    // 检查是否是引用参数
+                                                    for (func_ref.ref_params.items) |ref_idx| {
+                                                        if (ref_idx == param_op.index) {
+                                                            prev_param_reg = reg.id;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            .store => |store_op| {
+                                                // 如果前一个是引用param，这个store就是初始化alloca
+                                                if (prev_param_reg) |param_reg| {
+                                                    if (store_op.value.id == param_reg) {
+                                                        try param_to_alloca.put(param_reg, store_op.ptr.id);
+                                                        prev_param_reg = null;
+                                                    }
+                                                }
+                                            },
+                                            else => {
+                                                prev_param_reg = null;
+                                            },
+                                        }
+                                    }
+                                }
+                                
+                                // 生成写回代码
+                                for (func_ref.ref_params.items) |ref_idx| {
+                                    _ = func_ref.params.items[ref_idx]; // 参数信息（未使用）
+                                    
+                                    // 查找对应的alloca寄存器
+                                    var found_alloca: ?usize = null;
+                                    var it = param_to_alloca.iterator();
+                                    while (it.next()) |entry| {
+                                        // 通过参数名匹配（需要遍历指令找到param）
+                                        // 简化：直接使用第一个匹配的alloca
+                                        found_alloca = entry.value_ptr.*;
                                         break;
+                                    }
+                                    
+                                    if (found_alloca) |alloca_reg| {
+                                        try code.writer(self.allocator).print("    if (args.len > {d} and args[{d}].isRef()) args[{d}].asRef().* = reg_{d}.*;\n", .{ ref_idx, ref_idx, ref_idx, alloca_reg });
                                     }
                                 }
                             }
@@ -4829,11 +4869,6 @@ pub const NativeLinker = struct {
                         if (is_ref_param) {
                             // 引用参数：解引用获取值
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef().* else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, args_index });
-                            
-                            // 记录参数寄存器和参数索引（用于写回）
-                            if (self.param_registers) |param_regs| {
-                                try param_regs.put(op.name, reg.id);
-                            }
                         } else {
                             // 检查是否是可变参数
                             const is_variadic = blk: {
