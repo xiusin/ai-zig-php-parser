@@ -3423,21 +3423,30 @@ pub const IRGenerator = struct {
                             return self.emitWithResult(.{ .const_null = {} }, .php_value);
                         }
                     } else if (arg_node.?.tag == .variable) {
-                        // unset($var) - break reference, set to null
+                        // unset($var)
                         const var_name = self.getString(arg_node.?.data.variable.name);
-                        const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                         
-                        if (self.ref_vars.contains(var_name)) {
-                            // Reference variable: just remove from ref_vars and var_registers
+                        // 检查是否是全局变量（在全局作用域或使用global声明）
+                        const is_global = self.symbol_table.isGlobalScope();
+                        
+                        if (is_global) {
+                            // 全局变量：需要从全局变量表中删除
+                            const str_id = try self.module.?.internString(var_name);
+                            const var_name_str = try self.emitWithResult(.{ .const_string = str_id }, .php_string);
+                            _ = try self.emit(.{ .global_unset = .{ .name = var_name_str } }, null);
+                        } else if (self.ref_vars.contains(var_name)) {
+                            // 引用变量：移除引用
                             _ = self.ref_vars.remove(var_name);
                             _ = self.var_registers.remove(var_name);
                         } else {
-                            // Normal variable: set to null
+                            // 局部变量：设置为null
+                            const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                             if (self.var_registers.get(var_name)) |var_reg| {
                                 _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = null_reg } }, null);
                             }
                         }
-                        return null_reg;
+                        
+                        return try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     }
                 }
             }

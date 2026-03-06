@@ -742,6 +742,8 @@ pub const Instruction = struct {
         global_get: GlobalVarOp,
         /// Set global variable
         global_set: GlobalVarOp,
+        /// Unset global variable
+        global_unset: struct { name: Register },
         /// Get global variable dynamically (variable variable)
         global_get_dynamic: struct { name_reg: Register },
         /// Set global variable dynamically (variable variable)
@@ -1429,6 +1431,7 @@ pub const IRPrinter = struct {
             },
             .global_get_dynamic => |op| try self.print("global.get_dynamic {any}", .{op.name_reg}),
             .global_set_dynamic => |op| try self.print("global.set_dynamic {any} = {any}", .{ op.name_reg, op.value }),
+            .global_unset => |op| try self.print("global.unset {any}", .{op.name}),
 
             // Array operations
             .array_new => |op| try self.print("array.new capacity={d}", .{op.capacity}),

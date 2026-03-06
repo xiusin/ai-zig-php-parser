@@ -553,6 +553,21 @@ pub const NativeLinker = struct {
             \\    }
             \\}
             \\
+            \\pub fn unsetGlobalVar(name_val: runtime.Value) !void {
+            \\    if (!global_vars_initialized) return;
+            \\    if (!name_val.isString()) return;
+            \\    const name = name_val.asString().data;
+            \\    // 从全局变量表中删除并释放
+            \\    if (global_vars.getPtr(name)) |val_ptr| {
+            \\        // Release setGlobalVar的retain
+            \\        val_ptr.release(runtime.runtime_allocator);
+            \\        // 从表中删除
+            \\        if (global_vars.fetchRemove(name)) |kv| {
+            \\            runtime.runtime_allocator.free(kv.key);
+            \\        }
+            \\    }
+            \\}
+            \\
             \\pub fn getGlobalVarDynamic(name_val: runtime.Value) !runtime.Value {
             \\    const name_str = try name_val.toString(runtime.runtime_allocator);
             \\    defer name_str.release(runtime.runtime_allocator);
@@ -6303,6 +6318,10 @@ pub const NativeLinker = struct {
                 try writer.writeAll(", reg_");
                 try writer.print("{d}", .{op.value.id});
                 try writer.writeAll(");\n");
+            },
+            .global_unset => |op| {
+                // 从全局变量表中删除
+                try writer.print("    try unsetGlobalVar(reg_{d});\n", .{op.name.id});
             },
             .cast => |op| {
                 // cast: 类型转换
