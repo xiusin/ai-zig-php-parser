@@ -2019,7 +2019,6 @@ pub const NativeLinker = struct {
                     };
                     
                     if (is_ref_param_reg) {
-                        std.debug.print("DEBUG: reg_{d} is ref param reg, declaring as pointer\n", .{reg_id});
                         // 引用参数寄存器：声明为指针类型
                         try code.appendSlice(self.allocator, "    var reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -2043,6 +2042,10 @@ pub const NativeLinker = struct {
         }
 
         // 参数初始化现在由IR中的param和store指令处理
+        
+        // 为引用参数提供fallback null值（函数作用域）
+        try code.appendSlice(self.allocator, "    var null_val = runtime.Value.initNull();\n");
+        try code.appendSlice(self.allocator, "    _ = &null_val;\n\n");
 
         self.current_reg_types = &all_registers;
         defer self.current_reg_types = null;
@@ -4135,13 +4138,9 @@ pub const NativeLinker = struct {
                 
                 // 检查ptr是否是引用参数的alloca（使用映射表重定向到param）
                 if (self.ref_param_alloca_map) |map| {
-                    std.debug.print("DEBUG store: checking ptr reg_{d}, map.count={d}\n", .{ op.ptr.id, map.count() });
                     if (map.get(op.ptr.id)) |param_reg_id| {
-                        std.debug.print("DEBUG store: REDIRECT reg_{d} -> param reg_{d}\n", .{ op.ptr.id, param_reg_id });
                         // 重定向：写入param而不是alloca
-                        try writer.print("    std.debug.print(\"DEBUG store: before, reg_{d}={{*}}, value={{}}\\n\", .{{ reg_{d}, reg_{d} }});\n", .{ param_reg_id, param_reg_id, op.value.id });
                         try writer.print("    reg_{d}.* = reg_{d};\n", .{ param_reg_id, op.value.id });
-                        try writer.print("    std.debug.print(\"DEBUG store: after, *reg_{d}={{}}\\n\", .{{ reg_{d}.* }});\n", .{ param_reg_id, param_reg_id });
                         return;
                     }
                 }
@@ -4290,7 +4289,6 @@ pub const NativeLinker = struct {
                     else 
                         false;
                     
-                    std.debug.print("DEBUG make_ref: ptr=reg_{d}, is_alloca={}\n", .{ op.ptr.id, is_alloca });
                         
                     if (is_alloca) {
                         // alloca已经是指针，直接使用
@@ -4315,9 +4313,7 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     // 检查是否是引用参数的alloca（使用映射表重定向到param）
                     if (self.ref_param_alloca_map) |map| {
-                        std.debug.print("DEBUG load: checking ptr reg_{d}, map.count={d}\n", .{ op.ptr.id, map.count() });
                         if (map.get(op.ptr.id)) |param_reg_id| {
-                            std.debug.print("DEBUG load: REDIRECT reg_{d} -> param reg_{d}\n", .{ op.ptr.id, param_reg_id });
                             // 重定向：从param读取而不是alloca
                             try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, param_reg_id });
                             return;
@@ -4660,7 +4656,6 @@ pub const NativeLinker = struct {
 
                     // DEBUG: 输出类型信息
                     if (reg.id == 40) {
-                        std.debug.print("DEBUG mul reg_40: lhs_tag={s}, rhs_tag={s}, result_tag={s}\n", .{
                             @tagName(lhs_tag), @tagName(rhs_tag), @tagName(result_tag)
                         });
                         std.debug.print("  lhs_fallback={s}, rhs_fallback={s}, result_fallback={s}\n", .{
@@ -4995,11 +4990,10 @@ pub const NativeLinker = struct {
                         
                         if (is_ref_param) {
                             // 引用参数：返回args中的指针（不解引用）
-                            try writer.print("    {{\n", .{});
-                            try writer.print("        var null_val = runtime.Value.initNull();\n", .{});
-                            try writer.print("        std.debug.print(\"DEBUG param: args.len={{d}}, isRef={{}}\\n\", .{{ args.len, if (args.len > 0) args[0].isRef() else false }});\n", .{});
+                            try writer.print("        if (args.len > 0 and args[0].isRef()) {{\n", .{});
+                            try writer.print("            const ptr = args[0].asRef();\n", .{});
+                            try writer.print("        }}\n", .{});
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
-                            try writer.print("        std.debug.print(\"DEBUG param: reg_{d}={{*}}, *reg_{d}={{}}\\n\", .{{ reg_{d}, reg_{d}.* }});\n", .{ reg.id, reg.id, reg.id, reg.id });
                             
                             // 初始化对应的alloca（如果存在）
                             if (self.current_function_for_resolve) |func_check| {
@@ -5015,7 +5009,6 @@ pub const NativeLinker = struct {
                                     }
                                 }
                             }
-                            try writer.print("    }}\n", .{});
                         } else {
                             // 检查是否是可变参数
                             const is_variadic = blk: {

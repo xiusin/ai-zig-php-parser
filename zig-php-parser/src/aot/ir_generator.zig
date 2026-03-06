@@ -3596,15 +3596,12 @@ pub const IRGenerator = struct {
                     break :blk false;
                 } else false;
                 
-                std.debug.print("DEBUG IR gen: arg {d}, is_ref_param={}, target_func={s}\n", .{ i, is_ref_param, if (target_func) |f| f.name else "null" });
                 
                 if (is_ref_param) {
                     // 引用参数：需要传递变量的地址
                     const expr_node = self.getNode(expr_idx);
-                    std.debug.print("DEBUG IR gen: expr_node tag={s}\n", .{ if (expr_node) |n| @tagName(n.tag) else "null" });
                     if (expr_node != null and expr_node.?.tag == .variable) {
                         const var_name = self.getString(expr_node.?.data.variable.name);
-                        std.debug.print("DEBUG IR gen: var_name={s}\n", .{var_name});
                         
                         // 检查是否是全局变量
                         const is_global = self.global_vars.contains(var_name);
@@ -3613,7 +3610,6 @@ pub const IRGenerator = struct {
                         else 
                             false;
                         
-                        std.debug.print("DEBUG IR gen: is_global={}, is_main={}\n", .{ is_global, is_main });
                         
                         if (is_global or is_main) {
                             // 全局变量：创建临时alloca
