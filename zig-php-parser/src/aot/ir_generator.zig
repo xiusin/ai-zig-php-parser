@@ -3646,11 +3646,20 @@ pub const IRGenerator = struct {
                             continue;
                         }
                         
-                        // 局部变量：创建临时alloca，传递make_ref，记录写回
+                        // 局部变量：检查是否是引用参数
                         if (self.var_registers.get(var_name)) |var_reg| {
+                            // 如果变量本身是引用参数，直接传递（不创建临时alloca）
+                            if (self.reference_params.contains(var_name)) {
+                                // 直接传递引用参数（已经是指针）
+                                const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                                args[i] = ref_reg;
+                                // 不需要写回，因为修改会直接反映到原始引用
+                                continue;
+                            }
+                            
                             const func = self.current_function orelse return error.NoCurrentFunction;
                             
-                            // 创建临时alloca
+                            // 普通局部变量：创建临时alloca
                             const alloca_type = Type{ .php_value = {} };
                             const type_ptr = try self.allocator.create(Type);
                             type_ptr.* = alloca_type;
@@ -3676,7 +3685,7 @@ pub const IRGenerator = struct {
                             const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
                             args[i] = ref_reg;
                             
-                            // 记录需要写回（使用特殊标记表示局部变量）
+                            // 记录需要写回
                             try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
                             continue;
                         }
