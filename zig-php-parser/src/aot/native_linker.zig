@@ -1920,15 +1920,49 @@ pub const NativeLinker = struct {
                     try code.writer(self.allocator).print("{d}", .{reg_id});
                     try code.appendSlice(self.allocator, ";\n");
                 } else {
-                    // 普通寄存器：总是使用 runtime.Value 以避免类型不匹配
-                    // TODO: 未来可以优化为使用原生类型，但需要更精确的类型推断
-                    try code.appendSlice(self.allocator, "    var reg_");
-                    try code.writer(self.allocator).print("{d}", .{reg_id});
-                    try code.appendSlice(self.allocator, ": runtime.Value = runtime.Value.initNull();\n");
-                    // 标记为可能未使用（避免Zig编译器警告）
-                    try code.appendSlice(self.allocator, "    _ = &reg_");
-                    try code.writer(self.allocator).print("{d}", .{reg_id});
-                    try code.appendSlice(self.allocator, ";\n");
+                    // 检查是否是引用参数寄存器
+                    const is_ref_param_reg = blk: {
+                        if (self.current_function_for_resolve) |func_check| {
+                            // 遍历指令找到param
+                            for (func_check.blocks.items) |block_check| {
+                                for (block_check.instructions.items) |inst_check| {
+                                    if (inst_check.op == .param) {
+                                        if (inst_check.result) |result_reg| {
+                                            if (result_reg.id == reg_id) {
+                                                // 检查是否是引用参数
+                                                const param_op = inst_check.op.param;
+                                                for (func_check.ref_params.items) |ref_idx| {
+                                                    if (ref_idx == param_op.index) {
+                                                        break :blk true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break :blk false;
+                    };
+                    
+                    if (is_ref_param_reg) {
+                        // 引用参数寄存器：声明为指针类型
+                        try code.appendSlice(self.allocator, "    var reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ": *runtime.Value = undefined;\n");
+                        try code.appendSlice(self.allocator, "    _ = &reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ";\n");
+                    } else {
+                        // 普通寄存器：总是使用 runtime.Value 以避免类型不匹配
+                        try code.appendSlice(self.allocator, "    var reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ": runtime.Value = runtime.Value.initNull();\n");
+                        // 标记为可能未使用（避免Zig编译器警告）
+                        try code.appendSlice(self.allocator, "    _ = &reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ";\n");
+                    }
                 }
             }
             try code.appendSlice(self.allocator, "\n");
@@ -2130,66 +2164,6 @@ pub const NativeLinker = struct {
                             }
                         }
 
-                        // 写回引用参数（查找对应的alloca寄存器）
-                        if (self.current_function_for_resolve) |func_ref| {
-                            if (func_ref.ref_params.items.len > 0) {
-                                
-                                // 遍历所有指令，找到param和alloca的对应关系
-                                // 策略：param N 后面紧跟 store param_reg to alloca_reg
-                                var param_to_alloca = std.AutoHashMap(usize, usize).init(self.allocator);
-                                defer param_to_alloca.deinit();
-                                
-                                for (func_ref.blocks.items) |func_block| {
-                                    var prev_param_reg: ?usize = null;
-                                    for (func_block.instructions.items) |inst| {
-                                        switch (inst.op) {
-                                            .param => |param_op| {
-                                                if (inst.result) |reg| {
-                                                    // 检查是否是引用参数
-                                                    for (func_ref.ref_params.items) |ref_idx| {
-                                                        if (ref_idx == param_op.index) {
-                                                            prev_param_reg = reg.id;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            .store => |store_op| {
-                                                // 如果前一个是引用param，这个store就是初始化alloca
-                                                if (prev_param_reg) |param_reg| {
-                                                    if (store_op.value.id == param_reg) {
-                                                        try param_to_alloca.put(param_reg, store_op.ptr.id);
-                                                        prev_param_reg = null;
-                                                    }
-                                                }
-                                            },
-                                            else => {
-                                                prev_param_reg = null;
-                                            },
-                                        }
-                                    }
-                                }
-                                
-                                // 生成写回代码
-                                for (func_ref.ref_params.items) |ref_idx| {
-                                    _ = func_ref.params.items[ref_idx]; // 参数信息（未使用）
-                                    
-                                    // 查找对应的alloca寄存器
-                                    var found_alloca: ?usize = null;
-                                    var it = param_to_alloca.iterator();
-                                    while (it.next()) |entry| {
-                                        // 通过参数名匹配（需要遍历指令找到param）
-                                        // 简化：直接使用第一个匹配的alloca
-                                        found_alloca = entry.value_ptr.*;
-                                        break;
-                                    }
-                                    
-                                    if (found_alloca) |alloca_reg| {
-                                        try code.writer(self.allocator).print("    if (args.len > {d} and args[{d}].isRef()) args[{d}].asRef().* = reg_{d}.*;\n", .{ ref_idx, ref_idx, ref_idx, alloca_reg });
-                                    }
-                                }
-                            }
-                        }
 
                         if (ret_val) |reg| {
                             const type_tag = @as(std.meta.Tag(IR.Type), all_registers.get(reg.id) orelse reg.type_);
@@ -4139,17 +4113,44 @@ pub const NativeLinker = struct {
                         alloca_regs.contains(op.value.id)
                     else
                         false;
+                    
+                    // 检查 value 是否是引用参数寄存器（指针类型）
+                    const value_is_ref_param = blk: {
+                        if (self.current_function_for_resolve) |func_check| {
+                            for (func_check.blocks.items) |block_check| {
+                                for (block_check.instructions.items) |inst_check| {
+                                    if (inst_check.op == .param) {
+                                        if (inst_check.result) |result_reg| {
+                                            if (result_reg.id == op.value.id) {
+                                                const param_op = inst_check.op.param;
+                                                for (func_check.ref_params.items) |ref_idx| {
+                                                    if (ref_idx == param_op.index) {
+                                                        break :blk true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break :blk false;
+                    };
 
                     if (corrected_value_tag == .php_value or corrected_value_tag == .php_string or corrected_value_tag == .php_array or corrected_value_tag == .php_object or corrected_value_tag == .php_callable) {
                         // 已经是Value类型，需要retain
                         if (self.regMayHeap(op.value.id)) {
-                            if (value_is_alloca) {
+                            if (value_is_ref_param) {
+                                try writer.print("    _ = reg_{d}.*.retain();\n", .{op.value.id});
+                            } else if (value_is_alloca) {
                                 try writer.print("    _ = reg_{d}.*.retain();\n", .{op.value.id});
                             } else {
                                 try writer.print("    _ = reg_{d}.retain();\n", .{op.value.id});
                             }
                         }
-                        if (value_is_alloca) {
+                        if (value_is_ref_param) {
+                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                        } else if (value_is_alloca) {
                             try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                         } else {
                             try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
@@ -4259,7 +4260,31 @@ pub const NativeLinker = struct {
 
                     // 检查是否是 alloca 寄存器（即指针类型）
                     const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
-                    const ptr_prefix = if (is_ptr) "" else "&";
+                    
+                    // 检查是否是引用参数寄存器（指针类型）
+                    const ptr_is_ref_param = blk: {
+                        if (self.current_function_for_resolve) |func_check| {
+                            for (func_check.blocks.items) |block_check| {
+                                for (block_check.instructions.items) |inst_check| {
+                                    if (inst_check.op == .param) {
+                                        if (inst_check.result) |result_reg| {
+                                            if (result_reg.id == op.ptr.id) {
+                                                const param_op = inst_check.op.param;
+                                                for (func_check.ref_params.items) |ref_idx| {
+                                                    if (ref_idx == param_op.index) {
+                                                        break :blk true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break :blk false;
+                    };
+                    
+                    const ptr_prefix = if (is_ptr or ptr_is_ref_param) "" else "&";
 
                     if (type_tag == .i64) {
                         // 普通寄存器都是Value类型，需要包装
@@ -4867,8 +4892,13 @@ pub const NativeLinker = struct {
                         };
                         
                         if (is_ref_param) {
-                            // 引用参数：解引用获取值
-                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef().* else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, args_index });
+                            // 引用参数：返回args中的指针（不解引用）
+                            // args[i]是Value.initRef(&var)，通过asRef()获取*Value指针
+                            // 注意：需要提供fallback的可变null值
+                            try writer.print("    {{\n", .{});
+                            try writer.print("        var null_val = runtime.Value.initNull();\n", .{});
+                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
+                            try writer.print("    }}\n", .{});
                         } else {
                             // 检查是否是可变参数
                             const is_variadic = blk: {
