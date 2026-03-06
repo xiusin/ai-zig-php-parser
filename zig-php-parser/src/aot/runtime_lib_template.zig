@@ -6685,20 +6685,20 @@ fn unserializeValue(data: []const u8, pos: *usize, allocator: Allocator) !Value 
             return arr_val;
         },
         'O' => {
-            pos.* += 1;
+            pos.* += 1; // skip ':'
             const colon1 = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
             const len_str = data[pos.*..colon1];
-            pos.* = colon1 + 1;
+            pos.* = colon1 + 1; // skip ':'
             const name_len = std.fmt.parseInt(usize, len_str, 10) catch 0;
-            pos.* += 1;
+            pos.* += 1; // skip '"'
             const class_name = data[pos.* .. pos.* + name_len];
-            pos.* += name_len + 2;
-            pos.* += 1;
+            pos.* += name_len + 1; // skip class_name and '"'
+            pos.* += 1; // skip ':'
             const colon2 = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
             const count_str = data[pos.*..colon2];
-            pos.* = colon2 + 1;
+            pos.* = colon2 + 1; // skip ':'
             const count = std.fmt.parseInt(usize, count_str, 10) catch 0;
-            pos.* += 1;
+            pos.* += 1; // skip '{'
 
             const class_name_copy = try allocator.dupe(u8, class_name);
             defer allocator.free(class_name_copy);
@@ -6713,10 +6713,12 @@ fn unserializeValue(data: []const u8, pos: *usize, allocator: Allocator) !Value 
             while (i < count) : (i += 1) {
                 const key_val = try unserializeValue(data, pos, allocator);
                 const val = try unserializeValue(data, pos, allocator);
-                defer key_val.release(allocator);
-                defer val.release(allocator);
 
-                if (!key_val.isString()) continue;
+                if (!key_val.isString()) {
+                    key_val.release(allocator);
+                    val.release(allocator);
+                    continue;
+                }
                 const raw_key = key_val.asString().data;
                 var prop_name: []const u8 = raw_key;
                 if (raw_key.len > 0 and raw_key[0] == 0) {
@@ -6728,12 +6730,14 @@ fn unserializeValue(data: []const u8, pos: *usize, allocator: Allocator) !Value 
                 }
 
                 const prop_str = try PHPString.init(allocator, prop_name);
-                defer prop_str.release(allocator);
                 const prop_key = ArrayKey{ .string = prop_str };
                 try data_arr.set(allocator, prop_key, val);
+                
+                // 释放key_val，val已经被data_arr持有
+                key_val.release(allocator);
             }
 
-            pos.* += 1;
+            pos.* += 1; // skip '}'
 
             if (obj.class_meta) |meta| {
                 if (meta.magic_unserialize) |unser_fn| {
