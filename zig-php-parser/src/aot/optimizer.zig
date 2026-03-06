@@ -611,7 +611,6 @@ pub const IROptimizer = struct {
             }
             try module.inferred_types.put(func.name, func_types);
 
-            std.debug.print("  Saved {d} inferred types for function {s}\n", .{ func_types.count(), func.name });
         }
     }
 
@@ -1538,7 +1537,6 @@ pub const IROptimizer = struct {
 
     /// Promote memory to registers in a single function
     fn promoteMemoryToRegisters(self: *Self, func: *Function) !bool {
-        std.debug.print("mem2reg: Processing function {s}\n", .{func.name});
 
         // 超时保护：最多 5 秒
         var timer = try std.time.Timer.start();
@@ -1548,7 +1546,6 @@ pub const IROptimizer = struct {
         try Analysis.rebuildCFG(func);
 
         if (timer.read() > timeout_ns) {
-            std.debug.print("mem2reg: TIMEOUT at CFG rebuild\n", .{});
             return false;
         }
 
@@ -1584,9 +1581,7 @@ pub const IROptimizer = struct {
                         if (inst.result) |res| {
                             try reg_to_alloca.put(res.id, inst);
                         }
-                        std.debug.print("mem2reg: Promotable alloca reg_{d}\n", .{inst.result.?.id});
                     } else {
-                        std.debug.print("mem2reg: NOT promotable alloca reg_{d}\n", .{inst.result.?.id});
                     }
                 }
             }
@@ -1594,15 +1589,12 @@ pub const IROptimizer = struct {
 
         if (promotable_allocas.items.len == 0) return false;
 
-        std.debug.print("mem2reg: Found {d} promotable allocas\n", .{promotable_allocas.items.len});
 
         if (timer.read() > timeout_ns) {
-            std.debug.print("mem2reg: TIMEOUT after finding allocas\n", .{});
             return false;
         }
 
         // 3. Collect Defs
-        std.debug.print("mem2reg: Collecting defs...\n", .{});
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
                 switch (inst.op) {
@@ -1625,15 +1617,12 @@ pub const IROptimizer = struct {
             }
         }
 
-        std.debug.print("mem2reg: Defs collected\n", .{});
 
         if (timer.read() > timeout_ns) {
-            std.debug.print("mem2reg: TIMEOUT after collecting defs\n", .{});
             return false;
         }
 
         // 4. Insert Phi Nodes
-        std.debug.print("mem2reg: Inserting phi nodes...\n", .{});
         // Map: Block -> Map: Alloca -> PhiInstruction
         // We need this to quickly find the phi node for a variable in a block during renaming
         var new_phis = std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)).init(self.allocator);
@@ -1675,15 +1664,12 @@ pub const IROptimizer = struct {
             }
         }
 
-        std.debug.print("mem2reg: Phi nodes inserted\n", .{});
 
         if (timer.read() > timeout_ns) {
-            std.debug.print("mem2reg: TIMEOUT after inserting phi nodes\n", .{});
             return false;
         }
 
         // 5. Rename Variables
-        std.debug.print("mem2reg: Renaming variables...\n", .{});
         // Stack of current values for each alloca
         var current_values = std.AutoHashMap(*Instruction, std.ArrayListUnmanaged(Register)).init(self.allocator);
         defer {
@@ -1714,7 +1700,6 @@ pub const IROptimizer = struct {
             try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map, &back_edges);
             
             // 填充回边
-            std.debug.print("mem2reg: Filling {d} back-edge phi incoming...\n", .{back_edges.items.len});
             for (back_edges.items) |edge| {
                 if (new_phis.getPtr(edge.to)) |succ_phis| {
                     if (succ_phis.getPtr(edge.alloca)) |phi_inst_ptr| {
@@ -1733,25 +1718,19 @@ pub const IROptimizer = struct {
             }
         }
 
-        std.debug.print("mem2reg: Variables renamed\n", .{});
 
         // 6. 应用寄存器重命名：更新所有指令的操作数
         if (reg_rename_map.count() > 0) {
-            std.debug.print("mem2reg: Applying register renaming ({d} mappings)...\n", .{reg_rename_map.count()});
             try self.applyRegisterRenaming(func, &reg_rename_map);
-            std.debug.print("mem2reg: Register renaming applied\n", .{});
         }
 
         if (timer.read() > timeout_ns) {
-            std.debug.print("mem2reg: TIMEOUT after renaming\n", .{});
             return false;
         }
 
         // 5.5. 类型特化：根据 incoming 值推断 phi 节点的类型
-        std.debug.print("mem2reg: Specializing phi types...\n", .{});
 
         // DEBUG: 输出所有 PHI 节点的 incoming 值
-        std.debug.print("mem2reg: DEBUG - PHI incoming values:\n", .{});
         var debug_it = new_phis.iterator();
         while (debug_it.next()) |debug_entry| {
             var debug_phi_map = debug_entry.value_ptr;
@@ -1820,12 +1799,10 @@ pub const IROptimizer = struct {
         }
 
         // 6. 类型传播：从 phi 节点传播类型到使用者
-        std.debug.print("mem2reg: DEBUG - Before type propagation\n", .{});
         // 收集所有 phi 指令
         var all_phi_insts = std.AutoHashMap(*IR.Instruction, void).init(self.allocator);
         defer all_phi_insts.deinit();
 
-        std.debug.print("mem2reg: Collecting phi instructions...\n", .{});
         var block_it = new_phis.iterator();
         while (block_it.next()) |entry| {
             var phi_it = entry.value_ptr.iterator();
@@ -1834,12 +1811,10 @@ pub const IROptimizer = struct {
                 std.debug.print("  Found phi: {any}\n", .{phi_entry.value_ptr.*.result});
             }
         }
-        std.debug.print("mem2reg: Collected {d} phi instructions\n", .{all_phi_insts.count()});
 
         try self.propagateTypesFromPhis(func, &all_phi_insts);
 
         // 7. Cleanup (Remove allocas)
-        std.debug.print("mem2reg: Cleaning up allocas...\n", .{});
         // Stores and loads were marked as NOPs in renameVariables.
         // We just need to remove the allocas themselves.
         for (promotable_allocas.items) |alloca| {
@@ -1847,14 +1822,12 @@ pub const IROptimizer = struct {
             self.stats.allocas_promoted += 1;
         }
         
-        std.debug.print("mem2reg: Optimization complete, promoted {d} allocas\n", .{promotable_allocas.items.len});
 
         return true;
     }
 
     /// 类型传播：从 phi 节点传播类型到所有使用者
     fn propagateTypesFromPhis(self: *Self, func: *IR.Function, phis: *const std.AutoHashMap(*IR.Instruction, void)) !void {
-        std.debug.print("mem2reg: Propagating types from phi nodes...\n", .{});
 
         // 工作列表：需要传播类型的寄存器
         var worklist = std.ArrayList(usize).initCapacity(self.allocator, 0) catch unreachable;
@@ -2084,7 +2057,6 @@ pub const IROptimizer = struct {
         // 防止无限递归
         const max_depth = 1000;
         if (self.rename_depth >= max_depth) {
-            std.debug.print("mem2reg: RECURSION LIMIT at depth {d}\n", .{self.rename_depth});
             return error.RecursionLimit;
         }
         self.rename_depth += 1;
@@ -2130,7 +2102,6 @@ pub const IROptimizer = struct {
                                 // 记录寄存器重命名映射：load 的结果寄存器应该被替换为栈顶值
                                 if (inst.result) |res| {
                                     try reg_rename_map.put(res.id, val.id);
-                                    std.debug.print("  Rename: reg_{d} -> reg_{d}\n", .{ res.id, val.id });
                                 }
 
                                 // 将 load 转换为 cast（后续会被优化掉）

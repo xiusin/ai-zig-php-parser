@@ -375,10 +375,9 @@ pub const NativeLinker = struct {
         defer func_code.deinit(self.allocator);
         
         for (ir_module.functions.items, 0..) |func, i| {
-            std.debug.print("[{d}] Generating function: {s}\n", .{ i, func.name });
+            _ = i;
             const before_len = func_code.items.len;
             try self.generateFunction(&func_code, ir_module, func);
-            std.debug.print("[{d}] Done: {s}\n", .{ i, func.name });
             
             // 输出生成的函数代码
             if (std.mem.eql(u8, func.name, "__main__")) {
@@ -1440,7 +1439,6 @@ pub const NativeLinker = struct {
         defer type_inference.deinit();
 
         try type_inference.inferTypes(func);
-        std.debug.print("Code generation: Inferred {d} types for {s}\n", .{ type_inference.solver.var_to_type.count(), func.name });
 
         // 推断返回类型：检查函数体中是否有返回值
         var has_return_value = false;
@@ -1514,7 +1512,6 @@ pub const NativeLinker = struct {
             }
         }
 
-        std.debug.print("Saved {d} inferred types\n", .{inferred_types.count()});
         self.current_inferred_types = &inferred_types;
         defer self.current_inferred_types = null;
 
@@ -1528,7 +1525,7 @@ pub const NativeLinker = struct {
         // 收集寄存器定义
         std.debug.print("Collecting registers from {d} blocks\n", .{func.blocks.items.len});
         for (func.blocks.items, 0..) |block, block_idx| {
-            std.debug.print("Block {d}: {s}, {d} instructions\n", .{ block_idx, block.label, block.instructions.items.len });
+            _ = block_idx;
             for (block.instructions.items) |inst| {
                 // 检查是否是被 mem2reg 提升的 alloca（nop 指令 + ptr 类型）
                 if (inst.op == .nop and inst.result != null) {
