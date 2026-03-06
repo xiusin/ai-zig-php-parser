@@ -4653,7 +4653,6 @@ pub const NativeLinker = struct {
                     const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
                     const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
                     const result_tag = @as(std.meta.Tag(IR.Type), result_type);
-                    }
 
                     const lhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), lhs_fallback) == .php_value) .php_value else lhs_tag;
                     const rhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), rhs_fallback) == .php_value) .php_value else rhs_tag;
