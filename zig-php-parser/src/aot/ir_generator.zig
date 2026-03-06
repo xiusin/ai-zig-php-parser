@@ -3596,11 +3596,15 @@ pub const IRGenerator = struct {
                     break :blk false;
                 } else false;
                 
+                std.debug.print("DEBUG IR gen: arg {d}, is_ref_param={}, target_func={s}\n", .{ i, is_ref_param, if (target_func) |f| f.name else "null" });
+                
                 if (is_ref_param) {
                     // 引用参数：需要传递变量的地址
                     const expr_node = self.getNode(expr_idx);
+                    std.debug.print("DEBUG IR gen: expr_node tag={s}\n", .{ if (expr_node) |n| @tagName(n.tag) else "null" });
                     if (expr_node != null and expr_node.?.tag == .variable) {
                         const var_name = self.getString(expr_node.?.data.variable.name);
+                        std.debug.print("DEBUG IR gen: var_name={s}\n", .{var_name});
                         
                         // 检查是否是全局变量
                         const is_global = self.global_vars.contains(var_name);
@@ -3608,6 +3612,8 @@ pub const IRGenerator = struct {
                             std.mem.eql(u8, func.name, "__main__") 
                         else 
                             false;
+                        
+                        std.debug.print("DEBUG IR gen: is_global={}, is_main={}\n", .{ is_global, is_main });
                         
                         if (is_global or is_main) {
                             // 全局变量：创建临时alloca
@@ -3635,17 +3641,19 @@ pub const IRGenerator = struct {
                             const current_val = try self.generateExpression(expr_idx);
                             _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
                             
-                            // 传递temp地址
-                            args[i] = temp_reg;
+                            // 传递make_ref
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                            args[i] = ref_reg;
                             
                             // 记录需要写回
                             try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
                             continue;
                         }
                         
-                        // 局部变量：传递var_reg（已经是指针）
+                        // 局部变量：传递make_ref
                         if (self.var_registers.get(var_name)) |var_reg| {
-                            args[i] = var_reg;
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                            args[i] = ref_reg;
                             continue;
                         }
                     }

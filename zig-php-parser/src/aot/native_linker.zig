@@ -4287,6 +4287,8 @@ pub const NativeLinker = struct {
                         regs.contains(op.ptr.id) 
                     else 
                         false;
+                    
+                    std.debug.print("DEBUG make_ref: ptr=reg_{d}, is_alloca={}\n", .{ op.ptr.id, is_alloca });
                         
                     if (is_alloca) {
                         // alloca已经是指针，直接使用

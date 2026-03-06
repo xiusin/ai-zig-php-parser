@@ -1837,7 +1837,10 @@ pub fn val_deref(val: *Value) *Value {
 
 pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
     _ = allocator;
-    return Value.initRef(ptr);
+    std.debug.print("DEBUG make_ref: ptr={*}, *ptr={}\n", .{ ptr, ptr.* });
+    const result = Value.initRef(ptr);
+    std.debug.print("DEBUG make_ref: result.isRef()={}\n", .{ result.isRef() });
+    return result;
 }
 
 const BuiltinFn = *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value;
