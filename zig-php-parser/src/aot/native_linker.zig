@@ -1881,6 +1881,55 @@ pub const NativeLinker = struct {
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         var optimized_alloca_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer optimized_alloca_regs.deinit();
+        
+        // 记录引用参数的alloca -> param映射
+        var ref_param_alloca_map = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer ref_param_alloca_map.deinit();
+        
+        // 查找引用参数的alloca和param对应关系
+        if (func.ref_params.items.len > 0) {
+            for (func.blocks.items) |block_scan| {
+                var prev_param_reg: ?usize = null;
+                var prev_param_is_ref = false;
+                
+                for (block_scan.instructions.items) |inst_scan| {
+                    switch (inst_scan.op) {
+                        .param => |param_op| {
+                            if (inst_scan.result) |reg| {
+                                // 检查是否是引用参数
+                                for (func.ref_params.items) |ref_idx| {
+                                    if (ref_idx == param_op.index) {
+                                        prev_param_reg = reg.id;
+                                        prev_param_is_ref = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        },
+                        .store => |store_op| {
+                            // 如果前一个是引用param，这个store的目标就是对应的alloca
+                            if (prev_param_is_ref) {
+                                if (prev_param_reg) |param_reg| {
+                                    if (store_op.value.id == param_reg) {
+                                        try ref_param_alloca_map.put(store_op.ptr.id, param_reg);
+                                        prev_param_reg = null;
+                                        prev_param_is_ref = false;
+                                    }
+                                }
+                            }
+                        },
+                        else => {
+                            if (prev_param_is_ref) {
+                                prev_param_reg = null;
+                                prev_param_is_ref = false;
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
+        // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
         // 生成寄存器声明 - 使用简单的方式
@@ -1906,19 +1955,29 @@ pub const NativeLinker = struct {
                 std.debug.print("reg_{d}: type={s}, is_alloca={}\n", .{ reg_id, @tagName(@as(std.meta.Tag(IR.Type), reg_type)), is_alloca });
 
                 if (is_alloca) {
-                    // alloca 必须保持指针类型，不优化
-                    // 默认：alloca指针
-                    try code.appendSlice(self.allocator, "    var reg_");
-                    try code.writer(self.allocator).print("{d}", .{reg_id});
-                    try code.appendSlice(self.allocator, "_storage: runtime.Value = runtime.Value.initNull();\n");
-                    try code.appendSlice(self.allocator, "    var reg_");
-                    try code.writer(self.allocator).print("{d}", .{reg_id});
-                    try code.appendSlice(self.allocator, ": *runtime.Value = &reg_");
-                    try code.writer(self.allocator).print("{d}", .{reg_id});
-                    try code.appendSlice(self.allocator, "_storage;\n");
-                    try code.appendSlice(self.allocator, "    _ = &reg_");
-                    try code.writer(self.allocator).print("{d}", .{reg_id});
-                    try code.appendSlice(self.allocator, ";\n");
+                    // 检查是否是引用参数的alloca
+                    if (ref_param_alloca_map.get(reg_id)) |_| {
+                        // 引用参数的alloca：声明为undefined，稍后在param后初始化
+                        try code.appendSlice(self.allocator, "    var reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ": *runtime.Value = undefined;\n");
+                        try code.appendSlice(self.allocator, "    _ = &reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ";\n");
+                    } else {
+                        // 普通alloca：创建storage
+                        try code.appendSlice(self.allocator, "    var reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, "_storage: runtime.Value = runtime.Value.initNull();\n");
+                        try code.appendSlice(self.allocator, "    var reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ": *runtime.Value = &reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, "_storage;\n");
+                        try code.appendSlice(self.allocator, "    _ = &reg_");
+                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        try code.appendSlice(self.allocator, ";\n");
+                    }
                 } else {
                     // 检查是否是引用参数寄存器
                     const is_ref_param_reg = blk: {
@@ -4056,6 +4115,25 @@ pub const NativeLinker = struct {
                 }
             },
             .store => |op| {
+                // 检查是否是引用参数的初始化store（跳过）
+                if (self.current_function_for_resolve) |func_check| {
+                    for (func_check.blocks.items) |block_check| {
+                        for (block_check.instructions.items) |inst_check| {
+                            if (inst_check.op == .param) {
+                                if (inst_check.result) |param_result| {
+                                    if (param_result.id == op.value.id) {
+                                        const param_op = inst_check.op.param;
+                                        for (func_check.ref_params.items) |ref_idx| {
+                                            if (ref_idx == param_op.index) {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // 检查 ptr 的实际类型（可能被 mem2reg 提升）
                 const ptr_type = if (self.current_register_types) |types|
                     types.get(op.ptr.id) orelse op.ptr.type_
@@ -4898,6 +4976,21 @@ pub const NativeLinker = struct {
                             try writer.print("    {{\n", .{});
                             try writer.print("        var null_val = runtime.Value.initNull();\n", .{});
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
+                            
+                            // 初始化对应的alloca（如果存在）
+                            if (self.current_function_for_resolve) |func_check| {
+                                for (func_check.blocks.items) |block_check| {
+                                    for (block_check.instructions.items) |inst_check| {
+                                        if (inst_check.op == .store) {
+                                            const store_op = inst_check.op.store;
+                                            if (store_op.value.id == reg.id) {
+                                                try writer.print("    reg_{d} = reg_{d};\n", .{ store_op.ptr.id, reg.id });
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             try writer.print("    }}\n", .{});
                         } else {
                             // 检查是否是可变参数
