@@ -390,7 +390,7 @@ pub const NativeLinker = struct {
         // 将生成的函数代码写入主代码
         // std.debug.print("Writing function code to main\n", .{});
         try writer.writeAll(func_code.items);
-        std.debug.print("Function code written\n", .{});
+        // std.debug.print("Function code written\n", .{});
 
         var has_select: bool = false;
         for (ir_module.functions.items) |func| {
@@ -742,8 +742,8 @@ pub const NativeLinker = struct {
         // 后处理：修复所有错误的类型转换模式
         const generated_code = try code.toOwnedSlice(self.allocator);
         
-        std.debug.print("Post-processing: {d} bytes\n", .{generated_code.len});
-        std.debug.print("Skipping all post-processing (array_push fixed)\n", .{});
+        // std.debug.print("Post-processing: {d} bytes\n", .{generated_code.len});
+        // std.debug.print("Skipping all post-processing (array_push fixed)\n", .{});
         
         // 禁用所有后处理：array_push 已经正确生成代码
         return generated_code;
@@ -1539,10 +1539,10 @@ pub const NativeLinker = struct {
                             else => .php_value,
                         };
                         try all_registers.put(reg.id, inner_type);
-                        std.debug.print("mem2reg promoted reg_{d}, type=ptr -> {s}\n", .{ 
-                            reg.id, 
-                            @tagName(@as(std.meta.Tag(IR.Type), inner_type))
-                        });
+                        // std.debug.print("mem2reg promoted reg_{d}, type=ptr -> {s}\n", .{ 
+                        //     reg.id, 
+                        //     @tagName(@as(std.meta.Tag(IR.Type), inner_type))
+                        // });
                     }
                 }
                 
@@ -1619,7 +1619,7 @@ pub const NativeLinker = struct {
                     try all_registers.put(reg.id, corrected_type);
                     if (inst.op == .alloca) {
                         try alloca_registers.put(reg.id, {});
-                        std.debug.print("alloca reg_{d}, type={s}\n", .{ reg.id, @tagName(@as(std.meta.Tag(IR.Type), corrected_type)) });
+                        // std.debug.print("alloca reg_{d}, type={s}\n", .{ reg.id, @tagName(@as(std.meta.Tag(IR.Type), corrected_type)) });
                     }
                     // 注意：nop 指令（被优化掉的 alloca）不应该被添加到 alloca_registers
 
@@ -1938,8 +1938,8 @@ pub const NativeLinker = struct {
         
         // std.debug.print("ref_param_alloca_map.count() = {d}\n", .{ref_param_alloca_map.count()});
         var ref_it = ref_param_alloca_map.iterator();
-        while (ref_it.next()) |entry| {
-            std.debug.print("  alloca reg_{d} -> param reg_{d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        while (ref_it.next()) |_| {
+            // std.debug.print("  alloca reg_{d} -> param reg_{d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
@@ -1956,15 +1956,15 @@ pub const NativeLinker = struct {
             var reg_iter = all_registers.iterator();
             while (reg_iter.next()) |entry| {
                 const reg_id = entry.key_ptr.*;
-                const reg_type = entry.value_ptr.*;
+                _ = entry.value_ptr.*;
 
-                if (self.config.verbose and reg_id == 16) {
-                    // std.debug.print("  reg_16 type: {s}\n", .{@tagName(@as(std.meta.Tag(IR.Type), reg_type))});
-                }
+                // if (self.config.verbose and reg_id == 16) {
+                //     std.debug.print("  reg_16 type: {s}\n", .{@tagName(@as(std.meta.Tag(IR.Type), reg_type))});
+                // }
 
                 const is_alloca = alloca_registers.contains(reg_id);
 
-                std.debug.print("reg_{d}: type={s}, is_alloca={}\n", .{ reg_id, @tagName(@as(std.meta.Tag(IR.Type), reg_type)), is_alloca });
+                // std.debug.print("reg_{d}: type={s}, is_alloca={}\n", .{ reg_id, @tagName(@as(std.meta.Tag(IR.Type), reg_type)), is_alloca });
 
                 if (is_alloca) {
                     // 检查是否是引用参数的alloca
@@ -2158,8 +2158,8 @@ pub const NativeLinker = struct {
         
         // std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
-        while (alloca_it.next()) |key| {
-            std.debug.print("  alloca: reg_{d}\n", .{key.*});
+        while (alloca_it.next()) |_| {
+            // std.debug.print("  alloca: reg_{d}\n", .{key.*});
         }
 
         self.current_cleanup_regs = cleanup_registers.items;
@@ -4625,7 +4625,7 @@ pub const NativeLinker = struct {
                 }
             },
             .mul => |op| {
-                std.debug.print("generateInstructionSimple: mul reg_{d} = reg_{d} * reg_{d}\n", .{ if (inst.result) |r| r.id else 999, op.lhs.id, op.rhs.id });
+                // std.debug.print("generateInstructionSimple: mul reg_{d} = reg_{d} * reg_{d}\n", .{ if (inst.result) |r| r.id else 999, op.lhs.id, op.rhs.id });
                 if (inst.result) |reg| {
                     const lhs_fallback = if (self.current_register_types) |types|
                         (types.get(op.lhs.id) orelse op.lhs.type_)
@@ -5617,9 +5617,9 @@ pub const NativeLinker = struct {
             },
             .not => |op| {
                 if (inst.result) |reg| {
-                    std.debug.print("generateInstructionSimple: not reg_{d} = !reg_{d}, result_type={s}, operand_type={s}\n", .{
-                        reg.id, op.operand.id, @tagName(reg.type_), @tagName(op.operand.type_)
-                    });
+                    // std.debug.print("generateInstructionSimple: not reg_{d} = !reg_{d}, result_type={s}, operand_type={s}\n", .{
+                    //     reg.id, op.operand.id, @tagName(reg.type_), @tagName(op.operand.type_)
+                    // });
                     
                     // 使用修正后的类型
                     const operand_corrected = if (self.current_register_types) |types|
@@ -5970,13 +5970,13 @@ pub const NativeLinker = struct {
             .array_new => |op| {
                 _ = op;
                 if (inst.result) |reg| {
-                    std.debug.print("ENTER array_new: reg_{d}\n", .{reg.id});
+                    // std.debug.print("ENTER array_new: reg_{d}\n", .{reg.id});
                     const is_alloca = if (self.current_alloca_regs) |alloca_regs| blk: {
                         const result = alloca_regs.contains(reg.id);
-                        std.debug.print("  alloca_regs.contains({d})={}, count={}\n", .{reg.id, result, alloca_regs.count()});
+                        // std.debug.print("  alloca_regs.contains({d})={}, count={}\n", .{reg.id, result, alloca_regs.count()});
                         break :blk result;
                     } else blk: {
-                        std.debug.print("  current_alloca_regs=null\n", .{});
+                        // std.debug.print("  current_alloca_regs=null\n", .{});
                         break :blk false;
                     };
 
@@ -6513,12 +6513,12 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     // 调试
                     if (reg.id == 3) {
-                        std.debug.print("CAST reg_3: from={s}, to={s}, value.id={d}, value.type={s}\n", .{
-                            @tagName(@as(std.meta.Tag(IR.Type), op.from_type)),
-                            @tagName(@as(std.meta.Tag(IR.Type), op.to_type)),
-                            op.value.id,
-                            @tagName(@as(std.meta.Tag(IR.Type), op.value.type_)),
-                        });
+                        // std.debug.print("CAST reg_3: from={s}, to={s}, value.id={d}, value.type={s}\n", .{
+                        //     @tagName(@as(std.meta.Tag(IR.Type), op.from_type)),
+                        //     @tagName(@as(std.meta.Tag(IR.Type), op.to_type)),
+                        //     op.value.id,
+                        //     @tagName(@as(std.meta.Tag(IR.Type), op.value.type_)),
+                        // });
                     }
                     
                     // Get the actual type of the source register
@@ -6533,11 +6533,11 @@ pub const NativeLinker = struct {
                     const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
 
                     if (reg.id == 3) {
-                        std.debug.print("  src_real_type={s}, src_tag={s}, to_tag={s}\n", .{
-                            @tagName(@as(std.meta.Tag(IR.Type), src_real_type)),
-                            @tagName(src_tag),
-                            @tagName(to_tag),
-                        });
+                        // std.debug.print("  src_real_type={s}, src_tag={s}, to_tag={s}\n", .{
+                        //     @tagName(@as(std.meta.Tag(IR.Type), src_real_type)),
+                        //     @tagName(src_tag),
+                        //     @tagName(to_tag),
+                        // });
                     }
 
                     const dest_is_alloca = if (self.current_alloca_regs) |alloca_regs|
@@ -6660,12 +6660,12 @@ pub const NativeLinker = struct {
                     }
 
                     if (reg.id == 120 or op.operand.id == 117) {
-                        std.debug.print("move: dst.id={d}, dst_tag={s}, src.id={d}, src_tag={s}\n", .{
-                            reg.id,
-                            @tagName(dst_tag),
-                            op.operand.id,
-                            @tagName(src_tag),
-                        });
+                        // std.debug.print("move: dst.id={d}, dst_tag={s}, src.id={d}, src_tag={s}\n", .{
+                        //     reg.id,
+                        //     @tagName(dst_tag),
+                        //     op.operand.id,
+                        //     @tagName(src_tag),
+                        // });
                     }
 
                     var src_buf: [32]u8 = undefined;
@@ -6907,7 +6907,7 @@ pub const NativeLinker = struct {
         self.current_alloca_regs = alloca_regs;
         defer self.current_alloca_regs = prev_alloca_regs;
 
-        std.debug.print("tryGenerateStructuredControlFlowNew for {s}\n", .{func.name});
+        // std.debug.print("tryGenerateStructuredControlFlowNew for {s}\n", .{func.name});
 
         // 分析控制流
         var cfg = ControlFlowAnalysis.init(self.allocator);
@@ -6916,14 +6916,14 @@ pub const NativeLinker = struct {
         try self.buildCFG(func, &cfg);
         try self.detectLoops(func, &cfg);
 
-        std.debug.print("Found {d} loops\n", .{cfg.loops.items.len});
+        // std.debug.print("Found {d} loops\n", .{cfg.loops.items.len});
 
         if (cfg.loops.items.len == 0) {
             return false;
         }
 
         // 生成结构化代码
-        std.debug.print("Calling generateStructuredCodeNew...\n", .{});
+        // std.debug.print("Calling generateStructuredCodeNew...\n", .{});
         const result = try self.generateStructuredCodeNew(writer, func, &cfg, cleanup_regs);
         std.debug.print("generateStructuredCodeNew returned {}\n", .{result});
         return result;
@@ -8059,7 +8059,7 @@ pub const NativeLinker = struct {
                 const phi_op = inst.op.phi;
                 const result_reg = inst.result orelse continue;
 
-                std.debug.print("Processing phi reg_{d}, incoming count={d}\n", .{ result_reg.id, phi_op.incoming.len });
+                // std.debug.print("Processing phi reg_{d}, incoming count={d}\n", .{ result_reg.id, phi_op.incoming.len });
 
                 // 策略：在实际生成的块中查找更新，避免使用被展开破坏的 PHI incoming
                 var update_reg: ?usize = null;

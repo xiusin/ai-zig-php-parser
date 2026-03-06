@@ -1704,7 +1704,7 @@ pub const IROptimizer = struct {
                 if (new_phis.getPtr(edge.to)) |succ_phis| {
                     if (succ_phis.getPtr(edge.alloca)) |phi_inst_ptr| {
                         const phi_inst = phi_inst_ptr.*;
-                        std.debug.print("  Adding phi incoming (back-edge): block_{d} -> block_{d}, reg_{d}\n", .{ edge.from.index, edge.to.index, edge.value.id });
+                        // std.debug.print("  Adding phi incoming (back-edge): block_{d} -> block_{d}, reg_{d}\n", .{ edge.from.index, edge.to.index, edge.value.id });
 
                         const old_incoming = phi_inst.op.phi.incoming;
                         const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
@@ -1737,13 +1737,15 @@ pub const IROptimizer = struct {
             var debug_phi_it = debug_phi_map.iterator();
             while (debug_phi_it.next()) |debug_phi_entry| {
                 const debug_phi_inst = debug_phi_entry.value_ptr.*;
-                if (debug_phi_inst.result) |phi_res| {
-                    std.debug.print("  PHI reg_{d}: incoming = [", .{phi_res.id});
+                if (debug_phi_inst.result) |_| {
+                    // std.debug.print("  PHI reg_{d}: incoming = [", .{phi_res.id});
                     for (debug_phi_inst.op.phi.incoming, 0..) |inc, i| {
-                        if (i > 0) std.debug.print(", ", .{});
-                        std.debug.print("reg_{d} from block_{d}", .{ inc.value.id, inc.block.index });
+                        _ = inc;
+                        _ = i;
+                        // if (i > 0) std.debug.print(", ", .{});
+                        // std.debug.print("reg_{d} from block_{d}", .{ inc.value.id, inc.block.index });
                     }
-                    std.debug.print("]\n", .{});
+                    // std.debug.print("]\n", .{});
                 }
             }
         }
@@ -1786,10 +1788,10 @@ pub const IROptimizer = struct {
                 if (!has_php_value and !has_other) {
                     if (has_i64 and !has_f64 and !has_bool) {
                         phi_inst.result.?.type_ = .{ .i64 = {} };
-                        std.debug.print("  Specialized phi reg_{d} to i64\n", .{phi_inst.result.?.id});
+                        // std.debug.print("  Specialized phi reg_{d} to i64\n", .{phi_inst.result.?.id});
                     } else if (has_f64 and !has_i64 and !has_bool) {
                         phi_inst.result.?.type_ = .{ .f64 = {} };
-                        std.debug.print("  Specialized phi reg_{d} to f64\n", .{phi_inst.result.?.id});
+                        // std.debug.print("  Specialized phi reg_{d} to f64\n", .{phi_inst.result.?.id});
                     } else if (has_bool and !has_i64 and !has_f64) {
                         phi_inst.result.?.type_ = .{ .bool = {} };
                         std.debug.print("  Specialized phi reg_{d} to bool\n", .{phi_inst.result.?.id});
