@@ -2135,6 +2135,22 @@ pub const NativeLinker = struct {
                             }
                         }
 
+                        // 写回引用参数
+                        if (self.param_registers) |ref_param_regs| {
+                            var it = ref_param_regs.iterator();
+                            while (it.next()) |entry| {
+                                const param_name = entry.key_ptr.*;
+                                const reg_id = entry.value_ptr.*;
+                                // 查找参数索引
+                                for (func.params.items, 0..) |param, idx| {
+                                    if (std.mem.eql(u8, param.name, param_name) and param.is_reference) {
+                                        try code.writer(self.allocator).print("    if (args.len > {d} and args[{d}].isRef()) args[{d}].asRef().* = reg_{d};\n", .{ idx, idx, idx, reg_id });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
                         if (ret_val) |reg| {
                             const type_tag = @as(std.meta.Tag(IR.Type), all_registers.get(reg.id) orelse reg.type_);
                             if (type_tag == .i64) {
@@ -4811,11 +4827,10 @@ pub const NativeLinker = struct {
                         };
                         
                         if (is_ref_param) {
-                            // 引用参数：从args中的引用读取值
-                            // args[i]是Value.initRef(&var)，需要解引用
+                            // 引用参数：解引用获取值
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef().* else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, args_index });
                             
-                            // 记录参数寄存器（用于写回）
+                            // 记录参数寄存器和参数索引（用于写回）
                             if (self.param_registers) |param_regs| {
                                 try param_regs.put(op.name, reg.id);
                             }
