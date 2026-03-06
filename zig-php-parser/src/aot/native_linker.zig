@@ -117,6 +117,7 @@ pub const NativeLinker = struct {
     current_exception_handler: ?u32 = null,
     current_cleanup_regs: ?[]const usize = null,
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
+    ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
@@ -1929,6 +1930,12 @@ pub const NativeLinker = struct {
             }
         }
 
+        
+        std.debug.print("ref_param_alloca_map.count() = {d}\n", .{ref_param_alloca_map.count()});
+        var ref_it = ref_param_alloca_map.iterator();
+        while (ref_it.next()) |entry| {
+            std.debug.print("  alloca reg_{d} -> param reg_{d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        }
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
@@ -2005,6 +2012,7 @@ pub const NativeLinker = struct {
                     };
                     
                     if (is_ref_param_reg) {
+                        std.debug.print("DEBUG: reg_{d} is ref param reg, declaring as pointer\n", .{reg_id});
                         // 引用参数寄存器：声明为指针类型
                         try code.appendSlice(self.allocator, "    var reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -2136,6 +2144,9 @@ pub const NativeLinker = struct {
 
         self.current_alloca_regs = &alloca_registers;
         defer self.current_alloca_regs = null;
+        
+        self.ref_param_alloca_map = &ref_param_alloca_map;
+        defer self.ref_param_alloca_map = null;
         
         std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
@@ -4116,6 +4127,7 @@ pub const NativeLinker = struct {
             },
             .store => |op| {
                 // 检查是否是引用参数的初始化store（跳过）
+                var is_ref_param_init = false;
                 if (self.current_function_for_resolve) |func_check| {
                     for (func_check.blocks.items) |block_check| {
                         for (block_check.instructions.items) |inst_check| {
@@ -4125,13 +4137,26 @@ pub const NativeLinker = struct {
                                         const param_op = inst_check.op.param;
                                         for (func_check.ref_params.items) |ref_idx| {
                                             if (ref_idx == param_op.index) {
-                                                return;
+                                                is_ref_param_init = true;
+                                                break;
                                             }
                                         }
                                     }
                                 }
                             }
                         }
+                    }
+                }
+                if (is_ref_param_init) return;
+                
+                // 检查ptr是否是引用参数的alloca（使用映射表重定向到param）
+                if (self.ref_param_alloca_map) |map| {
+                    std.debug.print("DEBUG store: checking ptr reg_{d}, map.count={d}\n", .{ op.ptr.id, map.count() });
+                    if (map.get(op.ptr.id)) |param_reg_id| {
+                        std.debug.print("DEBUG store: REDIRECT reg_{d} -> param reg_{d}\n", .{ op.ptr.id, param_reg_id });
+                        // 重定向：写入param而不是alloca
+                        try writer.print("    reg_{d}.* = reg_{d};\n", .{ param_reg_id, op.value.id });
+                        return;
                     }
                 }
                 // 检查 ptr 的实际类型（可能被 mem2reg 提升）
@@ -4300,6 +4325,15 @@ pub const NativeLinker = struct {
             },
             .load => |op| {
                 if (inst.result) |reg| {
+                    // 检查是否是引用参数的alloca（使用映射表重定向到param）
+                    if (self.ref_param_alloca_map) |map| {
+                        if (map.get(op.ptr.id)) |param_reg_id| {
+                            // 重定向：从param读取而不是alloca
+                            try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, param_reg_id });
+                            return;
+                        }
+                    }
+                    
                     // 检查 ptr 的实际类型（可能被 mem2reg 提升）
                     const ptr_type = if (self.current_register_types) |types|
                         types.get(op.ptr.id) orelse op.ptr.type_
