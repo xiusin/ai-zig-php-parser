@@ -4653,16 +4653,6 @@ pub const NativeLinker = struct {
                     const lhs_tag = @as(std.meta.Tag(IR.Type), lhs_type);
                     const rhs_tag = @as(std.meta.Tag(IR.Type), rhs_type);
                     const result_tag = @as(std.meta.Tag(IR.Type), result_type);
-
-                    // DEBUG: 输出类型信息
-                    if (reg.id == 40) {
-                            @tagName(lhs_tag), @tagName(rhs_tag), @tagName(result_tag)
-                        });
-                        std.debug.print("  lhs_fallback={s}, rhs_fallback={s}, result_fallback={s}\n", .{
-                            @tagName(@as(std.meta.Tag(IR.Type), lhs_fallback)),
-                            @tagName(@as(std.meta.Tag(IR.Type), rhs_fallback)),
-                            @tagName(@as(std.meta.Tag(IR.Type), result_fallback))
-                        });
                     }
 
                     const lhs_expr_tag: std.meta.Tag(IR.Type) = if (@as(std.meta.Tag(IR.Type), lhs_fallback) == .php_value) .php_value else lhs_tag;
