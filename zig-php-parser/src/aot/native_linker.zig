@@ -4979,9 +4979,6 @@ pub const NativeLinker = struct {
                         
                         if (is_ref_param) {
                             // 引用参数：返回args中的指针（不解引用）
-                            try writer.print("        if (args.len > 0 and args[0].isRef()) {{\n", .{});
-                            try writer.print("            const ptr = args[0].asRef();\n", .{});
-                            try writer.print("        }}\n", .{});
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
                             
                             // 初始化对应的alloca（如果存在）
