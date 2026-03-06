@@ -376,8 +376,15 @@ pub const NativeLinker = struct {
         
         for (ir_module.functions.items, 0..) |func, i| {
             std.debug.print("[{d}] Generating function: {s}\n", .{ i, func.name });
+            const before_len = func_code.items.len;
             try self.generateFunction(&func_code, ir_module, func);
             std.debug.print("[{d}] Done: {s}\n", .{ i, func.name });
+            
+            // 输出生成的函数代码（仅modifyByReference）
+            if (std.mem.eql(u8, func.name, "modifyByReference")) {
+                const func_text = func_code.items[before_len..];
+                std.debug.print("=== GENERATED CODE FOR {s} ===\n{s}\n=== END ===\n", .{ func.name, func_text });
+            }
         }
         
         // 将生成的函数代码写入主代码
@@ -2178,39 +2185,7 @@ pub const NativeLinker = struct {
             if (block.terminator) |term| {
                 switch (term) {
                     .ret => |ret_val| {
-                        // 引用参数写回
-                        if (func.ref_params.items.len > 0) {
-                            try code.appendSlice(self.allocator, "\n    // Write back reference parameters\n");
-                            const func_has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
-                            for (func.ref_params.items) |ref_idx| {
-                                const param = func.params.items[ref_idx];
-                                const args_index = if (func_has_this) (if (ref_idx > 0) ref_idx - 1 else 0) else ref_idx;
-                                
-                                // 查找param指令对应的alloca
-                                for (func.blocks.items[0].instructions.items) |inst| {
-                                    if (inst.op == .param and inst.result != null) {
-                                        if (std.mem.eql(u8, inst.op.param.name, param.name)) {
-                                            const param_reg_id = inst.result.?.id;
-                                            // 找到对应的store指令
-                                            for (func.blocks.items[0].instructions.items) |store_inst| {
-                                                if (store_inst.op == .store and store_inst.op.store.value.id == param_reg_id) {
-                                                    const alloca_reg_id = store_inst.op.store.ptr.id;
-                                                    try code.writer(self.allocator).print("    if (args.len > {d} and args[{d}].isRef()) {{\n", .{ args_index, args_index });
-                                                    if (alloca_registers.contains(alloca_reg_id)) {
-                                                        try code.writer(self.allocator).print("        args[{d}].asRef().* = reg_{d}.*;\n", .{ args_index, alloca_reg_id });
-                                                    } else {
-                                                        try code.writer(self.allocator).print("        args[{d}].asRef().* = reg_{d};\n", .{ args_index, alloca_reg_id });
-                                                    }
-                                                    try code.appendSlice(self.allocator, "    }\n");
-                                                    break;
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        // 引用参数写回：已通过load/store重定向实现，不需要显式写回
                         
                         // 在return之前执行cleanup，但跳过即将返回的寄存器
                         if (cleanup_registers.items.len > 0) {
@@ -2218,6 +2193,9 @@ pub const NativeLinker = struct {
                             for (cleanup_registers.items) |reg_id| {
                                 const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
                                 if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
+                                    // 跳过引用参数的alloca（它们是undefined）
+                                    if (ref_param_alloca_map.get(reg_id)) |_| continue;
+                                    
                                     // 检查寄存器的实际类型
                                     const reg_type = all_registers.get(reg_id) orelse .php_value;
                                     const reg_tag = @as(std.meta.Tag(IR.Type), reg_type);
@@ -2278,9 +2256,12 @@ pub const NativeLinker = struct {
                         // 其他terminator不应该出现在单基本块中
                         // 没有返回值，可以释放所有寄存器
                         if (cleanup_registers.items.len > 0) {
-                            try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
+                            try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
                                 if (!self.shouldReleaseReg(reg_id)) continue;
+                                
+                                // 跳过引用参数的alloca（它们是undefined）
+                                if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
                                 // 检查寄存器的实际类型
                                 const reg_type = all_registers.get(reg_id) orelse .php_value;
@@ -2307,6 +2288,9 @@ pub const NativeLinker = struct {
                     try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
                     for (cleanup_registers.items) |reg_id| {
                         if (!self.shouldReleaseReg(reg_id)) continue;
+                        
+                        // 跳过引用参数的alloca（它们是undefined）
+                        if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
                         try code.appendSlice(self.allocator, "    reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
@@ -4327,7 +4311,9 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     // 检查是否是引用参数的alloca（使用映射表重定向到param）
                     if (self.ref_param_alloca_map) |map| {
+                        std.debug.print("DEBUG load: checking ptr reg_{d}, map.count={d}\n", .{ op.ptr.id, map.count() });
                         if (map.get(op.ptr.id)) |param_reg_id| {
+                            std.debug.print("DEBUG load: REDIRECT reg_{d} -> param reg_{d}\n", .{ op.ptr.id, param_reg_id });
                             // 重定向：从param读取而不是alloca
                             try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, param_reg_id });
                             return;
@@ -5005,10 +4991,9 @@ pub const NativeLinker = struct {
                         
                         if (is_ref_param) {
                             // 引用参数：返回args中的指针（不解引用）
-                            // args[i]是Value.initRef(&var)，通过asRef()获取*Value指针
-                            // 注意：需要提供fallback的可变null值
                             try writer.print("    {{\n", .{});
                             try writer.print("        var null_val = runtime.Value.initNull();\n", .{});
+                            try writer.print("        std.debug.print(\"DEBUG param: args.len={{d}}, isRef={{}}\\n\", .{{ args.len, if (args.len > 0) args[0].isRef() else false }});\n", .{});
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
                             
                             // 初始化对应的alloca（如果存在）
