@@ -295,7 +295,7 @@ pub const NativeLinker = struct {
 
     /// 将 IR 模块转换为 Zig 代码
     pub fn generateZigCode(self: *Self, ir_module: *const IR.Module) ![]const u8 {
-        std.debug.print("=== generateZigCode: {d} functions ===\n", .{ir_module.functions.items.len});
+        // std.debug.print("=== generateZigCode: {d} functions ===\n", .{ir_module.functions.items.len});
         
         // 设置当前IR模块
         self.ir_module = ir_module;
@@ -370,7 +370,7 @@ pub const NativeLinker = struct {
         }
 
         // 生成函数
-        std.debug.print("=== GENERATING FUNCTIONS: count={d} ===\n", .{ir_module.functions.items.len});
+        // std.debug.print("=== GENERATING FUNCTIONS: count={d} ===\n", .{ir_module.functions.items.len});
         var func_code = try std.ArrayList(u8).initCapacity(self.allocator, 0);
         defer func_code.deinit(self.allocator);
         
@@ -382,12 +382,13 @@ pub const NativeLinker = struct {
             // 输出生成的函数代码
             if (std.mem.eql(u8, func.name, "__main__")) {
                 const func_text = func_code.items[before_len..];
-                std.debug.print("=== GENERATED CODE FOR {s} ===\n{s}\n=== END ===\n", .{ func.name, func_text });
+                _ = func_text;
+                // std.debug.print("=== GENERATED CODE FOR {s} ===\n{s}\n=== END ===\n", .{ func.name, func_text });
             }
         }
         
         // 将生成的函数代码写入主代码
-        std.debug.print("Writing function code to main\n", .{});
+        // std.debug.print("Writing function code to main\n", .{});
         try writer.writeAll(func_code.items);
         std.debug.print("Function code written\n", .{});
 
@@ -717,16 +718,16 @@ pub const NativeLinker = struct {
         }
         
         if (has_main) {
-            std.debug.print("Writing main call\n", .{});
+            // std.debug.print("Writing main call\n", .{});
             try writer.writeAll(
                 \\
                 \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
                 \\
             );
-            std.debug.print("After main call\n", .{});
+            // std.debug.print("After main call\n", .{});
         }
         
-        std.debug.print("Before final writeAll\n", .{});
+        // std.debug.print("Before final writeAll\n", .{});
         
         try writer.writeAll(
             \\    _ = runtime.php_go_wait_all(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch {};
@@ -734,9 +735,9 @@ pub const NativeLinker = struct {
             \\
         );
         
-        std.debug.print("After writeAll\n", .{});
+        // std.debug.print("After writeAll\n", .{});
 
-        std.debug.print("\n\n=== STARTING POST-PROCESSING ===\n\n", .{});
+        // std.debug.print("\n\n=== STARTING POST-PROCESSING ===\n\n", .{});
         
         // 后处理：修复所有错误的类型转换模式
         const generated_code = try code.toOwnedSlice(self.allocator);
@@ -1523,7 +1524,7 @@ pub const NativeLinker = struct {
         defer cleanup_registers.deinit(self.allocator);
 
         // 收集寄存器定义
-        std.debug.print("Collecting registers from {d} blocks\n", .{func.blocks.items.len});
+        // std.debug.print("Collecting registers from {d} blocks\n", .{func.blocks.items.len});
         for (func.blocks.items, 0..) |block, block_idx| {
             _ = block_idx;
             for (block.instructions.items) |inst| {
@@ -1745,7 +1746,7 @@ pub const NativeLinker = struct {
             const corrected_type = entry.value_ptr.*;
             try inferred_types.put(reg_id, corrected_type);
         }
-        std.debug.print("Applied {d} corrected types to inferred_types\n", .{all_registers.count()});
+        // std.debug.print("Applied {d} corrected types to inferred_types\n", .{all_registers.count()});
 
         // ============================================================================
         // 反向类型传播（Backward Type Propagation）
@@ -1853,7 +1854,7 @@ pub const NativeLinker = struct {
             const corrected_type = entry.value_ptr.*;
             try inferred_types.put(reg_id, corrected_type);
         }
-        std.debug.print("Applied {d} corrected types after backward propagation\n", .{all_registers.count()});
+        // std.debug.print("Applied {d} corrected types after backward propagation\n", .{all_registers.count()});
 
         // 用代码生成时的类型推断结果覆盖寄存器类型
         // TODO: 暂时禁用，因为需要配合代码生成时的类型特化
@@ -1935,7 +1936,7 @@ pub const NativeLinker = struct {
         }
 
         
-        std.debug.print("ref_param_alloca_map.count() = {d}\n", .{ref_param_alloca_map.count()});
+        // std.debug.print("ref_param_alloca_map.count() = {d}\n", .{ref_param_alloca_map.count()});
         var ref_it = ref_param_alloca_map.iterator();
         while (ref_it.next()) |entry| {
             std.debug.print("  alloca reg_{d} -> param reg_{d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
@@ -1944,7 +1945,7 @@ pub const NativeLinker = struct {
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
         // 生成寄存器声明 - 使用简单的方式
-        std.debug.print("About to generate register declarations: count={d}\n", .{all_registers.count()});
+        // std.debug.print("About to generate register declarations: count={d}\n", .{all_registers.count()});
         if (all_registers.count() > 0) {
             try code.appendSlice(self.allocator, "    // Register declarations\n");
 
@@ -2155,7 +2156,7 @@ pub const NativeLinker = struct {
         self.ref_param_alloca_map = &ref_param_alloca_map;
         defer self.ref_param_alloca_map = null;
         
-        std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
+        // std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
         while (alloca_it.next()) |key| {
             std.debug.print("  alloca: reg_{d}\n", .{key.*});

@@ -93,10 +93,10 @@ pub const TypeConstraintSolver = struct {
 
     /// 求解所有约束（定点迭代）
     pub fn solve(self: *TypeConstraintSolver) !void {
-        std.debug.print(
-            "type_constraint: Solving {d} constraints for {d} variables\n",
-            .{ self.constraints.items.len, self.reg_to_var.count() },
-        );
+        // std.debug.print(
+        //     "type_constraint: Solving {d} constraints for {d} variables\n",
+        //     .{ self.constraints.items.len, self.reg_to_var.count() },
+        // );
 
         var changed = true;
         var iter: usize = 0;
@@ -111,10 +111,10 @@ pub const TypeConstraintSolver = struct {
 
         self.solve_iterations = iter;
 
-        std.debug.print(
-            "type_constraint: Solved in {d} iterations, {d}/{d} types inferred\n",
-            .{ iter, self.var_to_type.count(), self.reg_to_var.count() },
-        );
+        // std.debug.print(
+        //     "type_constraint: Solved in {d} iterations, {d}/{d} types inferred\n",
+        //     .{ iter, self.var_to_type.count(), self.reg_to_var.count() },
+        // );
     }
 
     /// 类型提升：两种标量类型取更宽的类型

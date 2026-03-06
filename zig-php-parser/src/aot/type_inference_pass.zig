@@ -20,18 +20,18 @@ pub const TypeInferencePass = struct {
     }
     
     pub fn inferTypes(self: *TypeInferencePass, func: *const IR.Function) !void {
-        std.debug.print("type_inference: Analyzing function {s}\n", .{func.name});
+        // std.debug.print("type_inference: Analyzing function {s}\n", .{func.name});
         
         // 收集约束
         try self.collectConstraints(func);
         
-        std.debug.print("type_inference: Collected {d} constraints\n", .{self.solver.constraints.items.len});
+        // std.debug.print("type_inference: Collected {d} constraints\n", .{self.solver.constraints.items.len});
         
         // 求解
         try self.solver.solve();
         
-        std.debug.print("type_inference: Inferred {d} register types\n", 
-            .{self.solver.var_to_type.count()});
+        // std.debug.print("type_inference: Inferred {d} register types\n", 
+        //     .{self.solver.var_to_type.count()});
     }
     
     fn collectConstraints(self: *TypeInferencePass, func: *const IR.Function) !void {

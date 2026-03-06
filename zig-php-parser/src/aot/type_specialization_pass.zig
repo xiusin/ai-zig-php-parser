@@ -40,7 +40,7 @@ pub const TypeSpecializationPass = struct {
     
     /// 对函数执行类型特化
     pub fn specialize(self: *TypeSpecializationPass, func: *IR.Function) !void {
-        std.debug.print("type_specialization: Specializing function {s}\n", .{func.name});
+        // std.debug.print("type_specialization: Specializing function {s}\n", .{func.name});
         
         // 1. 消除冗余 cast
         try self.eliminateRedundantCasts(func);
@@ -54,8 +54,8 @@ pub const TypeSpecializationPass = struct {
         // 4. 更新指令类型
         try self.updateInstructionTypes(func);
         
-        std.debug.print("type_specialization: Stats - casts_eliminated={d}, ops_specialized={d}\n", 
-            .{self.stats.casts_eliminated, self.stats.ops_specialized});
+        // std.debug.print("type_specialization: Stats - casts_eliminated={d}, ops_specialized={d}\n", 
+        //     .{self.stats.casts_eliminated, self.stats.ops_specialized});
     }
     
     /// 消除冗余的类型转换
