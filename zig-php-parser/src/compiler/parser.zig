@@ -2567,6 +2567,7 @@ pub const Parser = struct {
             .star_star => 70, // Exponentiation (higher than multiplication)
             .asterisk, .slash, .percent => 60,
             .plus, .minus, .dot => 50, // String concatenation has same precedence as addition/subtraction
+            .less_less, .greater_greater => 45, // Bit shift operators
             .less, .greater, .less_equal, .greater_equal, .spaceship => 40,
             .k_instanceof => 38, // instanceof has precedence between comparison and equality
             .equal_equal, .equal_equal_equal, .bang_equal, .bang_equal_equal => 35,
@@ -2577,7 +2578,7 @@ pub const Parser = struct {
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
             .question => 7, // Ternary
-            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal, .star_star_equal => 5,
+            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal, .star_star_equal, .less_less_equal, .greater_greater_equal => 5,
             .comma => 1, // Comma operator (lowest precedence)
             else => 0,
         };
