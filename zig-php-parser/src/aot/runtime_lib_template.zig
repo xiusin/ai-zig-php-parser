@@ -1828,10 +1828,12 @@ pub fn val_assign(target: *Value, value: Value) void {
 
 /// 变量解引用
 pub fn val_deref(val: *Value) *Value {
+    std.debug.print("DEBUG val_deref: val={*}, val.*={}, isRef={}\n", .{ val, val.*, val.isRef() });
     if (val.isRef()) {
         const ptr = val.asRef();
         return val_deref(ptr);
     }
+    std.debug.print("DEBUG val_deref: returning {*}\n", .{val});
     return val;
 }
 

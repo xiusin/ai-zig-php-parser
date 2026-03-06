@@ -380,8 +380,8 @@ pub const NativeLinker = struct {
             try self.generateFunction(&func_code, ir_module, func);
             std.debug.print("[{d}] Done: {s}\n", .{ i, func.name });
             
-            // 输出生成的函数代码（仅modifyByReference）
-            if (std.mem.eql(u8, func.name, "modifyByReference")) {
+            // 输出生成的函数代码
+            if (std.mem.eql(u8, func.name, "__main__")) {
                 const func_text = func_code.items[before_len..];
                 std.debug.print("=== GENERATED CODE FOR {s} ===\n{s}\n=== END ===\n", .{ func.name, func_text });
             }
@@ -4139,7 +4139,9 @@ pub const NativeLinker = struct {
                     if (map.get(op.ptr.id)) |param_reg_id| {
                         std.debug.print("DEBUG store: REDIRECT reg_{d} -> param reg_{d}\n", .{ op.ptr.id, param_reg_id });
                         // 重定向：写入param而不是alloca
+                        try writer.print("    std.debug.print(\"DEBUG store: before, reg_{d}={{*}}, value={{}}\\n\", .{{ reg_{d}, reg_{d} }});\n", .{ param_reg_id, param_reg_id, op.value.id });
                         try writer.print("    reg_{d}.* = reg_{d};\n", .{ param_reg_id, op.value.id });
+                        try writer.print("    std.debug.print(\"DEBUG store: after, *reg_{d}={{}}\\n\", .{{ reg_{d}.* }});\n", .{ param_reg_id, param_reg_id });
                         return;
                     }
                 }
@@ -4997,6 +4999,7 @@ pub const NativeLinker = struct {
                             try writer.print("        var null_val = runtime.Value.initNull();\n", .{});
                             try writer.print("        std.debug.print(\"DEBUG param: args.len={{d}}, isRef={{}}\\n\", .{{ args.len, if (args.len > 0) args[0].isRef() else false }});\n", .{});
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
+                            try writer.print("        std.debug.print(\"DEBUG param: reg_{d}={{*}}, *reg_{d}={{}}\\n\", .{{ reg_{d}, reg_{d}.* }});\n", .{ reg.id, reg.id, reg.id, reg.id });
                             
                             // 初始化对应的alloca（如果存在）
                             if (self.current_function_for_resolve) |func_check| {
