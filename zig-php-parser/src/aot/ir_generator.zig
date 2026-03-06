@@ -3646,10 +3646,38 @@ pub const IRGenerator = struct {
                             continue;
                         }
                         
-                        // 局部变量：传递make_ref
+                        // 局部变量：创建临时alloca，传递make_ref，记录写回
                         if (self.var_registers.get(var_name)) |var_reg| {
-                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                            const func = self.current_function orelse return error.NoCurrentFunction;
+                            
+                            // 创建临时alloca
+                            const alloca_type = Type{ .php_value = {} };
+                            const type_ptr = try self.allocator.create(Type);
+                            type_ptr.* = alloca_type;
+                            const ptr_type = Type{ .ptr = type_ptr };
+                            const temp_reg = func.newRegister(ptr_type);
+                            
+                            const alloca_inst = try self.allocator.create(Instruction);
+                            alloca_inst.* = .{
+                                .result = temp_reg,
+                                .op = .{ .alloca = .{ 
+                                    .type_ = alloca_type, 
+                                    .count = 1, 
+                                    .no_optimize = true 
+                                } },
+                                .location = self.current_location,
+                            };
+                            try self.entry_allocas.append(self.allocator, alloca_inst);
+                            
+                            // Store当前值到temp
+                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = var_reg } }, null);
+                            
+                            // 传递make_ref
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
                             args[i] = ref_reg;
+                            
+                            // 记录需要写回（使用特殊标记表示局部变量）
+                            try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
                             continue;
                         }
                     }
@@ -3847,7 +3875,15 @@ pub const IRGenerator = struct {
         // 引用参数写回
         for (ref_writebacks.items) |wb| {
             const new_val = try self.emitWithResult(.{ .load = .{ .ptr = wb.temp_reg, .type_ = .php_value } }, .php_value);
-            _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
+            
+            // 检查是否是局部变量
+            if (self.var_registers.contains(wb.var_name)) {
+                // 局部变量：更新var_registers映射
+                try self.var_registers.put(self.allocator, wb.var_name, new_val);
+            } else {
+                // 全局变量：global_set
+                _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
+            }
         }
 
         return result;
