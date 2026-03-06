@@ -4917,9 +4917,8 @@ pub const NativeLinker = struct {
             },
             .has_arg => |op| {
                 if (inst.result) |reg| {
-                    // IR中参数索引从1开始，args数组从0开始
-                    const args_index = if (op.index > 0) op.index - 1 else 0;
-                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool((args.len > {d}) and !args[{d}].isMissing());\n", .{ args_index, args_index });
+                    // 检查参数是否提供：args.len > index
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool((args.len > {d}) and !args[{d}].isMissing());\n", .{ op.index, op.index });
                 }
             },
             .eq => |op| {
