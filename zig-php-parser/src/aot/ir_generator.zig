@@ -2934,11 +2934,11 @@ pub const IRGenerator = struct {
             .spaceship => self.emitWithResult(.{ .spaceship = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
 
             // Bitwise
-            .ampersand => self.emitWithResult(.{ .bit_and = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
-            .pipe => self.emitWithResult(.{ .bit_or = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
-            .caret => self.emitWithResult(.{ .bit_xor = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
-            .less_less => self.emitWithResult(.{ .shl = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
-            .greater_greater => self.emitWithResult(.{ .shr = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .i64),
+            .ampersand => self.emitWithResult(.{ .bit_and = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .pipe => self.emitWithResult(.{ .bit_or = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .caret => self.emitWithResult(.{ .bit_xor = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .less_less => self.emitWithResult(.{ .shl = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+            .greater_greater => self.emitWithResult(.{ .shr = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
 
             // String concatenation
             .dot => self.emitWithResult(.{ .concat = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_string),
