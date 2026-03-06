@@ -948,6 +948,22 @@ pub const IRGenerator = struct {
         var traits = std.ArrayListUnmanaged([]const u8){};
         defer traits.deinit(self.allocator);
 
+        // 收集接口名称
+        var interfaces = try std.ArrayList([]const u8).initCapacity(self.allocator, class_data.implements.len);
+        defer interfaces.deinit(self.allocator);
+        for (class_data.implements) |impl_idx| {
+            const impl_node = self.getNode(impl_idx) orelse continue;
+            const iface_name = switch (impl_node.tag) {
+                .named_type => self.getString(impl_node.data.named_type.name),
+                .variable => self.getString(impl_node.data.variable.name),
+                .literal_string => self.getString(impl_node.data.literal_string.value),
+                else => continue,
+            };
+            try interfaces.append(self.allocator, iface_name);
+        }
+
+        const interfaces_slice = try interfaces.toOwnedSlice(self.allocator);
+
         // Create type definition
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
@@ -963,7 +979,7 @@ pub const IRGenerator = struct {
                 }
                 break :blk null;
             } else null,
-            .interfaces = &.{},
+            .interfaces = interfaces_slice,
             .traits = &.{},
             .properties = &.{},
             .methods = &.{},
@@ -976,7 +992,7 @@ pub const IRGenerator = struct {
         }
 
         // Register class in symbol table
-        try self.symbol_table.defineClass(class_name, type_def.parent, &.{}, self.current_location);
+        try self.symbol_table.defineClass(class_name, type_def.parent, type_def.interfaces, self.current_location);
 
         // Enter class scope
         _ = try self.symbol_table.enterScope(.class, class_name);

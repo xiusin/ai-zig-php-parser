@@ -1047,6 +1047,18 @@ pub const NativeLinker = struct {
                         .{ class_names[ci], escaped_parent },
                     );
                 }
+                
+                // 设置接口列表
+                if (td.interfaces.len > 0) {
+                    try writer.print("    {s}_meta.interfaces = &[_][]const u8{{", .{class_names[ci]});
+                    for (td.interfaces, 0..) |iface, idx| {
+                        if (idx > 0) try writer.writeAll(", ");
+                        const escaped_iface = try self.escapeString(iface);
+                        defer self.allocator.free(escaped_iface);
+                        try writer.print("\"{s}\"", .{escaped_iface});
+                    }
+                    try writer.writeAll("};\n");
+                }
             }
         }
 
