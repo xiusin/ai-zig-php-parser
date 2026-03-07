@@ -2245,6 +2245,22 @@ pub const IRGenerator = struct {
             .variable => {
                 const var_name = self.getString(target_node.data.variable.name);
                 
+                // 检查是否是引用变量（foreach引用）
+                if (self.ref_vars.contains(var_name)) {
+                    // 引用变量：使用php_ref_assign_ptr
+                    if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                        const assign_args = try self.allocator.alloc(Register, 2);
+                        assign_args[0] = ptr_reg;  // alloca指针
+                        assign_args[1] = value_reg;
+                        _ = try self.emit(.{ .call = .{
+                            .func_name = "php_ref_assign_ptr",
+                            .args = assign_args,
+                            .return_type = .void,
+                        } }, null);
+                    }
+                    return;
+                }
+                
                 // 检查是否是引用参数
                 const is_ref_param = self.reference_params.contains(var_name);
                 
