@@ -1660,7 +1660,6 @@ pub const Value = struct {
 
     pub fn asRefWrapper(self: Value) *RefWrapper {
         const ptr_val = nanbox_abi.decodePtr(self.val);
-        std.debug.print("DEBUG: asRefWrapper val={x}, decoded={x}\n", .{self.val, ptr_val});
         return @ptrFromInt(ptr_val);
     }
 
@@ -1692,12 +1691,11 @@ pub const Value = struct {
     }
 
     pub fn release(self: Value, allocator: Allocator) void {
-        // RefWrapper不应该在这里释放，只在php_array_iter_free_ref中释放
         if (self.isRef()) {
-            // 跳过RefWrapper的释放
-            return;
-        }
-        if (self.isString()) {
+            // RefWrapper需要清理
+            const wrapper = self.asRefWrapper();
+            wrapper.deinit(allocator);
+        } else if (self.isString()) {
             self.asString().release(allocator);
         } else if (self.isArray()) {
             self.asArray().release(allocator);
@@ -1894,7 +1892,6 @@ pub fn val_deref(val: *Value) *Value {
     if (val.isRef()) {
         // 尝试作为RefWrapper解析
         const wrapper = val.asRefWrapper();
-        std.debug.print("DEBUG: val_deref wrapper={*}, array={*}, ref_count={}\n", .{wrapper, wrapper.array, wrapper.array.ref_count});
         if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
             return value_ptr;
         }
@@ -3116,9 +3113,7 @@ pub const RefWrapper = struct {
     key: ArrayKey,
     
     pub fn updateKey(self: *RefWrapper, new_key: ArrayKey) void {
-        std.debug.print("DEBUG: updateKey before: array={*}, key={any}\n", .{self.array, self.key});
         self.key = new_key;
-        std.debug.print("DEBUG: updateKey after: array={*}, key={any}\n", .{self.array, self.key});
     }
     
     pub fn deinit(self: *RefWrapper, allocator: Allocator) void {
@@ -3129,8 +3124,7 @@ pub const RefWrapper = struct {
                 self.array.has_active_refs = false;
             }
         }
-        // 释放数组引用计数
-        self.array.release(allocator);
+        // 不释放数组引用计数（由迭代器管理）
         // 释放RefWrapper自身
         allocator.destroy(self);
     }
@@ -3295,11 +3289,11 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
         wrapper.array = iter.array;
         wrapper.key = entry.key_ptr.*;
         
-        // RefWrapper持有数组引用，增加引用计数
-        _ = iter.array.retain();
-        
-        // 标记数组有活跃引用
-        iter.array.has_active_refs = true;
+        // 不增加数组引用计数（迭代器已经持有）
+        // 只标记数组有活跃引用
+        if (!iter.array.has_active_refs) {
+            iter.array.has_active_refs = true;
+        }
         iter.array.ref_lock_count += 1;
         
         return Value.initRefWrapper(wrapper);

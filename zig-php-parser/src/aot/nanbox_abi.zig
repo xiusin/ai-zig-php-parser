@@ -16,7 +16,7 @@ pub const TYPE_STRING: u64 = 0x0000800000000000;
 pub const TYPE_ARRAY: u64 = 0x0001000000000000;
 pub const TYPE_OBJECT: u64 = 0x0001800000000000;
 pub const TYPE_FUNCTION: u64 = 0x0002000000000000;
-pub const TYPE_REF: u64 = 0x0003000000000000;
+pub const TYPE_REF: u64 = 0x0002800000000000;  // 修复：使用未占用的类型码
 
 pub inline fn encodeInt(i: i64) u64 {
     return TAG_INT_MARKER | (@as(u64, @bitCast(i)) & INT48_MASK);

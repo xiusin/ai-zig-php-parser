@@ -1633,20 +1633,23 @@ pub const IRGenerator = struct {
         const iter_args = try self.allocator.alloc(Register, 1);
         iter_args[0] = iterable_reg;
 
-        // 根据是否引用选择不同的初始化函数
-        const init_func = if (foreach_data.value_by_ref) "php_array_iter_init_ref" else "php_array_iter_init";
-        
-        // iter_addr = php_array_iter_init[_ref](iterable)
+        // 对于引用迭代器，额外retain数组确保生命周期
+        var array_backup: ?Register = null;
+        if (foreach_data.value_by_ref) {
+            // 保存数组引用
+            array_backup = iterable_reg;
+        }
+
+        // 统一使用普通迭代器初始化
         const iter_addr = try self.emitWithResult(.{
             .call = .{
-                .func_name = init_func,
+                .func_name = "php_array_iter_init",
                 .args = iter_args,
-                .return_type = .php_value, // 返回 Value 类型
+                .return_type = .php_value,
             },
         }, .php_value);
 
         // Alloc iterator storage (to update it in increment)
-        // 统一使用 php_value 类型
         const php_value_type_ptr = try self.allocator.create(Type);
         php_value_type_ptr.* = Type{ .php_value = {} };
         const iter_ptr_type = Type{ .ptr = php_value_type_ptr };
@@ -1663,17 +1666,15 @@ pub const IRGenerator = struct {
             .continue_block = increment_block,
         });
 
-        // Condition check: php_array_iter_valid[_ref](iter)
+        // Condition check: php_array_iter_valid(iter)
         self.setCurrentBlock(cond_block);
         const curr_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
 
         const valid_args = try self.allocator.alloc(Register, 1);
         valid_args[0] = curr_iter;
 
-        const valid_func = if (foreach_data.value_by_ref) "php_array_iter_valid_ref" else "php_array_iter_valid";
-        
         const valid_val = try self.emitWithResult(.{ .call = .{
-            .func_name = valid_func,
+            .func_name = "php_array_iter_valid",
             .args = valid_args,
             .return_type = .php_value,
         } }, .php_value);
@@ -1719,8 +1720,8 @@ pub const IRGenerator = struct {
             const val_args = try self.allocator.alloc(Register, 1);
             val_args[0] = body_iter;
 
-            // 根据是否是引用选择不同的函数（复用版本）
-            const func_name = if (foreach_data.value_by_ref) "php_array_iter_value_ref_reuse" else "php_array_iter_value";
+            // 根据是否是引用选择不同的函数
+            const func_name = if (foreach_data.value_by_ref) "php_array_iter_value_ref" else "php_array_iter_value";
             
             const val_val = try self.emitWithResult(.{ .call = .{
                 .func_name = func_name,
@@ -1751,10 +1752,8 @@ pub const IRGenerator = struct {
         const next_args = try self.allocator.alloc(Register, 1);
         next_args[0] = inc_iter;
 
-        const next_func = if (foreach_data.value_by_ref) "php_array_iter_next_ref" else "php_array_iter_next";
-        
         const next_iter = try self.emitWithResult(.{ .call = .{
-            .func_name = next_func,
+            .func_name = "php_array_iter_next",
             .args = next_args,
             .return_type = .php_value,
         } }, .php_value);
@@ -1772,15 +1771,13 @@ pub const IRGenerator = struct {
         const free_args = try self.allocator.alloc(Register, 1);
         free_args[0] = exit_iter;
 
-        const free_func = if (foreach_data.value_by_ref) "php_array_iter_free_ref" else "php_array_iter_free";
-        
         _ = try self.emit(.{ .call = .{
-            .func_name = free_func,
+            .func_name = "php_array_iter_free",
             .args = free_args,
             .return_type = .void,
         } }, null);
 
-        // 引用变量清理（RefWrapper在free_ref中已自动清理，只需从集合中移除）
+        // 清理引用变量标记
         if (foreach_data.value_by_ref) {
             const val_node = self.getNode(foreach_data.value);
             if (val_node != null and val_node.?.tag == .variable) {
