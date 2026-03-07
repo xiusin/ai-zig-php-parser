@@ -6285,8 +6285,7 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
             const guard = ClassContext.init(m, lookup.owner);
             defer guard.deinit();
             _ = try lookup.method.func(obj_val, args, allocator);
-            // __construct调用会导致对象被额外retain一次，需要release
-            obj.release();
+            // 注意：__construct不会额外retain对象，所以不需要release
         }
     }
 
