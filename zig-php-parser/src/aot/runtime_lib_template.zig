@@ -938,7 +938,10 @@ pub const PHPString = struct {
     pub fn release(self: *PHPString, allocator: Allocator) void {
         if (self.is_static) return;
 
-        if (self.ref_count == 0) return; // 防止重复释放
+        if (self.ref_count == 0) {
+            std.debug.print("WARNING: PHPString double free detected! data={s}\n", .{self.data});
+            return;
+        }
 
         self.ref_count -= 1;
         if (self.ref_count == 0) {
@@ -949,6 +952,7 @@ pub const PHPString = struct {
     /// 释放字符串
     fn deinit(self: *PHPString, allocator: Allocator) void {
         if (!self.is_static) {
+            std.debug.print("PHPString.deinit called\n", .{});
             if (alloc_counters.php_string_live_objects > 0) {
                 alloc_counters.php_string_live_objects -= 1;
             }
@@ -958,7 +962,9 @@ pub const PHPString = struct {
                 alloc_counters.php_string_live_bytes = 0;
             }
             allocator.free(self.data);
+            std.debug.print("PHPString.deinit: freed data\n", .{});
             destroyPHPString(self, allocator);
+            std.debug.print("PHPString.deinit: destroyed self\n", .{});
         }
     }
 
@@ -1281,7 +1287,10 @@ pub const PHPArray = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPArray, allocator: Allocator) void {
-        if (self.ref_count == 0) return;
+        if (self.ref_count == 0) {
+            std.debug.print("WARNING: PHPArray double free detected!\n", .{});
+            return;
+        }
 
         self.ref_count -= 1;
         if (self.ref_count == 0) {
@@ -5790,7 +5799,10 @@ pub const PHPObject = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
-        if (self.ref_count == 0) return;
+        if (self.ref_count == 0) {
+            std.debug.print("WARNING: PHPObject double free detected! class={s}\n", .{self.class_name});
+            return;
+        }
 
         self.ref_count -= 1;
         if (self.ref_count == 0) {
