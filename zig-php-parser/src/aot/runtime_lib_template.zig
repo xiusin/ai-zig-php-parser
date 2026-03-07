@@ -3157,7 +3157,8 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
     const array = array_val.asArray();
     
     // 增加数组引用计数，确保迭代期间数组不被释放
-    _ = array.retain();
+    const retained = array.retain();
+    _ = retained;
     
     const iter = try allocator.create(ArrayIterator);
     iter.array = array;  // 保存数组引用
@@ -3172,44 +3173,26 @@ pub fn php_array_iter_init_ref(array_val: Value, allocator: Allocator) !Value {
     if (!array_val.isArray()) return Value.initNull();
     const array = array_val.asArray();
     
-    std.debug.print("DEBUG: init_ref array={*}, ref_count={}\n", .{array, array.ref_count});
+    // 标记数组有活跃引用并立即转换为mixed模式
+    if (!array.has_active_refs) {
+        array.has_active_refs = true;
+        if (array.elements.mixed == null) {
+            try array.elements.convertToMixed();
+        }
+    }
     
     // 增加数组引用计数
-    _ = array.retain();
-    std.debug.print("DEBUG: after iter retain, ref_count={}\n", .{array.ref_count});
+    const retained = array.retain();
+    _ = retained;
     
-    // 创建迭代器
+    // 创建迭代器（在mixed模式上）
     const iter = try allocator.create(ArrayIterator);
     iter.array = array;
     iter.iter = array.elements.iterator();
     iter.current = iter.iter.next();
     
-    // 创建RefWrapper（只创建一次）
-    const wrapper = try allocator.create(RefWrapper);
-    wrapper.array = array;
-    wrapper.key = if (iter.current) |entry| entry.key_ptr.* else .{ .integer = 0 };
-    
-    // 增加数组引用计数（RefWrapper持有）
-    _ = array.retain();
-    std.debug.print("DEBUG: after wrapper retain, ref_count={}\n", .{array.ref_count});
-    
-    // 标记数组有活跃引用
-    array.has_active_refs = true;
-    array.ref_lock_count += 1;
-    
-    // 创建复合结构存储迭代器和RefWrapper
-    const combined = try allocator.create(RefIteratorState);
-    combined.iter = iter;
-    combined.wrapper = wrapper;
-    
-    // 返回复合结构的地址
-    return Value.initInt(@as(i64, @intCast(@intFromPtr(combined))));
+    return Value.initInt(@intCast(@intFromPtr(iter)));
 }
-
-pub const RefIteratorState = struct {
-    iter: *ArrayIterator,
-    wrapper: *RefWrapper,
-};
 
 pub fn php_array_iter_valid(iter_val: Value) !Value {
     // 检测是否是Iterator对象
@@ -3280,17 +3263,9 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     if (iter.current) |entry| {
-        // 标记数组有活跃引用
-        if (!iter.array.has_active_refs) {
-            iter.array.has_active_refs = true;
-            // 立即转换为mixed模式，确保指针稳定
-            if (iter.array.elements.mixed == null) {
-                try iter.array.elements.convertToMixed();
-            }
-        }
         iter.array.ref_lock_count += 1;
         
-        // 转换后重新获取指针（从mixed模式）
+        // 从mixed模式获取指针
         if (iter.array.elements.mixed) |*m| {
             if (m.getPtr(entry.key_ptr.*)) |value_ptr| {
                 return Value.initRef(value_ptr);
@@ -3334,15 +3309,22 @@ pub fn php_deref(ref_val: Value) !Value {
 
 /// 引用赋值：将值写入引用指向的位置
 pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
-    std.debug.print("DEBUG: php_ref_assign isRef={}\n", .{ref_val.isRef()});
     if (ref_val.isRef()) {
-        // 直接写入指针指向的位置
         const ptr = ref_val.asRef();
-        std.debug.print("DEBUG: writing to ptr={*}, old={}, new={}\n", .{ptr, ptr.asInt(), new_val.asInt()});
         ptr.release(runtime_allocator);
         _ = new_val.retain();
         ptr.* = new_val;
-        std.debug.print("DEBUG: after write, ptr.*={}\n", .{ptr.asInt()});
+    }
+    return Value.initNull();
+}
+
+/// 引用赋值（通过指针）：将值写入引用指向的位置
+pub fn php_ref_assign_ptr(ref_val: Value, new_val: Value) !Value {
+    if (ref_val.isRef()) {
+        const ptr = ref_val.asRef();
+        ptr.release(runtime_allocator);
+        _ = new_val.retain();
+        ptr.* = new_val;
     }
     return Value.initNull();
 }

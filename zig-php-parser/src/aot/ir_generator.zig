@@ -1640,10 +1640,11 @@ pub const IRGenerator = struct {
             array_backup = iterable_reg;
         }
 
-        // 统一使用普通迭代器初始化
+        // 根据是否引用选择不同的初始化函数
+        const init_func = if (foreach_data.value_by_ref) "php_array_iter_init_ref" else "php_array_iter_init";
         const iter_addr = try self.emitWithResult(.{
             .call = .{
-                .func_name = "php_array_iter_init",
+                .func_name = init_func,
                 .args = iter_args,
                 .return_type = .php_value,
             },
@@ -2391,21 +2392,17 @@ pub const IRGenerator = struct {
 
         // 检查是否是引用变量
         var is_ref = false;
-        var ref_reg: ?Register = null;
+        var ref_ptr_reg: ?Register = null;  // 指针寄存器
         var current_value: Register = undefined;
         
         if (target_node.tag == .variable) {
             const var_name = self.getString(target_node.data.variable.name);
             if (self.ref_vars.contains(var_name)) {
                 is_ref = true;
-                // 获取变量的指针寄存器
+                // 保存指针寄存器（不load）
                 if (self.lookupVarRegister(var_name)) |ptr_reg| {
-                    // Load引用值（这会生成 reg_X = val_deref(ptr).*，即引用值）
-                    const ptr_type = ptr_reg.type_;
-                    const pointed_type = if (ptr_type == .ptr) ptr_type.ptr.* else .php_value;
-                    ref_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = pointed_type } }, pointed_type);
-                    
-                    // 再次解引用获取实际值
+                    ref_ptr_reg = ptr_reg;
+                    // 解引用获取当前值
                     current_value = try self.generateExpression(compound_data.target);
                 } else {
                     return error.UndefinedVariable;
@@ -2445,12 +2442,12 @@ pub const IRGenerator = struct {
                 const var_name = self.getString(target_node.data.variable.name);
                 
                 if (is_ref) {
-                    // 如果是引用，调用 php_ref_assign 写回
+                    // 如果是引用，使用指针寄存器调用 php_ref_assign_ptr
                     const assign_args = try self.allocator.alloc(Register, 2);
-                    assign_args[0] = ref_reg.?;  // 使用保存的引用寄存器
+                    assign_args[0] = ref_ptr_reg.?;  // 传递指针寄存器
                     assign_args[1] = result_reg;
                     _ = try self.emit(.{ .call = .{
-                        .func_name = "php_ref_assign",
+                        .func_name = "php_ref_assign_ptr",
                         .args = assign_args,
                         .return_type = .void,
                     } }, null);
