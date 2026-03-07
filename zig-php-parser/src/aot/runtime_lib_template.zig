@@ -956,7 +956,7 @@ pub const PHPString = struct {
     /// 释放字符串
     fn deinit(self: *PHPString, allocator: Allocator) void {
         if (!self.is_static) {
-            std.debug.print("PHPString.deinit called\n", .{});
+            // std.debug.print("PHPString.deinit called\n", .{});
             if (alloc_counters.php_string_live_objects > 0) {
                 alloc_counters.php_string_live_objects -= 1;
             }
@@ -966,9 +966,9 @@ pub const PHPString = struct {
                 alloc_counters.php_string_live_bytes = 0;
             }
             allocator.free(self.data);
-            std.debug.print("PHPString.deinit: freed data\n", .{});
+            // std.debug.print("PHPString.deinit: freed data\n", .{});
             destroyPHPString(self, allocator);
-            std.debug.print("PHPString.deinit: destroyed self\n", .{});
+            // std.debug.print("PHPString.deinit: destroyed self\n", .{});
         }
     }
 
