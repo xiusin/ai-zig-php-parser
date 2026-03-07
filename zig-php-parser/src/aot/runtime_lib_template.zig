@@ -5790,7 +5790,6 @@ pub const PHPObject = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
-        std.debug.print("[OBJ_RELEASE] ref_count={}\n", .{self.ref_count});
         if (self.ref_count == 0) return;
 
         self.ref_count -= 1;
