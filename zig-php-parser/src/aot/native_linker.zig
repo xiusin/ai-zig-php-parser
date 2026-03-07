@@ -2913,8 +2913,6 @@ pub const NativeLinker = struct {
         const dest_tag = @as(std.meta.Tag(IR.Type), dest_type);
         const dest_is_value = !(dest_tag == .i64 or dest_tag == .f64 or dest_tag == .bool);
 
-        const dest_may_heap = if (self.current_reg_may_heap) |mh| mh[result_reg.id] else true;
-
         // 收集有效的 incoming 块
         const IncomingItem = struct { idx: u32, src: IR.Register };
         var valid_incoming = try std.ArrayList(IncomingItem).initCapacity(self.allocator, phi.incoming.len);
@@ -2946,15 +2944,17 @@ pub const NativeLinker = struct {
             try writer.print("    reg_{d} = ", .{result_reg.id});
             try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, src.id);
             try writer.writeAll(";");
-            if (dest_is_value and dest_may_heap) {
-                const src_may_heap = switch (src_tag) {
-                    .i64, .f64, .bool => false,
-                    else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
-                };
-                if (src_may_heap) {
-                    try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
-                }
-            }
+            // 注释掉phi的自动retain，因为它导致ref_count多1
+            // mem2reg优化后，phi代替store，store本身不应该retain
+            // if (dest_is_value and dest_may_heap) {
+            //     const src_may_heap = switch (src_tag) {
+            //         .i64, .f64, .bool => false,
+            //         else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
+            //     };
+            //     if (src_may_heap) {
+            //         try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
+            //     }
+            // }
             try writer.writeAll("\n");
             return;
         }
@@ -2968,15 +2968,16 @@ pub const NativeLinker = struct {
             try writer.print("        {d} => {{ reg_{d} = ", .{ item.idx, result_reg.id });
             try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, src.id);
             try writer.writeAll(";");
-            if (dest_is_value and dest_may_heap) {
-                const src_may_heap = switch (src_tag) {
-                    .i64, .f64, .bool => false,
-                    else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
-                };
-                if (src_may_heap) {
-                    try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
-                }
-            }
+            // 注释掉phi的自动retain
+            // if (dest_is_value and dest_may_heap) {
+            //     const src_may_heap = switch (src_tag) {
+            //         .i64, .f64, .bool => false,
+            //         else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
+            //     };
+            //     if (src_may_heap) {
+            //         try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
+            //     }
+            // }
             try writer.writeAll(" },\n");
         }
         try writer.writeAll("        else => unreachable,\n");
@@ -3204,10 +3205,11 @@ pub const NativeLinker = struct {
         }
         
         if (!has_any_dependency) {
-            // 无依赖，直接赋值（需要retain）
+            // 无依赖，直接赋值（不需要retain，因为phi代替store）
             for (assignments) |assign| {
                 try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
+                // 注释掉retain，避免ref_count多1
+                // try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
             }
         } else {
             // 有依赖，只为需要的赋值使用临时变量
@@ -3217,14 +3219,15 @@ pub const NativeLinker = struct {
                     try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
                 }
             }
-            // 第二步：赋值（需要retain）
+            // 第二步：赋值（不需要retain）
             for (assignments, 0..) |assign, i| {
                 if (needs_temp.items[i]) {
                     try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                 } else {
                     try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
                 }
-                try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
+                // 注释掉retain
+                // try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
             }
         }
     }

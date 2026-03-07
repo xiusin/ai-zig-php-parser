@@ -3441,11 +3441,8 @@ pub const IRGenerator = struct {
                         } else {
                             // 局部变量：先释放旧值（触发析构），再设置为null
                             if (self.var_registers.get(var_name)) |var_reg| {
-                                // Release两次：一次抵消phi的retain，一次是真正的unset
-                                const old_val1 = try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
-                                _ = try self.emit(.{ .release = .{ .operand = old_val1 } }, null);
-                                const old_val2 = try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
-                                _ = try self.emit(.{ .release = .{ .operand = old_val2 } }, null);
+                                const old_val = try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
+                                _ = try self.emit(.{ .release = .{ .operand = old_val } }, null);
                                 const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                                 _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = null_reg } }, null);
                             }
