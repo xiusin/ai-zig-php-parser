@@ -2158,12 +2158,30 @@ pub const NativeLinker = struct {
         
         // std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
-        while (alloca_it.next()) |key| {
-            std.debug.print("  alloca: reg_{d}\n", .{key.*});
+        while (alloca_it.next()) |_| {
+            // std.debug.print("  alloca: reg_{d}\n", .{key.*});
         }
 
         self.current_cleanup_regs = cleanup_registers.items;
         defer self.current_cleanup_regs = null;
+
+        // 找出被store到alloca的寄存器，它们不应该被cleanup
+        // 因为alloca会负责cleanup
+        var stored_to_alloca = std.AutoHashMap(usize, void).init(self.allocator);
+        defer stored_to_alloca.deinit();
+        
+        // 遍历所有block查找store指令
+        for (func.blocks.items) |block_scan| {
+            for (block_scan.instructions.items) |inst| {
+                if (inst.op == .store) {
+                    const store_op = inst.op.store;
+                    // 如果store的目标是alloca，记录源寄存器
+                    if (alloca_registers.contains(store_op.ptr.id)) {
+                        try stored_to_alloca.put(store_op.value.id, {});
+                    }
+                }
+            }
+        }
 
         // 生成代码体
         if (func.blocks.items.len == 1) {
@@ -2192,8 +2210,17 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
+                                // 跳过已经被store到alloca的寄存器
+                                if (stored_to_alloca.contains(reg_id)) {
+                                    std.debug.print("[SKIP] reg_{d} (stored to alloca)\n", .{reg_id});
+                                    continue;
+                                }
+                                
+                                std.debug.print("[CLEANUP] reg_{d}\n", .{reg_id});
+                                
                                 const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
                                 if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
+                                    std.debug.print("[SHOULD_RELEASE] reg_{d}=true\n", .{reg_id});
                                     // 跳过引用参数的alloca（它们是undefined）
                                     if (ref_param_alloca_map.get(reg_id)) |_| continue;
                                     
@@ -2204,6 +2231,7 @@ pub const NativeLinker = struct {
                                     if (is_ptr) {
                                         // alloca指针：检查指向的值是否为null
                                         // 需要release两次：一次抵消store的retain，一次真正的释放
+                                        try code.writer(self.allocator).print("    std.debug.print(\"[RT_CLEANUP] reg_{d} isNull={{}}\\n\", .{{reg_{d}.*.isNull()}});\n", .{ reg_id, reg_id });
                                         try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
                                         try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                         try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
@@ -2261,6 +2289,9 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
+                                // 跳过已经被store到alloca的寄存器
+                                if (stored_to_alloca.contains(reg_id)) continue;
+                                
                                 if (!self.shouldReleaseReg(reg_id)) continue;
                                 
                                 // 跳过引用参数的alloca（它们是undefined）
@@ -2291,6 +2322,9 @@ pub const NativeLinker = struct {
                 if (cleanup_registers.items.len > 0) {
                     try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values\n");
                     for (cleanup_registers.items) |reg_id| {
+                        // 跳过已经被store到alloca的寄存器
+                        if (stored_to_alloca.contains(reg_id)) continue;
+                        
                         if (!self.shouldReleaseReg(reg_id)) continue;
                         
                         // 跳过引用参数的alloca（它们是undefined）
