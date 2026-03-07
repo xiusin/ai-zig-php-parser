@@ -1660,6 +1660,7 @@ pub const Value = struct {
 
     pub fn asRefWrapper(self: Value) *RefWrapper {
         const ptr_val = nanbox_abi.decodePtr(self.val);
+        std.debug.print("DEBUG: asRefWrapper val={x}, decoded={x}\n", .{self.val, ptr_val});
         return @ptrFromInt(ptr_val);
     }
 
@@ -1893,6 +1894,7 @@ pub fn val_deref(val: *Value) *Value {
     if (val.isRef()) {
         // 尝试作为RefWrapper解析
         const wrapper = val.asRefWrapper();
+        std.debug.print("DEBUG: val_deref wrapper={*}, array={*}, ref_count={}\n", .{wrapper, wrapper.array, wrapper.array.ref_count});
         if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
             return value_ptr;
         }
@@ -3114,7 +3116,9 @@ pub const RefWrapper = struct {
     key: ArrayKey,
     
     pub fn updateKey(self: *RefWrapper, new_key: ArrayKey) void {
+        std.debug.print("DEBUG: updateKey before: array={*}, key={any}\n", .{self.array, self.key});
         self.key = new_key;
+        std.debug.print("DEBUG: updateKey after: array={*}, key={any}\n", .{self.array, self.key});
     }
     
     pub fn deinit(self: *RefWrapper, allocator: Allocator) void {
@@ -3178,8 +3182,11 @@ pub fn php_array_iter_init_ref(array_val: Value, allocator: Allocator) !Value {
     if (!array_val.isArray()) return Value.initNull();
     const array = array_val.asArray();
     
+    std.debug.print("DEBUG: init_ref array={*}, ref_count={}\n", .{array, array.ref_count});
+    
     // 增加数组引用计数
     _ = array.retain();
+    std.debug.print("DEBUG: after iter retain, ref_count={}\n", .{array.ref_count});
     
     // 创建迭代器
     const iter = try allocator.create(ArrayIterator);
@@ -3194,6 +3201,7 @@ pub fn php_array_iter_init_ref(array_val: Value, allocator: Allocator) !Value {
     
     // 增加数组引用计数（RefWrapper持有）
     _ = array.retain();
+    std.debug.print("DEBUG: after wrapper retain, ref_count={}\n", .{array.ref_count});
     
     // 标记数组有活跃引用
     array.has_active_refs = true;
@@ -3305,10 +3313,12 @@ pub fn php_array_iter_value_ref_reuse(state_val: Value) !Value {
     if (state_addr == 0) return Value.initNull();
     
     const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
+    std.debug.print("DEBUG: value_ref_reuse state={*}, wrapper={*}\n", .{state, state.wrapper});
     
     if (state.iter.current) |entry| {
         // 更新RefWrapper的key（零分配）
         state.wrapper.updateKey(entry.key_ptr.*);
+        std.debug.print("DEBUG: returning wrapper={*}\n", .{state.wrapper});
         return Value.initRefWrapper(state.wrapper);
     }
     return Value.initNull();
