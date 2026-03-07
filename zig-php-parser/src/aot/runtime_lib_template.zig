@@ -436,14 +436,14 @@ pub fn deinitRuntime() void {
         user_function_registry = null;
     }
     
-    // 暂时禁用constants cleanup来调试double free
-    // var iter = constants.iterator();
-    // while (iter.next()) |entry| {
-    //     // 释放键（我们复制了键）
-    //     runtime_allocator.free(entry.key_ptr.*);
-    //     // 释放值
-    //     entry.value_ptr.release(runtime_allocator);
-    // }
+    // 清理constants
+    var iter = constants.iterator();
+    while (iter.next()) |entry| {
+        // 释放键（我们复制了键）
+        runtime_allocator.free(entry.key_ptr.*);
+        // 释放值
+        entry.value_ptr.release(runtime_allocator);
+    }
     constants.deinit();
     // std.debug.print("deinitRuntime: after constants cleanup\n", .{});
     // 跳过循环收集，避免 iterator 整数溢出问题
