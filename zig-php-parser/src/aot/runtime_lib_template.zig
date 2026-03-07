@@ -5682,7 +5682,7 @@ pub fn findClass(name: []const u8) ?*ClassMeta {
 
 /// 清理所有注册的类和对象
 pub fn cleanupAllClasses() void {
-    // 清空对象注册表（不释放，由全局变量cleanup处理）
+    // 清空对象注册表（对象由global_vars cleanup处理）
     if (global_object_registry) |*registry| {
         registry.deinit(runtime_allocator);
         global_object_registry = null;
