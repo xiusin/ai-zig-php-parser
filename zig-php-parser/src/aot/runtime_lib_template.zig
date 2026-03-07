@@ -1886,8 +1886,13 @@ pub fn val_assign(target: *Value, value: Value) void {
 /// 变量解引用
 pub fn val_deref(val: *Value) *Value {
     if (val.isRef()) {
-        const ptr = val.asRef();
-        return val_deref(ptr);
+        // 尝试作为RefWrapper解析
+        const wrapper = val.asRefWrapper();
+        if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
+            return value_ptr;
+        }
+        // 如果getPtr失败，返回原值
+        return val;
     }
     return val;
 }
@@ -3247,16 +3252,11 @@ pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
     if (ref_val.isRef()) {
         // 尝试作为RefWrapper解析
         const wrapper = ref_val.asRefWrapper();
-        std.debug.print("DEBUG: ref_assign array={*}, key={any}\n", .{wrapper.array, wrapper.key});
         // 通过数组和键获取元素指针并修改
         if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
-            std.debug.print("DEBUG: old value={any}, new value={any}\n", .{value_ptr.*, new_val});
             value_ptr.release(runtime_allocator);
             _ = new_val.retain();
             value_ptr.* = new_val;
-            std.debug.print("DEBUG: after assign value={any}\n", .{value_ptr.*});
-        } else {
-            std.debug.print("DEBUG: getPtr returned null for key\n", .{});
         }
     }
     return Value.initNull();

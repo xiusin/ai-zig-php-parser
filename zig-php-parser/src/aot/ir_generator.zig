@@ -2373,25 +2373,30 @@ pub const IRGenerator = struct {
         // Get target node
         const target_node = self.getNode(compound_data.target) orelse return;
 
+        // 检查是否是引用变量
+        var is_ref = false;
+        var ref_reg: ?Register = null;
+        if (target_node.tag == .variable) {
+            const var_name = self.getString(target_node.data.variable.name);
+            if (self.ref_vars.contains(var_name)) {
+                is_ref = true;
+            }
+        }
+
         // Generate current value of target (read)
         var current_value = try self.generateExpression(compound_data.target);
         
-        // 如果是引用，需要解引用
-        var is_ref = false;
-        if (target_node.tag == .variable) {
-            const var_name = self.getString(target_node.data.variable.name);
-            // 检查是否在引用变量集合中
-            if (self.ref_vars.contains(var_name)) {
-                is_ref = true;
-                // 调用 php_deref 解引用
-                const deref_args = try self.allocator.alloc(Register, 1);
-                deref_args[0] = current_value;
-                current_value = try self.emitWithResult(.{ .call = .{
-                    .func_name = "php_deref",
-                    .args = deref_args,
-                    .return_type = .php_value,
-                } }, .php_value);
-            }
+        // 如果是引用，保存RefWrapper并解引用
+        if (is_ref) {
+            ref_reg = current_value;  // 保存RefWrapper
+            // 调用 php_deref 解引用
+            const deref_args = try self.allocator.alloc(Register, 1);
+            deref_args[0] = current_value;
+            current_value = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_deref",
+                .args = deref_args,
+                .return_type = .php_value,
+            } }, .php_value);
         }
 
         // Generate right-hand side value
@@ -2421,9 +2426,9 @@ pub const IRGenerator = struct {
                 
                 if (is_ref) {
                     // 如果是引用，调用 php_ref_assign 写回
-                    const ref_reg = try self.generateExpression(compound_data.target);
+                    // 使用保存的原始引用寄存器，而不是重新生成
                     const assign_args = try self.allocator.alloc(Register, 2);
-                    assign_args[0] = ref_reg;
+                    assign_args[0] = ref_reg.?;  // 使用保存的引用寄存器
                     assign_args[1] = result_reg;
                     _ = try self.emit(.{ .call = .{
                         .func_name = "php_ref_assign",
