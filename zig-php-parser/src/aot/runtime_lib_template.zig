@@ -5718,7 +5718,7 @@ pub const PHPObject = struct {
         errdefer allocator.free(obj.class_name);
 
         obj.properties = std.StringHashMap(Value).init(allocator);
-        obj.ref_count = 0;  // 初始为0，第一次赋值时变成1
+        obj.ref_count = 1;
         obj.gc_info = .{};
         obj.allocator = allocator;
         obj.class_meta = findClass(class_name);
@@ -5741,7 +5741,7 @@ pub const PHPObject = struct {
         errdefer allocator.free(obj.class_name);
 
         obj.properties = std.StringHashMap(Value).init(allocator);
-        obj.ref_count = 0;  // 初始为0，第一次赋值时变成1
+        obj.ref_count = 1;
         obj.gc_info = .{};
         obj.allocator = allocator;
         obj.class_meta = meta;
@@ -5790,11 +5790,7 @@ pub const PHPObject = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
-        if (self.ref_count == 0) {
-            // ref_count已经是0，直接析构
-            self.deinit();
-            return;
-        }
+        if (self.ref_count == 0) return;
 
         self.ref_count -= 1;
         if (self.ref_count == 0) {
