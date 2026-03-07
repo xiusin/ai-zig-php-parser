@@ -1219,13 +1219,18 @@ pub const PHPArray = struct {
 
         fn convertToMixed(self: *Elements) !void {
             if (self.mixed != null) return;
+            std.debug.print("DEBUG: convertToMixed, packed_values.len={}\n", .{self.packed_values.items.len});
             var map = std.ArrayHashMap(ArrayKey, Value, ArrayContext, true).init(self.allocator);
             for (self.packed_values.items, 0..) |v, idx| {
+                std.debug.print("DEBUG: copying idx={}, value={}\n", .{idx, v.asInt()});
+                const retained = v.retain();
+                _ = retained;
                 try map.put(.{ .integer = @intCast(idx) }, v);
             }
             self.packed_values.deinit(self.allocator);
             self.packed_values = .{};
             self.mixed = map;
+            std.debug.print("DEBUG: convertToMixed done, mixed.count={}\n", .{map.count()});
         }
 
         pub fn put(self: *Elements, key: ArrayKey, value: Value) !void {
@@ -3210,13 +3215,6 @@ pub fn php_array_iter_valid(iter_val: Value) !Value {
 }
 
 /// 引用迭代器valid
-pub fn php_array_iter_valid_ref(state_val: Value) !Value {
-    const state_addr = state_val.asInt();
-    if (state_addr == 0) return Value.initBool(false);
-    
-    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
-    return Value.initBool(state.iter.current != null);
-}
 
 pub fn php_array_iter_key(iter_val: Value, allocator: Allocator) !Value {
     // 检测是否是Iterator对象
@@ -3268,28 +3266,12 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
         // 从mixed模式获取指针
         if (iter.array.elements.mixed) |*m| {
             if (m.getPtr(entry.key_ptr.*)) |value_ptr| {
+                std.debug.print("DEBUG: iter_value_ref key={}, ptr={*}, value={}\n", .{entry.key_ptr.*.integer, value_ptr, value_ptr.asInt()});
                 return Value.initRef(value_ptr);
             }
         }
         
         return Value.initNull();
-    }
-    return Value.initNull();
-}
-
-/// 复用RefWrapper的引用迭代器值获取（零分配）
-pub fn php_array_iter_value_ref_reuse(state_val: Value) !Value {
-    const state_addr = state_val.asInt();
-    if (state_addr == 0) return Value.initNull();
-    
-    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
-    std.debug.print("DEBUG: value_ref_reuse state={*}, wrapper={*}\n", .{state, state.wrapper});
-    
-    if (state.iter.current) |entry| {
-        // 更新RefWrapper的key（零分配）
-        state.wrapper.updateKey(entry.key_ptr.*);
-        std.debug.print("DEBUG: returning wrapper={*}\n", .{state.wrapper});
-        return Value.initRefWrapper(state.wrapper);
     }
     return Value.initNull();
 }
@@ -3320,11 +3302,15 @@ pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
 
 /// 引用赋值（通过指针）：将值写入引用指向的位置
 pub fn php_ref_assign_ptr(ref_val: Value, new_val: Value) !Value {
+    std.debug.print("DEBUG: ref_assign_ptr isRef={}\n", .{ref_val.isRef()});
     if (ref_val.isRef()) {
         const ptr = ref_val.asRef();
+        std.debug.print("DEBUG: writing ptr={*}, old={}, new={}\n", .{ptr, ptr.asInt(), new_val.asInt()});
         ptr.release(runtime_allocator);
-        _ = new_val.retain();
+        const retained = new_val.retain();
+        _ = retained;
         ptr.* = new_val;
+        std.debug.print("DEBUG: after write, ptr.*={}\n", .{ptr.asInt()});
     }
     return Value.initNull();
 }
@@ -3346,17 +3332,6 @@ pub fn php_array_iter_next(iter_val: Value) !Value {
 }
 
 /// 引用迭代器next（返回state）
-pub fn php_array_iter_next_ref(state_val: Value) !Value {
-    const state_addr = state_val.asInt();
-    if (state_addr == 0) return Value.initInt(0);
-    
-    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
-    state.iter.current = state.iter.iter.next();
-    
-    // 返回原state
-    return state_val;
-}
-
 // Iterator接口支持
 pub fn php_is_iterator(val: Value) bool {
     if (!Value_isObject(val)) return false;
@@ -3426,23 +3401,6 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
 }
 
 /// 释放引用迭代器（包含RefWrapper）
-pub fn php_array_iter_free_ref(state_val: Value, allocator: Allocator) !Value {
-    const state_addr = state_val.asInt();
-    if (state_addr == 0) return Value.initNull();
-    
-    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
-    
-    // 释放RefWrapper（会释放数组引用计数和引用锁）
-    state.wrapper.deinit(allocator);
-    
-    // 释放迭代器的数组引用计数
-    state.iter.array.release(allocator);
-    
-    allocator.destroy(state.iter);
-    allocator.destroy(state);
-    return Value.initNull();
-}
-
 // ============================================================================
 // ArrayIterator类（SPL）
 // ============================================================================
