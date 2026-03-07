@@ -2224,12 +2224,8 @@ pub const NativeLinker = struct {
                                     // 添加null检查，跳过已unset的变量
                                     if (is_ptr) {
                                         // alloca指针：检查指向的值是否为null
-                                        // 需要release三次：
-                                        // 1. 抵消store的retain
-                                        // 2. 抵消__construct中$this的retain
-                                        // 3. 真正的释放
+                                        // 需要release两次：一次抵消store的retain，一次真正的释放
                                         try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
-                                        try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                         try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                         try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                         try code.writer(self.allocator).print("    }}\n", .{});
@@ -2299,9 +2295,8 @@ pub const NativeLinker = struct {
 
                                 // 添加null检查，跳过已unset的变量
                                 if (is_ptr) {
-                                    // alloca指针：需要release三次
+                                    // alloca指针：需要release两次
                                     try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
-                                    try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                     try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                     try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                     try code.writer(self.allocator).print("    }}\n", .{});
@@ -2331,9 +2326,8 @@ pub const NativeLinker = struct {
                         // 添加null检查，跳过已unset的变量
                         const is_alloca = alloca_registers.contains(reg_id);
                         if (is_alloca) {
-                            // alloca指针：需要release三次
+                            // alloca指针：需要release两次
                             try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
-                            try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                             try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                             try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                             try code.writer(self.allocator).print("    }}\n", .{});
