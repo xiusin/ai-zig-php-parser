@@ -1520,6 +1520,9 @@ pub const NativeLinker = struct {
         defer alloca_registers.deinit();
 
         // 收集需要释放的寄存器（字符串、数组等）
+        // 使用HashSet避免重复
+        var cleanup_registers_set = std.AutoHashMap(usize, void).init(self.allocator);
+        defer cleanup_registers_set.deinit();
         var cleanup_registers: std.ArrayList(usize) = .empty;
         defer cleanup_registers.deinit(self.allocator);
 
@@ -1629,13 +1632,13 @@ pub const NativeLinker = struct {
                         switch (inst.op) {
                             .const_string, .concat, .array_new, .new_object => {
                                 // 这些指令创建新的Value，需要释放
-                                try cleanup_registers.append(self.allocator, reg.id);
+                                try cleanup_registers_set.put(reg.id, {});
                             },
                             .call => {
                                 // 内置函数调用可能返回需要释放的资源（如字符串、数组）
                                 // 我们保守地释放所有Value类型的返回值
                                 if (corrected_type == .php_value) {
-                                    try cleanup_registers.append(self.allocator, reg.id);
+                                    try cleanup_registers_set.put(reg.id, {});
                                 }
                             },
                             // load 不创建新的引用，不需要释放
@@ -1643,7 +1646,7 @@ pub const NativeLinker = struct {
                         }
                     } else {
                         // alloca 指令（局部变量）也需要在函数结束时释放
-                        try cleanup_registers.append(self.allocator, reg.id);
+                        try cleanup_registers_set.put(reg.id, {});
                     }
                 }
 
@@ -2160,6 +2163,12 @@ pub const NativeLinker = struct {
         var alloca_it = alloca_registers.keyIterator();
         while (alloca_it.next()) |_| {
             // std.debug.print("  alloca: reg_{d}\n", .{key.*});
+        }
+
+        // 将cleanup_registers_set转换为list（去重后）
+        var cleanup_set_it = cleanup_registers_set.keyIterator();
+        while (cleanup_set_it.next()) |key| {
+            try cleanup_registers.append(self.allocator, key.*);
         }
 
         self.current_cleanup_regs = cleanup_registers.items;
