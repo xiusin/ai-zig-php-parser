@@ -3442,8 +3442,6 @@ pub const IRGenerator = struct {
                             // 局部变量：先释放旧值（触发析构），再设置为null
                             if (self.var_registers.get(var_name)) |var_reg| {
                                 const old_val = try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
-                                // Release两次：一次是unset，一次是清除赋值时的retain
-                                _ = try self.emit(.{ .release = .{ .operand = old_val } }, null);
                                 _ = try self.emit(.{ .release = .{ .operand = old_val } }, null);
                                 const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                                 _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = null_reg } }, null);

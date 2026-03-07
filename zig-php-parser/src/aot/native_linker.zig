@@ -6759,6 +6759,16 @@ pub const NativeLinker = struct {
                     try writer.print("    // PHI: reg_{d} (handled in terminator)\n", .{reg.id});
                 }
             },
+            .retain => |op| {
+                // retain: 增加引用计数
+                const suffix = self.getRegSuffix(op.operand.id);
+                try writer.print("    _ = reg_{d}{s}.retain();\n", .{ op.operand.id, suffix });
+            },
+            .release => |op| {
+                // release: 减少引用计数，可能触发析构
+                const suffix = self.getRegSuffix(op.operand.id);
+                try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.operand.id, suffix });
+            },
             else => {
                 try self.handleUnsupportedOp(inst);
             },
