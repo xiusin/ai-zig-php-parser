@@ -2158,8 +2158,8 @@ pub const NativeLinker = struct {
         
         // std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
-        while (alloca_it.next()) |_| {
-            // std.debug.print("  alloca: reg_{d}\n", .{key.*});
+        while (alloca_it.next()) |key| {
+            std.debug.print("  alloca: reg_{d}\n", .{key.*});
         }
 
         self.current_cleanup_regs = cleanup_registers.items;
@@ -2197,15 +2197,17 @@ pub const NativeLinker = struct {
                                     // 跳过引用参数的alloca（它们是undefined）
                                     if (ref_param_alloca_map.get(reg_id)) |_| continue;
                                     
-                                    // 检查寄存器的实际类型
-                                    const reg_type = all_registers.get(reg_id) orelse .php_value;
-                                    const reg_tag = @as(std.meta.Tag(IR.Type), reg_type);
-                                    const is_ptr = reg_tag == .ptr;
+                                    // 检查是否是alloca寄存器
+                                    const is_ptr = alloca_registers.contains(reg_id);
                                     
                                     // 添加null检查，跳过已unset的变量
                                     if (is_ptr) {
                                         // alloca指针：检查指向的值是否为null
-                                        try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
+                                        // 需要release两次：一次抵消store的retain，一次真正的释放
+                                        try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
+                                        try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                        try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                        try code.writer(self.allocator).print("    }}\n", .{});
                                     } else {
                                         try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                     }
@@ -2264,14 +2266,16 @@ pub const NativeLinker = struct {
                                 // 跳过引用参数的alloca（它们是undefined）
                                 if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
-                                // 检查寄存器的实际类型
-                                const reg_type = all_registers.get(reg_id) orelse .php_value;
-                                const reg_tag = @as(std.meta.Tag(IR.Type), reg_type);
-                                const is_ptr = reg_tag == .ptr;
+                                // 检查是否是alloca寄存器
+                                const is_ptr = alloca_registers.contains(reg_id);
 
                                 // 添加null检查，跳过已unset的变量
                                 if (is_ptr) {
-                                    try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
+                                    // alloca指针：需要release两次
+                                    try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
+                                    try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    try code.writer(self.allocator).print("    }}\n", .{});
                                 } else {
                                     try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                 }
@@ -2293,8 +2297,13 @@ pub const NativeLinker = struct {
                         if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
                         // 添加null检查，跳过已unset的变量
-                        if (alloca_registers.contains(reg_id)) {
-                            try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
+                        const is_alloca = alloca_registers.contains(reg_id);
+                        if (is_alloca) {
+                            // alloca指针：需要release两次
+                            try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
+                            try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            try code.writer(self.allocator).print("    }}\n", .{});
                         } else {
                             try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                         }
