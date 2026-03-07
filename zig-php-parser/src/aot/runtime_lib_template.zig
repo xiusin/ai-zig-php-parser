@@ -1143,6 +1143,8 @@ pub const PHPArray = struct {
     next_index: i64,
     ref_count: usize,
     gc_info: GCInfo,
+    has_active_refs: bool = false,  // 是否有活跃的引用
+    ref_lock_count: u32 = 0,        // 引用锁计数
 
     pub const ArrayContext = struct {
         pub fn hash(_: ArrayContext, key: ArrayKey) u32 {
@@ -1156,6 +1158,7 @@ pub const PHPArray = struct {
 
     pub const Elements = struct {
         allocator: Allocator,
+        parent: ?*PHPArray = null,  // 父数组引用
         packed_values: std.ArrayListUnmanaged(Value) = .{},
         mixed: ?std.ArrayHashMap(ArrayKey, Value, ArrayContext, true) = null,
 
@@ -1226,6 +1229,13 @@ pub const PHPArray = struct {
         }
 
         pub fn put(self: *Elements, key: ArrayKey, value: Value) !void {
+            // 如果父数组有活跃引用，强制使用mixed模式避免重新分配
+            if (self.parent) |parent| {
+                if (parent.has_active_refs and self.mixed == null) {
+                    try self.convertToMixed();
+                }
+            }
+            
             if (self.mixed) |*m| {
                 try m.put(key, value);
                 return;
@@ -1287,9 +1297,12 @@ pub const PHPArray = struct {
     pub fn init(allocator: Allocator) !*PHPArray {
         const array = try allocPHPArray(allocator);
         array.elements = Elements.init(allocator);
+        array.elements.parent = array;  // 设置父引用
         array.next_index = 0;
         array.ref_count = 1;
         array.gc_info = .{};
+        array.has_active_refs = false;
+        array.ref_lock_count = 0;
         alloc_counters.php_array_objects += 1;
         alloc_counters.php_array_live_objects += 1;
         alloc_counters.php_array_peak_live_objects = @max(
@@ -1524,9 +1537,15 @@ pub const Value = struct {
         return .{ .val = nanbox_abi.encodePtr(addr, TYPE_FUNCTION) };
     }
 
-    /// 创建引用值
+    /// 创建引用值（直接指针，不推荐用于数组元素）
     pub fn initRef(ptr: *Value) Value {
         const addr = @intFromPtr(ptr);
+        return .{ .val = nanbox_abi.encodePtr(addr, TYPE_REF) };
+    }
+
+    /// 创建引用值（使用RefWrapper，推荐用于数组元素）
+    pub fn initRefWrapper(wrapper: *RefWrapper) Value {
+        const addr = @intFromPtr(wrapper);
         return .{ .val = nanbox_abi.encodePtr(addr, TYPE_REF) };
     }
 
@@ -1635,6 +1654,11 @@ pub const Value = struct {
     }
 
     pub fn asRef(self: Value) *Value {
+        const ptr_val = nanbox_abi.decodePtr(self.val);
+        return @ptrFromInt(ptr_val);
+    }
+
+    pub fn asRefWrapper(self: Value) *RefWrapper {
         const ptr_val = nanbox_abi.decodePtr(self.val);
         return @ptrFromInt(ptr_val);
     }
@@ -3074,6 +3098,23 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
 // 数组迭代器函数
 // ============================================================================
 
+/// 引用包装器：持有数组引用和键，确保引用的稳定性
+pub const RefWrapper = struct {
+    array: *PHPArray,
+    key: ArrayKey,
+    
+    pub fn deinit(self: *RefWrapper, allocator: Allocator) void {
+        // 释放引用锁
+        if (self.array.ref_lock_count > 0) {
+            self.array.ref_lock_count -= 1;
+            if (self.array.ref_lock_count == 0) {
+                self.array.has_active_refs = false;
+            }
+        }
+        allocator.destroy(self);
+    }
+};
+
 pub const ArrayIterator = struct {
     array: *PHPArray,  // 持有数组引用
     iter: PHPArray.Elements.Iterator,
@@ -3170,11 +3211,16 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     if (iter.current) |entry| {
-        // 通过数组和键来获取元素指针
-        // 这样即使HashMap重新分配，我们也能通过键重新查找
-        const key = entry.key_ptr.*;
-        const value_ptr = iter.array.getPtr(key) orelse return Value.initNull();
-        return Value.initRef(value_ptr);
+        // 创建引用包装器
+        const wrapper = try runtime_allocator.create(RefWrapper);
+        wrapper.array = iter.array;
+        wrapper.key = entry.key_ptr.*;
+        
+        // 标记数组有活跃引用
+        iter.array.has_active_refs = true;
+        iter.array.ref_lock_count += 1;
+        
+        return Value.initRefWrapper(wrapper);
     }
     return Value.initNull();
 }
@@ -3182,9 +3228,14 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
 /// 解引用：从引用中读取值
 pub fn php_deref(ref_val: Value) !Value {
     if (ref_val.isRef()) {
-        const ptr = ref_val.asRef();
-        _ = ptr.retain();
-        return ptr.*;
+        // 尝试作为RefWrapper解析
+        const wrapper = ref_val.asRefWrapper();
+        // 通过数组和键获取当前值
+        if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
+            _ = value_ptr.retain();
+            return value_ptr.*;
+        }
+        return Value.initNull();
     }
     // 如果不是引用，直接返回值
     _ = ref_val.retain();
@@ -3194,10 +3245,19 @@ pub fn php_deref(ref_val: Value) !Value {
 /// 引用赋值：将值写入引用指向的位置
 pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
     if (ref_val.isRef()) {
-        const ptr = ref_val.asRef();
-        ptr.release(runtime_allocator);
-        _ = new_val.retain();
-        ptr.* = new_val;
+        // 尝试作为RefWrapper解析
+        const wrapper = ref_val.asRefWrapper();
+        std.debug.print("DEBUG: ref_assign array={*}, key={any}\n", .{wrapper.array, wrapper.key});
+        // 通过数组和键获取元素指针并修改
+        if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
+            std.debug.print("DEBUG: old value={any}, new value={any}\n", .{value_ptr.*, new_val});
+            value_ptr.release(runtime_allocator);
+            _ = new_val.retain();
+            value_ptr.* = new_val;
+            std.debug.print("DEBUG: after assign value={any}\n", .{value_ptr.*});
+        } else {
+            std.debug.print("DEBUG: getPtr returned null for key\n", .{});
+        }
     }
     return Value.initNull();
 }
