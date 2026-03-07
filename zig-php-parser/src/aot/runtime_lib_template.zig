@@ -428,7 +428,7 @@ pub fn php_handle_uncaught_exception() void {
 
 /// 清理运行时
 pub fn deinitRuntime() void {
-    std.debug.print("deinitRuntime: start\n", .{});
+    // std.debug.print("deinitRuntime: start\n", .{});
     concurrency.shutdownScheduler();
     cleanupAllClasses();
     if (user_function_registry) |*registry| {
@@ -445,7 +445,7 @@ pub fn deinitRuntime() void {
     //     entry.value_ptr.release(runtime_allocator);
     // }
     constants.deinit();
-    std.debug.print("deinitRuntime: after constants cleanup\n", .{});
+    // std.debug.print("deinitRuntime: after constants cleanup\n", .{});
     // 跳过循环收集，避免 iterator 整数溢出问题
     // gcCollectCycles(true);
     cycle_roots.deinit(runtime_allocator);
@@ -936,7 +936,7 @@ pub const PHPString = struct {
     pub fn retain(self: *PHPString) void {
         if (!self.is_static) {
             self.ref_count += 1;
-            std.debug.print("PHPString.retain: data={s} ref_count={d}\n", .{self.data, self.ref_count});
+            // std.debug.print("PHPString.retain: data={s} ref_count={d}\n", .{self.data, self.ref_count});
         }
     }
 
@@ -944,7 +944,7 @@ pub const PHPString = struct {
     pub fn release(self: *PHPString, allocator: Allocator) void {
         if (self.is_static) return;
 
-        std.debug.print("PHPString.release: data={s} ref_count={d}\n", .{self.data, self.ref_count});
+        // std.debug.print("PHPString.release: data={s} ref_count={d}\n", .{self.data, self.ref_count});
         
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPString double free detected! data={s}\n", .{self.data});
@@ -5803,12 +5803,12 @@ pub const PHPObject = struct {
     /// 增加引用计数
     pub fn retain(self: *PHPObject) void {
         self.ref_count += 1;
-        std.debug.print("PHPObject.retain: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
+        // std.debug.print("PHPObject.retain: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
     }
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
-        std.debug.print("PHPObject.release BEFORE: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
+        // std.debug.print("PHPObject.release BEFORE: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
         
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPObject double free detected! class={s}\n", .{self.class_name});
@@ -5816,10 +5816,10 @@ pub const PHPObject = struct {
         }
 
         self.ref_count -= 1;
-        std.debug.print("PHPObject.release AFTER: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
+        // std.debug.print("PHPObject.release AFTER: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
         
         if (self.ref_count == 0) {
-            std.debug.print("PHPObject.deinit: class={s}\n", .{self.class_name});
+            // std.debug.print("PHPObject.deinit: class={s}\n", .{self.class_name});
             self.deinit();
         } else if (!gc_in_progress) {
             gcBufferObject(self);

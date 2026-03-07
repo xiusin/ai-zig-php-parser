@@ -2695,7 +2695,7 @@ pub fn php_mutex_release(mutex: *PHPMutex) void {
 // ============================================================================
 
 test "PHPValue creation - null" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const val = php_value_create_null();
@@ -2708,7 +2708,7 @@ test "PHPValue creation - null" {
 }
 
 test "PHPValue creation - bool" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const val_true = php_value_create_bool(true);
@@ -2726,7 +2726,7 @@ test "PHPValue creation - bool" {
 }
 
 test "PHPValue creation - int" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const val = php_value_create_int(42);
@@ -2742,7 +2742,7 @@ test "PHPValue creation - int" {
 }
 
 test "PHPValue creation - float" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const val = php_value_create_float(3.14);
@@ -2754,7 +2754,7 @@ test "PHPValue creation - float" {
 }
 
 test "PHPValue creation - string" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const val = php_value_create_string("hello");
@@ -2777,7 +2777,7 @@ test "PHPValue creation - string" {
 }
 
 test "PHPValue creation - array" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const val = php_value_create_array();
@@ -2790,7 +2790,7 @@ test "PHPValue creation - array" {
 }
 
 test "Type conversion - toInt" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const null_val = php_value_create_null();
@@ -2811,7 +2811,7 @@ test "Type conversion - toInt" {
 }
 
 test "Type conversion - toFloat" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const int_val = php_value_create_int(42);
@@ -2824,7 +2824,7 @@ test "Type conversion - toFloat" {
 }
 
 test "Type conversion - toBool" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const int_zero = php_value_create_int(0);
@@ -2845,7 +2845,7 @@ test "Type conversion - toBool" {
 }
 
 test "Reference counting" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const val = php_value_create_int(42);
@@ -2868,7 +2868,7 @@ test "Reference counting" {
 }
 
 test "Array operations" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const arr_val = php_value_create_array();
@@ -2906,7 +2906,7 @@ test "Array operations" {
 }
 
 test "String operations" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const str1 = php_value_create_string("Hello");
@@ -2926,7 +2926,7 @@ test "String operations" {
 }
 
 test "String substr" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const str = php_value_create_string("Hello World");
@@ -2949,7 +2949,7 @@ test "String substr" {
 }
 
 test "Built-in functions - strlen" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const str = php_value_create_string("Hello");
@@ -2963,7 +2963,7 @@ test "Built-in functions - strlen" {
 }
 
 test "Built-in functions - count" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const arr_val = php_value_create_array();
@@ -2991,7 +2991,7 @@ test "Built-in functions - count" {
 }
 
 test "Built-in functions - type checking" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     const null_val = php_value_create_null();
@@ -3025,7 +3025,7 @@ test "Built-in functions - type checking" {
 }
 
 test "Exception handling" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     // Initially no exception
@@ -3049,7 +3049,7 @@ test "Exception handling" {
 }
 
 test "Value cloning" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     // Clone int
@@ -3069,7 +3069,7 @@ test "Value cloning" {
 }
 
 test "Math functions" {
-    initRuntime();
+    initRuntime(std.testing.allocator);
     defer deinitRuntime();
 
     // abs
