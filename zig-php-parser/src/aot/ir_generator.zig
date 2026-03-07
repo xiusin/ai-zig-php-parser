@@ -3332,7 +3332,7 @@ pub const IRGenerator = struct {
         const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
         if (is_and) {
             // &&: [false from lhs_end, rhs from rhs_end]
-            const false_val = try self.emitWithResult(.{ .const_bool = false }, .php_value);
+            const false_val = try self.emitWithResult(.{ .const_int = 0 }, .php_value);
             incoming[0] = .{ .value = false_val, .block = lhs_end_block };
             incoming[1] = .{ .value = rhs_reg, .block = rhs_end_block };
         } else {
