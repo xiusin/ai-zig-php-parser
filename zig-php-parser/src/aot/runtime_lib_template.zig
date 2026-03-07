@@ -3334,15 +3334,15 @@ pub fn php_deref(ref_val: Value) !Value {
 
 /// 引用赋值：将值写入引用指向的位置
 pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
-    std.debug.print("DEBUG: php_ref_assign called, isRef={}\n", .{ref_val.isRef()});
+    std.debug.print("DEBUG: php_ref_assign isRef={}\n", .{ref_val.isRef()});
     if (ref_val.isRef()) {
         // 直接写入指针指向的位置
         const ptr = ref_val.asRef();
-        std.debug.print("DEBUG: ptr={*}, old_val={any}, new_val={any}\n", .{ptr, ptr.*, new_val});
+        std.debug.print("DEBUG: writing to ptr={*}, old={}, new={}\n", .{ptr, ptr.asInt(), new_val.asInt()});
         ptr.release(runtime_allocator);
         _ = new_val.retain();
         ptr.* = new_val;
-        std.debug.print("DEBUG: after assign, ptr.*={any}\n", .{ptr.*});
+        std.debug.print("DEBUG: after write, ptr.*={}\n", .{ptr.asInt()});
     }
     return Value.initNull();
 }

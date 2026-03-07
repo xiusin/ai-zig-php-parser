@@ -2392,27 +2392,31 @@ pub const IRGenerator = struct {
         // 检查是否是引用变量
         var is_ref = false;
         var ref_reg: ?Register = null;
+        var current_value: Register = undefined;
+        
         if (target_node.tag == .variable) {
             const var_name = self.getString(target_node.data.variable.name);
             if (self.ref_vars.contains(var_name)) {
                 is_ref = true;
+                // 获取变量的指针寄存器
+                if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                    // Load引用值（这会生成 reg_X = val_deref(ptr).*，即引用值）
+                    const ptr_type = ptr_reg.type_;
+                    const pointed_type = if (ptr_type == .ptr) ptr_type.ptr.* else .php_value;
+                    ref_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = pointed_type } }, pointed_type);
+                    
+                    // 再次解引用获取实际值
+                    current_value = try self.generateExpression(compound_data.target);
+                } else {
+                    return error.UndefinedVariable;
+                }
+            } else {
+                // 普通变量，正常生成
+                current_value = try self.generateExpression(compound_data.target);
             }
-        }
-
-        // Generate current value of target (read)
-        var current_value = try self.generateExpression(compound_data.target);
-        
-        // 如果是引用，保存RefWrapper并解引用
-        if (is_ref) {
-            ref_reg = current_value;  // 保存RefWrapper
-            // 调用 php_deref 解引用
-            const deref_args = try self.allocator.alloc(Register, 1);
-            deref_args[0] = current_value;
-            current_value = try self.emitWithResult(.{ .call = .{
-                .func_name = "php_deref",
-                .args = deref_args,
-                .return_type = .php_value,
-            } }, .php_value);
+        } else {
+            // 非变量目标（如数组元素），正常生成
+            current_value = try self.generateExpression(compound_data.target);
         }
 
         // Generate right-hand side value
@@ -2442,7 +2446,6 @@ pub const IRGenerator = struct {
                 
                 if (is_ref) {
                     // 如果是引用，调用 php_ref_assign 写回
-                    // 使用保存的原始引用寄存器，而不是重新生成
                     const assign_args = try self.allocator.alloc(Register, 2);
                     assign_args[0] = ref_reg.?;  // 使用保存的引用寄存器
                     assign_args[1] = result_reg;
