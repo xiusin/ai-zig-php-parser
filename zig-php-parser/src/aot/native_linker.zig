@@ -2187,6 +2187,7 @@ pub const NativeLinker = struct {
                     // 如果store的目标是alloca，记录源寄存器
                     if (alloca_registers.contains(store_op.ptr.id)) {
                         try stored_to_alloca.put(store_op.value.id, {});
+                        // std.debug.print("stored_to_alloca: reg_{d} -> reg_{d}\n", .{store_op.value.id, store_op.ptr.id});
                     }
                 }
             }
@@ -2232,10 +2233,8 @@ pub const NativeLinker = struct {
                                     
                                     // 添加null检查，跳过已unset的变量
                                     if (is_ptr) {
-                                        // alloca指针：检查指向的值是否为null
-                                        // 需要release两次：一次抵消store的retain，一次真正的释放
+                                        // alloca指针：只release一次（抵消store的retain）
                                         try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
-                                        try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                         try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                         try code.writer(self.allocator).print("    }}\n", .{});
                                     } else {
@@ -2304,9 +2303,8 @@ pub const NativeLinker = struct {
 
                                 // 添加null检查，跳过已unset的变量
                                 if (is_ptr) {
-                                    // alloca指针：release两次（完全释放）
+                                    // alloca指针：只release一次
                                     try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
-                                    try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                     try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                     try code.writer(self.allocator).print("    }}\n", .{});
                                 } else {
@@ -2335,9 +2333,8 @@ pub const NativeLinker = struct {
                         // 添加null检查，跳过已unset的变量
                         const is_alloca = alloca_registers.contains(reg_id);
                         if (is_alloca) {
-                            // alloca指针：需要release两次
+                            // alloca指针：只release一次
                             try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) {{\n", .{reg_id});
-                            try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                             try code.writer(self.allocator).print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                             try code.writer(self.allocator).print("    }}\n", .{});
                         } else {
@@ -6821,14 +6818,15 @@ pub const NativeLinker = struct {
                 const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.operand.id) else false;
                 
                 if (is_alloca) {
-                    // alloca寄存器：release两次（完全释放），cleanup会跳过null
+                    // alloca寄存器：release两次（完全释放）
+                    // cleanup不会再release（因为isNull检查）
                     try writer.print("    if (!reg_{d}.*.isNull()) {{\n", .{op.operand.id});
                     try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.* = runtime.Value.initNull();\n", .{op.operand.id});
                     try writer.print("    }}\n", .{});
                 } else {
-                    // 普通寄存器：release两次
+                    // 普通寄存器：release两次（完全释放）
                     try writer.print("    if (!reg_{d}.isNull()) {{\n", .{op.operand.id});
                     try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});

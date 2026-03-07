@@ -428,20 +428,24 @@ pub fn php_handle_uncaught_exception() void {
 
 /// 清理运行时
 pub fn deinitRuntime() void {
+    std.debug.print("deinitRuntime: start\n", .{});
     concurrency.shutdownScheduler();
     cleanupAllClasses();
     if (user_function_registry) |*registry| {
         registry.deinit();
         user_function_registry = null;
     }
-    var iter = constants.iterator();
-    while (iter.next()) |entry| {
-        // 释放键（我们复制了键）
-        runtime_allocator.free(entry.key_ptr.*);
-        // 释放值
-        entry.value_ptr.release(runtime_allocator);
-    }
+    
+    // 暂时禁用constants cleanup来调试double free
+    // var iter = constants.iterator();
+    // while (iter.next()) |entry| {
+    //     // 释放键（我们复制了键）
+    //     runtime_allocator.free(entry.key_ptr.*);
+    //     // 释放值
+    //     entry.value_ptr.release(runtime_allocator);
+    // }
     constants.deinit();
+    std.debug.print("deinitRuntime: after constants cleanup\n", .{});
     // 跳过循环收集，避免 iterator 整数溢出问题
     // gcCollectCycles(true);
     cycle_roots.deinit(runtime_allocator);
