@@ -6037,9 +6037,22 @@ pub const NativeLinker = struct {
                                 try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
                             }
                         } else {
-                            try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                            try self.writeValueArgs(writer, op.args);
-                            try writer.writeAll(");\n");
+                            // 特殊处理php_ref_assign_ptr：第一个参数不解引用
+                            if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
+                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                // 第一个参数：直接使用指针（不解引用）
+                                try writer.print("reg_{d}", .{op.args[0].id});
+                                // 其余参数：正常处理
+                                for (op.args[1..]) |arg| {
+                                    try writer.writeAll(", ");
+                                    try self.writeRegRef(writer, arg.id);
+                                }
+                                try writer.writeAll(");\n");
+                            } else {
+                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(");\n");
+                            }
                         }
                     } else {
                         // 用户定义函数

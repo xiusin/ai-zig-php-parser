@@ -2399,7 +2399,7 @@ pub const IRGenerator = struct {
             const var_name = self.getString(target_node.data.variable.name);
             if (self.ref_vars.contains(var_name)) {
                 is_ref = true;
-                // 保存指针寄存器（不load）
+                // 保存指针寄存器
                 if (self.lookupVarRegister(var_name)) |ptr_reg| {
                     ref_ptr_reg = ptr_reg;
                     // 解引用获取当前值
@@ -2442,9 +2442,9 @@ pub const IRGenerator = struct {
                 const var_name = self.getString(target_node.data.variable.name);
                 
                 if (is_ref) {
-                    // 如果是引用，使用指针寄存器调用 php_ref_assign_ptr
+                    // 如果是引用，直接传递指针寄存器（不load）
                     const assign_args = try self.allocator.alloc(Register, 2);
-                    assign_args[0] = ref_ptr_reg.?;  // 传递指针寄存器
+                    assign_args[0] = ref_ptr_reg.?;  // 传递alloca指针
                     assign_args[1] = result_reg;
                     _ = try self.emit(.{ .call = .{
                         .func_name = "php_ref_assign_ptr",

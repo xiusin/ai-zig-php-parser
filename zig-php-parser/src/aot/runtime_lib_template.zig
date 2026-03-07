@@ -1219,10 +1219,8 @@ pub const PHPArray = struct {
 
         fn convertToMixed(self: *Elements) !void {
             if (self.mixed != null) return;
-            std.debug.print("DEBUG: convertToMixed, packed_values.len={}\n", .{self.packed_values.items.len});
             var map = std.ArrayHashMap(ArrayKey, Value, ArrayContext, true).init(self.allocator);
             for (self.packed_values.items, 0..) |v, idx| {
-                std.debug.print("DEBUG: copying idx={}, value={}\n", .{idx, v.asInt()});
                 const retained = v.retain();
                 _ = retained;
                 try map.put(.{ .integer = @intCast(idx) }, v);
@@ -1230,7 +1228,6 @@ pub const PHPArray = struct {
             self.packed_values.deinit(self.allocator);
             self.packed_values = .{};
             self.mixed = map;
-            std.debug.print("DEBUG: convertToMixed done, mixed.count={}\n", .{map.count()});
         }
 
         pub fn put(self: *Elements, key: ArrayKey, value: Value) !void {
@@ -1875,20 +1872,8 @@ pub const PHPClosure = struct {
 
 /// 变量赋值
 pub fn val_assign(target: *Value, value: Value) void {
-    // 释放旧值
-    // 注意：这里需要传入allocator，但为了简化API，我们假设 target 已经包含了必要的生命周期管理
-    // 或者我们应该让 val_assign 接受 allocator
-    // 现在的实现：如果 target 是引用，则更新引用的值
-    if (target.isRef()) {
-        const ptr = target.asRef();
-        // 递归赋值，处理引用链
-        val_assign(ptr, value);
-        return;
-    }
-
-    // 如果不是引用，直接覆盖值
-    // 注意：调用者负责释放旧值的资源，或者我们在AOT生成的代码中处理
-    // 这里的 val_assign 主要是处理引用语义
+    // 直接覆盖值（包括引用值）
+    // 注意：调用者负责释放旧值和retain新值
     target.* = value;
 }
 
@@ -3266,7 +3251,6 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
         // 从mixed模式获取指针
         if (iter.array.elements.mixed) |*m| {
             if (m.getPtr(entry.key_ptr.*)) |value_ptr| {
-                std.debug.print("DEBUG: iter_value_ref key={}, ptr={*}, value={}\n", .{entry.key_ptr.*.integer, value_ptr, value_ptr.asInt()});
                 return Value.initRef(value_ptr);
             }
         }
@@ -3300,17 +3284,14 @@ pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
     return Value.initNull();
 }
 
-/// 引用赋值（通过指针）：将值写入引用指向的位置
-pub fn php_ref_assign_ptr(ref_val: Value, new_val: Value) !Value {
-    std.debug.print("DEBUG: ref_assign_ptr isRef={}\n", .{ref_val.isRef()});
-    if (ref_val.isRef()) {
-        const ptr = ref_val.asRef();
-        std.debug.print("DEBUG: writing ptr={*}, old={}, new={}\n", .{ptr, ptr.asInt(), new_val.asInt()});
+/// 引用赋值（通过alloca指针）：将值写入引用指向的位置
+pub fn php_ref_assign_ptr(ref_ptr: *Value, new_val: Value) !Value {
+    if (ref_ptr.isRef()) {
+        const ptr = ref_ptr.asRef();
         ptr.release(runtime_allocator);
         const retained = new_val.retain();
         _ = retained;
         ptr.* = new_val;
-        std.debug.print("DEBUG: after write, ptr.*={}\n", .{ptr.asInt()});
     }
     return Value.initNull();
 }
