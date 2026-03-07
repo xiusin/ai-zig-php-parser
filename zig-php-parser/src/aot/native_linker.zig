@@ -3693,12 +3693,20 @@ pub const NativeLinker = struct {
                 try writer.writeAll("                }\n");
             },
             .throw => |ex_reg| {
-                try writer.print("                runtime.setException(reg_{d});\n", .{ex_reg.id});
+                const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(ex_reg.id) else false;
+                if (is_alloca) {
+                    try writer.print("                runtime.setException(reg_{d}.*);\n", .{ex_reg.id});
+                } else {
+                    try writer.print("                runtime.setException(reg_{d});\n", .{ex_reg.id});
+                }
 
                 // 清理资源
                 if (cleanup_regs.len > 0) {
                     try code.appendSlice(self.allocator, "                // Cleanup before throw\n");
                     for (cleanup_regs) |reg_id| {
+                        // 跳过异常对象本身
+                        if (reg_id == ex_reg.id) continue;
+                        
                         // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
                         if (alloca_regs.contains(reg_id)) continue;
 
@@ -4078,10 +4086,19 @@ pub const NativeLinker = struct {
     }
 
     fn generateCleanupCode(self: *Self, writer: anytype) !void {
+        try self.generateCleanupCodeExcept(writer, null);
+    }
+
+    fn generateCleanupCodeExcept(self: *Self, writer: anytype, except_reg: ?u32) !void {
         if (self.current_cleanup_regs) |regs| {
             if (regs.len > 0) {
                 try writer.writeAll("        // Cleanup on exception\n");
                 for (regs) |reg_id| {
+                    // 跳过排除的寄存器（如异常对象）
+                    if (except_reg) |ex_reg| {
+                        if (reg_id == ex_reg) continue;
+                    }
+                    
                     // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
                     if (self.current_alloca_regs) |alloca_regs| {
                         if (alloca_regs.contains(reg_id)) continue;
@@ -5931,12 +5948,14 @@ pub const NativeLinker = struct {
                             // 函数返回Value
                             if (in_try_block) {
                                 // 在 try 块中，捕获错误但不传播
-                                try writer.print("    reg_{d} = @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, op.func_name });
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.print("@\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
                                 try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                 try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
                             } else {
                                 // 不在 try 块中，使用 try 传播错误
-                                try writer.print("    reg_{d} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, op.func_name });
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.print("try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
                                 try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             }
@@ -5951,7 +5970,8 @@ pub const NativeLinker = struct {
                                 try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             }
-                            try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                            try self.writeRegAssignmentPrefix(writer, reg.id);
+                            try writer.writeAll("runtime.Value.initNull();\n");
                         }
                     }
 
@@ -6181,8 +6201,13 @@ pub const NativeLinker = struct {
                 }
             },
             .array_push => |op| {
-                // 简化：所有寄存器都是 Value 类型，直接使用
-                try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                // 检查value是否是alloca指针
+                const val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                if (val_is_alloca) {
+                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                } else {
+                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                }
             },
             .array_count => |op| {
                 if (inst.result) |reg| {
@@ -6295,7 +6320,7 @@ pub const NativeLinker = struct {
                     // 检查异常
                     try writer.writeAll("    if (runtime.hasException()) {\n");
                     try writer.writeAll("        @branchHint(.unlikely);\n");
-                    try self.generateCleanupCode(writer);
+                    try self.generateCleanupCodeExcept(writer, reg.id);
                     if (self.current_exception_handler) |handler_idx| {
                         try writer.print("        current_block = {d};\n", .{handler_idx});
                         try writer.print("        continue;\n", .{});
@@ -6353,7 +6378,9 @@ pub const NativeLinker = struct {
 
                         try writer.writeAll("    if (runtime.hasException()) {\n");
                         try writer.writeAll("        @branchHint(.unlikely);\n");
-                        try self.generateCleanupCode(writer);
+                        // 如果方法有返回值，排除result寄存器
+                        const except_reg = if (inst.result) |r| r.id else null;
+                        try self.generateCleanupCodeExcept(writer, except_reg);
                         if (self.current_exception_handler) |handler_idx| {
                             try writer.print("        current_block = {d};\n", .{handler_idx});
                             try writer.print("        continue;\n", .{});
@@ -6560,7 +6587,12 @@ pub const NativeLinker = struct {
             .global_set => |op| {
                 // 写入全局表
                 if (op.value) |val| {
-                    try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ op.name, val.id });
+                    const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(val.id) else false;
+                    if (is_alloca) {
+                        try writer.print("    try setGlobalVar(\"{s}\", reg_{d}.*);\n", .{ op.name, val.id });
+                    } else {
+                        try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ op.name, val.id });
+                    }
                 }
             },
             .global_get_dynamic => |op| {
@@ -6578,15 +6610,29 @@ pub const NativeLinker = struct {
             },
             .global_set_dynamic => |op| {
                 // 动态全局变量写入：$$var = value
-                try writer.writeAll("    try setGlobalVarDynamic(reg_");
-                try writer.print("{d}", .{op.name_reg.id});
-                try writer.writeAll(", reg_");
-                try writer.print("{d}", .{op.value.id});
-                try writer.writeAll(");\n");
+                const name_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.name_reg.id) else false;
+                const val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                
+                try writer.writeAll("    try setGlobalVarDynamic(");
+                if (name_is_alloca) {
+                    try writer.print("reg_{d}.*, ", .{op.name_reg.id});
+                } else {
+                    try writer.print("reg_{d}, ", .{op.name_reg.id});
+                }
+                if (val_is_alloca) {
+                    try writer.print("reg_{d}.*);\n", .{op.value.id});
+                } else {
+                    try writer.print("reg_{d});\n", .{op.value.id});
+                }
             },
             .global_unset => |op| {
                 // 从全局变量表中删除
-                try writer.print("    try unsetGlobalVar(reg_{d});\n", .{op.name.id});
+                const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.name.id) else false;
+                if (is_alloca) {
+                    try writer.print("    try unsetGlobalVar(reg_{d}.*);\n", .{op.name.id});
+                } else {
+                    try writer.print("    try unsetGlobalVar(reg_{d});\n", .{op.name.id});
+                }
             },
             .cast => |op| {
                 // cast: 类型转换
