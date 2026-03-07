@@ -125,14 +125,16 @@ pub const PassConfig = struct {
             .function_inlining = false,
             .inline_threshold = 0,
             .type_specialization = false,
-            .cse = false,
+            .cse = false,  // 禁用CSE，避免合并连续的load/release
             .licm = false,
             .strength_reduction = false,
-            .mem2reg = true, // 重新启用 mem2reg
+            .mem2reg = true, // 重新启用mem2reg
             .loop_unroll = false,
             .cfg_cleanup = false,
             .rc_elision = false,
             .max_iterations = 2, // 增加到 2 以支持类型推断
+        };
+    }
         };
     }
 
