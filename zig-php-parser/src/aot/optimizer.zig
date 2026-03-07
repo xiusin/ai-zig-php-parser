@@ -128,13 +128,11 @@ pub const PassConfig = struct {
             .cse = false,  // 禁用CSE，避免合并连续的load/release
             .licm = false,
             .strength_reduction = false,
-            .mem2reg = true, // 重新启用mem2reg
+            .mem2reg = false, // 禁用mem2reg，测试unset_var
             .loop_unroll = false,
             .cfg_cleanup = false,
             .rc_elision = false,
             .max_iterations = 2, // 增加到 2 以支持类型推断
-        };
-    }
         };
     }
 
@@ -2704,7 +2702,7 @@ pub const IROptimizer = struct {
             .neg, .bit_not, .not, .strlen, .array_count, .clone, .move => |op| {
                 try self.used_registers.put(op.operand.id, {});
             },
-            .retain, .release, .debug_print, .get_type => |op| {
+            .retain, .release, .unset_var, .debug_print, .get_type => |op| {
                 try self.used_registers.put(op.operand.id, {});
             },
             .load => |op| {
@@ -2944,7 +2942,7 @@ pub const IROptimizer = struct {
             .new_object, .property_get, .property_set, .method_call, .clone => true,
             .static_method_call, .static_property_get, .static_property_set => true,
             .closure_new, .closure_bind, .parent_call => true,
-            .retain, .release => true,
+            .retain, .release, .unset_var => true,
             .try_begin, .try_end, .catch_, .get_exception, .clear_exception => true,
             .mutex_lock, .mutex_unlock, .mutex_new => true,
             .go_spawn, .channel_new, .channel_send, .channel_recv, .channel_close, .select_, .await_ => true,

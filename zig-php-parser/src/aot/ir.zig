@@ -812,6 +812,8 @@ pub const Instruction = struct {
         retain: UnaryOp,
         /// Decrement reference count
         release: UnaryOp,
+        /// Unset variable (release and set to null)
+        unset_var: UnaryOp,
 
         // ============ Control Flow ============
         /// Phi node (SSA)
@@ -1509,6 +1511,7 @@ pub const IRPrinter = struct {
             .unbox => |op| try self.print("unbox {any} to {any}", .{ op.value, op.to_type }),
             .retain => |op| try self.print("retain {any}", .{op.operand}),
             .release => |op| try self.print("release {any}", .{op.operand}),
+            .unset_var => |op| try self.print("unset_var {any}", .{op.operand}),
 
             // Control flow
             .phi => |op| {

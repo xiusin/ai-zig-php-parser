@@ -3439,19 +3439,12 @@ pub const IRGenerator = struct {
                             _ = self.ref_vars.remove(var_name);
                             _ = self.var_registers.remove(var_name);
                         } else {
-                            // 局部变量：先释放旧值（触发析构），再设置为null
+                            // 局部变量：使用unset_var指令
                             if (self.var_registers.get(var_name)) |var_reg| {
-                                // 第一次release：抵消store的retain
-                                const old_val1 = try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
-                                _ = try self.emit(.{ .release = .{ .operand = old_val1 } }, null);
-                                
-                                // 第二次release：真正的unset，触发析构
-                                const old_val2 = try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
-                                _ = try self.emit(.{ .release = .{ .operand = old_val2 } }, null);
-                                
-                                // 设置为null
-                                const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = null_reg } }, null);
+                                // 生成unset_var指令，它会：
+                                // 1. release变量两次（抵消store的retain + 真正的unset）
+                                // 2. 设置变量为null
+                                _ = try self.emit(.{ .unset_var = .{ .operand = var_reg } }, null);
                             }
                         }
                         

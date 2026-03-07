@@ -6772,6 +6772,26 @@ pub const NativeLinker = struct {
                 const suffix = self.getRegSuffix(op.operand.id);
                 try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.operand.id, suffix });
             },
+            .unset_var => |op| {
+                // unset_var: 专门处理unset操作
+                // op.operand是alloca指针寄存器
+                const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.operand.id) else false;
+                
+                if (is_alloca) {
+                    // alloca寄存器，需要解引用
+                    // 第一次release：抵消store的retain
+                    try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
+                    // 第二次release：真正的unset，触发析构
+                    try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
+                    // 设置为null
+                    try writer.print("    reg_{d}.* = runtime.Value.initNull();\n", .{op.operand.id});
+                } else {
+                    // 普通寄存器
+                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});
+                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});
+                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{op.operand.id});
+                }
+            },
             else => {
                 try self.handleUnsupportedOp(inst);
             },
