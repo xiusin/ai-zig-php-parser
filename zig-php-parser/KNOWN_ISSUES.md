@@ -61,19 +61,38 @@
 
 ## 📊 测试通过率
 
-### 当前状态 (2026-03-07 12:50)
+### 当前状态 (2026-03-07 13:06)
 - **AOT测试**: 67/79 (84.81%)
 - **基础测试**: 16/16 (100%)
 - **AOT单元测试**: 138/139 (99.3%)
 
+### 失败详情
+
+#### 编译失败 (4个)
+1. **advanced_features_test.php** - 编译器崩溃在getOrCreateVarRegister
+2. **complex_closures_test.php** - 内存泄漏导致编译失败
+3. **error_handling.php** - 编译器内部错误
+4. **test_ultimate_complex.php** - 编译器崩溃
+
+#### Segmentation fault (4个)
+1. **test_assoc_array_ref.php** - 引用迭代器
+2. **test_nested_ref_foreach.php** - 嵌套引用迭代器
+3. **test_ref_basic.php** - 基本引用迭代器
+4. **test_simple_nested_ref.php** - 简单嵌套引用
+
+#### 运行失败 (3个)
+1. **closures_advanced.php** - 闭包绑定$this失败（NotAnObject）
+2. **complex_oop.php** - Trait静态属性访问失败（ClassNotFound）
+3. **super_complex_test.php** - 嵌套闭包调用失败（InvalidCallback）
+
+#### 超时 (1个)
+1. **benchmark_extreme.php** - 1000万次循环性能测试（正常）
+
 ### 历史记录
+- 2026-03-07 13:06: 84.81% (67/79) - 稳定状态
 - 2026-03-07 12:50: 84.81% (67/79) - 修复__construct release (+8.86%)
 - 2026-03-07 12:30: 75.95% (60/79) - 修复alloca指针解引用 (+3.45%)
 - 2026-03-07 12:00: 72.50% (58/80) - 初始状态
-
-### 失败分类
-- **Segmentation fault**: 4个测试（全部与引用迭代器相关）
-- **编译失败**: 8个测试
 
 ## 🎯 优先级排序
 
