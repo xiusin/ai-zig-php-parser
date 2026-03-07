@@ -3347,6 +3347,7 @@ pub const IRGenerator = struct {
         // This covers patterns like: ($arr[$k])($x), ($obj->prop)($x), ("strlen")($x), etc.
         var func_name: []const u8 = "";
         var indirect_callee: ?Register = null;
+        
         if (name_node.tag == .variable) {
             const is_variable_token = name_node.main_token.tag == .t_variable;
             if (is_variable_token) {
@@ -3426,26 +3427,24 @@ pub const IRGenerator = struct {
                         // unset($var)
                         const var_name = self.getString(arg_node.?.data.variable.name);
                         
-                        // 检查是否是全局变量（在全局作用域或使用global声明）
-                        const is_global = self.symbol_table.isGlobalScope();
-                        
-                        if (is_global) {
-                            // 全局变量：需要从全局变量表中删除
-                            const str_id = try self.module.?.internString(var_name);
-                            const var_name_str = try self.emitWithResult(.{ .const_string = str_id }, .php_string);
-                            _ = try self.emit(.{ .global_unset = .{ .name = var_name_str } }, null);
-                        } else if (self.ref_vars.contains(var_name)) {
-                            // 引用变量：移除引用
-                            _ = self.ref_vars.remove(var_name);
-                            _ = self.var_registers.remove(var_name);
-                        } else {
-                            // 局部变量：使用unset_var指令
-                            if (self.var_registers.get(var_name)) |var_reg| {
+                        // 优先检查是否在var_registers中（局部变量）
+                        if (self.var_registers.get(var_name)) |var_reg| {
+                            if (self.ref_vars.contains(var_name)) {
+                                // 引用变量：移除引用
+                                _ = self.ref_vars.remove(var_name);
+                                _ = self.var_registers.remove(var_name);
+                            } else {
+                                // 局部变量：使用unset_var指令
                                 // 生成unset_var指令，它会：
                                 // 1. release变量两次（抵消store的retain + 真正的unset）
                                 // 2. 设置变量为null
                                 _ = try self.emit(.{ .unset_var = .{ .operand = var_reg } }, null);
                             }
+                        } else {
+                            // 不在var_registers中，是全局变量
+                            const str_id = try self.module.?.internString(var_name);
+                            const var_name_str = try self.emitWithResult(.{ .const_string = str_id }, .php_string);
+                            _ = try self.emit(.{ .global_unset = .{ .name = var_name_str } }, null);
                         }
                         
                         return try self.emitWithResult(.{ .const_null = {} }, .php_value);

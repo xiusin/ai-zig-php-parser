@@ -2202,12 +2202,12 @@ pub const NativeLinker = struct {
                                     const reg_tag = @as(std.meta.Tag(IR.Type), reg_type);
                                     const is_ptr = reg_tag == .ptr;
                                     
-                                    try code.appendSlice(self.allocator, "    reg_");
-                                    try code.writer(self.allocator).print("{d}", .{reg_id});
+                                    // 添加null检查，跳过已unset的变量
                                     if (is_ptr) {
-                                        try code.appendSlice(self.allocator, ".*.release(runtime.runtime_allocator);\n");
+                                        // alloca指针：检查指向的值是否为null
+                                        try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                     } else {
-                                        try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+                                        try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                     }
                                 }
                             }
@@ -2269,12 +2269,11 @@ pub const NativeLinker = struct {
                                 const reg_tag = @as(std.meta.Tag(IR.Type), reg_type);
                                 const is_ptr = reg_tag == .ptr;
 
-                                try code.appendSlice(self.allocator, "    reg_");
-                                try code.writer(self.allocator).print("{d}", .{reg_id});
+                                // 添加null检查，跳过已unset的变量
                                 if (is_ptr) {
-                                    try code.appendSlice(self.allocator, ".*.release(runtime.runtime_allocator);\n");
+                                    try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                 } else {
-                                    try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+                                    try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                 }
                             }
                         }
@@ -2293,12 +2292,11 @@ pub const NativeLinker = struct {
                         // 跳过引用参数的alloca（它们是undefined）
                         if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
-                        try code.appendSlice(self.allocator, "    reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        // 添加null检查，跳过已unset的变量
                         if (alloca_registers.contains(reg_id)) {
-                            try code.appendSlice(self.allocator, ".*.release(runtime.runtime_allocator);\n");
+                            try code.writer(self.allocator).print("    if (!reg_{d}.*.isNull()) reg_{d}.*.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                         } else {
-                            try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
+                            try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                         }
                     }
                 }
