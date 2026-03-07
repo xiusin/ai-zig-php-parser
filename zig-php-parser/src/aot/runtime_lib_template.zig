@@ -450,10 +450,11 @@ pub fn deinitRuntime() void {
     // gcCollectCycles(true);
     cycle_roots.deinit(runtime_allocator);
     cycle_roots = .{};
-    // 暂时禁用static_string cleanup来调试
-    // for (static_string_entries.items) |e| {
-    //     e.deinit(runtime_allocator);
-    // }
+    // std.debug.print("deinitRuntime: cleaning up {d} static strings\n", .{static_string_entries.items.len});
+    for (static_string_entries.items) |e| {
+        // std.debug.print("deinitRuntime: cleaning static string: {s}\n", .{e.php.data});
+        e.deinit(runtime_allocator);
+    }
     static_string_entries.deinit(runtime_allocator);
     static_string_entries = .{};
     if (static_string_pool) |*pool| {

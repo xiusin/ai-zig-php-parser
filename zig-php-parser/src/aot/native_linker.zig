@@ -2187,14 +2187,19 @@ pub const NativeLinker = struct {
         var stored_to_alloca = std.AutoHashMap(usize, void).init(self.allocator);
         defer stored_to_alloca.deinit();
         
+        // 找出被store过的alloca指针（它们的值被retain过）
+        var alloca_with_store = std.AutoHashMap(usize, void).init(self.allocator);
+        defer alloca_with_store.deinit();
+        
         // 遍历所有block查找store指令
         for (func.blocks.items) |block_scan| {
             for (block_scan.instructions.items) |inst| {
                 if (inst.op == .store) {
                     const store_op = inst.op.store;
-                    // 如果store的目标是alloca，记录源寄存器
+                    // 如果store的目标是alloca，记录源寄存器和alloca指针
                     if (alloca_registers.contains(store_op.ptr.id)) {
                         try stored_to_alloca.put(store_op.value.id, {});
+                        try alloca_with_store.put(store_op.ptr.id, {});
                         // std.debug.print("stored_to_alloca: reg_{d} -> reg_{d}\n", .{store_op.value.id, store_op.ptr.id});
                     }
                 }
@@ -2243,9 +2248,16 @@ pub const NativeLinker = struct {
                                     if (unset_registers.contains(reg_id)) continue;
                                     
                                     if (is_ptr) {
-                                        // alloca指针：release两次（完全释放）
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                        // alloca指针：检查是否被store过
+                                        const has_store = alloca_with_store.contains(reg_id);
+                                        if (has_store) {
+                                            // 被store过：release两次（store会retain）
+                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                        } else {
+                                            // 没有被store：release一次
+                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                        }
                                     } else {
                                         try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                     }
@@ -2314,9 +2326,16 @@ pub const NativeLinker = struct {
                                 if (unset_registers.contains(reg_id)) continue;
                                 
                                 if (is_ptr) {
-                                    // alloca指针：release两次（完全释放）
-                                    try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                    try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    // alloca指针：检查是否被store过
+                                    const has_store = alloca_with_store.contains(reg_id);
+                                    if (has_store) {
+                                        // 被store过：release两次
+                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    } else {
+                                        // 没有被store：release一次
+                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    }
                                 } else {
                                     try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                 }
@@ -2345,9 +2364,16 @@ pub const NativeLinker = struct {
                         
                         const is_alloca = alloca_registers.contains(reg_id);
                         if (is_alloca) {
-                            // alloca指针：release两次（完全释放）
-                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            // alloca指针：检查是否被store过
+                            const has_store = alloca_with_store.contains(reg_id);
+                            if (has_store) {
+                                // 被store过：release两次
+                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            } else {
+                                // 没有被store：release一次
+                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            }
                         } else {
                             try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                         }
