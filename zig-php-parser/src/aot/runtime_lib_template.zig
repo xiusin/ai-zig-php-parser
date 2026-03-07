@@ -450,9 +450,10 @@ pub fn deinitRuntime() void {
     // gcCollectCycles(true);
     cycle_roots.deinit(runtime_allocator);
     cycle_roots = .{};
-    for (static_string_entries.items) |e| {
-        e.deinit(runtime_allocator);
-    }
+    // 暂时禁用static_string cleanup来调试
+    // for (static_string_entries.items) |e| {
+    //     e.deinit(runtime_allocator);
+    // }
     static_string_entries.deinit(runtime_allocator);
     static_string_entries = .{};
     if (static_string_pool) |*pool| {
@@ -935,6 +936,7 @@ pub const PHPString = struct {
     pub fn retain(self: *PHPString) void {
         if (!self.is_static) {
             self.ref_count += 1;
+            std.debug.print("PHPString.retain: data={s} ref_count={d}\n", .{self.data, self.ref_count});
         }
     }
 
@@ -942,6 +944,8 @@ pub const PHPString = struct {
     pub fn release(self: *PHPString, allocator: Allocator) void {
         if (self.is_static) return;
 
+        std.debug.print("PHPString.release: data={s} ref_count={d}\n", .{self.data, self.ref_count});
+        
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPString double free detected! data={s}\n", .{self.data});
             return;
@@ -5799,17 +5803,23 @@ pub const PHPObject = struct {
     /// 增加引用计数
     pub fn retain(self: *PHPObject) void {
         self.ref_count += 1;
+        std.debug.print("PHPObject.retain: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
     }
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
+        std.debug.print("PHPObject.release BEFORE: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
+        
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPObject double free detected! class={s}\n", .{self.class_name});
             return;
         }
 
         self.ref_count -= 1;
+        std.debug.print("PHPObject.release AFTER: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
+        
         if (self.ref_count == 0) {
+            std.debug.print("PHPObject.deinit: class={s}\n", .{self.class_name});
             self.deinit();
         } else if (!gc_in_progress) {
             gcBufferObject(self);
