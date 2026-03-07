@@ -1263,6 +1263,16 @@ pub const PHPArray = struct {
             return self.orderedRemove(key);
         }
 
+        pub fn getPtr(self: *Elements, key: ArrayKey) ?*Value {
+            if (self.mixed) |*m| return m.getPtr(key);
+            if (key != .integer) return null;
+            const i = key.integer;
+            if (i < 0) return null;
+            const idx: usize = @intCast(i);
+            if (idx >= self.packed_values.items.len) return null;
+            return &self.packed_values.items[idx];
+        }
+
         pub fn deinit(self: *Elements) void {
             if (self.mixed) |*m| {
                 m.deinit();
@@ -1335,6 +1345,11 @@ pub const PHPArray = struct {
             return v;
         }
         return null;
+    }
+
+    /// 获取元素指针（用于引用）
+    pub fn getPtr(self: *PHPArray, key: ArrayKey) ?*Value {
+        return self.elements.getPtr(key);
     }
 
     /// 获取元素（通过Value键）
@@ -3060,6 +3075,7 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 pub const ArrayIterator = struct {
+    array: *PHPArray,  // 持有数组引用
     iter: PHPArray.Elements.Iterator,
     current: ?PHPArray.Elements.Entry,
 };
@@ -3088,6 +3104,7 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
     if (!array_val.isArray()) return Value.initInt(0);
     const array = array_val.asArray();
     const iter = try allocator.create(ArrayIterator);
+    iter.array = array;  // 保存数组引用
     iter.iter = array.elements.iterator();
     iter.current = iter.iter.next();
     return Value.initInt(@as(i64, @intCast(@intFromPtr(iter))));
@@ -3153,9 +3170,11 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     if (iter.current) |entry| {
-        // 返回指向数组元素的引用（需要转换为可变指针）
-        const mutable_ptr: *Value = @constCast(entry.value_ptr);
-        return Value.initRef(mutable_ptr);
+        // 通过数组和键来获取元素指针
+        // 这样即使HashMap重新分配，我们也能通过键重新查找
+        const key = entry.key_ptr.*;
+        const value_ptr = iter.array.getPtr(key) orelse return Value.initNull();
+        return Value.initRef(value_ptr);
     }
     return Value.initNull();
 }
