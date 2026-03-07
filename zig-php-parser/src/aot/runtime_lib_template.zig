@@ -1691,11 +1691,11 @@ pub const Value = struct {
     }
 
     pub fn release(self: Value, allocator: Allocator) void {
+        // 引用不需要释放（只是指针）
         if (self.isRef()) {
-            // RefWrapper需要清理
-            const wrapper = self.asRefWrapper();
-            wrapper.deinit(allocator);
-        } else if (self.isString()) {
+            return;
+        }
+        if (self.isString()) {
             self.asString().release(allocator);
         } else if (self.isArray()) {
             self.asArray().release(allocator);
@@ -1890,13 +1890,9 @@ pub fn val_assign(target: *Value, value: Value) void {
 /// 变量解引用
 pub fn val_deref(val: *Value) *Value {
     if (val.isRef()) {
-        // 尝试作为RefWrapper解析
-        const wrapper = val.asRefWrapper();
-        if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
-            return value_ptr;
-        }
-        // 如果getPtr失败，返回原值
-        return val;
+        // 直接返回指针指向的Value
+        const ptr = val.asRef();
+        return ptr;
     }
     return val;
 }
@@ -3284,19 +3280,24 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     if (iter.current) |entry| {
-        // 创建引用包装器
-        const wrapper = try runtime_allocator.create(RefWrapper);
-        wrapper.array = iter.array;
-        wrapper.key = entry.key_ptr.*;
-        
-        // 不增加数组引用计数（迭代器已经持有）
-        // 只标记数组有活跃引用
+        // 标记数组有活跃引用
         if (!iter.array.has_active_refs) {
             iter.array.has_active_refs = true;
+            // 立即转换为mixed模式，确保指针稳定
+            if (iter.array.elements.mixed == null) {
+                try iter.array.elements.convertToMixed();
+            }
         }
         iter.array.ref_lock_count += 1;
         
-        return Value.initRefWrapper(wrapper);
+        // 转换后重新获取指针（从mixed模式）
+        if (iter.array.elements.mixed) |*m| {
+            if (m.getPtr(entry.key_ptr.*)) |value_ptr| {
+                return Value.initRef(value_ptr);
+            }
+        }
+        
+        return Value.initNull();
     }
     return Value.initNull();
 }
@@ -3321,14 +3322,10 @@ pub fn php_array_iter_value_ref_reuse(state_val: Value) !Value {
 /// 解引用：从引用中读取值
 pub fn php_deref(ref_val: Value) !Value {
     if (ref_val.isRef()) {
-        // 尝试作为RefWrapper解析
-        const wrapper = ref_val.asRefWrapper();
-        // 通过数组和键获取当前值
-        if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
-            _ = value_ptr.retain();
-            return value_ptr.*;
-        }
-        return Value.initNull();
+        // 直接解引用指针
+        const ptr = ref_val.asRef();
+        _ = ptr.retain();
+        return ptr.*;
     }
     // 如果不是引用，直接返回值
     _ = ref_val.retain();
@@ -3337,15 +3334,15 @@ pub fn php_deref(ref_val: Value) !Value {
 
 /// 引用赋值：将值写入引用指向的位置
 pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
+    std.debug.print("DEBUG: php_ref_assign called, isRef={}\n", .{ref_val.isRef()});
     if (ref_val.isRef()) {
-        // 尝试作为RefWrapper解析
-        const wrapper = ref_val.asRefWrapper();
-        // 通过数组和键获取元素指针并修改
-        if (wrapper.array.getPtr(wrapper.key)) |value_ptr| {
-            value_ptr.release(runtime_allocator);
-            _ = new_val.retain();
-            value_ptr.* = new_val;
-        }
+        // 直接写入指针指向的位置
+        const ptr = ref_val.asRef();
+        std.debug.print("DEBUG: ptr={*}, old_val={any}, new_val={any}\n", .{ptr, ptr.*, new_val});
+        ptr.release(runtime_allocator);
+        _ = new_val.retain();
+        ptr.* = new_val;
+        std.debug.print("DEBUG: after assign, ptr.*={any}\n", .{ptr.*});
     }
     return Value.initNull();
 }
@@ -3432,6 +3429,12 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    
+    // 清理引用锁
+    if (iter.array.ref_lock_count > 0) {
+        iter.array.ref_lock_count = 0;
+        iter.array.has_active_refs = false;
+    }
     
     // 释放数组引用计数
     iter.array.release(allocator);
