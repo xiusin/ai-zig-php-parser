@@ -1759,7 +1759,7 @@ pub const IRGenerator = struct {
         _ = self.loop_stack.pop();
         self.setCurrentBlock(exit_block);
 
-        // Cleanup iterator
+        // Cleanup iterator (先释放迭代器，保持数组引用计数)
         const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
 
         const free_args = try self.allocator.alloc(Register, 1);
@@ -1770,6 +1770,21 @@ pub const IRGenerator = struct {
             .args = free_args,
             .return_type = .void,
         } }, null);
+
+        // 清理引用变量（在迭代器释放后，数组引用计数已恢复）
+        if (foreach_data.value_by_ref) {
+            const val_node = self.getNode(foreach_data.value);
+            if (val_node != null and val_node.?.tag == .variable) {
+                const val_name = self.getString(val_node.?.data.variable.name);
+                // 将引用变量设置为null，触发RefWrapper清理
+                if (self.lookupVarRegister(val_name)) |val_var| {
+                    const null_val = try self.emitWithResult(.const_null, .php_value);
+                    _ = try self.emit(.{ .store = .{ .ptr = val_var, .value = null_val } }, null);
+                }
+                // 从引用变量集合中移除
+                _ = self.ref_vars.remove(val_name);
+            }
+        }
     }
 
     /// Generate IR for switch statement

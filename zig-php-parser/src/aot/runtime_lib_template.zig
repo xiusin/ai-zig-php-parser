@@ -1691,7 +1691,11 @@ pub const Value = struct {
     }
 
     pub fn release(self: Value, allocator: Allocator) void {
-        if (self.isString()) {
+        if (self.isRef()) {
+            // RefWrapper需要清理
+            const wrapper = self.asRefWrapper();
+            wrapper.deinit(allocator);
+        } else if (self.isString()) {
             self.asString().release(allocator);
         } else if (self.isArray()) {
             self.asArray().release(allocator);
@@ -3116,6 +3120,9 @@ pub const RefWrapper = struct {
                 self.array.has_active_refs = false;
             }
         }
+        // 释放数组引用计数
+        self.array.release(allocator);
+        // 释放RefWrapper自身
         allocator.destroy(self);
     }
 };
@@ -3149,6 +3156,10 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
     // 普通数组
     if (!array_val.isArray()) return Value.initInt(0);
     const array = array_val.asArray();
+    
+    // 增加数组引用计数，确保迭代期间数组不被释放
+    _ = array.retain();
+    
     const iter = try allocator.create(ArrayIterator);
     iter.array = array;  // 保存数组引用
     iter.iter = array.elements.iterator();
@@ -3220,6 +3231,9 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
         const wrapper = try runtime_allocator.create(RefWrapper);
         wrapper.array = iter.array;
         wrapper.key = entry.key_ptr.*;
+        
+        // RefWrapper持有数组引用，增加引用计数
+        _ = iter.array.retain();
         
         // 标记数组有活跃引用
         iter.array.has_active_refs = true;
@@ -3332,6 +3346,10 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
+    
+    // 释放数组引用计数
+    iter.array.release(allocator);
+    
     allocator.destroy(iter);
     return Value.initNull();
 }
