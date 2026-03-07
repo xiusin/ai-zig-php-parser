@@ -1691,11 +1691,12 @@ pub const Value = struct {
     }
 
     pub fn release(self: Value, allocator: Allocator) void {
+        // RefWrapper不应该在这里释放，只在php_array_iter_free_ref中释放
         if (self.isRef()) {
-            // RefWrapper需要清理
-            const wrapper = self.asRefWrapper();
-            wrapper.deinit(allocator);
-        } else if (self.isString()) {
+            // 跳过RefWrapper的释放
+            return;
+        }
+        if (self.isString()) {
             self.asString().release(allocator);
         } else if (self.isArray()) {
             self.asArray().release(allocator);
@@ -3198,13 +3199,19 @@ pub fn php_array_iter_init_ref(array_val: Value, allocator: Allocator) !Value {
     array.has_active_refs = true;
     array.ref_lock_count += 1;
     
-    // 返回包含迭代器和RefWrapper的复合值
-    // 使用高32位存储迭代器，低32位存储RefWrapper
-    const iter_addr: u64 = @intFromPtr(iter);
-    const wrapper_addr: u64 = @intFromPtr(wrapper);
-    const combined: i64 = @bitCast((iter_addr << 32) | wrapper_addr);
-    return Value.initInt(combined);
+    // 创建复合结构存储迭代器和RefWrapper
+    const combined = try allocator.create(RefIteratorState);
+    combined.iter = iter;
+    combined.wrapper = wrapper;
+    
+    // 返回复合结构的地址
+    return Value.initInt(@as(i64, @intCast(@intFromPtr(combined))));
 }
+
+pub const RefIteratorState = struct {
+    iter: *ArrayIterator,
+    wrapper: *RefWrapper,
+};
 
 pub fn php_array_iter_valid(iter_val: Value) !Value {
     // 检测是否是Iterator对象
@@ -3222,16 +3229,12 @@ pub fn php_array_iter_valid(iter_val: Value) !Value {
 }
 
 /// 引用迭代器valid
-pub fn php_array_iter_valid_ref(combined_val: Value) !Value {
-    const combined = combined_val.asInt();
-    if (combined == 0) return Value.initBool(false);
+pub fn php_array_iter_valid_ref(state_val: Value) !Value {
+    const state_addr = state_val.asInt();
+    if (state_addr == 0) return Value.initBool(false);
     
-    // 解析复合值
-    const combined_u: u64 = @bitCast(combined);
-    const iter_addr: usize = @intCast(combined_u >> 32);
-    
-    const iter: *ArrayIterator = @ptrFromInt(iter_addr);
-    return Value.initBool(iter.current != null);
+    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
+    return Value.initBool(state.iter.current != null);
 }
 
 pub fn php_array_iter_key(iter_val: Value, allocator: Allocator) !Value {
@@ -3297,22 +3300,16 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
 }
 
 /// 复用RefWrapper的引用迭代器值获取（零分配）
-pub fn php_array_iter_value_ref_reuse(combined_val: Value) !Value {
-    const combined = combined_val.asInt();
-    if (combined == 0) return Value.initNull();
+pub fn php_array_iter_value_ref_reuse(state_val: Value) !Value {
+    const state_addr = state_val.asInt();
+    if (state_addr == 0) return Value.initNull();
     
-    // 解析复合值
-    const combined_u: u64 = @bitCast(combined);
-    const iter_addr: usize = @intCast(combined_u >> 32);
-    const wrapper_addr: usize = @intCast(combined_u & 0xFFFFFFFF);
+    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
     
-    const iter: *ArrayIterator = @ptrFromInt(iter_addr);
-    const wrapper: *RefWrapper = @ptrFromInt(wrapper_addr);
-    
-    if (iter.current) |entry| {
+    if (state.iter.current) |entry| {
         // 更新RefWrapper的key（零分配）
-        wrapper.updateKey(entry.key_ptr.*);
-        return Value.initRefWrapper(wrapper);
+        state.wrapper.updateKey(entry.key_ptr.*);
+        return Value.initRefWrapper(state.wrapper);
     }
     return Value.initNull();
 }
@@ -3365,20 +3362,16 @@ pub fn php_array_iter_next(iter_val: Value) !Value {
     return Value.initInt(iter_addr);
 }
 
-/// 引用迭代器next（返回复合值）
-pub fn php_array_iter_next_ref(combined_val: Value) !Value {
-    const combined = combined_val.asInt();
-    if (combined == 0) return Value.initInt(0);
+/// 引用迭代器next（返回state）
+pub fn php_array_iter_next_ref(state_val: Value) !Value {
+    const state_addr = state_val.asInt();
+    if (state_addr == 0) return Value.initInt(0);
     
-    // 解析复合值
-    const combined_u: u64 = @bitCast(combined);
-    const iter_addr: usize = @intCast(combined_u >> 32);
+    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
+    state.iter.current = state.iter.iter.next();
     
-    const iter: *ArrayIterator = @ptrFromInt(iter_addr);
-    iter.current = iter.iter.next();
-    
-    // 返回原复合值
-    return combined_val;
+    // 返回原state
+    return state_val;
 }
 
 // Iterator接口支持
@@ -3444,25 +3437,20 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
 }
 
 /// 释放引用迭代器（包含RefWrapper）
-pub fn php_array_iter_free_ref(combined_val: Value, allocator: Allocator) !Value {
-    const combined = combined_val.asInt();
-    if (combined == 0) return Value.initNull();
+pub fn php_array_iter_free_ref(state_val: Value, allocator: Allocator) !Value {
+    const state_addr = state_val.asInt();
+    if (state_addr == 0) return Value.initNull();
     
-    // 解析复合值
-    const combined_u: u64 = @bitCast(combined);
-    const iter_addr: usize = @intCast(combined_u >> 32);
-    const wrapper_addr: usize = @intCast(combined_u & 0xFFFFFFFF);
-    
-    const iter: *ArrayIterator = @ptrFromInt(iter_addr);
-    const wrapper: *RefWrapper = @ptrFromInt(wrapper_addr);
+    const state: *RefIteratorState = @ptrFromInt(@as(usize, @intCast(state_addr)));
     
     // 释放RefWrapper（会释放数组引用计数和引用锁）
-    wrapper.deinit(allocator);
+    state.wrapper.deinit(allocator);
     
     // 释放迭代器的数组引用计数
-    iter.array.release(allocator);
+    state.iter.array.release(allocator);
     
-    allocator.destroy(iter);
+    allocator.destroy(state.iter);
+    allocator.destroy(state);
     return Value.initNull();
 }
 

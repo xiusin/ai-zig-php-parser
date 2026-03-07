@@ -1403,8 +1403,13 @@ pub const NativeLinker = struct {
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
+        .{ "php_array_iter_init_ref", bi(.{ .runtime_name = "php_array_iter_init_ref", .needs_allocator = true }) },
         .{ "php_array_iter_key", bi(.{ .runtime_name = "php_array_iter_key", .needs_allocator = true }) },
+        .{ "php_array_iter_value_ref_reuse", bi(.{ .runtime_name = "php_array_iter_value_ref_reuse", .needs_allocator = false, .may_raise = true }) },
+        .{ "php_array_iter_valid_ref", bi(.{ .runtime_name = "php_array_iter_valid_ref", .needs_allocator = false, .may_raise = true }) },
+        .{ "php_array_iter_next_ref", bi(.{ .runtime_name = "php_array_iter_next_ref", .needs_allocator = false, .may_raise = true }) },
         .{ "php_array_iter_free", bi(.{ .runtime_name = "php_array_iter_free", .needs_allocator = true }) },
+        .{ "php_array_iter_free_ref", bi(.{ .runtime_name = "php_array_iter_free_ref", .needs_allocator = true }) },
         .{ "php_create_closure", bi(.{ .runtime_name = "php_create_closure", .needs_allocator = true }) },
         .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
