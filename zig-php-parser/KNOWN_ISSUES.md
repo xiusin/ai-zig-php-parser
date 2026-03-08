@@ -61,6 +61,23 @@ thread XXXXX panic: reached unreachable code
 src/aot/ir_generator.zig:2027:43: in generateStatement
 ```
 
+### 受影响脚本列表
+**前200个脚本中的12个**：
+- test_0004.php
+- test_0006.php
+- test_0034.php
+- test_0038.php
+- test_0061.php
+- test_0066.php
+- test_0080.php
+- test_0083.php
+- test_0105.php
+- test_0106.php
+- test_0142.php
+- test_0150.php
+
+**预估总数**: ~385个 (基于42%比例)
+
 ### 影响范围
 - **影响脚本**: 42% (约385/918个gemini_scripts)
 - **严重程度**: 🔴 高
@@ -70,6 +87,7 @@ src/aot/ir_generator.zig:2027:43: in generateStatement
 - **发现时间**: 2026-03-08
 - **状态**: 🔴 未解决
 - **优先级**: P0 (阻塞性问题)
+- **需要**: 高级模型处理
 
 ---
 
