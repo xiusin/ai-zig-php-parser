@@ -1204,9 +1204,10 @@ pub const PHPArray = struct {
                 const unmanaged = &m.unmanaged;
                 
                 // 如果entries的capacity异常，说明HashMap被破坏
-                // 这通常是由于内存错误导致的，我们返回空迭代器避免crash
+                // 这通常是由于use-after-free导致的
                 if (unmanaged.entries.capacity > 10_000_000) {
-                    // 不打印错误，静默处理
+                    // HashMap被破坏，返回空迭代器
+                    // 注意：这会导致foreach跳过所有元素，但至少不会crash
                     return .{ .elements = self };
                 }
                 
@@ -1332,6 +1333,12 @@ pub const PHPArray = struct {
     pub fn release(self: *PHPArray, allocator: Allocator) void {
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPArray double free detected!\n", .{});
+            return;
+        }
+
+        // 如果有活跃的迭代器引用，不允许释放
+        if (self.ref_lock_count > 0) {
+            // 迭代器还在使用，延迟释放
             return;
         }
 
@@ -3158,6 +3165,10 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
     // 增加数组引用计数，确保迭代期间数组不被释放
     const retained = array.retain();
     _ = retained;
+    
+    // 设置迭代器锁，防止数组在迭代期间被释放
+    array.ref_lock_count += 1;
+    array.has_active_refs = true;
     
     const iter = try allocator.create(ArrayIterator);
     iter.array = array;  // 保存数组引用
