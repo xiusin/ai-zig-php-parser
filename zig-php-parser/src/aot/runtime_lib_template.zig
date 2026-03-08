@@ -3141,9 +3141,10 @@ pub const RefWrapper = struct {
 };
 
 pub const ArrayIterator = struct {
-    array: *PHPArray,  // 持有数组引用
+    array: *PHPArray, // 持有数组引用
     iter: PHPArray.Elements.Iterator,
     current: ?PHPArray.Elements.Entry,
+    freed: bool = false, // 防止双重释放
 };
 
 pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
@@ -3165,23 +3166,25 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
             }
         }
     }
-    
+
     // 普通数组
     if (!array_val.isArray()) return Value.initInt(0);
     const array = array_val.asArray();
-    
+
     // 增加数组引用计数，确保迭代期间数组不被释放
     const retained = array.retain();
     _ = retained;
-    
+
     // 设置迭代器锁，防止数组在迭代期间被释放
     array.ref_lock_count += 1;
     array.has_active_refs = true;
-    
+
     const iter = try allocator.create(ArrayIterator);
-    iter.array = array;  // 保存数组引用
+    iter.array = array; // 保存数组引用
     iter.iter = array.elements.iterator();
     iter.current = iter.iter.next();
+
+    // std.debug.print("ITER_INIT: iter={*} array={*}\n", .{ iter, array });
     return Value.initInt(@as(i64, @intCast(@intFromPtr(iter))));
 }
 
@@ -3390,21 +3393,28 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
         iter_val.release(runtime_allocator);
         return Value.initNull();
     }
-    
+
     // 普通数组迭代器
     const iter_addr = iter_val.asInt();
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
-    
+
+    // 防止双重释放
+    if (iter.freed) {
+        std.debug.print("WARNING: ArrayIterator double free detected!\n", .{});
+        return Value.initNull();
+    }
+    iter.freed = true;
+
     // 清理引用锁
     if (iter.array.ref_lock_count > 0) {
         iter.array.ref_lock_count = 0;
         iter.array.has_active_refs = false;
     }
-    
+
     // 释放数组引用计数
     iter.array.release(allocator);
-    
+
     allocator.destroy(iter);
     return Value.initNull();
 }
@@ -5957,21 +5967,21 @@ pub const PHPObject = struct {
     /// 增加引用计数
     pub fn retain(self: *PHPObject) void {
         self.ref_count += 1;
-        // std.debug.print("PHPObject.retain: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
+        // std.debug.print("PHPObject.retain: class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
     }
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
-        // std.debug.print("PHPObject.release BEFORE: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
-        
+        // std.debug.print("PHPObject.release BEFORE: class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
+
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPObject double free detected! class={s}\n", .{self.class_name});
             return;
         }
 
         self.ref_count -= 1;
-        // std.debug.print("PHPObject.release AFTER: class={s} ref_count={d}\n", .{self.class_name, self.ref_count});
-        
+        // std.debug.print("PHPObject.release AFTER: class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
+
         if (self.ref_count == 0) {
             // std.debug.print("PHPObject.deinit: class={s}\n", .{self.class_name});
             self.deinit();
