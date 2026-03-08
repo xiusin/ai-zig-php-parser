@@ -1446,14 +1446,10 @@ pub const NativeLinker = struct {
         const LivenessAnalysis = @import("liveness_analysis.zig").LivenessAnalysis;
         var liveness = LivenessAnalysis.init(self.allocator);
         defer liveness.deinit();
-        
-        // 暂时跳过活跃性分析，直接设置为null
-        // try liveness.analyze(func);
-        _ = func;
+        try liveness.analyze(func);
         
         // 保存活跃性信息供后续使用
-        // self.current_liveness = &liveness;
-        self.current_liveness = null;
+        self.current_liveness = &liveness;
         defer self.current_liveness = null;
 
         // 在代码生成时重新进行类型推断
@@ -2859,12 +2855,9 @@ pub const NativeLinker = struct {
                 try self.generateInstructionSimple(code, inst);
                 
                 // 在指令后，release死亡的操作数
-                // TODO: 调试活跃性分析
-                _ = inst_idx;
-                _ = liveness;
-                // if (self.current_liveness) |liveness| {
-                //     try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
-                // }
+                if (self.current_liveness) |liveness| {
+                    try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
+                }
             }
 
             // 生成终止指令
