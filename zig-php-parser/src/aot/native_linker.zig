@@ -4073,7 +4073,10 @@ pub const NativeLinker = struct {
             const ty = rt.get(reg_id) orelse IR.Type.php_value;
             const tag = @as(std.meta.Tag(IR.Type), ty);
             switch (tag) {
-                .php_value, .php_string, .php_array, .php_object, .php_resource, .php_callable => {},
+                .php_value, .php_string, .php_array, .php_object, .php_resource, .php_callable => {
+                    // php_string/php_array/php_object总是需要release
+                    return true;
+                },
                 else => return false,
             }
         }
