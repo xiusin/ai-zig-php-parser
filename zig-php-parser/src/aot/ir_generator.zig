@@ -1623,10 +1623,11 @@ pub const IRGenerator = struct {
         // Get iterable
         const iterable_reg = try self.generateExpression(foreach_data.iterable);
 
-        // Create blocks
+        // Create blocks - 添加cleanup块确保迭代器总是被释放
         const cond_block = try self.createBlock("foreach_cond");
         const body_block = try self.createBlock("foreach_body");
         const increment_block = try self.createBlock("foreach_increment");
+        const cleanup_block = try self.createBlock("foreach_cleanup");
         const exit_block = try self.createBlock("foreach_exit");
 
         // Initialize iterator
@@ -1661,9 +1662,9 @@ pub const IRGenerator = struct {
         // Jump to condition check
         self.setTerminator(.{ .br = cond_block });
 
-        // Push loop context for break/continue
+        // Push loop context for break/continue - break和continue都跳转到cleanup
         try self.loop_stack.append(self.allocator, .{
-            .break_block = exit_block,
+            .break_block = cleanup_block,
             .continue_block = increment_block,
         });
 
@@ -1680,11 +1681,11 @@ pub const IRGenerator = struct {
             .return_type = .php_value,
         } }, .php_value);
 
-        // 不需要转换，直接使用 php_value
+        // 循环结束时跳转到cleanup，而不是直接跳转到exit
         self.setTerminator(.{ .cond_br = .{
             .cond = valid_val,
             .then_block = body_block,
-            .else_block = exit_block,
+            .else_block = cleanup_block,
         } });
 
         // Body
@@ -1762,15 +1763,15 @@ pub const IRGenerator = struct {
 
         self.setTerminator(.{ .br = cond_block });
 
-        // Exit block
+        // Cleanup block - 所有退出路径都经过这里
         _ = self.loop_stack.pop();
-        self.setCurrentBlock(exit_block);
+        self.setCurrentBlock(cleanup_block);
 
         // Cleanup iterator
-        const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
+        const cleanup_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
 
         const free_args = try self.allocator.alloc(Register, 1);
-        free_args[0] = exit_iter;
+        free_args[0] = cleanup_iter;
 
         _ = try self.emit(.{ .call = .{
             .func_name = "php_array_iter_free",
@@ -1787,6 +1788,12 @@ pub const IRGenerator = struct {
                 _ = self.ref_vars.remove(val_name);
             }
         }
+
+        // 跳转到真正的exit
+        self.setTerminator(.{ .br = exit_block });
+
+        // Exit block - 清理完成后继续执行
+        self.setCurrentBlock(exit_block);
     }
 
     /// Generate IR for switch statement
