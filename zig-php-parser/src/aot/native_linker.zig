@@ -2853,10 +2853,11 @@ pub const NativeLinker = struct {
                 try code.appendSlice(self.allocator, "    ");
                 try self.generateInstructionSimple(code, inst);
                 
-                // 在指令后，release死亡的操作数
-                if (self.current_liveness) |liveness| {
-                    try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
-                }
+                // 在指令后，release死亡的操作数（暂时禁用）
+                _ = inst_idx;
+                // if (self.current_liveness) |liveness| {
+                //     try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
+                // }
             }
 
             // 生成终止指令
