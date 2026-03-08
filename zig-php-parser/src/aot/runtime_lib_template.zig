@@ -30,6 +30,14 @@ pub const pprof = @import("pprof.zig");
 /// 注意：这是一个全局变量，在AOT编译的代码中可以直接访问
 pub var runtime_allocator: Allocator = undefined;
 
+/// 空字符串常量（用于错误恢复）
+var EMPTY_STRING: PHPString = .{
+    .data = &[_]u8{},
+    .length = 0,
+    .ref_count = 999999,
+    .is_static = true,
+};
+
 /// 用户定义函数注册表
 pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) = null;
 
@@ -1339,6 +1347,12 @@ pub const PHPArray = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPArray, allocator: Allocator) void {
+        // 检测内存破坏
+        if (self.ref_count > 1000000) {
+            std.debug.print("ERROR: PHPArray corrupted! ref_count={d} (0x{x})\n", .{ self.ref_count, self.ref_count });
+            return;
+        }
+
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPArray double free detected!\n", .{});
             return;
@@ -1661,7 +1675,17 @@ pub const Value = struct {
     }
 
     pub fn asString(self: Value) *PHPString {
-        return @ptrFromInt(nanbox_abi.decodePtr(self.val));
+        const ptr = nanbox_abi.decodePtr(self.val);
+        const str: *PHPString = @ptrFromInt(ptr);
+        
+        // 检测内存破坏
+        if (str.length > 1024 * 1024 * 100) {
+            std.debug.print("ERROR: PHPString corrupted! length={d} (0x{x})\n", .{ str.length, str.length });
+            // 返回空字符串避免崩溃
+            return @constCast(&EMPTY_STRING);
+        }
+        
+        return str;
     }
 
     pub fn asArray(self: Value) *PHPArray {
@@ -1722,7 +1746,13 @@ pub const Value = struct {
             return;
         }
         if (self.isString()) {
-            self.asString().release(allocator);
+            const str = self.asString();
+            // 检测破坏
+            if (str.length > 1024 * 1024 * 100) {
+                std.debug.print("ERROR: Corrupted string in release! length={d}\n", .{str.length});
+                return;
+            }
+            str.release(allocator);
         } else if (self.isArray()) {
             self.asArray().release(allocator);
         } else if (Value_isObject(self)) {
@@ -5982,7 +6012,11 @@ pub const PHPObject = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
-        // std.debug.print("PHPObject.release BEFORE: class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
+        // 检测内存破坏
+        if (self.ref_count > 1000000) {
+            std.debug.print("ERROR: PHPObject corrupted! class={s} ref_count={d} (0x{x})\n", .{ self.class_name, self.ref_count, self.ref_count });
+            return;
+        }
 
         if (self.ref_count == 0) {
             std.debug.print("WARNING: PHPObject double free detected! class={s}\n", .{self.class_name});
@@ -5990,10 +6024,8 @@ pub const PHPObject = struct {
         }
 
         self.ref_count -= 1;
-        // std.debug.print("PHPObject.release AFTER: class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
 
         if (self.ref_count == 0) {
-            // std.debug.print("PHPObject.deinit: class={s}\n", .{self.class_name});
             self.deinit();
         } else if (!gc_in_progress) {
             gcBufferObject(self);
