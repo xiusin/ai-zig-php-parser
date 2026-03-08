@@ -179,7 +179,7 @@ pub const CompileOptions = struct {
         if (std.mem.endsWith(u8, input, ".php") and input.len > 4) {
             return try allocator.dupe(u8, input[0 .. input.len - 4]);
         }
-        
+
         // 如果没有.php后缀，添加默认后缀
         if (self.target.os == .windows) {
             return try std.fmt.allocPrint(allocator, "{s}.exe", .{input});
@@ -530,6 +530,7 @@ pub const AOTCompiler = struct {
         // Free IR generator
         if (self.ir_generator) |gen| {
             gen.deinit();
+            self.allocator.destroy(gen);
         }
 
         // Free optimizer
@@ -538,7 +539,11 @@ pub const AOTCompiler = struct {
             self.allocator.destroy(opt);
         }
 
-        // Free type inferencer (no deinit needed, it's stack-allocated style)
+        // Free type inferencer
+        if (self.type_inferencer) |ti| {
+            self.allocator.destroy(ti);
+        }
+
         // Free symbol table
         if (self.symbol_table) |st| {
             st.deinit();
@@ -1356,7 +1361,7 @@ test "CompileOptions with Go syntax mode" {
 
 test "AOTCompiler initializes syntax config from options" {
     const allocator = std.testing.allocator;
-    
+
     // Test with PHP mode
     {
         const opts = CompileOptions{
@@ -1365,11 +1370,11 @@ test "AOTCompiler initializes syntax config from options" {
         };
         var aot_compiler = try AOTCompiler.init(allocator, opts);
         defer aot_compiler.deinit();
-        
+
         try std.testing.expectEqual(SyntaxMode.php, aot_compiler.getSyntaxMode());
         try std.testing.expect(aot_compiler.getSyntaxConfig().isPhpMode());
     }
-    
+
     // Test with Go mode
     {
         const opts = CompileOptions{
@@ -1378,7 +1383,7 @@ test "AOTCompiler initializes syntax config from options" {
         };
         var aot_compiler = try AOTCompiler.init(allocator, opts);
         defer aot_compiler.deinit();
-        
+
         try std.testing.expectEqual(SyntaxMode.go, aot_compiler.getSyntaxMode());
         try std.testing.expect(aot_compiler.getSyntaxConfig().isGoMode());
     }
