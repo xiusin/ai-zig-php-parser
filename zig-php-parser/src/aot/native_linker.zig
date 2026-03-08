@@ -126,6 +126,7 @@ pub const NativeLinker = struct {
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
     ir_module: ?*const IR.Module = null, // 当前IR模块（用于查找函数）
     param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
+    current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
 
     /// 检查寄存器是否需要 release（排除优化的 alloca）
     fn shouldReleaseReg(self: *Self, reg_id: usize) bool {
@@ -1440,6 +1441,16 @@ pub const NativeLinker = struct {
         if (func.name.len == 0 or !std.unicode.utf8ValidateSlice(func.name)) {
             return error.InvalidFunctionName;
         }
+
+        // 活跃性分析
+        const LivenessAnalysis = @import("liveness_analysis.zig").LivenessAnalysis;
+        var liveness = LivenessAnalysis.init(self.allocator);
+        defer liveness.deinit();
+        try liveness.analyze(func);
+        
+        // 保存活跃性信息供后续使用
+        self.current_liveness = &liveness;
+        defer self.current_liveness = null;
 
         // 在代码生成时重新进行类型推断
         const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
@@ -2839,9 +2850,14 @@ pub const NativeLinker = struct {
             }
 
             // 生成非 phi 指令
-            for (block.instructions.items[first_non_phi_idx..]) |inst| {
+            for (block.instructions.items[first_non_phi_idx..], first_non_phi_idx..) |inst, inst_idx| {
                 try code.appendSlice(self.allocator, "    ");
                 try self.generateInstructionSimple(code, inst);
+                
+                // 在指令后，release死亡的操作数
+                if (self.current_liveness) |liveness| {
+                    try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
+                }
             }
 
             // 生成终止指令
@@ -4092,6 +4108,87 @@ pub const NativeLinker = struct {
             if (regs.contains(reg_id)) return ".*";
         }
         return "";
+    }
+
+    /// Release死亡的操作数
+    fn releaseDeadOperands(
+        self: *Self,
+        code: *std.ArrayList(u8),
+        block_idx: usize,
+        inst_idx: usize,
+        inst: IR.Instruction,
+        liveness: *const @import("liveness_analysis.zig").LivenessAnalysis,
+        alloca_regs: *const std.AutoHashMap(usize, void),
+    ) !void {
+        var writer = code.writer(self.allocator);
+        
+        // 收集指令使用的寄存器
+        var used_regs = try std.ArrayList(usize).initCapacity(self.allocator, 0);
+        defer used_regs.deinit(self.allocator);
+        
+        switch (inst.op) {
+            .add, .sub, .mul, .div, .mod, .pow, .concat,
+            .eq, .ne, .lt, .le, .gt, .ge,
+            .bit_and, .bit_or, .bit_xor, .shl, .shr => |bin| {
+                try used_regs.append(self.allocator, bin.lhs.id);
+                try used_regs.append(self.allocator, bin.rhs.id);
+            },
+            .neg, .not, .bit_not => |un| {
+                try used_regs.append(self.allocator, un.operand.id);
+            },
+            .cast => |op| {
+                try used_regs.append(self.allocator, op.value.id);
+            },
+            .call => |call| {
+                for (call.args) |arg| {
+                    try used_regs.append(self.allocator, arg.id);
+                }
+            },
+            .call_indirect => |call| {
+                try used_regs.append(self.allocator, call.func_ptr.id);
+                for (call.args) |arg| {
+                    try used_regs.append(self.allocator, arg.id);
+                }
+            },
+            .load => |op| {
+                try used_regs.append(self.allocator, op.ptr.id);
+            },
+            .store => |op| {
+                try used_regs.append(self.allocator, op.ptr.id);
+                try used_regs.append(self.allocator, op.value.id);
+            },
+            .array_get => |op| {
+                try used_regs.append(self.allocator, op.array.id);
+                try used_regs.append(self.allocator, op.key.id);
+            },
+            .array_set => |op| {
+                try used_regs.append(self.allocator, op.array.id);
+                try used_regs.append(self.allocator, op.key.id);
+                try used_regs.append(self.allocator, op.value.id);
+            },
+            .property_get => |op| {
+                try used_regs.append(self.allocator, op.object.id);
+            },
+            .property_set => |op| {
+                try used_regs.append(self.allocator, op.object.id);
+                try used_regs.append(self.allocator, op.value.id);
+            },
+            else => {},
+        }
+        
+        // Release死亡的寄存器
+        for (used_regs.items) |reg_id| {
+            // 跳过alloca
+            if (alloca_regs.contains(reg_id)) continue;
+            
+            // 检查是否需要release
+            if (!self.regMayHeap(reg_id)) continue;
+            
+            // 检查是否在指令后死亡
+            if (!liveness.isLiveAfter(block_idx, inst_idx, reg_id)) {
+                try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+            }
+        }
     }
 
     fn generateCleanupCode(self: *Self, writer: anytype) !void {
