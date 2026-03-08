@@ -1446,10 +1446,14 @@ pub const NativeLinker = struct {
         const LivenessAnalysis = @import("liveness_analysis.zig").LivenessAnalysis;
         var liveness = LivenessAnalysis.init(self.allocator);
         defer liveness.deinit();
-        try liveness.analyze(func);
+        
+        // 暂时跳过活跃性分析，直接设置为null
+        // try liveness.analyze(func);
+        _ = func;
         
         // 保存活跃性信息供后续使用
-        self.current_liveness = &liveness;
+        // self.current_liveness = &liveness;
+        self.current_liveness = null;
         defer self.current_liveness = null;
 
         // 在代码生成时重新进行类型推断
@@ -2855,9 +2859,12 @@ pub const NativeLinker = struct {
                 try self.generateInstructionSimple(code, inst);
                 
                 // 在指令后，release死亡的操作数
-                if (self.current_liveness) |liveness| {
-                    try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
-                }
+                // TODO: 调试活跃性分析
+                _ = inst_idx;
+                _ = liveness;
+                // if (self.current_liveness) |liveness| {
+                //     try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
+                // }
             }
 
             // 生成终止指令
@@ -4176,15 +4183,23 @@ pub const NativeLinker = struct {
             else => {},
         }
         
-        // Release死亡的寄存器
+        // 去重
+        var seen = std.AutoHashMap(usize, void).init(self.allocator);
+        defer seen.deinit();
+        
+        // Release死亡的寄存器（这是它们的最后使用）
         for (used_regs.items) |reg_id| {
+            // 去重
+            if (seen.contains(reg_id)) continue;
+            try seen.put(reg_id, {});
+            
             // 跳过alloca
             if (alloca_regs.contains(reg_id)) continue;
             
             // 检查是否需要release
             if (!self.regMayHeap(reg_id)) continue;
             
-            // 检查是否在指令后死亡
+            // 检查是否在指令后死亡（不在live_out中）
             if (!liveness.isLiveAfter(block_idx, inst_idx, reg_id)) {
                 try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
             }
