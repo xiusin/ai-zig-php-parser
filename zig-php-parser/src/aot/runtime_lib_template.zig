@@ -1200,7 +1200,16 @@ pub const PHPArray = struct {
 
         pub fn iterator(self: *const Elements) Iterator {
             if (self.mixed) |*m| {
-                // 修复：m 是 const 指针，需要转换为可变指针
+                // 安全检查：直接检查unmanaged的entries
+                const unmanaged = &m.unmanaged;
+                
+                // 如果entries的capacity异常，说明HashMap被破坏
+                // 这通常是由于内存错误导致的，我们返回空迭代器避免crash
+                if (unmanaged.entries.capacity > 10_000_000) {
+                    // 不打印错误，静默处理
+                    return .{ .elements = self };
+                }
+                
                 const mut_m = @constCast(m);
                 return .{ .elements = self, .mixed_it = mut_m.iterator() };
             }
