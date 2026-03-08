@@ -855,8 +855,9 @@ pub const PHPString = struct {
 
     /// 创建新字符串
     pub fn init(allocator: Allocator, str: []const u8) !*PHPString {
-        // 增加限制到1GB，支持更大的字符串操作
-        if (str.len > 1024 * 1024 * 1024) {
+        // 检查字符串长度是否异常
+        if (str.len > 1024 * 1024 * 100) { // 100MB
+            std.debug.print("ERROR: String too large: {d} bytes ({d} MB)\n", .{str.len, str.len / (1024 * 1024)});
             return error.StringTooLarge;
         }
 
@@ -979,9 +980,16 @@ pub const PHPString = struct {
 
     /// 字符串连接（支持 COW 就地复用：ref_count==1 时 realloc 扩展，避免新建对象）
     pub fn concat(self: *PHPString, other: *PHPString, allocator: Allocator) !*PHPString {
+        // 检测内存破坏：如果length异常大，说明对象被破坏
+        if (self.length > 1024 * 1024 * 1024 or other.length > 1024 * 1024 * 1024) {
+            // 内存破坏，返回空字符串避免crash
+            return try PHPString.init(allocator, "");
+        }
+        
         const new_length = self.length + other.length;
 
         if (new_length > 1024 * 1024 * 100) {
+            std.debug.print("ERROR: Concat result too large: {d} + {d} = {d} bytes ({d} MB)\n", .{self.length, other.length, new_length, new_length / (1024 * 1024)});
             return error.StringTooLarge;
         }
 
