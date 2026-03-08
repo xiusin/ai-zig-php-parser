@@ -1,6 +1,43 @@
 # AOT编译器已知问题
 
-## 🔴 问题1: foreach内部try-catch触发unreachable (P0)
+## 🟡 问题1: 函数内临时值内存占用 (P2)
+
+### 问题描述
+AOT编译的函数中，临时值（字符串、数组等）在函数结束前不会被释放，导致长函数或循环中的内存占用较高。
+
+### 原因
+为保证正确性，禁用了指令级的release机制，只在函数结束时统一cleanup。这避免了过早释放导致的use-after-free，但牺牲了内存效率。
+
+### 影响
+- **内存占用**: 长函数中临时值累积，内存使用高于解释器模式
+- **性能**: 不影响执行速度，只影响内存峰值
+- **正确性**: ✅ 100%测试通过率 (48/48)
+
+### 示例
+```php
+function longFunction() {
+    for ($i = 0; $i < 10000; $i++) {
+        $temp = "string" . $i;  // 这些临时字符串在函数结束前不释放
+        echo $temp . "\n";
+    }
+    // 所有$temp在这里才释放
+}
+```
+
+### 解决方案（未来）
+1. **精确活跃性分析** - 在安全点插入release（需要更复杂的分析）
+2. **Arena Allocator** - 函数级别的内存池，统一释放
+3. **引用计数优化** - 编译时消除不必要的retain/release
+
+### 状态
+- **发现时间**: 2026-03-08
+- **状态**: 🟡 已知但可接受
+- **优先级**: P2 (优化项)
+- **权衡**: 正确性 > 内存效率
+
+---
+
+## 🔴 问题2: foreach内部try-catch触发unreachable (P0)
 
 ### 问题描述
 当PHP代码中存在**foreach循环内部的try-catch块**时，AOT编译器会触发unreachable panic。
@@ -36,7 +73,7 @@ src/aot/ir_generator.zig:2027:43: in generateStatement
 
 ---
 
-## 🟡 问题2: 数组迭代器integer overflow (P1)
+## 🟡 问题3: 数组迭代器integer overflow (P1)
 
 ### 问题描述
 在某些情况下，数组迭代器会触发integer overflow panic。
