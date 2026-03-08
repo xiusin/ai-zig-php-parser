@@ -104,7 +104,7 @@ pub const OptimizeLevel = enum {
 /// 原生链接器
 pub const NativeLinker = struct {
     const Self = @This();
-    
+
     allocator: Allocator,
     config: NativeLinkerConfig,
     diagnostics: *DiagnosticEngine,
@@ -287,7 +287,7 @@ pub const NativeLinker = struct {
         std.fs.cwd().makeDir(temp_name) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
-        
+
         // 返回绝对路径
         const abs_path = try std.fs.cwd().realpathAlloc(self.allocator, temp_name);
         self.temp_dir = abs_path;
@@ -298,11 +298,11 @@ pub const NativeLinker = struct {
     /// 将 IR 模块转换为 Zig 代码
     pub fn generateZigCode(self: *Self, ir_module: *const IR.Module) ![]const u8 {
         // std.debug.print("=== generateZigCode: {d} functions ===\n", .{ir_module.functions.items.len});
-        
+
         // 设置当前IR模块
         self.ir_module = ir_module;
         defer self.ir_module = null;
-        
+
         var code = std.ArrayList(u8){};
         errdefer code.deinit(self.allocator);
 
@@ -375,12 +375,12 @@ pub const NativeLinker = struct {
         // std.debug.print("=== GENERATING FUNCTIONS: count={d} ===\n", .{ir_module.functions.items.len});
         var func_code = try std.ArrayList(u8).initCapacity(self.allocator, 0);
         defer func_code.deinit(self.allocator);
-        
+
         for (ir_module.functions.items, 0..) |func, i| {
             _ = i;
             const before_len = func_code.items.len;
             try self.generateFunction(&func_code, ir_module, func);
-            
+
             // 输出生成的函数代码
             if (std.mem.eql(u8, func.name, "__main__")) {
                 const func_text = func_code.items[before_len..];
@@ -388,7 +388,7 @@ pub const NativeLinker = struct {
                 // std.debug.print("=== GENERATED CODE FOR {s} ===\n{s}\n=== END ===\n", .{ func.name, func_text });
             }
         }
-        
+
         // 将生成的函数代码写入主代码
         // std.debug.print("Writing function code to main\n", .{});
         try writer.writeAll(func_code.items);
@@ -524,7 +524,7 @@ pub const NativeLinker = struct {
 
         // 生成主入口
         const has_strings = ir_module.string_table.items.len > 0;
-        
+
         try writer.writeAll(
             \\
             \\// 全局变量表
@@ -615,7 +615,7 @@ pub const NativeLinker = struct {
             \\    }
             \\
         );
-        
+
         // 只在有字符串表时调用 initStaticStrings
         if (has_strings) {
             try writer.writeAll(
@@ -624,7 +624,7 @@ pub const NativeLinker = struct {
                 \\
             );
         }
-        
+
         // 初始化PHP预定义常量
         try writer.writeAll(
             \\    // 初始化PHP预定义常量
@@ -636,7 +636,7 @@ pub const NativeLinker = struct {
             \\    }
             \\
         );
-        
+
         try writer.writeAll(
             \\    var alloc_stats_enabled: bool = false;
             \\    if (std.process.getEnvVarOwned(allocator, "ZIGPHP_ALLOC_STATS")) |v| {
@@ -709,7 +709,7 @@ pub const NativeLinker = struct {
             \\    defer runtime.cleanupAllClasses();
             \\
         );
-        
+
         // 检查是否存在 __main__ 函数
         var has_main = false;
         for (ir_module.functions.items) |func| {
@@ -718,7 +718,7 @@ pub const NativeLinker = struct {
                 break;
             }
         }
-        
+
         if (has_main) {
             // std.debug.print("Writing main call\n", .{});
             try writer.writeAll(
@@ -728,25 +728,25 @@ pub const NativeLinker = struct {
             );
             // std.debug.print("After main call\n", .{});
         }
-        
+
         // std.debug.print("Before final writeAll\n", .{});
-        
+
         try writer.writeAll(
             \\    _ = runtime.php_go_wait_all(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch {};
             \\}
             \\
         );
-        
+
         // std.debug.print("After writeAll\n", .{});
 
         // std.debug.print("\n\n=== STARTING POST-PROCESSING ===\n\n", .{});
-        
+
         // 后处理：修复所有错误的类型转换模式
         const generated_code = try code.toOwnedSlice(self.allocator);
-        
+
         // std.debug.print("Post-processing: {d} bytes\n", .{generated_code.len});
         // std.debug.print("Skipping all post-processing (array_push fixed)\n", .{});
-        
+
         // 禁用所有后处理：array_push 已经正确生成代码
         return generated_code;
     }
@@ -1072,7 +1072,7 @@ pub const NativeLinker = struct {
                         .{ class_names[ci], escaped_parent },
                     );
                 }
-                
+
                 // 设置接口列表
                 if (td.interfaces.len > 0) {
                     try writer.print("    {s}_meta.interfaces = &[_][]const u8{{", .{class_names[ci]});
@@ -1125,7 +1125,7 @@ pub const NativeLinker = struct {
         _ = self;
         // 先尝试直接查找
         if (builtinInfo(func_name)) |info| return info.needs_allocator;
-        
+
         // 如果是 php_ 前缀，去掉前缀再查找
         if (std.mem.startsWith(u8, func_name, "php_")) {
             const lookup_name = func_name[4..];
@@ -1153,10 +1153,11 @@ pub const NativeLinker = struct {
     fn isStatementFunction(self: *const Self, func_name: []const u8) bool {
         _ = self;
         const statement_funcs = [_][]const u8{
-            "echo", "var_dump", "print_r", "unset",
+            "echo",       "var_dump",  "print_r",     "unset",
             "array_push", "array_pop", "array_shift", "array_unshift",
-            "sort", "rsort", "asort", "arsort", "ksort", "krsort",
-            "shuffle", "usort", "uasort", "uksort",
+            "sort",       "rsort",     "asort",       "arsort",
+            "ksort",      "krsort",    "shuffle",     "usort",
+            "uasort",     "uksort",
         };
         for (statement_funcs) |sf| {
             if (std.mem.eql(u8, func_name, sf)) return true;
@@ -1192,7 +1193,7 @@ pub const NativeLinker = struct {
         .{ "var_dump", bi(.{ .runtime_name = "php_var_dump", .needs_allocator = false }) },
         .{ "print_r", bi(.{ .runtime_name = "print_r", .needs_allocator = false }) },
         .{ "var_export", bi(.{ .runtime_name = "var_export", .needs_allocator = false }) },
-        
+
         // 引用操作函数
         .{ "php_deref", bi(.{ .runtime_name = "php_deref", .needs_allocator = false }) },
         .{ "php_ref_assign", bi(.{ .runtime_name = "php_ref_assign", .needs_allocator = false, .may_raise = false }) },
@@ -1430,7 +1431,7 @@ pub const NativeLinker = struct {
         self.current_function_has_this = has_this;
         self.current_function_for_resolve = func;
         defer self.current_function_for_resolve = null;
-        
+
         // 初始化参数寄存器映射
         var param_regs = std.StringHashMap(usize).init(self.allocator);
         defer param_regs.deinit();
@@ -1447,7 +1448,7 @@ pub const NativeLinker = struct {
         var liveness = LivenessAnalysis.init(self.allocator);
         defer liveness.deinit();
         try liveness.analyze(func);
-        
+
         // 保存活跃性信息供后续使用
         self.current_liveness = &liveness;
         defer self.current_liveness = null;
@@ -1570,16 +1571,16 @@ pub const NativeLinker = struct {
                             else => .php_value,
                         };
                         try all_registers.put(reg.id, inner_type);
-                        // std.debug.print("mem2reg promoted reg_{d}, type=ptr -> {s}\n", .{ 
-                        //     reg.id, 
+                        // std.debug.print("mem2reg promoted reg_{d}, type=ptr -> {s}\n", .{
+                        //     reg.id,
                         //     @tagName(@as(std.meta.Tag(IR.Type), inner_type))
                         // });
                     }
                 }
-                
+
                 // 跳过 nop 指令（被优化掉的指令）
                 if (inst.op == .nop) continue;
-                
+
                 // 收集 result 寄存器
                 if (inst.result) |reg| {
                     // 修正类型：如果指令使用运行时函数，结果应该是 Value
@@ -1776,7 +1777,7 @@ pub const NativeLinker = struct {
         // 反向类型传播（Backward Type Propagation）
         // ============================================================================
         // 目的：根据操作的使用场景，修正寄存器的类型
-        // 
+        //
         // 算法：
         // 1. 标记类型确定的寄存器（const_string, call 等）
         // 2. 遍历所有指令，根据操作需求传播类型约束
@@ -1790,19 +1791,24 @@ pub const NativeLinker = struct {
         //   => 传播后：reg_1 的类型修正为 php_value
         // ============================================================================
         const enable_debug = false; // 可选的调试输出
-        
+
         // 首先标记哪些寄存器的类型是确定的（由定义决定）
         var definite_types = std.AutoHashMap(usize, void).init(self.allocator);
         defer definite_types.deinit();
-        
+
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
                 if (inst.result) |reg| {
                     switch (inst.op) {
                         // 这些指令的结果类型是确定的，不应该被反向传播修改
-                        .const_string, .const_null,
-                        .array_new, .new_object, .call, .call_indirect,
-                        .array_get, .property_get,
+                        .const_string,
+                        .const_null,
+                        .array_new,
+                        .new_object,
+                        .call,
+                        .call_indirect,
+                        .array_get,
+                        .property_get,
                         .alloca, // alloca类型不应该被修改
                         => {
                             try definite_types.put(reg.id, {});
@@ -1812,7 +1818,7 @@ pub const NativeLinker = struct {
                 }
             }
         }
-        
+
         // 然后进行反向传播，但跳过类型确定的寄存器
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
@@ -1911,17 +1917,17 @@ pub const NativeLinker = struct {
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         var optimized_alloca_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer optimized_alloca_regs.deinit();
-        
+
         // 记录引用参数的alloca -> param映射
         var ref_param_alloca_map = std.AutoHashMap(usize, usize).init(self.allocator);
         defer ref_param_alloca_map.deinit();
-        
+
         // 查找引用参数的alloca和param对应关系
         if (func.ref_params.items.len > 0) {
             for (func.blocks.items) |block_scan| {
                 var prev_param_reg: ?usize = null;
                 var prev_param_is_ref = false;
-                
+
                 for (block_scan.instructions.items) |inst_scan| {
                     switch (inst_scan.op) {
                         .param => |param_op| {
@@ -1959,7 +1965,6 @@ pub const NativeLinker = struct {
             }
         }
 
-        
         // std.debug.print("ref_param_alloca_map.count() = {d}\n", .{ref_param_alloca_map.count()});
         var ref_it = ref_param_alloca_map.iterator();
         while (ref_it.next()) |_| {
@@ -2039,7 +2044,7 @@ pub const NativeLinker = struct {
                         }
                         break :blk false;
                     };
-                    
+
                     if (is_ref_param_reg) {
                         // 引用参数寄存器：声明为指针类型
                         try code.appendSlice(self.allocator, "    var reg_");
@@ -2064,7 +2069,7 @@ pub const NativeLinker = struct {
         }
 
         // 参数初始化现在由IR中的param和store指令处理
-        
+
         // 为引用参数提供fallback null值（函数作用域）
         try code.appendSlice(self.allocator, "    var null_val = runtime.Value.initNull();\n");
         try code.appendSlice(self.allocator, "    _ = &null_val;\n\n");
@@ -2176,13 +2181,13 @@ pub const NativeLinker = struct {
 
         self.current_alloca_regs = &alloca_registers;
         defer self.current_alloca_regs = null;
-        
+
         self.current_unset_regs = &unset_registers;
         defer self.current_unset_regs = null;
-        
+
         self.ref_param_alloca_map = &ref_param_alloca_map;
         defer self.ref_param_alloca_map = null;
-        
+
         // std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
         while (alloca_it.next()) |_| {
@@ -2202,11 +2207,11 @@ pub const NativeLinker = struct {
         // 因为alloca会负责cleanup
         var stored_to_alloca = std.AutoHashMap(usize, void).init(self.allocator);
         defer stored_to_alloca.deinit();
-        
+
         // 找出被store过的alloca指针（它们的值被retain过）
         var alloca_with_store = std.AutoHashMap(usize, void).init(self.allocator);
         defer alloca_with_store.deinit();
-        
+
         // 遍历所有block查找store指令
         for (func.blocks.items) |block_scan| {
             for (block_scan.instructions.items) |inst| {
@@ -2227,15 +2232,15 @@ pub const NativeLinker = struct {
             // 单基本块：直接生成线性代码
             try code.appendSlice(self.allocator, "    // Instructions\n");
             const block = func.blocks.items[0];
-            
+
             // 禁用异常跳转（单块函数没有状态机）
             const prev_handler = self.current_exception_handler;
             self.current_exception_handler = null;
-            
+
             for (block.instructions.items) |inst| {
                 try self.generateInstructionSimple(code, inst);
             }
-            
+
             // 恢复异常处理器
             self.current_exception_handler = prev_handler;
 
@@ -2244,25 +2249,25 @@ pub const NativeLinker = struct {
                 switch (term) {
                     .ret => |ret_val| {
                         // 引用参数写回：已通过load/store重定向实现，不需要显式写回
-                        
+
                         // 在return之前执行cleanup，但跳过即将返回的寄存器
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
                                 // 跳过已经被store到alloca的寄存器
                                 if (stored_to_alloca.contains(reg_id)) continue;
-                                
+
                                 const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
                                 if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                     // 跳过引用参数的alloca（它们是undefined）
                                     if (ref_param_alloca_map.get(reg_id)) |_| continue;
-                                    
+
                                     // 检查是否是alloca寄存器
                                     const is_ptr = alloca_registers.contains(reg_id);
-                                    
+
                                     // 跳过已unset的寄存器（避免访问已释放内存）
                                     if (unset_registers.contains(reg_id)) continue;
-                                    
+
                                     if (is_ptr) {
                                         // alloca指针：检查是否被store过
                                         const has_store = alloca_with_store.contains(reg_id);
@@ -2280,7 +2285,6 @@ pub const NativeLinker = struct {
                                 }
                             }
                         }
-
 
                         if (ret_val) |reg| {
                             const type_tag = @as(std.meta.Tag(IR.Type), all_registers.get(reg.id) orelse reg.type_);
@@ -2329,9 +2333,9 @@ pub const NativeLinker = struct {
                             for (cleanup_registers.items) |reg_id| {
                                 // 跳过已经被store到alloca的寄存器
                                 if (stored_to_alloca.contains(reg_id)) continue;
-                                
+
                                 if (!self.shouldReleaseReg(reg_id)) continue;
-                                
+
                                 // 跳过引用参数的alloca（它们是undefined）
                                 if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
@@ -2340,7 +2344,7 @@ pub const NativeLinker = struct {
 
                                 // 跳过已unset的寄存器（避免访问已释放内存）
                                 if (unset_registers.contains(reg_id)) continue;
-                                
+
                                 if (is_ptr) {
                                     // alloca指针：检查是否被store过
                                     const has_store = alloca_with_store.contains(reg_id);
@@ -2369,15 +2373,15 @@ pub const NativeLinker = struct {
                     for (cleanup_registers.items) |reg_id| {
                         // 跳过已经被store到alloca的寄存器
                         if (stored_to_alloca.contains(reg_id)) continue;
-                        
+
                         if (!self.shouldReleaseReg(reg_id)) continue;
-                        
+
                         // 跳过引用参数的alloca（它们是undefined）
                         if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
                         // 跳过已unset的寄存器（避免访问已释放内存）
                         if (unset_registers.contains(reg_id)) continue;
-                        
+
                         const is_alloca = alloca_registers.contains(reg_id);
                         if (is_alloca) {
                             // alloca指针：检查是否被store过
@@ -2832,7 +2836,7 @@ pub const NativeLinker = struct {
             // 收集所有 phi 节点
             var phi_instructions = std.ArrayList(*const IR.Instruction).initCapacity(self.allocator, 0) catch unreachable;
             defer phi_instructions.deinit(self.allocator);
-            
+
             var first_non_phi_idx: usize = 0;
             for (block.instructions.items, 0..) |inst, idx| {
                 if (inst.op == .phi) {
@@ -2842,7 +2846,7 @@ pub const NativeLinker = struct {
                     break;
                 }
             }
-            
+
             // 如果有 phi 节点，生成并行赋值
             if (phi_instructions.items.len > 0) {
                 try self.generatePhiInstructionsParallel(code, phi_instructions.items, func);
@@ -2852,7 +2856,7 @@ pub const NativeLinker = struct {
             for (block.instructions.items[first_non_phi_idx..], first_non_phi_idx..) |inst, inst_idx| {
                 try code.appendSlice(self.allocator, "    ");
                 try self.generateInstructionSimple(code, inst);
-                
+
                 // 在指令后，release死亡的操作数（暂时禁用）
                 _ = inst_idx;
                 // if (self.current_liveness) |liveness| {
@@ -2895,16 +2899,16 @@ pub const NativeLinker = struct {
         func: *const IR.Function,
     ) !void {
         var writer = code.writer(self.allocator);
-        
+
         // 收集所有 phi 节点的信息
         const PhiInfo = struct {
             result_reg: IR.Register,
             incoming: []const IR.Instruction.PhiIncoming,
         };
-        
+
         var phi_infos = std.ArrayList(PhiInfo).initCapacity(self.allocator, phi_instructions.len) catch unreachable;
         defer phi_infos.deinit(self.allocator);
-        
+
         for (phi_instructions) |inst| {
             const result_reg = inst.result orelse continue;
             try phi_infos.append(self.allocator, .{
@@ -2912,9 +2916,9 @@ pub const NativeLinker = struct {
                 .incoming = inst.op.phi.incoming,
             });
         }
-        
+
         if (phi_infos.items.len == 0) return;
-        
+
         // 检查是否所有 phi 节点都只有一个 incoming
         var all_single_incoming = true;
         for (phi_infos.items) |info| {
@@ -2923,7 +2927,7 @@ pub const NativeLinker = struct {
                 break;
             }
         }
-        
+
         // 如果都是单个 incoming，直接赋值（不需要 switch）
         if (all_single_incoming) {
             for (phi_infos.items) |info| {
@@ -2936,11 +2940,11 @@ pub const NativeLinker = struct {
             }
             return;
         }
-        
+
         // 收集所有可能的前驱块
         var pred_blocks = std.AutoHashMap(u32, void).init(self.allocator);
         defer pred_blocks.deinit();
-        
+
         for (phi_infos.items) |info| {
             for (info.incoming) |incoming| {
                 for (func.blocks.items, 0..) |block, idx| {
@@ -2951,22 +2955,22 @@ pub const NativeLinker = struct {
                 }
             }
         }
-        
+
         // 如果没有前驱块，跳过switch生成
         if (pred_blocks.count() == 0) return;
-        
+
         // 为每个前驱块生成并行赋值
         try writer.writeAll("    switch (prev_block) {\n");
-        
+
         var pred_iter = pred_blocks.keyIterator();
         while (pred_iter.next()) |pred_idx_ptr| {
             const pred_idx = pred_idx_ptr.*;
             try writer.print("        {d} => {{\n", .{pred_idx});
-            
+
             // 收集这个前驱块的所有赋值
             var assignments = std.ArrayList(PhiAssignment).initCapacity(self.allocator, 0) catch unreachable;
             defer assignments.deinit(self.allocator);
-            
+
             for (phi_infos.items) |info| {
                 for (info.incoming) |incoming| {
                     var incoming_idx: ?u32 = null;
@@ -2987,13 +2991,13 @@ pub const NativeLinker = struct {
                     }
                 }
             }
-            
+
             // 使用并行赋值
             try self.generatePhiAssignmentsParallel(writer, assignments.items, "            ");
-            
+
             try writer.writeAll("        },\n");
         }
-        
+
         try writer.writeAll("        else => unreachable,\n");
         try writer.writeAll("    }\n");
     }
@@ -3003,7 +3007,7 @@ pub const NativeLinker = struct {
         const phi = inst.op.phi;
 
         const result_reg = inst.result orelse return;
-        
+
         // 使用修正后的类型
         const dest_type = if (self.current_register_types) |types|
             types.get(result_reg.id) orelse result_reg.type_
@@ -3131,10 +3135,10 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
-        
-        return if (is_alloca) 
+
+        return if (is_alloca)
             try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
-        else 
+        else
             try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
     }
 
@@ -3144,14 +3148,14 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
-        
+
         // 使用独立缓冲区避免覆盖
         var temp_buf: [32]u8 = undefined;
-        const base_ref = if (is_alloca) 
+        const base_ref = if (is_alloca)
             try std.fmt.bufPrint(&temp_buf, "reg_{d}.*", .{reg_id})
-        else 
+        else
             try std.fmt.bufPrint(&temp_buf, "reg_{d}", .{reg_id});
-        
+
         // 如果期望类型是基本类型，添加转换
         if (expected_type == .i64) {
             return try std.fmt.bufPrint(buf, "{s}.asInt()", .{base_ref});
@@ -3160,7 +3164,7 @@ pub const NativeLinker = struct {
         } else if (expected_type == .bool) {
             return try std.fmt.bufPrint(buf, "{s}.asBool()", .{base_ref});
         }
-        
+
         return try std.fmt.bufPrint(buf, "{s}", .{base_ref});
     }
 
@@ -3173,7 +3177,7 @@ pub const NativeLinker = struct {
             types.get(operand.id) orelse operand.type_
         else
             operand.type_;
-        
+
         const op_tag = @as(std.meta.Tag(IR.Type), op_type);
         return try self.getValueWrapper(buf, operand.id, op_tag);
     }
@@ -3183,14 +3187,14 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
-        
+
         // 先生成 base_ref 到临时缓冲区
         var temp_buf: [32]u8 = undefined;
-        const base_ref = if (is_alloca) 
+        const base_ref = if (is_alloca)
             try std.fmt.bufPrint(&temp_buf, "reg_{d}.*", .{reg_id})
-        else 
+        else
             try std.fmt.bufPrint(&temp_buf, "reg_{d}", .{reg_id});
-        
+
         // 根据推断类型生成包装（现在 base_ref 不会被覆盖）
         if (inferred_type == .i64) {
             return try std.fmt.bufPrint(buf, "runtime.Value.initInt({s}.asInt())", .{base_ref});
@@ -3199,7 +3203,7 @@ pub const NativeLinker = struct {
         } else if (inferred_type == .bool) {
             return try std.fmt.bufPrint(buf, "runtime.Value.initBool({s}.toBool())", .{base_ref});
         }
-        
+
         // php_value 或其他类型，直接返回
         return try std.fmt.bufPrint(buf, "{s}", .{base_ref});
     }
@@ -3210,7 +3214,7 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
-        
+
         if (is_alloca) {
             try writer.print("reg_{d}.*", .{reg_id});
         } else {
@@ -3243,7 +3247,7 @@ pub const NativeLinker = struct {
 
     /// 生成 phi 节点的值赋值（统一函数）
     /// 使用原始类型，不是推断类型，确保类型一致
-    /// 
+    ///
     /// 注意：这个函数只生成单个 phi 赋值
     /// 对于多个相互依赖的 phi 节点，调用者需要处理并行赋值语义
     fn generatePhiValueAssignment(
@@ -3256,7 +3260,7 @@ pub const NativeLinker = struct {
         _ = self;
         // 使用原始类型，不是推断类型
         const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
-        
+
         // 如果结果是 php_value，总是直接赋值（所有寄存器都是 Value）
         if (result_tag == .php_value) {
             try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
@@ -3266,7 +3270,7 @@ pub const NativeLinker = struct {
             try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
         }
     }
-    
+
     /// 生成多个 phi 节点的并行赋值
     /// 处理相互依赖的情况，使用临时变量
     fn generatePhiAssignmentsParallel(
@@ -3275,13 +3279,12 @@ pub const NativeLinker = struct {
         assignments: []const PhiAssignment,
         indent: []const u8,
     ) !void {
-        
         if (assignments.len == 0) return;
-        
+
         // 检测每个赋值是否有依赖
         var needs_temp = try std.ArrayList(bool).initCapacity(self.allocator, assignments.len);
         defer needs_temp.deinit(self.allocator);
-        
+
         for (assignments) |assign1| {
             var has_dep = false;
             for (assignments) |assign2| {
@@ -3293,7 +3296,7 @@ pub const NativeLinker = struct {
             }
             try needs_temp.append(self.allocator, has_dep);
         }
-        
+
         // 检查是否有任何依赖
         var has_any_dependency = false;
         for (needs_temp.items) |need| {
@@ -3302,7 +3305,7 @@ pub const NativeLinker = struct {
                 break;
             }
         }
-        
+
         if (!has_any_dependency) {
             // 无依赖，直接赋值（不需要retain，因为phi代替store）
             for (assignments) |assign| {
@@ -3341,9 +3344,10 @@ pub const NativeLinker = struct {
         args: anytype,
     ) !void {
         // 检测错误模式
-        if (std.mem.indexOf(u8, format_str, "initInt(reg_") != null and 
-            std.mem.indexOf(u8, format_str, "asInt") == null) {
-            std.debug.print("ERROR: reg_{d} = {s}\n", .{reg_id, format_str});
+        if (std.mem.indexOf(u8, format_str, "initInt(reg_") != null and
+            std.mem.indexOf(u8, format_str, "asInt") == null)
+        {
+            std.debug.print("ERROR: reg_{d} = {s}\n", .{ reg_id, format_str });
             @panic("Found initInt(reg_) without asInt()!");
         }
         try self.writeRegAssignmentPrefix(writer, reg_id);
@@ -3470,7 +3474,7 @@ pub const NativeLinker = struct {
     ) !void {
         for (args, 0..) |arg, i| {
             if (i > 0) try writer.writeAll(", ");
-            
+
             // 使用 writeRegRef 处理 alloca 解引用
             try self.writeRegRef(writer, arg.id);
         }
@@ -3492,12 +3496,12 @@ pub const NativeLinker = struct {
         ref_params: []const u32,
     ) !void {
         _ = func_name;
-        
+
         try writer.writeAll("&[_]runtime.Value{");
         if (args.len > 0) {
             for (args, 0..) |arg, i| {
                 if (i > 0) try writer.writeAll(", ");
-                
+
                 // 检查是否是引用参数
                 var is_ref = false;
                 for (ref_params) |ref_idx| {
@@ -3506,7 +3510,7 @@ pub const NativeLinker = struct {
                         break;
                     }
                 }
-                
+
                 if (is_ref) {
                     // 引用参数：生成initRef
                     const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
@@ -3544,15 +3548,15 @@ pub const NativeLinker = struct {
                     for (func.ref_params.items) |ref_idx| {
                         const param = func.params.items[ref_idx];
                         const args_index = if (has_this) (if (ref_idx > 0) ref_idx - 1 else 0) else ref_idx;
-                        
+
                         // 引用参数对应的是alloca寄存器（指针）
                         // 需要找到对应的alloca并load其值
                         // 参数名在IR中是"$name"格式
-                        const param_name_with_dollar = if (param.name.len > 0 and param.name[0] == '$') 
-                            param.name 
-                        else 
+                        const param_name_with_dollar = if (param.name.len > 0 and param.name[0] == '$')
+                            param.name
+                        else
                             param.name;
-                        
+
                         // 遍历所有指令找到param指令对应的alloca
                         for (func.blocks.items[0].instructions.items) |inst| {
                             if (inst.op == .param and inst.result != null) {
@@ -3581,7 +3585,7 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
-                
+
                 if (cleanup_regs.len > 0) {
                     // 收集当前块的phi incoming值（不应释放）
                     var phi_incoming_regs = std.AutoHashMap(usize, void).init(self.allocator);
@@ -3594,7 +3598,7 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
-                    
+
                     try code.appendSlice(self.allocator, "                // Cleanup (except return value)\n");
                     for (cleanup_regs) |reg_id| {
                         // 检查是否是返回值寄存器或phi incoming值
@@ -3641,7 +3645,7 @@ pub const NativeLinker = struct {
                 // 收集所有 phi 赋值
                 var assignments = std.ArrayList(PhiAssignment).initCapacity(self.allocator, 0) catch unreachable;
                 defer assignments.deinit(self.allocator);
-                
+
                 const source_block = func.blocks.items[current_block_idx];
                 for (target.instructions.items) |inst| {
                     if (inst.op == .phi) {
@@ -3655,7 +3659,7 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
-                
+
                 // 使用并行赋值
                 try self.generatePhiAssignmentsParallel(writer, assignments.items, "            ");
 
@@ -3728,13 +3732,15 @@ pub const NativeLinker = struct {
                     for (cleanup_regs) |reg_id| {
                         // 跳过异常对象本身
                         if (reg_id == ex_reg.id) continue;
-                        
+
                         // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
                         if (alloca_regs.contains(reg_id)) continue;
 
                         if (!self.shouldReleaseReg(reg_id)) continue;
                         // 不要释放异常对象本身，因为它已经被 setException 接管（retain）了
                         try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                        // 释放后必须置null，防止catch块或后续代码访问悬垂指针（use-after-free）
+                        try writer.print("                reg_{d} = runtime.Value.initNull();\n", .{reg_id});
                     }
                 }
 
@@ -4121,15 +4127,13 @@ pub const NativeLinker = struct {
         alloca_regs: *const std.AutoHashMap(usize, void),
     ) !void {
         var writer = code.writer(self.allocator);
-        
+
         // 收集指令使用的寄存器
         var used_regs = try std.ArrayList(usize).initCapacity(self.allocator, 0);
         defer used_regs.deinit(self.allocator);
-        
+
         switch (inst.op) {
-            .add, .sub, .mul, .div, .mod, .pow, .concat,
-            .eq, .ne, .lt, .le, .gt, .ge,
-            .bit_and, .bit_or, .bit_xor, .shl, .shr => |bin| {
+            .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge, .bit_and, .bit_or, .bit_xor, .shl, .shr => |bin| {
                 try used_regs.append(self.allocator, bin.lhs.id);
                 try used_regs.append(self.allocator, bin.rhs.id);
             },
@@ -4175,28 +4179,28 @@ pub const NativeLinker = struct {
             },
             else => {},
         }
-        
+
         // 去重
         var seen = std.AutoHashMap(usize, void).init(self.allocator);
         defer seen.deinit();
-        
+
         // Release死亡的寄存器（这是它们的最后使用）
         for (used_regs.items) |reg_id| {
             // 去重
             if (seen.contains(reg_id)) continue;
             try seen.put(reg_id, {});
-            
+
             // 跳过alloca
             if (alloca_regs.contains(reg_id)) continue;
-            
+
             // 跳过result寄存器（正在被赋值）
             if (inst.result) |result_reg| {
                 if (reg_id == result_reg.id) continue;
             }
-            
+
             // 检查是否需要release
             if (!self.regMayHeap(reg_id)) continue;
-            
+
             // 检查是否在指令后死亡（不在live_out中）
             if (!liveness.isLiveAfter(block_idx, inst_idx, reg_id)) {
                 try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
@@ -4217,7 +4221,7 @@ pub const NativeLinker = struct {
                     if (except_reg) |ex_reg| {
                         if (reg_id == ex_reg) continue;
                     }
-                    
+
                     // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
                     if (self.current_alloca_regs) |alloca_regs| {
                         if (alloca_regs.contains(reg_id)) continue;
@@ -4307,13 +4311,13 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     // 所有寄存器都是runtime.Value类型，box操作只是类型标记
                     // 在代码生成时，直接赋值即可
-                    try writer.print("    reg_{d} = reg_{d};\n", .{reg.id, op.value.id});
+                    try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.value.id });
                 }
             },
             .unbox => |op| {
                 if (inst.result) |reg| {
                     const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
-                    
+
                     // 从php_value提取基本类型
                     if (to_tag == .i64) {
                         try self.writeRegAssignmentFmt(writer, reg.id, "reg_{d}.asInt();\n", .{op.value.id});
@@ -4349,7 +4353,7 @@ pub const NativeLinker = struct {
                     }
                 }
                 if (is_ref_param_init) return;
-                
+
                 // 检查ptr是否是引用参数的alloca（使用映射表重定向到param）
                 if (self.ref_param_alloca_map) |map| {
                     if (map.get(op.ptr.id)) |param_reg_id| {
@@ -4364,7 +4368,7 @@ pub const NativeLinker = struct {
                 else
                     op.ptr.type_;
                 const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
-                
+
                 // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
                 const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
                 const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
@@ -4378,10 +4382,10 @@ pub const NativeLinker = struct {
                         op.value.type_;
                     const value_tag = @as(std.meta.Tag(IR.Type), value_type);
                     const needs_refcount = value_tag == .php_value or value_tag == .php_string or value_tag == .php_array or value_tag == .php_object;
-                    
+
                     var src_buf: [32]u8 = undefined;
                     const src_ref = try self.getOperandRef(&src_buf, op.value.id);
-                    
+
                     if (needs_refcount) {
                         // 先 retain 新值（防止新旧值相同时被释放）
                         try writer.print("    _ = ({s}).retain();\n", .{src_ref});
@@ -4415,7 +4419,7 @@ pub const NativeLinker = struct {
                         alloca_regs.contains(op.value.id)
                     else
                         false;
-                    
+
                     // 检查 value 是否是引用参数寄存器（指针类型）
                     const value_is_ref_param = blk: {
                         if (self.current_function_for_resolve) |func_check| {
@@ -4498,28 +4502,17 @@ pub const NativeLinker = struct {
             .make_ref => |op| {
                 if (inst.result) |reg| {
                     // 检查ptr是否是alloca（指针类型）
-                    const is_alloca = if (self.current_alloca_regs) |regs| 
-                        regs.contains(op.ptr.id) 
-                    else 
+                    const is_alloca = if (self.current_alloca_regs) |regs|
+                        regs.contains(op.ptr.id)
+                    else
                         false;
-                    
-                        
+
                     if (is_alloca) {
                         // alloca已经是指针，直接使用
-                        try self.writeRegAssignmentFmt(
-                            writer, 
-                            reg.id, 
-                            "try runtime.make_ref(reg_{d}, runtime.runtime_allocator);\n", 
-                            .{op.ptr.id}
-                        );
+                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.make_ref(reg_{d}, runtime.runtime_allocator);\n", .{op.ptr.id});
                     } else {
                         // 普通变量，需要取地址
-                        try self.writeRegAssignmentFmt(
-                            writer, 
-                            reg.id, 
-                            "try runtime.make_ref(&reg_{d}, runtime.runtime_allocator);\n", 
-                            .{op.ptr.id}
-                        );
+                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.make_ref(&reg_{d}, runtime.runtime_allocator);\n", .{op.ptr.id});
                     }
                 }
             },
@@ -4533,14 +4526,14 @@ pub const NativeLinker = struct {
                             return;
                         }
                     }
-                    
+
                     // 检查 ptr 的实际类型（可能被 mem2reg 提升）
                     const ptr_type = if (self.current_register_types) |types|
                         types.get(op.ptr.id) orelse op.ptr.type_
                     else
                         op.ptr.type_;
                     const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
-                    
+
                     // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
                     const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
                     const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
@@ -4572,7 +4565,7 @@ pub const NativeLinker = struct {
 
                     // 检查是否是 alloca 寄存器（即指针类型）
                     const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
-                    
+
                     // 检查是否是引用参数寄存器（指针类型）
                     const ptr_is_ref_param = blk: {
                         if (self.current_function_for_resolve) |func_check| {
@@ -4595,7 +4588,7 @@ pub const NativeLinker = struct {
                         }
                         break :blk false;
                     };
-                    
+
                     const ptr_prefix = if (is_ptr or ptr_is_ref_param) "" else "&";
 
                     if (type_tag == .i64) {
@@ -4630,49 +4623,49 @@ pub const NativeLinker = struct {
                         }
                         break :blk @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     } else @as(std.meta.Tag(IR.Type), op.lhs.type_);
-                    
+
                     const rhs_type_tag = if (self.current_register_types) |types| blk: {
                         if (types.get(op.rhs.id)) |corrected_type| {
                             break :blk @as(std.meta.Tag(IR.Type), corrected_type);
                         }
                         break :blk @as(std.meta.Tag(IR.Type), op.rhs.type_);
                     } else @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    
+
                     try self.writeRegAssignmentPrefix(writer, reg.id);
                     try writer.writeAll("try runtime.php_concat(");
-                    
+
                     // 左操作数 - 所有寄存器都是 Value，需要类型转换
                     if (lhs_type_tag == .i64) {
                         const lhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.lhs.id)) ".*" else "" else "";
-                        try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt())", .{op.lhs.id, lhs_suffix});
+                        try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt())", .{ op.lhs.id, lhs_suffix });
                     } else if (lhs_type_tag == .f64) {
                         const lhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.lhs.id)) ".*" else "" else "";
-                        try writer.print("runtime.Value.initFloat(reg_{d}{s}.asFloat())", .{op.lhs.id, lhs_suffix});
+                        try writer.print("runtime.Value.initFloat(reg_{d}{s}.asFloat())", .{ op.lhs.id, lhs_suffix });
                     } else if (lhs_type_tag == .bool) {
                         const lhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.lhs.id)) ".*" else "" else "";
-                        try writer.print("runtime.Value.initBool(reg_{d}{s}.toBool())", .{op.lhs.id, lhs_suffix});
+                        try writer.print("runtime.Value.initBool(reg_{d}{s}.toBool())", .{ op.lhs.id, lhs_suffix });
                     } else {
                         const lhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.lhs.id)) ".*" else "" else "";
-                        try writer.print("reg_{d}{s}", .{op.lhs.id, lhs_suffix});
+                        try writer.print("reg_{d}{s}", .{ op.lhs.id, lhs_suffix });
                     }
-                    
+
                     try writer.writeAll(", ");
-                    
+
                     // 右操作数 - 所有寄存器都是 Value，需要类型转换
                     if (rhs_type_tag == .i64) {
                         const rhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.rhs.id)) ".*" else "" else "";
-                        try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt())", .{op.rhs.id, rhs_suffix});
+                        try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt())", .{ op.rhs.id, rhs_suffix });
                     } else if (rhs_type_tag == .f64) {
                         const rhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.rhs.id)) ".*" else "" else "";
-                        try writer.print("runtime.Value.initFloat(reg_{d}{s}.asFloat())", .{op.rhs.id, rhs_suffix});
+                        try writer.print("runtime.Value.initFloat(reg_{d}{s}.asFloat())", .{ op.rhs.id, rhs_suffix });
                     } else if (rhs_type_tag == .bool) {
                         const rhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.rhs.id)) ".*" else "" else "";
-                        try writer.print("runtime.Value.initBool(reg_{d}{s}.toBool())", .{op.rhs.id, rhs_suffix});
+                        try writer.print("runtime.Value.initBool(reg_{d}{s}.toBool())", .{ op.rhs.id, rhs_suffix });
                     } else {
                         const rhs_suffix = if (self.current_alloca_regs) |regs| if (regs.contains(op.rhs.id)) ".*" else "" else "";
-                        try writer.print("reg_{d}{s}", .{op.rhs.id, rhs_suffix});
+                        try writer.print("reg_{d}{s}", .{ op.rhs.id, rhs_suffix });
                     }
-                    
+
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                 }
             },
@@ -5174,13 +5167,13 @@ pub const NativeLinker = struct {
                             }
                             break :blk false;
                         };
-                        
+
                         // IR中参数索引：
                         // 有this: 0=this, 1=第一个参数, 2=第二个参数...
                         // 无this: 0=第一个参数, 1=第二个参数...
                         // args数组索引：0=第一个参数, 1=第二个参数...
                         const args_index = if (has_this) (if (op.index > 0) op.index - 1 else 0) else op.index;
-                        
+
                         // 检查是否是引用参数
                         const is_ref_param = blk: {
                             if (self.current_function_for_resolve) |func| {
@@ -5190,11 +5183,11 @@ pub const NativeLinker = struct {
                             }
                             break :blk false;
                         };
-                        
+
                         if (is_ref_param) {
                             // 引用参数：返回args中的指针（不解引用）
                             try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
-                            
+
                             // 初始化对应的alloca（如果存在）
                             if (self.current_function_for_resolve) |func_check| {
                                 for (func_check.blocks.items) |block_check| {
@@ -5221,33 +5214,33 @@ pub const NativeLinker = struct {
                                 }
                                 break :blk false;
                             };
-                            
+
                             if (is_variadic) {
-                            // 可变参数：收集从 args_index 开始的所有参数到数组
-                            try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
-                            try writer.print("    {{\n", .{});
-                            try writer.print("        var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
-                            try writer.print("        var i: usize = {d};\n", .{args_index});
-                            try writer.print("        while (i < args.len) : (i += 1) {{\n", .{});
-                            try writer.print("            try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
-                            try writer.print("        }}\n", .{});
-                            try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
-                            try writer.print("    }}\n", .{});
-                        } else {
-                            // 普通参数 - 现在所有寄存器都是 Value 类型
-                            // 根据原始类型推断决定如何转换
-                            const orig_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                            
-                            if (orig_type_tag == .i64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initInt(args[{d}].toInt()) else runtime.Value.initInt(0);\n", .{ args_index, args_index, args_index });
-                            } else if (orig_type_tag == .f64) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initFloat(args[{d}].toFloat()) else runtime.Value.initFloat(0.0);\n", .{ args_index, args_index, args_index });
-                            } else if (orig_type_tag == .bool) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initBool(args[{d}].toBool()) else runtime.Value.initBool(false);\n", .{ args_index, args_index, args_index });
+                                // 可变参数：收集从 args_index 开始的所有参数到数组
+                                try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                try writer.print("    {{\n", .{});
+                                try writer.print("        var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
+                                try writer.print("        var i: usize = {d};\n", .{args_index});
+                                try writer.print("        while (i < args.len) : (i += 1) {{\n", .{});
+                                try writer.print("            try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                                try writer.print("        }}\n", .{});
+                                try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                try writer.print("    }}\n", .{});
                             } else {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                // 普通参数 - 现在所有寄存器都是 Value 类型
+                                // 根据原始类型推断决定如何转换
+                                const orig_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+
+                                if (orig_type_tag == .i64) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initInt(args[{d}].toInt()) else runtime.Value.initInt(0);\n", .{ args_index, args_index, args_index });
+                                } else if (orig_type_tag == .f64) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initFloat(args[{d}].toFloat()) else runtime.Value.initFloat(0.0);\n", .{ args_index, args_index, args_index });
+                                } else if (orig_type_tag == .bool) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initBool(args[{d}].toBool()) else runtime.Value.initBool(false);\n", .{ args_index, args_index, args_index });
+                                } else {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                }
                             }
-                        }
                         }
                     }
                 }
@@ -5280,13 +5273,13 @@ pub const NativeLinker = struct {
                     // 使用 writeConditionExpr 处理条件
                     try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
                     try writer.writeAll(") {\n");
-                        
+
                     var then_buf: [32]u8 = undefined;
                     const then_ref = try self.getOperandRef(&then_buf, op.then_value.id);
                     try writer.print("        reg_{d} = {s};\n", .{ reg.id, then_ref });
                     try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
                     try writer.writeAll("    } else {\n");
-                    
+
                     var else_buf: [32]u8 = undefined;
                     const else_ref = try self.getOperandRef(&else_buf, op.else_value.id);
                     try writer.print("        reg_{d} = {s};\n", .{ reg.id, else_ref });
@@ -5322,7 +5315,7 @@ pub const NativeLinker = struct {
                     else
                         reg.type_;
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    
+
                     // 获取操作数的修正类型
                     const lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
@@ -5332,7 +5325,7 @@ pub const NativeLinker = struct {
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
-                    
+
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
@@ -5379,7 +5372,7 @@ pub const NativeLinker = struct {
                     else
                         reg.type_;
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    
+
                     // 获取操作数的修正类型
                     const lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
@@ -5389,7 +5382,7 @@ pub const NativeLinker = struct {
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
-                    
+
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
@@ -5434,7 +5427,7 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    
+
                     // 检查实际声明类型，不是推断类型
                     if (type_tag == .php_value) {
                         // 结果是 Value，不要 .toBool()
@@ -5463,7 +5456,7 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
-                    
+
                     // 检查实际声明类型，不是推断类型
                     if (type_tag == .php_value) {
                         // 结果是 Value，不要 .toBool()
@@ -5556,7 +5549,7 @@ pub const NativeLinker = struct {
                     else
                         reg.type_;
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    
+
                     // 获取操作数的修正类型
                     const lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
@@ -5566,7 +5559,7 @@ pub const NativeLinker = struct {
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
-                    
+
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
@@ -5613,7 +5606,7 @@ pub const NativeLinker = struct {
                     else
                         reg.type_;
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    
+
                     // 获取操作数的修正类型
                     const lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
@@ -5623,7 +5616,7 @@ pub const NativeLinker = struct {
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
-                    
+
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
@@ -5670,7 +5663,7 @@ pub const NativeLinker = struct {
                     else
                         reg.type_;
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
-                    
+
                     // 获取操作数的修正类型
                     const lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
@@ -5680,7 +5673,7 @@ pub const NativeLinker = struct {
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
-                    
+
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
@@ -5730,7 +5723,7 @@ pub const NativeLinker = struct {
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
-                    
+
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
 
@@ -5836,7 +5829,7 @@ pub const NativeLinker = struct {
                     // std.debug.print("generateInstructionSimple: not reg_{d} = !reg_{d}, result_type={s}, operand_type={s}\n", .{
                     //     reg.id, op.operand.id, @tagName(reg.type_), @tagName(op.operand.type_)
                     // });
-                    
+
                     // 使用修正后的类型
                     const operand_corrected = if (self.current_register_types) |types|
                         types.get(op.operand.id) orelse op.operand.type_
@@ -5844,7 +5837,7 @@ pub const NativeLinker = struct {
                         op.operand.type_;
 
                     const operand_type_tag = @as(std.meta.Tag(IR.Type), operand_corrected);
-                    
+
                     // 所有寄存器都声明为 runtime.Value，所以总是生成返回 Value 的代码
                     if (operand_type_tag == .php_value) {
                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_not(reg_{d});\n", .{op.operand.id});
@@ -5976,9 +5969,10 @@ pub const NativeLinker = struct {
                                     }
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_iter_init") or 
-                                       std.mem.eql(u8, runtime_name, "php_array_iter_key") or
-                                       std.mem.eql(u8, runtime_name, "php_array_iter_free")) {
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_iter_init") or
+                                std.mem.eql(u8, runtime_name, "php_array_iter_key") or
+                                std.mem.eql(u8, runtime_name, "php_array_iter_free"))
+                            {
                                 // 这些函数的 allocator 在第二个参数位置
                                 if (op.args.len > 0) {
                                     const first_arg = op.args[0];
@@ -6058,7 +6052,7 @@ pub const NativeLinker = struct {
                         // 用户定义函数 - 检查是否返回值
                         const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
                         const in_try_block = self.current_exception_handler != null;
-                        
+
                         // 查找函数的引用参数信息
                         const target_func = if (self.ir_module) |module| module.findFunction(op.func_name) else null;
                         const ref_params = if (target_func) |func| func.ref_params.items else &[_]u32{};
@@ -6228,8 +6222,7 @@ pub const NativeLinker = struct {
                     }
 
                     // 支持ArrayAccess对象、字符串索引和数组访问
-                    try self.writeRegAssignmentFmt(writer, reg.id, 
-                        "if (runtime.Value_isObject(reg_{d})) blk: {{ " ++
+                    try self.writeRegAssignmentFmt(writer, reg.id, "if (runtime.Value_isObject(reg_{d})) blk: {{ " ++
                         "break :blk try runtime.php_object_call(reg_{d}, \"offsetGet\", &[_]runtime.Value{{reg_{d}}}); " ++
                         "}} else if (reg_{d}.isString()) blk: {{ " ++
                         "const str = reg_{d}.asString(); " ++
@@ -6238,8 +6231,7 @@ pub const NativeLinker = struct {
                         "const idx = @as(usize, @intCast(idx_i64)); " ++
                         "const ch_slice = str.data[idx..@min(idx+1, str.data.len)]; " ++
                         "break :blk runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, ch_slice)); " ++
-                        "}} else if (reg_{d}.isArray()) (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()) else runtime.Value.initNull();\n", 
-                        .{ op.array.id, op.array.id, op.key.id, op.array.id, op.array.id, op.key.id, op.array.id, op.array.id, op.key.id });
+                        "}} else if (reg_{d}.isArray()) (reg_{d}.asArray().getByValue(reg_{d}) orelse runtime.Value.initNull()) else runtime.Value.initNull();\n", .{ op.array.id, op.array.id, op.key.id, op.array.id, op.array.id, op.key.id, op.array.id, op.array.id, op.key.id });
                 }
             },
             .array_set => |op| {
@@ -6640,13 +6632,13 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_class);
                     const escaped_prop = try self.escapeString(op.property_name);
                     defer self.allocator.free(escaped_prop);
-                    
+
                     // 设置ClassContext以支持self/static/parent
                     try writer.print("    {{\n", .{});
                     try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
                     try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
                     try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
-                    
+
                     try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     try writer.print("        reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
                     try writer.writeAll("    }\n");
@@ -6659,13 +6651,13 @@ pub const NativeLinker = struct {
                 defer self.allocator.free(escaped_class);
                 const escaped_prop = try self.escapeString(op.property_name);
                 defer self.allocator.free(escaped_prop);
-                
+
                 // 设置ClassContext以支持self/static/parent
                 try writer.print("    {{\n", .{});
                 try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
                 try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
                 try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
-                
+
                 try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
                 try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
                 try writer.writeAll(");\n");
@@ -6744,7 +6736,7 @@ pub const NativeLinker = struct {
                 // 动态全局变量写入：$$var = value
                 const name_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.name_reg.id) else false;
                 const val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
-                
+
                 try writer.writeAll("    try setGlobalVarDynamic(");
                 if (name_is_alloca) {
                     try writer.print("reg_{d}.*, ", .{op.name_reg.id});
@@ -6778,7 +6770,7 @@ pub const NativeLinker = struct {
                         //     @tagName(@as(std.meta.Tag(IR.Type), op.value.type_)),
                         // });
                     }
-                    
+
                     // Get the actual type of the source register
                     const src_fallback = if (self.current_reg_types) |types|
                         (types.get(op.value.id) orelse op.value.type_)
@@ -6806,7 +6798,7 @@ pub const NativeLinker = struct {
                     // 根据目标类型生成不同的转换代码
                     if (to_tag == .php_value) {
                         // 转换到php_value
-                        
+
                         // 优化：如果源也是 php_value（实际类型），直接赋值
                         if (src_tag == .php_value) {
                             // php_value -> php_value：直接赋值（无意义的 cast）
@@ -6827,7 +6819,7 @@ pub const NativeLinker = struct {
                             // 所有寄存器实际都是 Value，需要生成包装代码
                             var src_buf: [128]u8 = undefined;
                             const src_wrapped = try self.getValueWrapper(&src_buf, op.value.id, src_tag);
-                            
+
                             if (!dest_is_alloca and self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
                                 try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                             }
@@ -6928,7 +6920,7 @@ pub const NativeLinker = struct {
 
                     var src_buf: [32]u8 = undefined;
                     const src_ref = try self.getOperandRef(&src_buf, op.operand.id);
-                    
+
                     if (dst_tag == .i64 and src_tag == .php_value) {
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s}.asInt();\n", .{src_ref});
                     } else if (dst_tag == .f64 and src_tag == .php_value) {
@@ -7031,13 +7023,13 @@ pub const NativeLinker = struct {
                 // unset_var: 专门处理unset操作
                 // op.operand是alloca指针寄存器
                 const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.operand.id) else false;
-                
+
                 if (is_alloca) {
                     // 记录已unset的寄存器
                     if (self.current_unset_regs) |regs| {
                         try regs.put(op.operand.id, {});
                     }
-                    
+
                     // alloca寄存器：release两次（完全释放）
                     try writer.print("    if (!reg_{d}.*.isNull()) {{\n", .{op.operand.id});
                     try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
@@ -7083,7 +7075,7 @@ pub const NativeLinker = struct {
             if (is_simple_return) {
                 // 单块函数优化：直接生成线性代码
                 try writer.writeAll("    // Single-block function: linear code generation (optimized)\n");
-                
+
                 // 禁用异常跳转（单块函数没有状态机）
                 const prev_handler = self.current_exception_handler;
                 self.current_exception_handler = null;
@@ -7092,7 +7084,7 @@ pub const NativeLinker = struct {
                 for (block.instructions.items) |inst| {
                     try self.generateInstruction(writer, inst);
                 }
-                
+
                 // 恢复异常处理器
                 self.current_exception_handler = prev_handler;
 
@@ -7247,10 +7239,10 @@ pub const NativeLinker = struct {
         const first_loop = cfg.loops.items[0];
         for (0..first_loop.header) |idx| {
             const block = func.blocks.items[idx];
-            
+
             // 设置异常处理器（内联辅助逻辑）
             self.current_exception_handler = if (block.exception_handler) |h| h.index else null;
-            
+
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
             for (block.instructions.items) |inst| {
                 try writer.writeAll("    ");
@@ -7695,10 +7687,7 @@ pub const NativeLinker = struct {
 
                 if (is_loop_body) {
                     // 这是来自循环体的更新值
-                    try phi_updates.append(self.allocator, .{ 
-                        .phi_reg = result_reg.id, 
-                        .value_reg = incoming.value.id 
-                    });
+                    try phi_updates.append(self.allocator, .{ .phi_reg = result_reg.id, .value_reg = incoming.value.id });
                     break;
                 }
             }
@@ -8180,7 +8169,7 @@ pub const NativeLinker = struct {
                 block_idx: usize,
                 visited: *std.AutoHashMap(usize, void),
                 depth: usize,
-                source_block_idx: ?usize,  // 前驱块索引
+                source_block_idx: ?usize, // 前驱块索引
             ) anyerror!void {
                 if (visited.contains(block_idx)) return;
                 try visited.put(block_idx, {});
@@ -8285,7 +8274,7 @@ pub const NativeLinker = struct {
                         try writer_.writeAll("} else {\n");
 
                         const else_target = @as(usize, cbr.else_block.index);
-                        
+
                         // 如果 else_target 已经被访问，手动生成 phi 赋值
                         if (visited.contains(else_target)) {
                             const else_block = func_.blocks.items[else_target];
@@ -8305,7 +8294,7 @@ pub const NativeLinker = struct {
                                 }
                             }
                         }
-                        
+
                         if (loop_.increment) |inc2| {
                             if (else_target == inc2 or else_target == loop_.header) {
                                 try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth + 1);
@@ -8615,7 +8604,7 @@ pub const NativeLinker = struct {
                         // 生成赋值
                         var src_buf: [32]u8 = undefined;
                         const src_ref = try self.getOperandRef(&src_buf, ms.loop_count_reg);
-                        
+
                         if (is_optimized_alloca or inc_tag == .i64) {
                             // 目标是 i64 - 但所有寄存器都是 Value
                             if (count_tag == .i64) {
@@ -8669,7 +8658,7 @@ pub const NativeLinker = struct {
                     }
                 }
             }
-        } else if (false and dead_loop) {  // 暂时禁用 dead_loop 优化
+        } else if (false and dead_loop) { // 暂时禁用 dead_loop 优化
             // 无效循环：只执行最后一次赋值
             try writer.print("    // Dead loop eliminated\n", .{});
 
@@ -9173,7 +9162,7 @@ pub const NativeLinker = struct {
         switch (type_tag) {
             .i64 => try writer.print("reg_{d}.asInt() != 0", .{reg_id}),
             .f64 => try writer.print("reg_{d}.asFloat() != 0.0", .{reg_id}),
-            .bool => try writer.print("reg_{d}.toBool()", .{reg_id}),  // 所有寄存器都是 Value
+            .bool => try writer.print("reg_{d}.toBool()", .{reg_id}), // 所有寄存器都是 Value
             .php_value => try writer.print("reg_{d}.toBool()", .{reg_id}),
             else => try writer.print("reg_{d}.toBool()", .{reg_id}),
         }
@@ -9946,7 +9935,7 @@ pub const NativeLinker = struct {
                         // } else {
                         var src_buf: [32]u8 = undefined;
                         const src_ref = try self.getOperandRef(&src_buf, resolved_reg);
-                        
+
                         if (phi_tag == value_tag) {
                             try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
                         } else if (phi_tag == .i64 and value_tag == .php_value) {
@@ -11610,7 +11599,7 @@ pub const NativeLinker = struct {
                         try writer.print("        {s} = ctx;\n", .{result_reg.?});
                     } else {
                         const arg_idx = if (self.current_function_has_this) op.index - 1 else op.index;
-                        
+
                         // 检查是否是可变参数
                         const is_variadic = blk: {
                             if (self.current_function_for_resolve) |func| {
@@ -11620,7 +11609,7 @@ pub const NativeLinker = struct {
                             }
                             break :blk false;
                         };
-                        
+
                         if (is_variadic) {
                             // 可变参数：收集从 arg_idx 开始的所有参数到数组
                             try writer.print("        {s} = runtime.Value.initNull();\n", .{result_reg.?});
@@ -11664,7 +11653,7 @@ pub const NativeLinker = struct {
                 else
                     op.ptr.type_;
                 const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
-                
+
                 // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
                 const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
                 const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
@@ -11729,7 +11718,7 @@ pub const NativeLinker = struct {
                 else
                     op.ptr.type_;
                 const ptr_tag = @as(std.meta.Tag(IR.Type), ptr_type);
-                
+
                 // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
                 const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
                 const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
@@ -11737,7 +11726,7 @@ pub const NativeLinker = struct {
                 var ptr_buf: [32]u8 = undefined;
                 var value_buf: [32]u8 = undefined;
                 const ptr = try std.fmt.bufPrint(&ptr_buf, "reg_{d}", .{op.ptr.id});
-                
+
                 // 获取 value 的实际类型
                 const store_value_type = if (self.current_register_types) |types|
                     types.get(op.value.id) orelse op.value.type_
@@ -11766,7 +11755,7 @@ pub const NativeLinker = struct {
                 } else {
                     // 真实的指针存储
                     const value = try std.fmt.bufPrint(&value_buf, "reg_{d}", .{op.value.id});
-                    
+
                     // 获取指针指向的类型
                     const ptr_inner_type = switch (op.ptr.type_) {
                         .ptr => |inner| inner.*,
@@ -12095,13 +12084,13 @@ pub const NativeLinker = struct {
                         } else {
                             try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
                         }
-                        
+
                         // 特殊处理：file_put_contents只接受2个参数+allocator，忽略可选的flags
-                        const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents")) 
-                            @min(op.args.len, 2) 
-                        else 
+                        const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents"))
+                            @min(op.args.len, 2)
+                        else
                             op.args.len;
-                        
+
                         for (op.args[0..max_args], 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
                             // 统一使用 writeRegRef 处理 alloca 解引用
@@ -12308,16 +12297,16 @@ pub const NativeLinker = struct {
                     try writer.print("        {s} = {s};\n", .{ result_reg.?, value });
                 }
             },
-            
+
             // ========================================================================
             // Box/Unbox 操作
             // ========================================================================
             .box => |op| {
                 var value_buf: [32]u8 = undefined;
                 const value = try self.getOperandRef(&value_buf, op.value.id);
-                
+
                 const from_tag = @as(std.meta.Tag(IR.Type), op.from_type);
-                
+
                 // 从基本类型转换到php_value
                 if (from_tag == .i64) {
                     try writer.print("        {s} = runtime.Value.initInt({s});\n", .{ result_reg.?, value });
@@ -12332,13 +12321,13 @@ pub const NativeLinker = struct {
                     try writer.print("        {s} = {s};\n", .{ result_reg.?, value });
                 }
             },
-            
+
             .unbox => |op| {
                 var value_buf: [32]u8 = undefined;
                 const value = try self.getOperandRef(&value_buf, op.value.id);
-                
+
                 const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
-                
+
                 // 从php_value提取基本类型
                 if (to_tag == .i64) {
                     try writer.print("        {s} = {s}.asInt();\n", .{ result_reg.?, value });
@@ -12491,11 +12480,11 @@ pub const NativeLinker = struct {
     fn copyRuntimeLib(self: *Self, temp_dir: []const u8) !void {
         // 尝试多个可能的路径
         const possible_base_paths = [_][]const u8{
-            ".",  // 当前目录
-            "..",  // 上级目录
-            "../..",  // 上上级目录
+            ".", // 当前目录
+            "..", // 上级目录
+            "../..", // 上上级目录
         };
-        
+
         var found = false;
         for (possible_base_paths) |base| {
             const template_path = try std.fs.path.join(
@@ -12503,7 +12492,7 @@ pub const NativeLinker = struct {
                 &[_][]const u8{ base, "src/aot/runtime_lib_template.zig" },
             );
             defer self.allocator.free(template_path);
-            
+
             const template_content = std.fs.cwd().readFileAlloc(
                 self.allocator,
                 template_path,
@@ -12520,18 +12509,18 @@ pub const NativeLinker = struct {
             const file = try std.fs.cwd().createFile(runtime_path, .{});
             defer file.close();
             try file.writeAll(template_content);
-            
+
             // 复制其他运行时文件
             try self.copyOtherRuntimeFiles(temp_dir, base);
             found = true;
             break;
         }
-        
+
         if (!found) {
             return error.FileNotFound;
         }
     }
-    
+
     fn copyOtherRuntimeFiles(self: *Self, temp_dir: []const u8, base_path: []const u8) !void {
         const files = [_]struct { src: []const u8, dst: []const u8 }{
             .{ .src = "src/aot/profiler.zig", .dst = "profiler.zig" },
@@ -12548,7 +12537,7 @@ pub const NativeLinker = struct {
                 &[_][]const u8{ base_path, f.src },
             );
             defer self.allocator.free(src_path);
-            
+
             const content = std.fs.cwd().readFileAlloc(
                 self.allocator,
                 src_path,
@@ -12582,7 +12571,7 @@ pub const NativeLinker = struct {
         // 基本命令
         try args.append(self.allocator, "zig");
         try args.append(self.allocator, "build-exe");
-        
+
         // 使用相对路径 main.zig（因为我们会在临时目录中运行）
         try args.append(self.allocator, "main.zig");
 
@@ -12595,7 +12584,7 @@ pub const NativeLinker = struct {
             break :blk try std.fs.path.join(self.allocator, &[_][]const u8{ cwd, output_path });
         };
         defer if (!std.fs.path.isAbsolute(output_path)) self.allocator.free(abs_output_path);
-        
+
         const output_arg = try std.fmt.allocPrint(
             self.allocator,
             "-femit-bin={s}",
