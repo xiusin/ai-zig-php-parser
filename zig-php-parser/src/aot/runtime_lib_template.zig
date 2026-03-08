@@ -3145,6 +3145,7 @@ pub const ArrayIterator = struct {
     iter: PHPArray.Elements.Iterator,
     current: ?PHPArray.Elements.Entry,
     freed: bool = false, // 防止双重释放
+    ref_count: usize = 1, // 引用计数，初始为1
 };
 
 pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
@@ -3401,21 +3402,30 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
 
     // 防止双重释放
     if (iter.freed) {
-        std.debug.print("WARNING: ArrayIterator double free detected!\n", .{});
         return Value.initNull();
     }
-    iter.freed = true;
 
-    // 清理引用锁
-    if (iter.array.ref_lock_count > 0) {
-        iter.array.ref_lock_count = 0;
-        iter.array.has_active_refs = false;
+    // 减少引用计数
+    if (iter.ref_count > 0) {
+        iter.ref_count -= 1;
     }
 
-    // 释放数组引用计数
-    iter.array.release(allocator);
+    // 只有ref_count=0时才真正释放
+    if (iter.ref_count == 0) {
+        iter.freed = true;
 
-    allocator.destroy(iter);
+        // 清理引用锁
+        if (iter.array.ref_lock_count > 0) {
+            iter.array.ref_lock_count = 0;
+            iter.array.has_active_refs = false;
+        }
+
+        // 释放数组引用计数
+        iter.array.release(allocator);
+
+        allocator.destroy(iter);
+    }
+
     return Value.initNull();
 }
 

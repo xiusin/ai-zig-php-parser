@@ -1856,6 +1856,17 @@ pub const IRGenerator = struct {
 
         // Exit block - 清理完成后继续执行
         self.setCurrentBlock(exit_block);
+
+        // 再次free迭代器，确保异常路径也能清理
+        // 引用计数会防止真正的双重释放
+        const exit_iter = try self.emitWithResult(.{ .load = .{ .ptr = iter_ptr, .type_ = .php_value } }, .php_value);
+        const exit_free_args = try self.allocator.alloc(Register, 1);
+        exit_free_args[0] = exit_iter;
+        _ = try self.emit(.{ .call = .{
+            .func_name = "php_array_iter_free",
+            .args = exit_free_args,
+            .return_type = .void,
+        } }, null);
     }
 
     /// Generate IR for switch statement
