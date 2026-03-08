@@ -1650,20 +1650,13 @@ pub const NativeLinker = struct {
 
                     // 检查是否需要释放（字符串、数组等需要分配内存的类型）
                     if (inst.op != .alloca) {
-                        // 检查是否是字符串或数组相关的指令
+                        // 只cleanup创建新值的指令
                         switch (inst.op) {
-                            .const_string, .concat, .array_new, .new_object => {
-                                // 这些指令创建新的Value，需要释放
-                                try cleanup_registers_set.put(reg.id, {});
-                            },
-                            .call => {
-                                // 内置函数调用可能返回需要释放的资源（如字符串、数组）
-                                // 我们保守地释放所有Value类型的返回值
+                            .const_string, .concat, .array_new, .new_object, .call => {
                                 if (corrected_type == .php_value) {
                                     try cleanup_registers_set.put(reg.id, {});
                                 }
                             },
-                            // load 不创建新的引用，不需要释放
                             else => {},
                         }
                     } else {
