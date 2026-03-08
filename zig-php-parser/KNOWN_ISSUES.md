@@ -41,10 +41,17 @@ src/aot/ir_generator.zig:2027:43: in generateStatement
 ### 问题描述
 在某些情况下，数组迭代器会触发integer overflow panic。
 
+### 触发条件
+- 嵌套的foreach循环（3层或更多）
+- 每层foreach都包含try-catch
+- 数组操作频繁
+
 ### 错误信息
 ```
 thread XXXXX panic: integer overflow
 /opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/multi_array_list.zig:228:35: in slice
+    ptr += field_size * self.capacity;
+                      ^
 runtime_lib.zig:1205:71: in iterator
 runtime_lib.zig:3155:40: in php_array_iter_init
 ```
@@ -52,12 +59,21 @@ runtime_lib.zig:3155:40: in php_array_iter_init
 ### 影响范围
 - **影响脚本**: ~1% (test_0007.php等)
 - **严重程度**: 🟡 中
-- **触发条件**: 特定的数组操作模式
+- **触发条件**: 特定的数组操作模式（嵌套foreach+try-catch）
+
+### 根本原因
+ArrayHashMap的capacity字段在某些情况下被设置为非常大的值，导致`field_size * self.capacity`溢出。
+
+可能的原因：
+1. Double free导致内存破坏
+2. ArrayHashMap内部状态被破坏
+3. Zig标准库的bug
 
 ### 状态
 - **发现时间**: 2026-03-08
 - **状态**: 🟡 待修复
 - **优先级**: P1
+- **需要**: 深入调试ArrayHashMap的内存管理
 
 ---
 
