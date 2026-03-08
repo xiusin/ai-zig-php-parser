@@ -855,8 +855,8 @@ pub const PHPString = struct {
 
     /// 创建新字符串
     pub fn init(allocator: Allocator, str: []const u8) !*PHPString {
-        // 添加长度检查，防止过大的字符串
-        if (str.len > 1024 * 1024 * 100) { // 100MB限制
+        // 增加限制到1GB，支持更大的字符串操作
+        if (str.len > 1024 * 1024 * 1024) {
             return error.StringTooLarge;
         }
 
