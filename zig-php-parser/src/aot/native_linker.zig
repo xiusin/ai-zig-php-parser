@@ -1452,6 +1452,12 @@ pub const NativeLinker = struct {
         self.current_liveness = &liveness;
         defer self.current_liveness = null;
 
+        // 所有权追踪（暂时禁用）
+        // const OwnershipTracker = @import("ownership_tracker.zig").OwnershipTracker;
+        // var ownership = OwnershipTracker.init(self.allocator);
+        // defer ownership.deinit();
+        // try ownership.analyze(func);
+
         // 在代码生成时重新进行类型推断
         const TypeInferencePass = @import("type_inference_pass.zig").TypeInferencePass;
         var type_inference = TypeInferencePass.init(self.allocator);
