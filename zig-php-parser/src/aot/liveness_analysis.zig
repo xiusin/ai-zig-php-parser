@@ -39,7 +39,7 @@ pub const LivenessAnalysis = struct {
         self.inst_live_out.deinit();
     }
     
-    /// 分析函数的活跃性（简化版：不做迭代）
+    /// 分析函数的活跃性（完整实现）
     pub fn analyze(self: *Self, func: *const IR.Function) !void {
         // 初始化每个块的活跃集合
         for (func.blocks.items, 0..) |_, block_idx| {
@@ -47,33 +47,66 @@ pub const LivenessAnalysis = struct {
             try self.live_out.put(block_idx, RegSet.init(self.allocator));
         }
         
-        // 简化版：只做一次反向传播，不迭代到不动点
-        // 这样避免复杂的数据流分析bug
-        for (func.blocks.items, 0..) |block, block_idx| {
-            var current = RegSet.init(self.allocator);
-            defer current.deinit();
+        // 反向数据流分析，迭代到不动点
+        var changed = true;
+        var iterations: usize = 0;
+        while (changed and iterations < 100) : (iterations += 1) {
+            changed = false;
             
-            // 反向遍历指令，收集使用的寄存器
-            var inst_idx: usize = block.instructions.items.len;
-            while (inst_idx > 0) {
-                inst_idx -= 1;
-                const inst = block.instructions.items[inst_idx].*;
+            // 反向遍历基本块
+            var block_idx: usize = func.blocks.items.len;
+            while (block_idx > 0) {
+                block_idx -= 1;
+                const block = func.blocks.items[block_idx];
                 
-                // 移除定义的寄存器
-                if (inst.result) |reg| {
-                    _ = current.remove(reg.id);
+                // 计算live_out[B] = ∪ live_in[S] for S in successors(B)
+                var new_live_out = RegSet.init(self.allocator);
+                try self.computeLiveOut(func, block_idx, &new_live_out);
+                
+                // 计算live_in[B] = use[B] ∪ (live_out[B] - def[B])
+                var new_live_in = RegSet.init(self.allocator);
+                
+                // 反向遍历指令
+                try self.copySets(&new_live_in, &new_live_out);
+                var inst_idx: usize = block.instructions.items.len;
+                while (inst_idx > 0) {
+                    inst_idx -= 1;
+                    const inst = block.instructions.items[inst_idx].*;
+                    
+                    // 移除定义的寄存器
+                    if (inst.result) |reg| {
+                        _ = new_live_in.remove(reg.id);
+                    }
+                    
+                    // 添加使用的寄存器
+                    try self.addUsedRegs(&new_live_in, inst);
                 }
                 
-                // 添加使用的寄存器
-                try self.addUsedRegs(&current, inst);
+                // 检查是否改变
+                const old_live_in = self.live_in.getPtr(block_idx).?;
+                const old_live_out = self.live_out.getPtr(block_idx).?;
+                
+                if (!self.setsEqual(old_live_in, &new_live_in) or 
+                    !self.setsEqual(old_live_out, &new_live_out)) {
+                    changed = true;
+                    
+                    // 释放旧集合
+                    old_live_in.deinit();
+                    old_live_out.deinit();
+                    
+                    // 保存新集合
+                    try self.live_in.put(block_idx, new_live_in);
+                    try self.live_out.put(block_idx, new_live_out);
+                } else {
+                    // 没有改变，释放新集合
+                    new_live_in.deinit();
+                    new_live_out.deinit();
+                }
             }
-            
-            // 保存live_in
-            const live_in = self.live_in.getPtr(block_idx).?;
-            try self.copySets(live_in, &current);
         }
         
-        // 不计算inst_live_out，简化实现
+        // 计算每条指令后的活跃变量
+        try self.computeInstLiveness(func);
     }
     
     /// 计算块出口的活跃变量
@@ -154,12 +187,12 @@ pub const LivenessAnalysis = struct {
                 inst_idx -= 1;
                 const inst = block.instructions.items[inst_idx].*;
                 
-                // 保存当前活跃集合
+                // 保存当前活跃集合（指令后）
                 var inst_live = RegSet.init(self.allocator);
                 try self.copySets(&inst_live, &current);
                 try self.inst_live_out.put(.{ .block = block_idx, .inst = inst_idx }, inst_live);
                 
-                // 更新活跃集合
+                // 更新活跃集合（指令前）
                 if (inst.result) |reg| {
                     _ = current.remove(reg.id);
                 }
@@ -231,16 +264,11 @@ pub const LivenessAnalysis = struct {
         }
     }
     
-    /// 判断寄存器在指令后是否活跃
-    /// 简化版：检查寄存器是否在后续指令中被使用
+    /// 判断寄存器在指令后是否活跃（精确实现）
     pub fn isLiveAfter(self: *const Self, block_idx: usize, inst_idx: usize, reg_id: usize) bool {
-        _ = self;
-        _ = block_idx;
-        _ = inst_idx;
-        _ = reg_id;
-        // 保守策略：总是认为活跃，不release
-        // 这样避免过早释放，虽然会有泄漏但保证正确性
-        return true;
+        const inst_id = InstId{ .block = block_idx, .inst = inst_idx };
+        const live_set = self.inst_live_out.get(inst_id) orelse return false;
+        return live_set.contains(reg_id);
     }
     
     /// 集合操作辅助函数

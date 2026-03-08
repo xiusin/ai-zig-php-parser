@@ -4189,6 +4189,11 @@ pub const NativeLinker = struct {
             // 跳过alloca
             if (alloca_regs.contains(reg_id)) continue;
             
+            // 跳过result寄存器（正在被赋值）
+            if (inst.result) |result_reg| {
+                if (reg_id == result_reg.id) continue;
+            }
+            
             // 检查是否需要release
             if (!self.regMayHeap(reg_id)) continue;
             
