@@ -3587,26 +3587,16 @@ pub const NativeLinker = struct {
                 }
 
                 if (cleanup_regs.len > 0) {
-                    // 收集当前块的phi incoming值（不应释放）
-                    var phi_incoming_regs = std.AutoHashMap(usize, void).init(self.allocator);
-                    defer phi_incoming_regs.deinit();
-                    const current_block = func.blocks.items[current_block_idx];
-                    for (current_block.instructions.items) |inst| {
-                        if (inst.op == .phi) {
-                            for (inst.op.phi.incoming) |incoming| {
-                                try phi_incoming_regs.put(incoming.value.id, {});
-                            }
-                        }
-                    }
-
                     try code.appendSlice(self.allocator, "                // Cleanup (except return value)\n");
                     for (cleanup_regs) |reg_id| {
-                        // 检查是否是返回值寄存器或phi incoming值
+                        // 检查是否是返回值寄存器
                         const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
-                        const is_phi_incoming = phi_incoming_regs.contains(reg_id);
-                        if (!is_return_reg and !is_phi_incoming and self.shouldReleaseReg(reg_id)) {
-                            const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
-                            try writer.print("                reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg_id, suffix });
+                        if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
+                            // 只cleanup alloca寄存器（局部变量）
+                            // 其他寄存器（临时值）可能被返回值引用，不安全释放
+                            if (alloca_regs.contains(reg_id)) {
+                                try writer.print("                reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            }
                         }
                     }
                 }
