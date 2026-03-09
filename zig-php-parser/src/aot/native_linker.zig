@@ -5288,12 +5288,12 @@ pub const NativeLinker = struct {
             },
             .const_null => {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initNull();\n", .{});
                 }
             },
             .const_missing => {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initMissing();\n", .{reg.id});
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initMissing();\n", .{});
                 }
             },
             .arg_count => {
