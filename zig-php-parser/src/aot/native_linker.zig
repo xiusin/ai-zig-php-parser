@@ -4940,28 +4940,32 @@ pub const NativeLinker = struct {
                     } else {
                         switch (result_tag) {
                             .php_value => {
-                                try writer.print("    reg_{d} = try runtime.php_div(", .{reg.id});
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("try runtime.php_div(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(");\n");
                             },
                             .i64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_div(", .{reg.id});
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("(try runtime.php_div(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asInt();\n");
                             },
                             .f64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_div(", .{reg.id});
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("(try runtime.php_div(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asFloat();\n");
                             },
                             .bool => {
-                                try writer.print("    reg_{d} = (try runtime.php_div(", .{reg.id});
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("(try runtime.php_div(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
@@ -5017,21 +5021,24 @@ pub const NativeLinker = struct {
                     } else {
                         switch (result_tag) {
                             .php_value => {
-                                try writer.print("    reg_{d} = try runtime.php_mod(", .{reg.id});
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("try runtime.php_mod(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(");\n");
                             },
                             .i64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_mod(", .{reg.id});
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("(try runtime.php_mod(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asInt();\n");
                             },
                             .f64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_mod(", .{reg.id});
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("(try runtime.php_mod(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
@@ -5129,6 +5136,7 @@ pub const NativeLinker = struct {
             },
             .bit_and => |op| {
                 if (inst.result) |reg| {
+                    const alloca_regs = self.current_alloca_regs orelse unreachable;
                     const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
                     const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
                     const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
@@ -5137,6 +5145,7 @@ pub const NativeLinker = struct {
             },
             .bit_or => |op| {
                 if (inst.result) |reg| {
+                    const alloca_regs = self.current_alloca_regs orelse unreachable;
                     const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
                     const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
                     const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
@@ -5145,6 +5154,7 @@ pub const NativeLinker = struct {
             },
             .bit_xor => |op| {
                 if (inst.result) |reg| {
+                    const alloca_regs = self.current_alloca_regs orelse unreachable;
                     const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
                     const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
                     const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";

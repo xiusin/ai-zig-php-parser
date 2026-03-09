@@ -398,16 +398,27 @@ pub fn main() !void {
     // Handle AOT compilation mode
     if (compile_mode) {
         if (php_file) |filename| {
+            // 为AOT编译创建独立的Arena，避免内存泄漏检测误报
+            var aot_arena = std.heap.ArenaAllocator.init(allocator);
+            defer aot_arena.deinit();
+            const aot_alloc = aot_arena.allocator();
+            
             aot_options.input_file = filename;
             if (aot_zig_flags.items.len > 0) {
-                aot_options.extra_zig_flags = try aot_zig_flags.toOwnedSlice(allocator);
+                // 复制到arena分配器
+                const flags = try aot_alloc.alloc([]const u8, aot_zig_flags.items.len);
+                for (aot_zig_flags.items, 0..) |flag, idx| {
+                    flags[idx] = try aot_alloc.dupe(u8, flag);
+                }
+                aot_options.extra_zig_flags = flags;
             }
             // Convert compiler SyntaxMode to AOT SyntaxMode
             aot_options.syntax_mode = switch (syntax_mode) {
                 .php => .php,
                 .go => .go,
             };
-            try runAOTCompilation(allocator, aot_options);
+            
+            try runAOTCompilation(aot_alloc, aot_options);
         } else {
             std.debug.print("Error: No input file specified for compilation.\n", .{});
             printUsage();
