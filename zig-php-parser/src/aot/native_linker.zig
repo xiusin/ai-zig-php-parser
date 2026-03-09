@@ -3261,13 +3261,39 @@ pub const NativeLinker = struct {
         // 使用原始类型，不是推断类型
         const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
 
+        // 检查value_reg是否是alloca
+        const value_is_alloca = if (self.current_alloca_regs) |regs| 
+            regs.contains(value_reg.id) 
+        else 
+            false;
+        const result_is_alloca = if (self.current_alloca_regs) |regs| 
+            regs.contains(result_reg.id) 
+        else 
+            false;
+
         // 如果结果是 php_value，总是直接赋值（所有寄存器都是 Value）
         if (result_tag == .php_value) {
-            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            if (result_is_alloca and value_is_alloca) {
+                try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (result_is_alloca) {
+                try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (value_is_alloca) {
+                try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
+            } else {
+                try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            }
         } else {
             // 结果是原生类型（不应该发生，因为所有寄存器都是 Value）
             // 但为了安全，还是处理一下
-            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            if (result_is_alloca and value_is_alloca) {
+                try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (result_is_alloca) {
+                try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (value_is_alloca) {
+                try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
+            } else {
+                try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            }
         }
     }
 
@@ -6755,8 +6781,13 @@ pub const NativeLinker = struct {
                     try writer.writeAll("    // Catch all\n");
                 }
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = runtime.getException();\n", .{reg.id});
+                    const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                    if (is_alloca) {
+                        try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    }
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.getException();\n", .{});
                 } else {
                     try writer.writeAll("    if (runtime.hasException()) {\n");
                     try writer.writeAll("        var ignored_ex = runtime.getException();\n");
