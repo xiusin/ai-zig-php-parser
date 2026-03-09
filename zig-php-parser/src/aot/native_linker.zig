@@ -3334,7 +3334,24 @@ pub const NativeLinker = struct {
         if (!has_any_dependency) {
             // 无依赖，直接赋值（不需要retain，因为phi代替store）
             for (assignments) |assign| {
-                try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+                const value_is_alloca = if (self.current_alloca_regs) |regs| 
+                    regs.contains(assign.value.id) 
+                else 
+                    false;
+                const result_is_alloca = if (self.current_alloca_regs) |regs| 
+                    regs.contains(assign.result.id) 
+                else 
+                    false;
+                
+                if (result_is_alloca and value_is_alloca) {
+                    try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
+                } else if (result_is_alloca) {
+                    try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+                } else if (value_is_alloca) {
+                    try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
+                } else {
+                    try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+                }
                 // 注释掉retain，避免ref_count多1
                 // try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
             }
@@ -3343,15 +3360,44 @@ pub const NativeLinker = struct {
             // 第一步：保存需要临时变量的源值
             for (assignments, 0..) |assign, i| {
                 if (needs_temp.items[i]) {
-                    try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
+                    const value_is_alloca = if (self.current_alloca_regs) |regs| 
+                        regs.contains(assign.value.id) 
+                    else 
+                        false;
+                    if (value_is_alloca) {
+                        try writer.print("{s}const phi_temp_{d} = reg_{d}.*;\n", .{ indent, i, assign.value.id });
+                    } else {
+                        try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
+                    }
                 }
             }
             // 第二步：赋值（不需要retain）
             for (assignments, 0..) |assign, i| {
+                const result_is_alloca = if (self.current_alloca_regs) |regs| 
+                    regs.contains(assign.result.id) 
+                else 
+                    false;
+                    
                 if (needs_temp.items[i]) {
-                    try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
+                    if (result_is_alloca) {
+                        try writer.print("{s}reg_{d}.* = phi_temp_{d};\n", .{ indent, assign.result.id, i });
+                    } else {
+                        try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
+                    }
                 } else {
-                    try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+                    const value_is_alloca = if (self.current_alloca_regs) |regs| 
+                        regs.contains(assign.value.id) 
+                    else 
+                        false;
+                    if (result_is_alloca and value_is_alloca) {
+                        try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
+                    } else if (result_is_alloca) {
+                        try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+                    } else if (value_is_alloca) {
+                        try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
+                    } else {
+                        try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
+                    }
                 }
                 // 注释掉retain
                 // try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
@@ -4392,7 +4438,24 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     // 所有寄存器都是runtime.Value类型，box操作只是类型标记
                     // 在代码生成时，直接赋值即可
-                    try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.value.id });
+                    const value_is_alloca = if (self.current_alloca_regs) |regs| 
+                        regs.contains(op.value.id) 
+                    else 
+                        false;
+                    const result_is_alloca = if (self.current_alloca_regs) |regs| 
+                        regs.contains(reg.id) 
+                    else 
+                        false;
+                    
+                    if (result_is_alloca and value_is_alloca) {
+                        try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{ reg.id, op.value.id });
+                    } else if (result_is_alloca) {
+                        try writer.print("    reg_{d}.* = reg_{d};\n", .{ reg.id, op.value.id });
+                    } else if (value_is_alloca) {
+                        try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, op.value.id });
+                    } else {
+                        try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.value.id });
+                    }
                 }
             },
             .unbox => |op| {
