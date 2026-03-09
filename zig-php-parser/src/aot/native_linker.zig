@@ -3257,7 +3257,6 @@ pub const NativeLinker = struct {
         value_reg: IR.Register,
         indent: []const u8,
     ) !void {
-        _ = self;
         // 使用原始类型，不是推断类型
         const result_tag = @as(std.meta.Tag(IR.Type), result_reg.type_);
 

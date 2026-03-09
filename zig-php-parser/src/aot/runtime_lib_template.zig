@@ -1817,6 +1817,8 @@ pub const Value = struct {
 
     /// 转换为字符串（PHP语义）
     /// 注意：返回的字符串引用计数已经+1，调用者负责release
+    /// 将Value转换为字符串
+    /// PHP 8+行为：数组转字符串抛出异常
     pub fn toString(self: Value, allocator: Allocator) !*PHPString {
         if (self.isNull()) return PHPString.init(allocator, "");
         if (self.isBool()) return PHPString.init(allocator, if (self.asBool()) "1" else "");
@@ -1850,12 +1852,19 @@ pub const Value = struct {
             return PHPString.init(allocator, self.asString().data);
         }
         if (self.isArray()) {
-            return PHPString.init(allocator, "Array");
+            // PHP 8+行为：数组转字符串抛出TypeError
+            _ = try throwException("Array to string conversion", allocator);
+            // 返回error以中断执行流
+            return error.TypeError;
         }
         if (self.isFunction()) {
-            return PHPString.init(allocator, "Function");
+            // 函数转字符串也应该抛出异常（PHP 8+）
+            _ = try throwException("Object of class Closure could not be converted to string", allocator);
+            return error.TypeError;
         }
         if (Value_isObject(self)) {
+            // 对象转字符串：尝试调用__toString()
+            // 如果没有__toString()，PHP 8+抛出异常
             return Value_asObject(self).toString(allocator);
         }
         return PHPString.init(allocator, "");
@@ -2839,10 +2848,17 @@ pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
     }
 
     // 慢速路径：需要类型转换
-    const lhs_str = try lhs.toString(allocator);
+    const lhs_str = lhs.toString(allocator) catch {
+        // 类型转换失败（如数组转字符串），异常已设置
+        // 返回空字符串以继续执行（异常会在后续被检查）
+        return Value.initString(try PHPString.init(allocator, ""));
+    };
     defer lhs_str.release(allocator);
 
-    const rhs_str = try rhs.toString(allocator);
+    const rhs_str = rhs.toString(allocator) catch {
+        // 类型转换失败（如数组转字符串），异常已设置
+        return Value.initString(try PHPString.init(allocator, ""));
+    };
     defer rhs_str.release(allocator);
 
     const result = try lhs_str.concat(rhs_str, allocator);
