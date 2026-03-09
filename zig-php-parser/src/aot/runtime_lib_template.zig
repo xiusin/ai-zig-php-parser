@@ -2574,7 +2574,10 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
-        if (b == 0) return error.DivisionByZero;
+        if (b == 0) {
+            _ = try throwException("Division by zero", runtime_allocator);
+            return Value.initNull();
+        }
         if (@mod(a, b) == 0) {
             const result = @divTrunc(a, b);
             if (result >= Value.INT48_MIN and result <= Value.INT48_MAX) {
@@ -2585,7 +2588,10 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
 
     const a = lhs.toFloat();
     const b = rhs.toFloat();
-    if (b == 0.0) return error.DivisionByZero;
+    if (b == 0.0) {
+        _ = try throwException("Division by zero", runtime_allocator);
+        return Value.initNull();
+    }
     return Value.initFloat(a / b);
 }
 
@@ -2593,7 +2599,11 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
 pub fn php_mod(lhs: Value, rhs: Value) !Value {
     const a = lhs.toInt();
     const b = rhs.toInt();
-    if (b == 0) return error.DivisionByZero;
+    if (b == 0) {
+        // PHP在除零时抛出DivisionByZeroError异常
+        _ = try throwException("Modulo by zero", runtime_allocator);
+        return Value.initNull();
+    }
     // PHP 使用 remainder（保留符号），不是 modulo
     return Value.initInt(@rem(a, b));
 }
