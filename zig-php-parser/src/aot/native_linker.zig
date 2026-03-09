@@ -5129,17 +5129,26 @@ pub const NativeLinker = struct {
             },
             .bit_and => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() & reg_{d}.toInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
+                    const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
+                    const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
+                    try writer.print("    reg_{d}{s} = runtime.Value.initInt(reg_{d}{s}.toInt() & reg_{d}{s}.toInt());\n", .{ reg.id, result_deref, op.lhs.id, lhs_deref, op.rhs.id, rhs_deref });
                 }
             },
             .bit_or => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() | reg_{d}.toInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
+                    const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
+                    const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
+                    try writer.print("    reg_{d}{s} = runtime.Value.initInt(reg_{d}{s}.toInt() | reg_{d}{s}.toInt());\n", .{ reg.id, result_deref, op.lhs.id, lhs_deref, op.rhs.id, rhs_deref });
                 }
             },
             .bit_xor => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() ^ reg_{d}.toInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
+                    const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
+                    const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
+                    try writer.print("    reg_{d}{s} = runtime.Value.initInt(reg_{d}{s}.toInt() ^ reg_{d}{s}.toInt());\n", .{ reg.id, result_deref, op.lhs.id, lhs_deref, op.rhs.id, rhs_deref });
                 }
             },
             .nop => {},
