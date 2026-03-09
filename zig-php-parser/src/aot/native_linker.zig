@@ -3354,6 +3354,72 @@ pub const NativeLinker = struct {
         try writer.print(format_str, args);
     }
 
+    /// 统一的二元运算结果赋值
+    /// 自动处理alloca解引用和类型转换
+    fn writeBinaryOpAssignment(
+        self: *Self,
+        writer: anytype,
+        result_reg: usize,
+        result_type: std.meta.Tag(IR.Type),
+        op_name: []const u8,
+        lhs_reg: usize,
+        rhs_reg: usize,
+    ) !void {
+        try self.writeRegAssignmentPrefix(writer, result_reg);
+        
+        switch (result_type) {
+            .php_value => {
+                try writer.print("try runtime.{s}(", .{op_name});
+                try self.writeRegAccess(writer, lhs_reg);
+                try writer.writeAll(", ");
+                try self.writeRegAccess(writer, rhs_reg);
+                try writer.writeAll(");\n");
+            },
+            .i64 => {
+                try writer.print("(try runtime.{s}(", .{op_name});
+                try self.writeRegAccess(writer, lhs_reg);
+                try writer.writeAll(", ");
+                try self.writeRegAccess(writer, rhs_reg);
+                try writer.writeAll(")).asInt();\n");
+            },
+            .f64 => {
+                try writer.print("(try runtime.{s}(", .{op_name});
+                try self.writeRegAccess(writer, lhs_reg);
+                try writer.writeAll(", ");
+                try self.writeRegAccess(writer, rhs_reg);
+                try writer.writeAll(")).asFloat();\n");
+            },
+            .bool => {
+                try writer.print("(try runtime.{s}(", .{op_name});
+                try self.writeRegAccess(writer, lhs_reg);
+                try writer.writeAll(", ");
+                try self.writeRegAccess(writer, rhs_reg);
+                try writer.writeAll(")).asBool();\n");
+            },
+            else => {
+                try writer.print("try runtime.{s}(", .{op_name});
+                try self.writeRegAccess(writer, lhs_reg);
+                try writer.writeAll(", ");
+                try self.writeRegAccess(writer, rhs_reg);
+                try writer.writeAll(");\n");
+            },
+        }
+    }
+
+    /// 统一的寄存器访问（自动处理alloca解引用）
+    fn writeRegAccess(self: *Self, writer: anytype, reg_id: usize) !void {
+        const is_alloca = if (self.current_alloca_regs) |regs| 
+            regs.contains(reg_id) 
+        else 
+            false;
+        
+        if (is_alloca) {
+            try writer.print("reg_{d}.*", .{reg_id});
+        } else {
+            try writer.print("reg_{d}", .{reg_id});
+        }
+    }
+
     /// 统一的条件表达式生成
     /// 根据寄存器的实际类型生成正确的条件判断代码
     fn writeConditionExpr(
@@ -4703,9 +4769,10 @@ pub const NativeLinker = struct {
                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat(reg_{d}.asFloat() + reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
                     } else {
                         // 混合类型或 php_value，使用运行时函数
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
                         switch (result_tag) {
                             .php_value => {
-                                try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
+                                try writer.writeAll("try runtime.php_add(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
@@ -4713,7 +4780,7 @@ pub const NativeLinker = struct {
                             },
                             .i64 => {
                                 // 所有寄存器都是 Value 类型，需要包装
-                                try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_add(", .{reg.id});
+                                try writer.writeAll("runtime.Value.initInt((try runtime.php_add(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
@@ -4721,7 +4788,7 @@ pub const NativeLinker = struct {
                             },
                             .f64 => {
                                 // 所有寄存器都是 Value 类型，需要包装
-                                try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_add(", .{reg.id});
+                                try writer.writeAll("runtime.Value.initFloat((try runtime.php_add(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
@@ -4729,14 +4796,14 @@ pub const NativeLinker = struct {
                             },
                             .bool => {
                                 // 所有寄存器都是 Value 类型，需要包装
-                                try writer.print("    reg_{d} = runtime.Value.initBool((try runtime.php_add(", .{reg.id});
+                                try writer.writeAll("runtime.Value.initBool((try runtime.php_add(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asBool());\n");
                             },
                             else => {
-                                try writer.print("    reg_{d} = try runtime.php_add(", .{reg.id});
+                                try writer.writeAll("try runtime.php_add(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
@@ -4781,39 +4848,40 @@ pub const NativeLinker = struct {
                         try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_sub(reg_{d}, reg_{d})).asInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
                     } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
                         // 所有寄存器都是 Value 类型，必须使用 php_sub
-                        try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_sub(reg_{d}, reg_{d})).asFloat());\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat((try runtime.php_sub(reg_{d}, reg_{d})).asFloat());\n", .{ op.lhs.id, op.rhs.id });
                     } else {
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
                         switch (result_tag) {
                             .php_value => {
-                                try writer.print("    reg_{d} = try runtime.php_sub(", .{reg.id});
+                                try writer.writeAll("try runtime.php_sub(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(");\n");
                             },
                             .i64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_sub(", .{reg.id});
+                                try writer.writeAll("(try runtime.php_sub(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asInt();\n");
                             },
                             .f64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_sub(", .{reg.id});
+                                try writer.writeAll("(try runtime.php_sub(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asFloat();\n");
                             },
                             .bool => {
-                                try writer.print("    reg_{d} = (try runtime.php_sub(", .{reg.id});
+                                try writer.writeAll("(try runtime.php_sub(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asBool();\n");
                             },
                             else => {
-                                try writer.print("    reg_{d} = try runtime.php_sub(", .{reg.id});
+                                try writer.writeAll("try runtime.php_sub(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
@@ -4856,42 +4924,43 @@ pub const NativeLinker = struct {
 
                     if (lhs_tag == .i64 and rhs_tag == .i64 and result_tag == .i64) {
                         // 所有寄存器都是 Value 类型，必须使用 php_mul
-                        try writer.print("    reg_{d} = runtime.Value.initInt((try runtime.php_mul(reg_{d}, reg_{d})).asInt());\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt((try runtime.php_mul(reg_{d}, reg_{d})).asInt());\n", .{ op.lhs.id, op.rhs.id });
                     } else if (lhs_tag == .f64 and rhs_tag == .f64 and result_tag == .f64) {
                         // 所有寄存器都是 Value 类型，必须使用 php_mul
-                        try writer.print("    reg_{d} = runtime.Value.initFloat((try runtime.php_mul(reg_{d}, reg_{d})).asFloat());\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat((try runtime.php_mul(reg_{d}, reg_{d})).asFloat());\n", .{ op.lhs.id, op.rhs.id });
                     } else {
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
                         switch (result_tag) {
                             .php_value => {
-                                try writer.print("    reg_{d} = try runtime.php_mul(", .{reg.id});
+                                try writer.writeAll("try runtime.php_mul(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(");\n");
                             },
                             .i64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_mul(", .{reg.id});
+                                try writer.writeAll("(try runtime.php_mul(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asInt();\n");
                             },
                             .f64 => {
-                                try writer.print("    reg_{d} = (try runtime.php_mul(", .{reg.id});
+                                try writer.writeAll("(try runtime.php_mul(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asFloat();\n");
                             },
                             .bool => {
-                                try writer.print("    reg_{d} = (try runtime.php_mul(", .{reg.id});
+                                try writer.writeAll("(try runtime.php_mul(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
                                 try writer.writeAll(")).asBool();\n");
                             },
                             else => {
-                                try writer.print("    reg_{d} = try runtime.php_mul(", .{reg.id});
+                                try writer.writeAll("try runtime.php_mul(");
                                 try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
                                 try writer.writeAll(", ");
                                 try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
