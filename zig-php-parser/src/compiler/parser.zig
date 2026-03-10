@@ -230,7 +230,6 @@ pub const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) anyerror!ast.Node.Index {
-        
         var attributes: []const ast.Node.Index = &.{};
         if (self.curr.tag == .t_attribute_start) attributes = try self.parseAttributes();
 
@@ -525,7 +524,7 @@ pub const Parser = struct {
             // In Go mode, property names can be t_go_identifier (without $ prefix)
             var properties = std.ArrayListUnmanaged(ast.Node.Index){};
             defer properties.deinit(self.allocator);
-            
+
             // Parse first property
             var name_str: []const u8 = undefined;
             if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
@@ -553,14 +552,14 @@ pub const Parser = struct {
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
                 _ = try self.eat(.r_brace);
             }
-            
+
             const first_prop = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
             try properties.append(self.allocator, first_prop);
-            
+
             // Parse additional properties if comma-separated
             while (self.curr.tag == .comma) {
                 self.nextToken();
-                
+
                 var prop_name_str: []const u8 = undefined;
                 if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
                     const name_tok = try self.eat(.t_go_identifier);
@@ -573,33 +572,33 @@ pub const Parser = struct {
                     }
                 }
                 const prop_name_id = try self.context.intern(prop_name_str);
-                
+
                 var prop_default: ?ast.Node.Index = null;
                 if (self.curr.tag == .equal) {
                     self.nextToken();
                     prop_default = try self.parseExpression(0);
                 }
-                
+
                 var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){};
                 if (self.curr.tag == .l_brace) {
                     self.nextToken();
                     while (self.curr.tag != .r_brace) try prop_hooks.append(self.allocator, try self.parsePropertyHook());
                     _ = try self.eat(.r_brace);
                 }
-                
+
                 const prop_node = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = prop_name_id, .modifiers = modifiers, .type = type_node, .default_value = prop_default, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, prop_hooks.items) } } });
                 try properties.append(self.allocator, prop_node);
             }
-            
+
             if (self.curr.tag == .semicolon) {
                 self.nextToken();
             }
-            
+
             // If only one property, return it directly
             if (properties.items.len == 1) {
                 return properties.items[0];
             }
-            
+
             // Multiple properties: return as expr_list
             return self.createNode(.{ .tag = .expr_list, .main_token = token, .data = .{ .expr_list = .{ .exprs = try self.context.arena.allocator().dupe(ast.Node.Index, properties.items) } } });
         }
@@ -706,7 +705,7 @@ pub const Parser = struct {
             // In Go mode, property names can be t_go_identifier (without $ prefix)
             var properties = std.ArrayListUnmanaged(ast.Node.Index){};
             defer properties.deinit(self.allocator);
-            
+
             // Parse first property
             var name_str: []const u8 = undefined;
             if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
@@ -734,14 +733,14 @@ pub const Parser = struct {
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
                 _ = try self.eat(.r_brace);
             }
-            
+
             const first_prop = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .type = type_node, .default_value = default_value, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, hooks.items) } } });
             try properties.append(self.allocator, first_prop);
-            
+
             // Parse additional properties if comma-separated
             while (self.curr.tag == .comma) {
                 self.nextToken();
-                
+
                 var prop_name_str: []const u8 = undefined;
                 if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier) {
                     const name_tok = try self.eat(.t_go_identifier);
@@ -754,33 +753,33 @@ pub const Parser = struct {
                     }
                 }
                 const prop_name_id = try self.context.intern(prop_name_str);
-                
+
                 var prop_default: ?ast.Node.Index = null;
                 if (self.curr.tag == .equal) {
                     self.nextToken();
                     prop_default = try self.parseExpression(0);
                 }
-                
+
                 var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){};
                 if (self.curr.tag == .l_brace) {
                     self.nextToken();
                     while (self.curr.tag != .r_brace) try prop_hooks.append(self.allocator, try self.parsePropertyHook());
                     _ = try self.eat(.r_brace);
                 }
-                
+
                 const prop_node = try self.createNode(.{ .tag = .property_decl, .main_token = token, .data = .{ .property_decl = .{ .attributes = attributes, .name = prop_name_id, .modifiers = modifiers, .type = type_node, .default_value = prop_default, .hooks = try self.context.arena.allocator().dupe(ast.Node.Index, prop_hooks.items) } } });
                 try properties.append(self.allocator, prop_node);
             }
-            
+
             if (self.curr.tag == .semicolon) {
                 self.nextToken();
             }
-            
+
             // If only one property, return it directly
             if (properties.items.len == 1) {
                 return properties.items[0];
             }
-            
+
             // Multiple properties: return as expr_list
             return self.createNode(.{ .tag = .expr_list, .main_token = token, .data = .{ .expr_list = .{ .exprs = try self.context.arena.allocator().dupe(ast.Node.Index, properties.items) } } });
         }
@@ -920,13 +919,13 @@ pub const Parser = struct {
             try self.eat(.k_fn)
         else
             try self.eat(.k_function);
-        
+
         // Check for reference return (&)
         const returns_reference = if (self.curr.tag == .ampersand) blk: {
             self.nextToken();
             break :blk true;
         } else false;
-        
+
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         _ = try self.eat(.l_paren);
@@ -1086,7 +1085,7 @@ pub const Parser = struct {
             // 有 => 符号，第一个表达式是键
             _ = try self.eat(.fat_arrow);
             key = first_expr;
-            
+
             // 检查值是否是引用
             if (self.curr.tag == .ampersand) {
                 _ = try self.eat(.ampersand);
@@ -1359,13 +1358,13 @@ pub const Parser = struct {
 
         const target = try self.parseExpression(100);
         const op = try self.eat(.equal);
-        
+
         // Check for reference assignment (&)
         const is_reference = if (self.curr.tag == .ampersand) blk: {
             self.nextToken();
             break :blk true;
         } else false;
-        
+
         const val = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val, .is_reference = is_reference } } });
@@ -1602,7 +1601,7 @@ pub const Parser = struct {
                     left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = expr_node } } });
                     continue;
                 }
-                
+
                 // 方法名可以是标识符，也可以是某些关键字（如 set, get）
                 // In Go mode, member names are t_go_identifier; in PHP mode, they are t_string
                 const member_name_tok = if (self.curr.tag == .t_string)
@@ -1748,7 +1747,7 @@ pub const Parser = struct {
             } else if (tag == .equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
-            } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal) {
+            } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal or tag == .star_star_equal or tag == .less_less_equal or tag == .greater_greater_equal or tag == .and_equal or tag == .or_equal or tag == .caret_equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .compound_assignment, .main_token = op, .data = .{ .compound_assignment = .{ .target = left, .op = tag, .value = right } } });
             } else if (tag == .question) {
@@ -2121,16 +2120,16 @@ pub const Parser = struct {
                                 const t = self.curr;
                                 self.nextToken();
                                 const var_text = self.lexer.buffer[t.loc.start..t.loc.end];
-                                
+
                                 // 检查是否包含 -> (格式: $var->prop)
                                 if (std.mem.indexOf(u8, var_text, "->")) |arrow_pos| {
                                     // 分割变量名和属性名
                                     const var_part = var_text[0..arrow_pos]; // $var
-                                    const prop_part = var_text[arrow_pos + 2..]; // prop
-                                    
+                                    const prop_part = var_text[arrow_pos + 2 ..]; // prop
+
                                     // 创建变量节点
                                     const var_node = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_part) } } });
-                                    
+
                                     // 创建属性访问节点
                                     break :blk try self.createNode(.{ .tag = .property_access, .main_token = t, .data = .{ .property_access = .{ .target = var_node, .property_name = try self.context.intern(prop_part) } } });
                                 } else {
@@ -2232,16 +2231,16 @@ pub const Parser = struct {
                 .t_variable => {
                     const t = try self.eat(.t_variable);
                     const var_text = self.lexer.buffer[t.loc.start..t.loc.end];
-                    
+
                     // 检查是否包含 -> (格式: $var->prop)
                     if (std.mem.indexOf(u8, var_text, "->")) |arrow_pos| {
                         // 分割变量名和属性名
                         const var_part = var_text[0..arrow_pos]; // $var
-                        const prop_part = var_text[arrow_pos + 2..]; // prop
-                        
+                        const prop_part = var_text[arrow_pos + 2 ..]; // prop
+
                         // 创建变量节点
                         const var_node = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_part) } } });
-                        
+
                         // 创建属性访问节点
                         part = try self.createNode(.{ .tag = .property_access, .main_token = t, .data = .{ .property_access = .{ .target = var_node, .property_name = try self.context.intern(prop_part) } } });
                     } else {
@@ -2346,12 +2345,12 @@ pub const Parser = struct {
             if (self.curr.tag == .k_default) {
                 self.nextToken();
                 _ = try self.eat(.fat_arrow);
-                const body = try self.parseExpression(1);  // 使用 1 避免解析逗号
+                const body = try self.parseExpression(1); // 使用 1 避免解析逗号
                 default_arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{}, .body = body } } });
             } else {
-                const cond = try self.parseExpression(1);  // 使用 1 避免解析逗号
+                const cond = try self.parseExpression(1); // 使用 1 避免解析逗号
                 _ = try self.eat(.fat_arrow);
-                const body = try self.parseExpression(1);  // 使用 1 避免解析逗号
+                const body = try self.parseExpression(1); // 使用 1 避免解析逗号
                 // Use arena to allocate conditions array to avoid dangling pointer
                 const conditions = try arena.alloc(ast.Node.Index, 1);
                 conditions[0] = cond;

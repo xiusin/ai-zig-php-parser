@@ -428,6 +428,15 @@ pub fn getException() Value {
     return Value.initNull();
 }
 
+/// 查看当前异常但不消费（用于 catch 类型分派）
+pub fn peekException() Value {
+    if (has_exception) {
+        _ = current_exception.retain();
+        return current_exception;
+    }
+    return Value.initNull();
+}
+
 pub fn php_handle_uncaught_exception() void {
     if (has_exception) {
         has_exception = false;

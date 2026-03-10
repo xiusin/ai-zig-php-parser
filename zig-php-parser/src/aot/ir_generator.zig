@@ -2040,16 +2040,106 @@ pub const IRGenerator = struct {
             }
         }
 
-        // Generate catch clauses
-        self.setCurrentBlock(catch_block);
-        for (try_data.catch_clauses) |catch_idx| {
-            try self.generateCatchClause(catch_idx, finally_block orelse exit_block);
-        }
-        if (!self.isBlockTerminated()) {
-            if (finally_block) |fb| {
-                self.setTerminator(.{ .br = fb });
-            } else {
-                self.setTerminator(.{ .br = exit_block });
+        // Generate catch clauses — 每个 catch 子句一个独立块，dispatcher 链式类型匹配
+        const target_after_catch = finally_block orelse exit_block;
+        if (try_data.catch_clauses.len == 1) {
+            // 单个 catch：直接在 catch_block 中生成
+            self.setCurrentBlock(catch_block);
+            try self.generateCatchClause(try_data.catch_clauses[0], target_after_catch);
+            if (!self.isBlockTerminated()) {
+                self.setTerminator(.{ .br = target_after_catch });
+            }
+        } else if (try_data.catch_clauses.len > 1) {
+            // 多个 catch：为每个创建独立块，dispatcher 用 exception_matches 分支
+            var catch_blocks_list = std.ArrayListUnmanaged(*BasicBlock){};
+            defer catch_blocks_list.deinit(self.allocator);
+            for (try_data.catch_clauses, 0..) |_, ci| {
+                var buf2: [64]u8 = undefined;
+                const blk_name = std.fmt.bufPrint(&buf2, "catch_{d}", .{ci}) catch "catch_n";
+                const blk = try self.createBlock(blk_name);
+                try catch_blocks_list.append(self.allocator, blk);
+            }
+            // dispatcher：在 catch_block 中查看异常类型（不消费）并分支
+            self.setCurrentBlock(catch_block);
+            const exc_reg = try self.emitWithResult(.{ .peek_exception = {} }, .php_value);
+            for (try_data.catch_clauses, 0..) |catch_idx, ci| {
+                const cnode = self.getNode(catch_idx) orelse continue;
+                if (cnode.tag != .catch_clause) continue;
+                const cdata = cnode.data.catch_clause;
+                var exc_type: ?[]const u8 = null;
+                if (cdata.exception_type) |type_idx| {
+                    const tnode = self.getNode(type_idx);
+                    if (tnode != null and tnode.?.tag == .named_type) {
+                        exc_type = self.getString(tnode.?.data.named_type.name);
+                    }
+                }
+                if (exc_type) |etype| {
+                    // 有类型限定：检查 instanceof
+                    const class_name_id = try self.module.?.internString(etype);
+                    const class_name_reg = try self.emitWithResult(.{ .const_string = class_name_id }, .php_value);
+                    const match_reg = try self.emitWithResult(.{ .instanceof = .{ .object = exc_reg, .class_name = class_name_reg } }, .bool);
+                    const next_check = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else target_after_catch;
+                    self.setTerminator(.{ .cond_br = .{
+                        .cond = match_reg,
+                        .then_block = catch_blocks_list.items[ci],
+                        .else_block = next_check,
+                    } });
+                    // 后续分支需要新块
+                    if (ci + 1 < try_data.catch_clauses.len) {
+                        const cont_blk = try self.createBlock("catch_dispatch");
+                        // 实际不需要新块，else_block 直接指向下一个 catch 块或 next_check
+                        _ = cont_blk;
+                    }
+                } else {
+                    // 无类型（catch all）：直接跳转
+                    self.setTerminator(.{ .br = catch_blocks_list.items[ci] });
+                }
+                // 如果已设置 terminator，后续 emit 会到新块
+                // 在 else_block 是下一个 catch_block 的情况下，需要在那个块继续 dispatch
+                // 但 cond_br 的 else_block 直接指向下一个 catch_blocks_list[ci+1]
+                // 所以不需要额外的 dispatch 块
+                break; // dispatcher 只处理第一个，后续由 cond_br 链式跳转
+            }
+            // 为后续 catch 生成 dispatcher 入口（每个 catch block 入口检查自己的类型）
+            for (try_data.catch_clauses, 0..) |catch_idx, ci| {
+                self.setCurrentBlock(catch_blocks_list.items[ci]);
+                const cnode2 = self.getNode(catch_idx) orelse continue;
+                if (cnode2.tag != .catch_clause) continue;
+                const cdata2 = cnode2.data.catch_clause;
+                // 如果不是最后一个 catch 且有类型，需要在块入口也检查类型
+                // （因为可能从上一个 catch 的 else_block 直接跳过来）
+                var exc_type2: ?[]const u8 = null;
+                if (cdata2.exception_type) |type_idx2| {
+                    const tnode2 = self.getNode(type_idx2);
+                    if (tnode2 != null and tnode2.?.tag == .named_type) {
+                        exc_type2 = self.getString(tnode2.?.data.named_type.name);
+                    }
+                }
+                if (ci > 0 and exc_type2 != null) {
+                    // 非第一个有类型的 catch：需要在入口检查类型（不消费异常）
+                    const exc_reg2 = try self.emitWithResult(.{ .peek_exception = {} }, .php_value);
+                    const class_name_id2 = try self.module.?.internString(exc_type2.?);
+                    const class_name_reg2 = try self.emitWithResult(.{ .const_string = class_name_id2 }, .php_value);
+                    const match_reg2 = try self.emitWithResult(.{ .instanceof = .{ .object = exc_reg2, .class_name = class_name_reg2 } }, .bool);
+                    const next_target = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else target_after_catch;
+                    const body_block = try self.createBlock("catch_body");
+                    self.setTerminator(.{ .cond_br = .{
+                        .cond = match_reg2,
+                        .then_block = body_block,
+                        .else_block = next_target,
+                    } });
+                    self.setCurrentBlock(body_block);
+                }
+                try self.generateCatchClause(catch_idx, target_after_catch);
+                if (!self.isBlockTerminated()) {
+                    self.setTerminator(.{ .br = target_after_catch });
+                }
+            }
+        } else {
+            // 无 catch 子句
+            self.setCurrentBlock(catch_block);
+            if (!self.isBlockTerminated()) {
+                self.setTerminator(.{ .br = target_after_catch });
             }
         }
 
@@ -4385,6 +4475,17 @@ pub const IRGenerator = struct {
         } }, .php_value);
     }
 
+    /// 递归展开 use() 中逗号分隔的捕获节点（binary_expr → 叶子节点）
+    fn flattenCaptureNode(self: *Self, idx: Node.Index, out: *std.ArrayListUnmanaged(Node.Index)) !void {
+        const n = self.getNode(idx) orelse return;
+        if (n.tag == .binary_expr) {
+            try self.flattenCaptureNode(n.data.binary_expr.lhs, out);
+            try self.flattenCaptureNode(n.data.binary_expr.rhs, out);
+        } else {
+            try out.append(self.allocator, idx);
+        }
+    }
+
     /// Generate IR for closure
     fn generateClosure(self: *Self, node: *const Node) !Register {
         const closure_data = node.data.closure;
@@ -4397,7 +4498,14 @@ pub const IRGenerator = struct {
         var cap_by_ref = std.ArrayListUnmanaged(bool){};
         defer cap_by_ref.deinit(self.allocator);
 
+        // 收集所有捕获节点索引（展开逗号分隔的 binary_expr）
+        var flat_cap_indices = std.ArrayListUnmanaged(Node.Index){};
+        defer flat_cap_indices.deinit(self.allocator);
         for (closure_data.captures) |cap_idx| {
+            try self.flattenCaptureNode(cap_idx, &flat_cap_indices);
+        }
+
+        for (flat_cap_indices.items) |cap_idx| {
             const cap_node = self.getNode(cap_idx) orelse continue;
 
             var var_name: []const u8 = undefined;
@@ -4441,7 +4549,8 @@ pub const IRGenerator = struct {
                 if (self.getVarRegister(var_name)) |ptr_reg| {
                     val_reg = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
                 } else {
-                    val_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    // 变量可能是 __main__ 中的全局变量，从全局表读取
+                    val_reg = try self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
                 }
                 try captures.append(self.allocator, val_reg);
                 try cap_names.append(self.allocator, var_name);
@@ -4469,10 +4578,12 @@ pub const IRGenerator = struct {
         const prev_block = self.current_block;
         const prev_var_registers = self.var_registers;
         const prev_global_vars = self.global_vars;
+        const prev_has_this = self.current_has_this_param;
 
         self.current_function = func;
         self.var_registers = .{};
         self.global_vars = .{};
+        self.current_has_this_param = false;
 
         const entry = try func.createBlock("entry");
         self.setCurrentBlock(entry);
@@ -4501,6 +4612,7 @@ pub const IRGenerator = struct {
         self.global_vars = prev_global_vars;
         self.current_function = prev_function;
         self.current_block = prev_block;
+        self.current_has_this_param = prev_has_this;
 
         // Return callable reference
         // Create array for captures

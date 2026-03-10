@@ -830,6 +830,8 @@ pub const Instruction = struct {
         catch_: CatchOp,
         /// Get current exception
         get_exception: void,
+        /// Peek current exception (does not consume)
+        peek_exception: void,
         /// Clear current exception
         clear_exception: void,
 
@@ -1534,6 +1536,7 @@ pub const IRPrinter = struct {
                 }
             },
             .get_exception => try self.write("get_exception"),
+            .peek_exception => try self.write("peek_exception"),
             .clear_exception => try self.write("clear_exception"),
 
             // Concurrency

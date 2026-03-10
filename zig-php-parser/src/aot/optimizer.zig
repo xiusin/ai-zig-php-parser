@@ -610,7 +610,6 @@ pub const IROptimizer = struct {
                 old_types.deinit();
             }
             try module.inferred_types.put(func.name, func_types);
-
         }
     }
 
@@ -1506,7 +1505,7 @@ pub const IROptimizer = struct {
                     try func_types.put(reg_id, inferred_type);
                 }
             }
-            
+
             // 如果已存在，先释放旧的
             if (module.inferred_types.getPtr(func.name)) |old_map| {
                 old_map.deinit();
@@ -1581,14 +1580,12 @@ pub const IROptimizer = struct {
                         if (inst.result) |res| {
                             try reg_to_alloca.put(res.id, inst);
                         }
-                    } else {
-                    }
+                    } else {}
                 }
             }
         }
 
         if (promotable_allocas.items.len == 0) return false;
-
 
         if (timer.read() > timeout_ns) {
             return false;
@@ -1617,7 +1614,6 @@ pub const IROptimizer = struct {
             }
         }
 
-
         if (timer.read() > timeout_ns) {
             return false;
         }
@@ -1636,7 +1632,7 @@ pub const IROptimizer = struct {
 
         for (promotable_allocas.items) |alloca| {
             const defs = def_blocks.get(alloca).?;
-            
+
             // Compute IDF
             var idf = try self.computeIDF(defs.items, &dt);
             defer idf.deinit(self.allocator);
@@ -1663,7 +1659,6 @@ pub const IROptimizer = struct {
                 try phis_in_block.?.put(alloca, phi_inst);
             }
         }
-
 
         if (timer.read() > timeout_ns) {
             return false;
@@ -1696,9 +1691,9 @@ pub const IROptimizer = struct {
             // 记录回边的 phi incoming
             var back_edges = try std.ArrayList(BackEdge).initCapacity(self.allocator, 0);
             defer back_edges.deinit(self.allocator);
-            
+
             try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map, &back_edges);
-            
+
             // 填充回边
             for (back_edges.items) |edge| {
                 if (new_phis.getPtr(edge.to)) |succ_phis| {
@@ -1717,7 +1712,6 @@ pub const IROptimizer = struct {
                 }
             }
         }
-
 
         // 6. 应用寄存器重命名：更新所有指令的操作数
         if (reg_rename_map.count() > 0) {
@@ -1823,7 +1817,6 @@ pub const IROptimizer = struct {
             alloca.op = .nop;
             self.stats.allocas_promoted += 1;
         }
-        
 
         return true;
     }
@@ -1980,7 +1973,7 @@ pub const IROptimizer = struct {
         if (alloca.op == .alloca and alloca.op.alloca.no_optimize) {
             return false;
         }
-        
+
         // Result must be used
         const result_reg = alloca.result orelse return false;
         const result_id = result_reg.id;
@@ -2014,7 +2007,7 @@ pub const IROptimizer = struct {
                     else => {
                         // Check if register is used in other operands
                         if (self.usesRegister(inst, result_id)) {
-                            std.debug.print("  reg_{d} NOT promotable: used in {s}\n", .{result_id, @tagName(inst.op)});
+                            std.debug.print("  reg_{d} NOT promotable: used in {s}\n", .{ result_id, @tagName(inst.op) });
                             return false;
                         }
                     },
@@ -2145,7 +2138,7 @@ pub const IROptimizer = struct {
         for (block.successors.items) |succ| {
             // 检测回边：如果后继的索引 <= 当前块的索引，可能是回边
             const is_back_edge = succ.index <= block.index;
-            
+
             if (is_back_edge) {
                 // 记录回边，稍后填充
                 if (new_phis.getPtr(succ)) |succ_phis| {
@@ -2572,7 +2565,7 @@ pub const IROptimizer = struct {
         for (module.functions.items) |func| {
             // 先运行逃逸分析
             // try self.escape_analysis.analyze(func);
-            
+
             if (try self.eliminateRCEllisionInFunction(func)) {
                 changed = true;
             }
@@ -2600,7 +2593,7 @@ pub const IROptimizer = struct {
                             changed = true;
                             continue;
                         }
-                        
+
                         const operand_tag = @as(std.meta.Tag(Type), op.operand.type_);
                         if (operand_tag != .php_value and operand_tag != .php_string and operand_tag != .php_array and operand_tag != .php_object and operand_tag != .php_resource and operand_tag != .php_callable) {
                             _ = block.instructions.orderedRemove(i);
@@ -2643,7 +2636,7 @@ pub const IROptimizer = struct {
                             changed = true;
                             continue;
                         }
-                        
+
                         const operand_tag = @as(std.meta.Tag(Type), op.operand.type_);
                         if (operand_tag != .php_value and operand_tag != .php_string and operand_tag != .php_array and operand_tag != .php_object and operand_tag != .php_resource and operand_tag != .php_callable) {
                             _ = block.instructions.orderedRemove(i);
@@ -2835,7 +2828,7 @@ pub const IROptimizer = struct {
             },
             // Instructions with no register operands
             .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .param, .capture_get, .arg_count, .has_arg => {},
-            .try_begin, .try_end, .get_exception, .clear_exception => {},
+            .try_begin, .try_end, .get_exception, .peek_exception, .clear_exception => {},
             .mutex_lock, .mutex_unlock, .mutex_new => {},
             .catch_ => {},
             // Global variable operations
@@ -2943,7 +2936,7 @@ pub const IROptimizer = struct {
             .static_method_call, .static_property_get, .static_property_set => true,
             .closure_new, .closure_bind, .parent_call => true,
             .retain, .release, .unset_var => true,
-            .try_begin, .try_end, .catch_, .get_exception, .clear_exception => true,
+            .try_begin, .try_end, .catch_, .get_exception, .peek_exception, .clear_exception => true,
             .mutex_lock, .mutex_unlock, .mutex_new => true,
             .go_spawn, .channel_new, .channel_send, .channel_recv, .channel_close, .select_, .await_ => true,
             .debug_print => true,

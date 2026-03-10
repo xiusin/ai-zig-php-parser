@@ -6989,7 +6989,13 @@ pub const NativeLinker = struct {
             .get_exception => {
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                    try writer.print("    reg_{d} = runtime.getException();\n", .{reg.id});
+                }
+            },
+            .peek_exception => {
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    try writer.print("    reg_{d} = runtime.peekException();\n", .{reg.id});
                 }
             },
             .clear_exception => {
@@ -12320,6 +12326,35 @@ pub const NativeLinker = struct {
             },
 
             // ========================================================================
+            // 位运算指令
+            // ========================================================================
+            .bit_and => |op| {
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initInt(reg_{d}.toInt() & reg_{d}.toInt());\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                }
+            },
+            .bit_or => |op| {
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initInt(reg_{d}.toInt() | reg_{d}.toInt());\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                }
+            },
+            .bit_xor => |op| {
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initInt(reg_{d}.toInt() ^ reg_{d}.toInt());\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                }
+            },
+            .shl => |op| {
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initInt(reg_{d}.toInt() << @as(u6, @intCast(@min(63, @max(0, reg_{d}.toInt())))));\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                }
+            },
+            .shr => |op| {
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.Value.initInt(reg_{d}.toInt() >> @as(u6, @intCast(@min(63, @max(0, reg_{d}.toInt())))));\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
+                }
+            },
+
+            // ========================================================================
             // 逻辑运算指令
             // ========================================================================
             .and_ => |op| {
@@ -12693,6 +12728,12 @@ pub const NativeLinker = struct {
                 // 获取当前捕获的异常
                 if (inst.result) |_| {
                     try writer.print("        {s} = runtime.getException();\n", .{result_reg.?});
+                }
+            },
+            .peek_exception => {
+                // 查看当前异常但不消费（用于 catch 类型分派）
+                if (inst.result) |_| {
+                    try writer.print("        {s} = runtime.peekException();\n", .{result_reg.?});
                 }
             },
 
