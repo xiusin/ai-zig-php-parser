@@ -262,7 +262,7 @@ pub const Function = struct {
         if (self.name_owned) {
             self.allocator.free(self.name);
         }
-        
+
         self.params.deinit(self.allocator);
         for (self.blocks.items) |block| {
             block.deinit();
@@ -880,6 +880,7 @@ pub const Instruction = struct {
     pub const CaptureGetOp = struct {
         index: u32,
         name: []const u8,
+        by_ref: bool = false,
     };
 
     pub const HasArgOp = struct {

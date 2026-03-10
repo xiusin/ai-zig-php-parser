@@ -4394,6 +4394,8 @@ pub const IRGenerator = struct {
         defer cap_names.deinit(self.allocator);
         var captures = std.ArrayListUnmanaged(Register){};
         defer captures.deinit(self.allocator);
+        var cap_by_ref = std.ArrayListUnmanaged(bool){};
+        defer cap_by_ref.deinit(self.allocator);
 
         for (closure_data.captures) |cap_idx| {
             const cap_node = self.getNode(cap_idx) orelse continue;
@@ -4427,10 +4429,12 @@ pub const IRGenerator = struct {
                     const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = ptr_reg } }, .php_value);
                     try captures.append(self.allocator, ref_reg);
                     try cap_names.append(self.allocator, var_name);
+                    try cap_by_ref.append(self.allocator, true);
                 } else {
                     const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     try captures.append(self.allocator, null_reg);
                     try cap_names.append(self.allocator, var_name);
+                    try cap_by_ref.append(self.allocator, true);
                 }
             } else {
                 var val_reg: Register = undefined;
@@ -4441,6 +4445,7 @@ pub const IRGenerator = struct {
                 }
                 try captures.append(self.allocator, val_reg);
                 try cap_names.append(self.allocator, var_name);
+                try cap_by_ref.append(self.allocator, false);
             }
         }
 
@@ -4463,9 +4468,11 @@ pub const IRGenerator = struct {
         const prev_function = self.current_function;
         const prev_block = self.current_block;
         const prev_var_registers = self.var_registers;
+        const prev_global_vars = self.global_vars;
 
         self.current_function = func;
         self.var_registers = .{};
+        self.global_vars = .{};
 
         const entry = try func.createBlock("entry");
         self.setCurrentBlock(entry);
@@ -4475,7 +4482,8 @@ pub const IRGenerator = struct {
 
         // Process captures (inject into local scope)
         for (cap_names.items, 0..) |var_name, i| {
-            const capture_val = try self.emitWithResult(.{ .capture_get = .{ .index = @intCast(i), .name = var_name } }, .php_value);
+            const is_ref = if (i < cap_by_ref.items.len) cap_by_ref.items[i] else false;
+            const capture_val = try self.emitWithResult(.{ .capture_get = .{ .index = @intCast(i), .name = var_name, .by_ref = is_ref } }, .php_value);
             const local_ptr = try self.getOrCreateVarRegister(var_name, .php_value);
             _ = try self.emit(.{ .store = .{ .ptr = local_ptr, .value = capture_val } }, null);
         }
@@ -4489,6 +4497,8 @@ pub const IRGenerator = struct {
 
         self.var_registers.deinit(self.allocator);
         self.var_registers = prev_var_registers;
+        self.global_vars.deinit(self.allocator);
+        self.global_vars = prev_global_vars;
         self.current_function = prev_function;
         self.current_block = prev_block;
 
@@ -4552,9 +4562,11 @@ pub const IRGenerator = struct {
         const prev_function = self.current_function;
         const prev_block = self.current_block;
         const prev_var_registers = self.var_registers;
+        const prev_global_vars = self.global_vars;
 
         self.current_function = func;
         self.var_registers = .{};
+        self.global_vars = .{};
 
         const entry = try func.createBlock("entry");
         self.setCurrentBlock(entry);
@@ -4575,6 +4587,8 @@ pub const IRGenerator = struct {
 
         self.var_registers.deinit(self.allocator);
         self.var_registers = prev_var_registers;
+        self.global_vars.deinit(self.allocator);
+        self.global_vars = prev_global_vars;
         self.current_function = prev_function;
         self.current_block = prev_block;
 
