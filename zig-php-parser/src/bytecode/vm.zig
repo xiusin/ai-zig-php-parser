@@ -3038,8 +3038,37 @@ fn builtinPregMatch(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     defer pcre2_match_data_free_8(match_data);
 
     const rc = pcre2_match_8(re, subject.ptr, subject.len, 0, 0, match_data, null);
-    if (rc == PCRE2_ERROR_NOMATCH) return .{ .int_val = 0 };
-    if (rc < 0) return .{ .int_val = 0 };
+    if (rc == PCRE2_ERROR_NOMATCH) {
+        // 如果有matches参数，设置为空数组
+        if (args.len >= 3) {
+            args[2].array_val.elements.clearRetainingCapacity();
+        }
+        return .{ .int_val = 0 };
+    }
+    if (rc < 0) {
+        if (args.len >= 3) {
+            args[2].array_val.elements.clearRetainingCapacity();
+        }
+        return .{ .int_val = 0 };
+    }
+    
+    // 填充matches数组
+    if (args.len >= 3) {
+        args[2].array_val.elements.clearRetainingCapacity();
+        const ovec = pcre2_get_ovector_pointer_8(match_data);
+        
+        var i: usize = 0;
+        while (i < @as(usize, @intCast(rc))) : (i += 1) {
+            const start = ovec[i * 2];
+            const end = ovec[i * 2 + 1];
+            if (start < subject.len and end <= subject.len and start <= end) {
+                const capture = subject[start..end];
+                const capture_str = vm.createString(capture) catch return BytecodeVM.VMError.OutOfMemory;
+                args[2].array_val.elements.append(vm.allocator, .{ .string_val = capture_str }) catch return BytecodeVM.VMError.OutOfMemory;
+            }
+        }
+    }
+    
     return .{ .int_val = 1 };
 }
 

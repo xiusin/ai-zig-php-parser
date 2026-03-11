@@ -3948,6 +3948,30 @@ pub const IRGenerator = struct {
                     padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
+            } else if (std.mem.eql(u8, func_name, "preg_match")) {
+                // preg_match有3个参数时，第3个是引用参数matches
+                if (args.len == 3) {
+                    // 第3个参数需要转换为引用
+                    // 获取原始参数表达式
+                    const matches_arg_idx = positional_args.items[2];
+                    const matches_node = self.getNode(matches_arg_idx);
+                    
+                    if (matches_node != null and matches_node.?.tag == .variable) {
+                        const var_name = self.getString(matches_node.?.data.variable.name);
+                        
+                        // 获取或创建变量的alloca
+                        const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                        
+                        // 创建引用
+                        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                        
+                        // 替换第3个参数
+                        args[2] = ref_reg;
+                    }
+                    
+                    // 修改函数名
+                    func_name = "preg_match_with_matches";
+                }
             } else if (std.mem.eql(u8, func_name, "explode")) {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);

@@ -129,6 +129,23 @@ pub const NativeLinker = struct {
     param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
     current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
 
+    /// 查找make_ref指令的原始alloca
+    fn findMakeRefSource(self: *Self, reg_id: usize) ?usize {
+        const func = self.current_function_for_resolve orelse return null;
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |result_reg| {
+                    if (result_reg.id == reg_id) {
+                        if (inst.op == .make_ref) {
+                            return inst.op.make_ref.ptr.id;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     /// 检查寄存器是否需要 release（排除优化的 alloca）
     fn shouldReleaseReg(self: *Self, reg_id: usize) bool {
         if (self.current_optimized_alloca_regs) |opt_regs| {
@@ -1289,6 +1306,7 @@ pub const NativeLinker = struct {
         .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
         .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
+        .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
         .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
         .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
         .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
@@ -6166,8 +6184,32 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
 
-                        // 特殊处理 max/min：使用数组参数
-                        if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
+                        // 特殊处理 preg_match_with_matches：第3个参数是引用
+                        if (std.mem.eql(u8, runtime_name, "preg_match_with_matches")) {
+                            if (op.args.len >= 3) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                // 前2个参数正常传递
+                                try self.writeValueArgs(writer, op.args[0..2]);
+                                try writer.writeAll(", ");
+                                // 第3个参数：如果是make_ref的结果，找到原始alloca并直接传递（不加&）
+                                const matches_arg = op.args[2];
+                                const matches_reg_id = matches_arg.id;
+                                
+                                if (self.findMakeRefSource(matches_reg_id)) |alloca_id| {
+                                    // alloca本身就是指针，直接传递
+                                    try writer.print("reg_{d}", .{alloca_id});
+                                } else {
+                                    // fallback：传递地址
+                                    try writer.print("&reg_{d}", .{matches_reg_id});
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else {
+                                // 参数不足，fallback
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            }
+                        } else if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                             try self.writeValueArgsArray(writer, op.args);
                             try writer.writeAll(");\n");
