@@ -3069,7 +3069,7 @@ pub fn print_r(value: Value, return_output: Value) !Value {
     var buffer = try std.ArrayList(u8).initCapacity(runtime_allocator, 256);
     defer buffer.deinit(runtime_allocator);
 
-    try printValue(buffer.writer(runtime_allocator), value, 0);
+    try printValue(buffer.writer(runtime_allocator), value, 0, false);
 
     if (want_return) {
         return Value.initString(try PHPString.init(runtime_allocator, buffer.items));
@@ -3094,18 +3094,21 @@ pub fn var_export(value: Value, return_output: Value) !Value {
 
 fn writeIndent(writer: anytype, indent: usize) !void {
     var i: usize = 0;
-    while (i < indent) : (i += 1) {
-        try writer.writeAll("  ");
+    while (i < indent * 4) : (i += 1) {  // 4空格缩进
+        try writer.writeByte(' ');
     }
 }
 
-fn printValue(writer: anytype, value: Value, indent: usize) !void {
+fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !void {
     if (value.isNull()) {
-        try writer.writeAll("NULL");
+        // null不输出任何内容（PHP行为）
         return;
     }
     if (value.isBool()) {
-        try writer.writeAll(if (value.asBool()) "true" else "false");
+        // bool输出1或空（PHP行为）
+        if (value.asBool()) {
+            try writer.writeByte('1');
+        }
         return;
     }
     if (value.isInt()) {
@@ -3113,7 +3116,13 @@ fn printValue(writer: anytype, value: Value, indent: usize) !void {
         return;
     }
     if (value.isFloat()) {
-        try writer.print("{d}", .{value.asFloat()});
+        const f = value.asFloat();
+        // PHP格式化浮点数
+        if (@floor(f) == f and f >= -1e15 and f <= 1e15) {
+            try writer.print("{d}", .{@as(i64, @intFromFloat(f))});
+        } else {
+            try writer.print("{d}", .{f});
+        }
         return;
     }
     if (value.isString()) {
@@ -3122,40 +3131,104 @@ fn printValue(writer: anytype, value: Value, indent: usize) !void {
     }
     if (value.isArray()) {
         const arr = value.asArray();
+        
+        // 数组开始
         try writer.writeAll("Array\n");
-        try writeIndent(writer, indent);
-        try writer.writeAll("(\n");
-        var iter = arr.elements.iterator();
-        while (iter.next()) |entry| {
+        if (is_nested) {
             try writeIndent(writer, indent + 1);
+        } else {
+            try writeIndent(writer, indent);
+        }
+        try writer.writeAll("(\n");
+        
+        // 遍历元素
+        const count = arr.elements.count();
+        var iter = arr.elements.iterator();
+        var idx: usize = 0;
+        while (iter.next()) |entry| {
+            const elem_indent = if (is_nested) indent + 2 else indent + 1;
+            try writeIndent(writer, elem_indent);
             switch (entry.key_ptr.*) {
                 .integer => |i| try writer.print("[{d}] => ", .{i}),
                 .string => |s| try writer.print("[{s}] => ", .{s.data}),
             }
-            try printValue(writer, entry.value_ptr.*, indent + 1);
-            try writer.writeAll("\n");
+            
+            const val = entry.value_ptr.*;
+            const is_complex = val.isArray() or Value_isObject(val);
+            
+            if (is_complex) {
+                try printValue(writer, val, elem_indent, true);
+                // 如果不是最后一个元素，添加空行
+                if (idx < count - 1) {
+                    try writer.writeByte('\n');
+                }
+            } else {
+                try printValue(writer, val, elem_indent, false);
+                try writer.writeByte('\n');
+            }
+            
+            idx += 1;
         }
-        try writeIndent(writer, indent);
+        
+        if (is_nested) {
+            try writeIndent(writer, indent + 1);
+        } else {
+            try writeIndent(writer, indent);
+        }
         try writer.writeAll(")\n");
         return;
     }
     if (Value_isObject(value)) {
         const obj = Value_asObject(value);
+        
+        // 对象开始
         try writer.print("{s} Object\n", .{obj.class_name});
-        try writeIndent(writer, indent);
-        try writer.writeAll("(\n");
-        var it = obj.properties.iterator();
-        while (it.next()) |entry| {
+        if (is_nested) {
             try writeIndent(writer, indent + 1);
-            try writer.print("[{s}] => ", .{entry.key_ptr.*});
-            try printValue(writer, entry.value_ptr.*, indent + 1);
-            try writer.writeAll("\n");
+        } else {
+            try writeIndent(writer, indent);
         }
-        try writeIndent(writer, indent);
+        try writer.writeAll("(\n");
+        
+        // 遍历属性
+        const count = obj.properties.count();
+        var it = obj.properties.iterator();
+        var idx: usize = 0;
+        while (it.next()) |entry| {
+            const elem_indent = if (is_nested) indent + 2 else indent + 1;
+            try writeIndent(writer, elem_indent);
+            
+            // 属性名格式化
+            const prop_name = entry.key_ptr.*;
+            try writer.print("[{s}] => ", .{prop_name});
+            
+            const val = entry.value_ptr.*;
+            const is_complex = val.isArray() or Value_isObject(val);
+            
+            if (is_complex) {
+                try printValue(writer, val, elem_indent, true);
+                if (idx < count - 1) {
+                    try writer.writeByte('\n');
+                }
+            } else {
+                try printValue(writer, val, elem_indent, false);
+                try writer.writeByte('\n');
+            }
+            
+            idx += 1;
+        }
+        
+        if (is_nested) {
+            try writeIndent(writer, indent + 1);
+        } else {
+            try writeIndent(writer, indent);
+        }
         try writer.writeAll(")\n");
         return;
     }
-    try writer.writeAll("Unknown");
+    
+    // 其他类型（资源等）
+    try writer.writeAll("Resource");
 }
 
 fn exportValue(writer: anytype, value: Value, indent: usize) !void {
