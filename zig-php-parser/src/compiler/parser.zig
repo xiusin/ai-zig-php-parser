@@ -853,7 +853,8 @@ pub const Parser = struct {
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        try args.append(self.allocator, try self.parseExpression(0));
+                        // 使用优先级2跳过逗号运算符
+                        try args.append(self.allocator, try self.parseExpression(2));
                         if (self.curr.tag == .comma) self.nextToken();
                     }
                     _ = try self.eat(.r_paren);
@@ -1633,7 +1634,8 @@ pub const Parser = struct {
                     self.nextToken();
                     var args = std.ArrayListUnmanaged(ast.Node.Index){};
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        try args.append(self.allocator, try self.parseExpression(0));
+                        // 使用优先级2跳过逗号运算符（逗号优先级是1）
+                        try args.append(self.allocator, try self.parseExpression(2));
                         if (self.curr.tag == .comma) self.nextToken();
                     }
                     _ = try self.eat(.r_paren);
@@ -1702,7 +1704,8 @@ pub const Parser = struct {
                         self.nextToken();
                         var args = std.ArrayListUnmanaged(ast.Node.Index){};
                         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                            try args.append(self.allocator, try self.parseExpression(1));
+                            // 使用优先级2跳过逗号运算符（逗号优先级是1）
+                            try args.append(self.allocator, try self.parseExpression(2));
                             if (self.curr.tag == .comma) self.nextToken();
                         }
                         _ = try self.eat(.r_paren);
@@ -1728,7 +1731,8 @@ pub const Parser = struct {
                         });
                         try args.append(self.allocator, named_arg_node);
                     } else {
-                        try args.append(self.allocator, try self.parseExpression(1));
+                        // 使用优先级2跳过逗号运算符（逗号优先级是1）
+                        try args.append(self.allocator, try self.parseExpression(2));
                     }
                     if (self.curr.tag == .comma) self.nextToken();
                 }
@@ -1853,7 +1857,8 @@ pub const Parser = struct {
                         });
                         try args.append(self.allocator, named_arg_node);
                     } else {
-                        try args.append(self.allocator, try self.parseExpression(1));
+                        // 使用优先级2跳过逗号运算符（逗号优先级是1）
+                        try args.append(self.allocator, try self.parseExpression(2));
                     }
                     if (self.curr.tag == .comma) self.nextToken();
                 }
@@ -1916,7 +1921,8 @@ pub const Parser = struct {
                     self.nextToken();
                     var args = std.ArrayListUnmanaged(ast.Node.Index){};
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        try args.append(self.allocator, try self.parseExpression(0));
+                        // 使用优先级2跳过逗号运算符
+                        try args.append(self.allocator, try self.parseExpression(2));
                         if (self.curr.tag == .comma) self.nextToken();
                     }
                     _ = try self.eat(.r_paren);
@@ -2446,7 +2452,8 @@ pub const Parser = struct {
             if (self.curr.tag == .l_paren) {
                 self.nextToken();
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                    try args.append(self.allocator, try self.parseExpression(0));
+                    // 使用优先级2跳过逗号运算符
+                    try args.append(self.allocator, try self.parseExpression(2));
                     if (self.curr.tag == .comma) self.nextToken();
                 }
                 _ = try self.eat(.r_paren);
