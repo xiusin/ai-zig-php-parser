@@ -3959,14 +3959,44 @@ pub const IRGenerator = struct {
                     if (matches_node != null and matches_node.?.tag == .variable) {
                         const var_name = self.getString(matches_node.?.data.variable.name);
                         
-                        // 获取或创建变量的alloca
-                        const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                        // 检查是否是全局变量
+                        const is_global = self.global_vars.contains(var_name);
                         
-                        // 创建引用
-                        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
-                        
-                        // 替换第3个参数
-                        args[2] = ref_reg;
+                        if (is_global) {
+                            // 全局变量：创建临时alloca
+                            const func = self.current_function orelse return error.NoCurrentFunction;
+                            const alloca_type = Type{ .php_value = {} };
+                            const type_ptr = try self.allocator.create(Type);
+                            type_ptr.* = alloca_type;
+                            const ptr_type = Type{ .ptr = type_ptr };
+                            const temp_reg = func.newRegister(ptr_type);
+
+                            const alloca_inst = try self.allocator.create(Instruction);
+                            alloca_inst.* = .{
+                                .result = temp_reg,
+                                .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                                .location = self.current_location,
+                            };
+                            try self.entry_allocas.append(self.allocator, alloca_inst);
+
+                            // Load全局变量并store到临时变量
+                            const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
+                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
+
+                            // 创建引用
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                            args[2] = ref_reg;
+
+                            // 记录需要写回
+                            try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
+                        } else {
+                            // 局部变量：获取或创建alloca
+                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                            
+                            // 创建引用
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                            args[2] = ref_reg;
+                        }
                     }
                     
                     // 修改函数名

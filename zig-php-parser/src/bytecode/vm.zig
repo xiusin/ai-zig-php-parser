@@ -2033,7 +2033,7 @@ pub const BytecodeVM = struct {
 
         var i: u16 = 0;
         while (i < actual_count) : (i += 1) {
-            args_buf[i] = self.popFast();
+            args_buf[actual_count - 1 - i] = self.popFast(); // 反转顺序
         }
 
         // O(1) 直接索引访问内置函数
