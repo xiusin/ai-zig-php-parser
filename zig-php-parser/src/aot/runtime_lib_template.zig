@@ -1800,12 +1800,37 @@ pub const Value = struct {
         }
         if (self.isBool()) return if (self.asBool()) 1 else 0;
         if (self.isNull()) return 0;
-        // 字符串转整数：解析数字前缀
+        // 字符串转整数：PHP语义（解析数字前缀）
         if (self.isString()) {
             const str = self.asString();
             if (str.length == 0) return 0;
-            // 简化实现：只处理纯数字字符串
-            return std.fmt.parseInt(i64, str.data, 10) catch 0;
+            
+            // PHP行为：解析前导数字，遇到非数字停止
+            var result: i64 = 0;
+            var i: usize = 0;
+            var negative = false;
+            
+            // 跳过前导空格
+            while (i < str.length and std.ascii.isWhitespace(str.data[i])) : (i += 1) {}
+            
+            // 处理符号
+            if (i < str.length and (str.data[i] == '+' or str.data[i] == '-')) {
+                negative = (str.data[i] == '-');
+                i += 1;
+            }
+            
+            // 解析数字（遇到非数字停止）
+            var has_digits = false;
+            while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {
+                has_digits = true;
+                const digit = str.data[i] - '0';
+                result = result * 10 + digit;
+            }
+            
+            // 如果没有数字，返回0
+            if (!has_digits) return 0;
+            
+            return if (negative) -result else result;
         }
         return 0;
     }
