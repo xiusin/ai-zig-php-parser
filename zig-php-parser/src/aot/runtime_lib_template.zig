@@ -4478,6 +4478,45 @@ pub fn php_str_contains(haystack: Value, needle: Value) !Value {
     return Value.initBool(false);
 }
 
+/// 简化的preg_match实现 - 仅支持基础字面量匹配
+/// 完整PCRE支持需要外部库
+pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!pattern_val.isString() or !subject_val.isString()) {
+        return Value.initInt(0);
+    }
+
+    const pattern_str = pattern_val.asString();
+    const subject_str = subject_val.asString();
+
+    // 提取正则表达式内容（去除定界符）
+    // 格式: /pattern/flags
+    if (pattern_str.length < 2) return Value.initInt(0);
+    
+    const delimiter = pattern_str.data[0];
+    var end_pos: usize = pattern_str.length - 1;
+    
+    // 查找结束定界符
+    while (end_pos > 0 and pattern_str.data[end_pos] != delimiter) : (end_pos -= 1) {}
+    if (end_pos <= 1) return Value.initInt(0);
+    
+    const pattern = pattern_str.data[1..end_pos];
+    
+    // 简单字面量匹配（不支持正则语法）
+    if (pattern.len == 0) return Value.initInt(1);
+    if (pattern.len > subject_str.length) return Value.initInt(0);
+    
+    // 搜索子串
+    var i: usize = 0;
+    while (i <= subject_str.length - pattern.len) : (i += 1) {
+        if (std.mem.eql(u8, subject_str.data[i .. i + pattern.len], pattern)) {
+            return Value.initInt(1); // 找到匹配
+        }
+    }
+    
+    return Value.initInt(0); // 未找到
+}
+
 /// str_starts_with - 检查字符串是否以指定前缀开始 (PHP 8.0+)
 pub fn php_str_starts_with(haystack: Value, needle: Value) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
