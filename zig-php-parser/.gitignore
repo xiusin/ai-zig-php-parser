@@ -10,3 +10,4 @@ test_*
 tests_*
 *php
 _debug*
+/.idea/*
