@@ -9,3 +9,4 @@ test/aot_diff/
 test_*
 tests_*
 *php
+_debug*

@@ -478,3 +478,6 @@ pub fn build(b: *std.Build) void {
 > 每次任务结束后为我们功能模块提供建设性有意义的后续开发建议；
 > 执行php脚本测试必须带超时管理，每个脚本执行时间不能超过10秒；
 > 测试/编译产物必须删除；
+> **AI 防幻觉规范**：必须阅读 [AI_ANTI_HALLUCINATION_GUIDE.md](AI_ANTI_HALLUCINATION_GUIDE.md)，遵循其中所有约束；
+> 修改代码前必须先读取目标文件上下文，禁止凭记忆/推测写代码；
+> Zig 0.15.2 API 对照表见防幻觉规范 1.2 节，ArrayList/HashMap 必须传 allocator；
