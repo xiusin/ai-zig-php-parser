@@ -4479,7 +4479,17 @@ pub fn php_str_contains(haystack: Value, needle: Value) !Value {
 }
 
 /// 简化的preg_match实现 - 仅支持基础字面量匹配
-/// 完整PCRE支持需要外部库
+/// 
+/// ⚠️ 限制说明:
+/// - 仅支持字面量子串搜索
+/// - 不支持正则语法: . * + ? [] {} () | ^ $ \d \w 等
+/// - 与解释器/Bytecode的PCRE2实现行为不一致
+/// 
+/// 使用场景:
+/// - ✅ preg_match('/literal/', $str) - 字面量匹配
+/// - ❌ preg_match('/.*pattern/', $str) - 正则语法不支持
+/// 
+/// TODO: 集成PCRE2库以实现完整正则支持
 pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
     _ = allocator;
     if (!pattern_val.isString() or !subject_val.isString()) {
