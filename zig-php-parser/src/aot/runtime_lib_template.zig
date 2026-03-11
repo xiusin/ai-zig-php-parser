@@ -1844,7 +1844,45 @@ pub const Value = struct {
         if (self.isString()) {
             const str = self.asString();
             if (str.length == 0) return 0.0;
-            return std.fmt.parseFloat(f64, str.data) catch 0.0;
+            
+            // PHP行为：解析前导数字（支持浮点数）
+            var result: f64 = 0.0;
+            var i: usize = 0;
+            var negative = false;
+            
+            // 跳过前导空格
+            while (i < str.length and std.ascii.isWhitespace(str.data[i])) : (i += 1) {}
+            
+            // 处理符号
+            if (i < str.length and (str.data[i] == '+' or str.data[i] == '-')) {
+                negative = (str.data[i] == '-');
+                i += 1;
+            }
+            
+            // 解析整数部分
+            var has_digits = false;
+            while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {
+                has_digits = true;
+                const digit = str.data[i] - '0';
+                result = result * 10.0 + @as(f64, @floatFromInt(digit));
+            }
+            
+            // 解析小数部分
+            if (i < str.length and str.data[i] == '.') {
+                i += 1;
+                var decimal_place: f64 = 0.1;
+                while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {
+                    has_digits = true;
+                    const digit = str.data[i] - '0';
+                    result += @as(f64, @floatFromInt(digit)) * decimal_place;
+                    decimal_place *= 0.1;
+                }
+            }
+            
+            // 如果没有数字，返回0
+            if (!has_digits) return 0.0;
+            
+            return if (negative) -result else result;
         }
         return 0.0;
     }
@@ -2668,37 +2706,89 @@ pub fn php_pow(base: Value, exp: Value) !Value {
 
 /// 等于运算（PHP语义：类型转换后比较）
 pub fn php_eq(lhs: Value, rhs: Value) !Value {
-    // null == null
+    // PHP松散比较规则（按优先级）
+    
+    // 1. 相同类型直接比较
     if (lhs.isNull() and rhs.isNull()) return Value.initBool(true);
-
-    // bool == bool
+    
     if (lhs.isBool() and rhs.isBool()) {
         return Value.initBool(lhs.asBool() == rhs.asBool());
     }
-
-    // int == int
+    
     if (lhs.isInt() and rhs.isInt()) {
         return Value.initBool(lhs.asInt() == rhs.asInt());
     }
-
-    // 数字比较
-    if ((lhs.isInt() or lhs.isFloat()) and (rhs.isInt() or rhs.isFloat())) {
-        return Value.initBool(lhs.toFloat() == rhs.toFloat());
-    }
-
-    // 字符串比较
+    
     if (lhs.isString() and rhs.isString()) {
         const a = lhs.asString();
         const b = rhs.asString();
         return Value.initBool(std.mem.eql(u8, a.data, b.data));
     }
-
-    // 数组比较
+    
+    // 2. null与其他类型比较
+    // null == false, null == 0, null == "", null == []
+    if (lhs.isNull()) {
+        if (rhs.isBool()) return Value.initBool(!rhs.asBool());
+        if (rhs.isInt()) return Value.initBool(rhs.asInt() == 0);
+        if (rhs.isFloat()) return Value.initBool(rhs.asFloat() == 0.0);
+        if (rhs.isString()) return Value.initBool(rhs.asString().length == 0);
+        if (rhs.isArray()) return Value.initBool(rhs.asArray().elements.count() == 0);
+        return Value.initBool(false);
+    }
+    if (rhs.isNull()) {
+        if (lhs.isBool()) return Value.initBool(!lhs.asBool());
+        if (lhs.isInt()) return Value.initBool(lhs.asInt() == 0);
+        if (lhs.isFloat()) return Value.initBool(lhs.asFloat() == 0.0);
+        if (lhs.isString()) return Value.initBool(lhs.asString().length == 0);
+        if (lhs.isArray()) return Value.initBool(lhs.asArray().elements.count() == 0);
+        return Value.initBool(false);
+    }
+    
+    // 3. bool与其他类型比较
+    // bool转为int: true=1, false=0
+    if (lhs.isBool()) {
+        const lhs_int: i64 = if (lhs.asBool()) 1 else 0;
+        if (rhs.isInt()) return Value.initBool(lhs_int == rhs.asInt());
+        if (rhs.isFloat()) return Value.initBool(@as(f64, @floatFromInt(lhs_int)) == rhs.asFloat());
+        if (rhs.isString()) {
+            const rhs_int = rhs.toInt();
+            return Value.initBool(lhs_int == rhs_int);
+        }
+        return Value.initBool(false);
+    }
+    if (rhs.isBool()) {
+        const rhs_int: i64 = if (rhs.asBool()) 1 else 0;
+        if (lhs.isInt()) return Value.initBool(lhs.asInt() == rhs_int);
+        if (lhs.isFloat()) return Value.initBool(lhs.asFloat() == @as(f64, @floatFromInt(rhs_int)));
+        if (lhs.isString()) {
+            const lhs_int = lhs.toInt();
+            return Value.initBool(lhs_int == rhs_int);
+        }
+        return Value.initBool(false);
+    }
+    
+    // 4. 数字比较（int/float）
+    if ((lhs.isInt() or lhs.isFloat()) and (rhs.isInt() or rhs.isFloat())) {
+        return Value.initBool(lhs.toFloat() == rhs.toFloat());
+    }
+    
+    // 5. 数字和字符串比较
+    // 字符串转为数字后比较
+    if ((lhs.isInt() or lhs.isFloat()) and rhs.isString()) {
+        const rhs_num = rhs.toFloat();
+        return Value.initBool(lhs.toFloat() == rhs_num);
+    }
+    if (lhs.isString() and (rhs.isInt() or rhs.isFloat())) {
+        const lhs_num = lhs.toFloat();
+        return Value.initBool(lhs_num == rhs.toFloat());
+    }
+    
+    // 6. 数组比较
     if (lhs.isArray() and rhs.isArray()) {
         const a = lhs.asArray();
         const b = rhs.asArray();
         if (a.elements.count() != b.elements.count()) return Value.initBool(false);
-
+        
         var iter = a.elements.iterator();
         while (iter.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -2709,18 +2799,8 @@ pub fn php_eq(lhs: Value, rhs: Value) !Value {
         }
         return Value.initBool(true);
     }
-
-    // 数字和字符串比较：尝试将字符串转为数字
-    if ((lhs.isInt() or lhs.isFloat()) and rhs.isString()) {
-        const num_val = stringToNumber(rhs.asString().data);
-        return Value.initBool(lhs.toFloat() == num_val);
-    }
-    if (lhs.isString() and (rhs.isInt() or rhs.isFloat())) {
-        const num_val = stringToNumber(lhs.asString().data);
-        return Value.initBool(num_val == rhs.toFloat());
-    }
-
-    // 其他情况：false
+    
+    // 7. 其他情况：false
     return Value.initBool(false);
 }
 
