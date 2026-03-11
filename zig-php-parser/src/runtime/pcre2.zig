@@ -4,6 +4,7 @@ const Value = types.Value;
 const PHPString = types.PHPString;
 const PHPArray = types.PHPArray;
 const ArrayKey = types.ArrayKey;
+const gc = @import("gc.zig");
 const exceptions = @import("exceptions.zig");
 const ExceptionFactory = exceptions.ExceptionFactory;
 const c = @cImport({});
@@ -432,21 +433,33 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
     if (matches_ref) |ref| {
         if (ref.getTag() == .array) {
             const matches_box = ref.getAsArray();
-            const matches_arr = matches_box.data.*;
-            matches_arr.elements.clearRetainingCapacity();
-
+            const matches_arr = matches_box.data;
+            
+            // 重新初始化数组
+            matches_arr.deinit(vm.allocator);
+            matches_arr.* = PHPArray.init(vm.allocator);
+            
             if (all_matches.items.len > 0) {
                 const num_groups = all_matches.items[0].items.len;
                 var group_idx: usize = 0;
                 while (group_idx < num_groups) : (group_idx += 1) {
-                    var group_arr = try vm.createArray();
+                    // 创建组数组
+                    const group_box = try vm.allocator.create(gc.Box(*PHPArray));
+                    const group_arr = try vm.allocator.create(PHPArray);
+                    group_arr.* = PHPArray.init(vm.allocator);
+                    group_box.* = .{
+                        .ref_count = 1,
+                        .gc_info = .{},
+                        .data = group_arr,
+                    };
+                    
                     for (all_matches.items) |match_groups| {
                         if (group_idx < match_groups.items.len) {
-                            const capture_str = try vm.createString(match_groups.items[group_idx]);
-                            try group_arr.elements.append(vm.allocator, Value.initString(capture_str));
+                            const capture_val = try createStringValue(vm.allocator, match_groups.items[group_idx]);
+                            try group_arr.push(vm.allocator, capture_val);
                         }
                     }
-                    try matches_arr.elements.append(vm.allocator, Value.initArray(group_arr));
+                    try matches_arr.push(vm.allocator, Value.fromBox(group_box, Value.TYPE_ARRAY));
                 }
             }
         }
