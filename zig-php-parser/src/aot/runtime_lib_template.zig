@@ -43,6 +43,11 @@ pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: 
 
 /// 全局常量表
 pub var constants: std.StringHashMap(Value) = undefined;
+
+/// 静态变量表（函数名::变量名 -> 值）
+var static_vars: ?std.StringHashMap(Value) = null;
+var static_vars_mutex: std.Thread.Mutex = .{};
+
 var array_internal_pointers: ?std.AutoHashMap(*PHPArray, usize) = null;
 const StaticStringEntry = struct {
     const inline_cap: usize = 22;
@@ -319,6 +324,7 @@ pub fn initRuntime(allocator: Allocator) void {
     registerZigSelect(runtime_allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
     constants = std.StringHashMap(Value).init(runtime_allocator);
+    static_vars = std.StringHashMap(Value).init(runtime_allocator);
     array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(runtime_allocator);
     static_string_pool = std.StringHashMap(*StaticStringEntry).init(runtime_allocator);
     static_string_entries = .{};
@@ -12168,4 +12174,37 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
     // 简化实现：不排序，直接返回true
     return Value.initBool(true);
+}
+
+/// 静态变量访问函数
+pub fn getStaticVar(func_name_val: Value, var_name_val: Value) !Value {
+    const func_name = if (func_name_val.isString()) func_name_val.asString().data else "global";
+    const var_name = if (var_name_val.isString()) var_name_val.asString().data else "";
+    
+    static_vars_mutex.lock();
+    defer static_vars_mutex.unlock();
+    
+    if (static_vars == null) return Value.initNull();
+    
+    // 构造键：函数名::变量名
+    const key = try std.fmt.allocPrint(runtime_allocator, "{s}::{s}", .{func_name, var_name});
+    defer runtime_allocator.free(key);
+    
+    return static_vars.?.get(key) orelse Value.initNull();
+}
+
+pub fn setStaticVar(func_name_val: Value, var_name_val: Value, value: Value) !Value {
+    const func_name = if (func_name_val.isString()) func_name_val.asString().data else "global";
+    const var_name = if (var_name_val.isString()) var_name_val.asString().data else "";
+    
+    static_vars_mutex.lock();
+    defer static_vars_mutex.unlock();
+    
+    if (static_vars == null) return Value.initNull();
+    
+    // 构造键：函数名::变量名
+    const key = try runtime_allocator.dupe(u8, try std.fmt.allocPrint(runtime_allocator, "{s}::{s}", .{func_name, var_name}));
+    
+    try static_vars.?.put(key, value);
+    return value;
 }

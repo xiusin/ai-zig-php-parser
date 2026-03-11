@@ -1448,6 +1448,10 @@ pub const NativeLinker = struct {
         .{ "mt_srand", .{ .runtime_name = "php_mt_srand", .needs_allocator = false } },
         .{ "random_int", .{ .runtime_name = "php_random_int", .needs_allocator = false } },
         .{ "random_bytes", .{ .runtime_name = "php_random_bytes", .needs_allocator = true } },
+        
+        // Static variable functions
+        .{ "getStaticVar", bi(.{ .runtime_name = "getStaticVar", .needs_allocator = false }) },
+        .{ "setStaticVar", bi(.{ .runtime_name = "setStaticVar", .needs_allocator = false }) },
 
         .{ "is_null", .{ .runtime_name = "php_is_null", .needs_allocator = false } },
         .{ "is_bool", .{ .runtime_name = "php_is_bool", .needs_allocator = false } },
