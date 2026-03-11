@@ -4508,6 +4508,22 @@ extern fn pcre2_match_8(
     ?*anyopaque,
 ) c_int;
 
+extern fn pcre2_get_ovector_pointer_8(?*pcre2_match_data) [*]usize;
+
+extern fn pcre2_substitute_8(
+    ?*const pcre2_code,
+    [*]const u8,
+    usize,
+    usize,
+    c_uint,
+    ?*pcre2_match_data,
+    ?*anyopaque,
+    [*]const u8,
+    usize,
+    [*]u8,
+    [*]usize,
+) c_int;
+
 // PCRE2 常量
 const PCRE2_CASELESS: c_uint = 0x00000008;
 const PCRE2_MULTILINE: c_uint = 0x00000002;
@@ -4515,6 +4531,8 @@ const PCRE2_DOTALL: c_uint = 0x00000004;
 const PCRE2_EXTENDED: c_uint = 0x00000008;
 const PCRE2_UTF: c_uint = 0x00080000;
 const PCRE2_ERROR_NOMATCH: c_int = -1;
+const PCRE2_SUBSTITUTE_GLOBAL: c_uint = 0x00000100;
+const PCRE2_SUBSTITUTE_OVERFLOW_LENGTH: c_uint = 0x00001000;
 
 const ParsedPattern = struct {
     pattern: []const u8,
@@ -4622,6 +4640,148 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) 
     if (rc == PCRE2_ERROR_NOMATCH) return Value.initInt(0);
     if (rc < 0) return Value.initInt(0);
     return Value.initInt(1);
+}
+
+/// preg_replace - 正则替换
+pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, allocator: Allocator) !Value {
+    if (!pattern_val.isString() or !replacement_val.isString() or !subject_val.isString()) {
+        return Value.initNull();
+    }
+
+    const pattern_str = pattern_val.asString();
+    const replacement_str = replacement_val.asString();
+    const subject_str = subject_val.asString();
+
+    const parsed = parsePHPRegexPattern(pattern_str.data);
+
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(
+        parsed.pattern.ptr,
+        parsed.pattern.len,
+        parsed.options,
+        &errcode,
+        &erroffset,
+        null
+    );
+    if (re_ptr == null) return subject_val;
+    const re = re_ptr.?;
+    defer pcre2_code_free_8(re);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return subject_val;
+    defer pcre2_match_data_free_8(match_data);
+
+    // 分配输出缓冲区
+    const output_len: usize = subject_str.length * 2;
+    const output = try allocator.alloc(u8, output_len);
+    errdefer allocator.free(output);
+
+    var output_size: usize = output_len;
+    const rc = pcre2_substitute_8(
+        re,
+        subject_str.data.ptr,
+        subject_str.length,
+        0,
+        PCRE2_SUBSTITUTE_GLOBAL,
+        match_data,
+        null,
+        replacement_str.data.ptr,
+        replacement_str.length,
+        output.ptr,
+        @ptrCast(&output_size)
+    );
+
+    if (rc < 0) {
+        allocator.free(output);
+        return subject_val;
+    }
+
+    const result = try allocator.realloc(output, output_size);
+    return Value.initString(try PHPString.init(allocator, result));
+}
+
+/// preg_split - 正则分割
+pub fn preg_split(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
+    if (!pattern_val.isString() or !subject_val.isString()) {
+        return Value.initNull();
+    }
+
+    const pattern_str = pattern_val.asString();
+    const subject_str = subject_val.asString();
+
+    const parsed = parsePHPRegexPattern(pattern_str.data);
+
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(
+        parsed.pattern.ptr,
+        parsed.pattern.len,
+        parsed.options,
+        &errcode,
+        &erroffset,
+        null
+    );
+    if (re_ptr == null) {
+        // 编译失败，返回包含原字符串的数组
+        const arr = try PHPArray.init(allocator);
+        try arr.push(allocator, subject_val);
+        return Value.initArray(arr);
+    }
+    const re = re_ptr.?;
+    defer pcre2_code_free_8(re);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        const arr = try PHPArray.init(allocator);
+        try arr.push(allocator, subject_val);
+        return Value.initArray(arr);
+    };
+    defer pcre2_match_data_free_8(match_data);
+
+    const result_arr = try PHPArray.init(allocator);
+    var offset: usize = 0;
+
+    while (offset < subject_str.length) {
+        const rc = pcre2_match_8(
+            re,
+            subject_str.data.ptr,
+            subject_str.length,
+            @intCast(offset),
+            0,
+            match_data,
+            null
+        );
+
+        if (rc == PCRE2_ERROR_NOMATCH) {
+            // 添加剩余部分
+            const remaining = subject_str.data[offset..];
+            if (remaining.len > 0) {
+                const part = try PHPString.init(allocator, remaining);
+                try result_arr.push(allocator, Value.initString(part));
+            }
+            break;
+        }
+
+        if (rc < 0) break;
+
+        const ovec = pcre2_get_ovector_pointer_8(match_data);
+        const match_start = ovec[0];
+        const match_end = ovec[1];
+
+        // 添加匹配前的部分
+        if (match_start > offset) {
+            const part = subject_str.data[offset..match_start];
+            const part_str = try PHPString.init(allocator, part);
+            try result_arr.push(allocator, Value.initString(part_str));
+        }
+
+        offset = match_end;
+        if (match_start == match_end) {
+            // 空匹配，前进一个字符避免无限循环
+            offset += 1;
+        }
+    }
+
+    return Value.initArray(result_arr);
 }
 
 /// str_starts_with - 检查字符串是否以指定前缀开始 (PHP 8.0+)

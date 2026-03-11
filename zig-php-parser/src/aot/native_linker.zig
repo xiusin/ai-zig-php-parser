@@ -1289,6 +1289,8 @@ pub const NativeLinker = struct {
         .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
         .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
+        .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
+        .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
         .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
         .{ "str_word_count", bi(.{ .runtime_name = "php_str_word_count", .needs_allocator = false }) },
         .{ "str_ends_with", bi(.{ .runtime_name = "php_str_ends_with", .needs_allocator = false }) },
