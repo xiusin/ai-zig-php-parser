@@ -4776,10 +4776,12 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
     return Value.initInt(1);
 }
 
-/// preg_match_all - 返回所有匹配和捕获组
-/// 返回: [match_count, [[full_match, group1, group2, ...], ...]]
-pub fn preg_match_all(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
+/// preg_match_all - 返回所有匹配
+/// matches_ref: 引用参数，填充为二维数组
+/// 返回：匹配次数
+pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Value, allocator: Allocator) !Value {
     if (!pattern_val.isString() or !subject_val.isString()) {
+        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
     }
 
@@ -4787,60 +4789,60 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, allocator: Allocat
     const subject_str = subject_val.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
-    var errcode: c_int = 0;
-    var erroffset: usize = 0;
-    const re_ptr = pcre2_compile_8(
-        parsed.pattern.ptr,
-        parsed.pattern.len,
-        parsed.options,
-        &errcode,
-        &erroffset,
-        null,
-    );
-    if (re_ptr == null) return Value.initInt(0);
-    const re = re_ptr.?;
-    defer pcre2_code_free_8(re);
+    // 使用缓存获取编译后的正则
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
+    };
 
-    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initInt(0);
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
+    };
     defer pcre2_match_data_free_8(match_data);
 
-    const result_arr = try PHPArray.init(allocator);
+    // 存储所有匹配（临时）
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    defer {
+        for (all_matches.items) |*match_groups| {
+            match_groups.deinit(allocator);
+        }
+        all_matches.deinit(allocator);
+    }
+
     var offset: usize = 0;
     var match_count: i64 = 0;
 
-    while (offset < subject_str.length) {
+    // 循环匹配所有
+    while (offset <= subject_str.length) {
         const rc = pcre2_match_8(
             re,
             subject_str.data.ptr,
             subject_str.length,
-            offset,
+            @intCast(offset),
             0,
             match_data,
             null,
         );
 
-        if (rc == PCRE2_ERROR_NOMATCH) break;
-        if (rc < 0) break;
+        if (rc == PCRE2_ERROR_NOMATCH or rc < 0) break;
 
         match_count += 1;
         const ovec = pcre2_get_ovector_pointer_8(match_data);
-        
-        // 创建当前匹配的数组 [full_match, group1, group2, ...]
-        const match_arr = try PHPArray.init(allocator);
-        
+
+        // 保存当前匹配的所有组
+        var match_groups = std.ArrayListUnmanaged([]const u8){};
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
             const end = ovec[i * 2 + 1];
             if (start < subject_str.length and end <= subject_str.length and start <= end) {
                 const capture = subject_str.data[start..end];
-                const capture_str = try PHPString.init(allocator, capture);
-                try match_arr.push(allocator, Value.initString(capture_str));
+                try match_groups.append(allocator, capture);
             }
         }
-        
-        try result_arr.push(allocator, Value.initArray(match_arr));
-        
+        try all_matches.append(allocator, match_groups);
+
         // 移动到下一个位置
         const match_end = ovec[1];
         if (match_end == offset) {
@@ -4850,10 +4852,38 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, allocator: Allocat
         }
     }
 
+    // 转换为PREG_PATTERN_ORDER格式
+    // matches[0] = [所有完整匹配]
+    // matches[1] = [所有第1个捕获组]
+    const matches_arr = try PHPArray.init(allocator);
+
+    if (all_matches.items.len > 0) {
+        const num_groups = all_matches.items[0].items.len;
+        
+        // 为每个组创建数组
+        var group_idx: usize = 0;
+        while (group_idx < num_groups) : (group_idx += 1) {
+            const group_arr = try PHPArray.init(allocator);
+            
+            // 收集所有匹配中的该组
+            for (all_matches.items) |match_groups| {
+                if (group_idx < match_groups.items.len) {
+                    const capture = match_groups.items[group_idx];
+                    const capture_str = try PHPString.init(allocator, capture);
+                    try group_arr.push(allocator, Value.initString(capture_str));
+                }
+            }
+            
+            try matches_arr.push(allocator, Value.initArray(group_arr));
+        }
+    }
+
+    matches_ref.* = Value.initArray(matches_arr);
     return Value.initInt(match_count);
 }
 
-/// preg_replace - 正则替换
+/// preg_match_all - 返回所有匹配和捕获组
+/// 返回: [match_count, [[full_match, group1, group2, ...], ...]]
 pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, allocator: Allocator) !Value {
     if (!pattern_val.isString() or !replacement_val.isString() or !subject_val.isString()) {
         return Value.initNull();

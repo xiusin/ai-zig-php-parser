@@ -1307,6 +1307,7 @@ pub const NativeLinker = struct {
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
         .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
         .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
+        .{ "preg_match_all", bi(.{ .runtime_name = "preg_match_all", .needs_allocator = true }) },
         .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
         .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
         .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
@@ -6205,6 +6206,28 @@ pub const NativeLinker = struct {
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else {
                                 // 参数不足，fallback
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            }
+                        } else if (std.mem.eql(u8, runtime_name, "preg_match_all")) {
+                            // preg_match_all与preg_match_with_matches相同处理
+                            if (op.args.len >= 3) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                // 前2个参数正常传递
+                                try self.writeValueArgs(writer, op.args[0..2]);
+                                try writer.writeAll(", ");
+                                // 第3个参数：引用
+                                const matches_arg = op.args[2];
+                                const matches_reg_id = matches_arg.id;
+                                
+                                if (self.findMakeRefSource(matches_reg_id)) |alloca_id| {
+                                    try writer.print("reg_{d}", .{alloca_id});
+                                } else {
+                                    try writer.print("&reg_{d}", .{matches_reg_id});
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgs(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");

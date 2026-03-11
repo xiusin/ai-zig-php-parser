@@ -4002,6 +4002,54 @@ pub const IRGenerator = struct {
                     // 修改函数名
                     func_name = "preg_match_with_matches";
                 }
+            } else if (std.mem.eql(u8, func_name, "preg_match_all")) {
+                // preg_match_all有3个参数时，第3个是引用参数matches
+                if (args.len >= 3) {
+                    // 第3个参数需要转换为引用（与preg_match相同逻辑）
+                    const matches_arg_idx = positional_args.items[2];
+                    const matches_node = self.getNode(matches_arg_idx);
+                    
+                    if (matches_node != null and matches_node.?.tag == .variable) {
+                        const var_name = self.getString(matches_node.?.data.variable.name);
+                        const is_global = self.global_vars.contains(var_name);
+                        
+                        if (is_global) {
+                            // 全局变量：创建临时alloca
+                            const func = self.current_function orelse return error.NoCurrentFunction;
+                            const alloca_type = Type{ .php_value = {} };
+                            const type_ptr = try self.allocator.create(Type);
+                            type_ptr.* = alloca_type;
+                            const ptr_type = Type{ .ptr = type_ptr };
+                            const temp_reg = func.newRegister(ptr_type);
+
+                            const alloca_inst = try self.allocator.create(Instruction);
+                            alloca_inst.* = .{
+                                .result = temp_reg,
+                                .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                                .location = self.current_location,
+                            };
+                            try self.entry_allocas.append(self.allocator, alloca_inst);
+
+                            // Load全局变量并store到临时变量
+                            const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
+                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
+
+                            // 创建引用
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                            args[2] = ref_reg;
+
+                            // 记录需要写回
+                            try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
+                        } else {
+                            // 局部变量：获取或创建alloca
+                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                            
+                            // 创建引用
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                            args[2] = ref_reg;
+                        }
+                    }
+                }
             } else if (std.mem.eql(u8, func_name, "explode")) {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
