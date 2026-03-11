@@ -12997,6 +12997,14 @@ pub const NativeLinker = struct {
             try args.append(self.allocator, flag);
         }
 
+        // 链接PCRE2库（正则表达式支持）
+        try args.append(self.allocator, "-lpcre2-8");
+        // 添加库搜索路径（macOS Homebrew）
+        if (self.config.target.os == .macos) {
+            try args.append(self.allocator, "-L/opt/homebrew/lib");
+            try args.append(self.allocator, "-L/usr/local/lib");
+        }
+
         // 静态链接（macOS 不支持）
         if (self.config.static_link and self.config.target.os != .macos) {
             try args.append(self.allocator, "-static");

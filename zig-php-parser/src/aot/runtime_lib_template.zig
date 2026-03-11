@@ -4478,18 +4478,109 @@ pub fn php_str_contains(haystack: Value, needle: Value) !Value {
     return Value.initBool(false);
 }
 
-/// 简化的preg_match实现 - 仅支持基础字面量匹配
-/// 
-/// ⚠️ 限制说明:
-/// - 仅支持字面量子串搜索
-/// - 不支持正则语法: . * + ? [] {} () | ^ $ \d \w 等
-/// - 与解释器/Bytecode的PCRE2实现行为不一致
-/// 
-/// 使用场景:
-/// - ✅ preg_match('/literal/', $str) - 字面量匹配
-/// - ❌ preg_match('/.*pattern/', $str) - 正则语法不支持
-/// 
-/// TODO: 集成PCRE2库以实现完整正则支持
+// ============================================================================
+// PCRE2 正则表达式支持
+// ============================================================================
+
+// PCRE2 C API声明
+const pcre2_code = opaque {};
+const pcre2_match_data = opaque {};
+
+extern fn pcre2_compile_8(
+    pattern: [*]const u8,
+    pattern_length: usize,
+    options: c_uint,
+    *c_int,
+    [*c]usize,
+    ?*anyopaque,
+) ?*pcre2_code;
+
+extern fn pcre2_code_free_8(?*pcre2_code) void;
+extern fn pcre2_match_data_create_from_pattern_8(?*const pcre2_code, ?*anyopaque) ?*pcre2_match_data;
+extern fn pcre2_match_data_free_8(?*pcre2_match_data) void;
+extern fn pcre2_match_8(
+    ?*const pcre2_code,
+    [*]const u8,
+    usize,
+    c_int,
+    c_uint,
+    ?*pcre2_match_data,
+    ?*anyopaque,
+) c_int;
+
+// PCRE2 常量
+const PCRE2_CASELESS: c_uint = 0x00000008;
+const PCRE2_MULTILINE: c_uint = 0x00000002;
+const PCRE2_DOTALL: c_uint = 0x00000004;
+const PCRE2_EXTENDED: c_uint = 0x00000008;
+const PCRE2_UTF: c_uint = 0x00080000;
+const PCRE2_ERROR_NOMATCH: c_int = -1;
+
+const ParsedPattern = struct {
+    pattern: []const u8,
+    options: c_uint,
+};
+
+/// 解析PHP风格正则表达式 (/pattern/flags)
+fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
+    var result = ParsedPattern{
+        .pattern = pattern,
+        .options = PCRE2_UTF | PCRE2_DOTALL,
+    };
+
+    if (pattern.len == 0) return result;
+
+    var start: usize = 0;
+    while (start < pattern.len and pattern[start] == ' ') : (start += 1) {}
+    if (start >= pattern.len) return result;
+
+    const delimiter = pattern[start];
+    var end: usize = start + 1;
+    var paren_depth: i32 = 0;
+    var in_escape = false;
+
+    while (end < pattern.len) : (end += 1) {
+        const ch = pattern[end];
+        if (in_escape) {
+            in_escape = false;
+            continue;
+        }
+        if (ch == '\\') {
+            in_escape = true;
+            continue;
+        }
+        if (ch == '(' or ch == '[' or ch == '{') {
+            paren_depth += 1;
+        } else if (ch == ')' or ch == ']' or ch == '}') {
+            paren_depth -= 1;
+        } else if (ch == delimiter and paren_depth == 0) {
+            break;
+        }
+    }
+
+    if (end >= pattern.len) {
+        result.pattern = pattern[start + 1..];
+        return result;
+    }
+    result.pattern = pattern[start + 1..end];
+
+    const modifiers = pattern[end + 1..];
+    for (modifiers) |ch| {
+        switch (ch) {
+            'i' => result.options |= PCRE2_CASELESS,
+            'm' => result.options |= PCRE2_MULTILINE,
+            's' => result.options |= PCRE2_DOTALL,
+            'x' => result.options |= PCRE2_EXTENDED,
+            ' ' => break,
+            else => {},
+        }
+    }
+
+    return result;
+}
+
+/// 完整PCRE2实现的preg_match
+/// 支持所有正则语法，与解释器/Bytecode行为一致
 pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
     _ = allocator;
     if (!pattern_val.isString() or !subject_val.isString()) {
@@ -4499,32 +4590,38 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) 
     const pattern_str = pattern_val.asString();
     const subject_str = subject_val.asString();
 
-    // 提取正则表达式内容（去除定界符）
-    // 格式: /pattern/flags
-    if (pattern_str.length < 2) return Value.initInt(0);
-    
-    const delimiter = pattern_str.data[0];
-    var end_pos: usize = pattern_str.length - 1;
-    
-    // 查找结束定界符
-    while (end_pos > 0 and pattern_str.data[end_pos] != delimiter) : (end_pos -= 1) {}
-    if (end_pos <= 1) return Value.initInt(0);
-    
-    const pattern = pattern_str.data[1..end_pos];
-    
-    // 简单字面量匹配（不支持正则语法）
-    if (pattern.len == 0) return Value.initInt(1);
-    if (pattern.len > subject_str.length) return Value.initInt(0);
-    
-    // 搜索子串
-    var i: usize = 0;
-    while (i <= subject_str.length - pattern.len) : (i += 1) {
-        if (std.mem.eql(u8, subject_str.data[i .. i + pattern.len], pattern)) {
-            return Value.initInt(1); // 找到匹配
-        }
-    }
-    
-    return Value.initInt(0); // 未找到
+    const parsed = parsePHPRegexPattern(pattern_str.data);
+
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(
+        parsed.pattern.ptr,
+        parsed.pattern.len,
+        parsed.options,
+        &errcode,
+        &erroffset,
+        null
+    );
+    if (re_ptr == null) return Value.initInt(0);
+    const re = re_ptr.?;
+    defer pcre2_code_free_8(re);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initInt(0);
+    defer pcre2_match_data_free_8(match_data);
+
+    const rc = pcre2_match_8(
+        re,
+        subject_str.data.ptr,
+        subject_str.length,
+        0,
+        0,
+        match_data,
+        null
+    );
+
+    if (rc == PCRE2_ERROR_NOMATCH) return Value.initInt(0);
+    if (rc < 0) return Value.initInt(0);
+    return Value.initInt(1);
 }
 
 /// str_starts_with - 检查字符串是否以指定前缀开始 (PHP 8.0+)
