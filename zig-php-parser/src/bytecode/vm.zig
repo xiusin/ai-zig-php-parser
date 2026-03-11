@@ -339,6 +339,7 @@ pub const BytecodeVM = struct {
             .{ .name = "explode", .func = builtinExplode },
             .{ .name = "implode", .func = builtinImplode },
             .{ .name = "preg_match", .func = builtinPregMatch },
+            .{ .name = "preg_match_all", .func = builtinPregMatchAll },
             .{ .name = "preg_replace", .func = builtinPregReplace },
             .{ .name = "count", .func = builtinCount },
             .{ .name = "sizeof", .func = builtinCount },
@@ -3123,6 +3124,81 @@ fn builtinPregReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     defer vm.allocator.free(owned);
     const out_str = vm.createString(owned) catch return BytecodeVM.VMError.OutOfMemory;
     return .{ .string_val = out_str };
+}
+
+fn builtinPregMatchAll(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 3) return .{ .int_val = 0 };
+    const pattern = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    const subject = valueToString(vm, args[1]) catch return BytecodeVM.VMError.OutOfMemory;
+    const parsed = parsePHPRegexPattern(pattern);
+
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(parsed.pattern.ptr, parsed.pattern.len, parsed.options, &errcode, &erroffset, null);
+    if (re_ptr == null) return .{ .int_val = 0 };
+    const re = re_ptr.?;
+    defer pcre2_code_free_8(re);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return .{ .int_val = 0 };
+    defer pcre2_match_data_free_8(match_data);
+
+    // 临时存储所有匹配
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    defer {
+        for (all_matches.items) |*match_groups| {
+            match_groups.deinit(vm.allocator);
+        }
+        all_matches.deinit(vm.allocator);
+    }
+
+    var offset: usize = 0;
+    var match_count: i64 = 0;
+
+    while (offset <= subject.len) {
+        const rc = pcre2_match_8(re, subject.ptr, subject.len, @intCast(offset), 0, match_data, null);
+        if (rc == PCRE2_ERROR_NOMATCH or rc < 0) break;
+
+        match_count += 1;
+        const ovec = pcre2_get_ovector_pointer_8(match_data);
+
+        var match_groups = std.ArrayListUnmanaged([]const u8){};
+        var i: usize = 0;
+        while (i < @as(usize, @intCast(rc))) : (i += 1) {
+            const start = ovec[i * 2];
+            const end = ovec[i * 2 + 1];
+            if (start < subject.len and end <= subject.len and start <= end) {
+                const capture = subject[start..end];
+                match_groups.append(vm.allocator, capture) catch return BytecodeVM.VMError.OutOfMemory;
+            }
+        }
+        all_matches.append(vm.allocator, match_groups) catch return BytecodeVM.VMError.OutOfMemory;
+
+        const match_end = ovec[1];
+        if (match_end == offset) {
+            offset += 1;
+        } else {
+            offset = match_end;
+        }
+    }
+
+    // 转换为PREG_PATTERN_ORDER格式
+    args[2].array_val.elements.clearRetainingCapacity();
+    if (all_matches.items.len > 0) {
+        const num_groups = all_matches.items[0].items.len;
+        var group_idx: usize = 0;
+        while (group_idx < num_groups) : (group_idx += 1) {
+            const group_arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+            for (all_matches.items) |match_groups| {
+                if (group_idx < match_groups.items.len) {
+                    const capture_str = vm.createString(match_groups.items[group_idx]) catch return BytecodeVM.VMError.OutOfMemory;
+                    group_arr.elements.append(vm.allocator, .{ .string_val = capture_str }) catch return BytecodeVM.VMError.OutOfMemory;
+                }
+            }
+            args[2].array_val.elements.append(vm.allocator, .{ .array_val = group_arr }) catch return BytecodeVM.VMError.OutOfMemory;
+        }
+    }
+
+    return .{ .int_val = match_count };
 }
 
 fn builtinAbs(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {

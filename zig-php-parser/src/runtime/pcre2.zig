@@ -350,7 +350,7 @@ pub fn pregMatchFn(vm: *VM, args: []const Value) !Value {
 
 /// preg_match_all 实现
 pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
-    const min_args: usize = 2;
+    const min_args: usize = 3;
     if (args.len < min_args) {
         const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, min_args, @as(u32, @intCast(args.len)), "preg_match_all", "builtin", 0);
         _ = try vm.throwException(exception);
@@ -359,7 +359,7 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
 
     const pattern_val = args[0];
     const subject_val = args[1];
-    _ = if (args.len > 2) args[2] else null;
+    const matches_ref = if (args.len > 2) args[2] else null;
 
     if (pattern_val.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "preg_match_all() expects parameter 1 to be string", "builtin", 0);
@@ -380,10 +380,19 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
     var pcre_pattern = try PCRE2Pattern.compile(vm.allocator, parsed.pattern, parsed.options);
     defer pcre_pattern.deinit();
 
-    var match_count: usize = 0;
+    // 临时存储所有匹配
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    defer {
+        for (all_matches.items) |*match_groups| {
+            match_groups.deinit(vm.allocator);
+        }
+        all_matches.deinit(vm.allocator);
+    }
+
+    var match_count: i64 = 0;
     var offset: usize = 0;
 
-    while (offset < subject.len) {
+    while (offset <= subject.len) {
         const rc = pcre2_match_8(
             pcre_pattern.re,
             subject.ptr,
@@ -394,19 +403,56 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
             null,
         );
 
-        if (rc == PCRE2_ERROR_NOMATCH) break;
-        if (rc < 0) return Value.initInt(@as(i64, @intCast(match_count)));
+        if (rc == PCRE2_ERROR_NOMATCH or rc < 0) break;
 
         match_count += 1;
         const ovec = pcre_pattern.getOvector();
+
+        var match_groups = std.ArrayListUnmanaged([]const u8){};
+        var i: usize = 0;
+        while (i < @as(usize, @intCast(rc))) : (i += 1) {
+            const start = ovec[i * 2];
+            const end = ovec[i * 2 + 1];
+            if (start < subject.len and end <= subject.len and start <= end) {
+                const capture = subject[start..end];
+                try match_groups.append(vm.allocator, capture);
+            }
+        }
+        try all_matches.append(vm.allocator, match_groups);
+
         const match_end = ovec[1];
         if (match_end == offset) {
-            break;
+            offset += 1;
+        } else {
+            offset = match_end;
         }
-        offset = match_end;
     }
 
-    return Value.initInt(@as(i64, @intCast(match_count)));
+    // 填充matches数组（PREG_PATTERN_ORDER格式）
+    if (matches_ref) |ref| {
+        if (ref.getTag() == .array) {
+            const matches_box = ref.getAsArray();
+            const matches_arr = matches_box.data.*;
+            matches_arr.elements.clearRetainingCapacity();
+
+            if (all_matches.items.len > 0) {
+                const num_groups = all_matches.items[0].items.len;
+                var group_idx: usize = 0;
+                while (group_idx < num_groups) : (group_idx += 1) {
+                    var group_arr = try vm.createArray();
+                    for (all_matches.items) |match_groups| {
+                        if (group_idx < match_groups.items.len) {
+                            const capture_str = try vm.createString(match_groups.items[group_idx]);
+                            try group_arr.elements.append(vm.allocator, Value.initString(capture_str));
+                        }
+                    }
+                    try matches_arr.elements.append(vm.allocator, Value.initArray(group_arr));
+                }
+            }
+        }
+    }
+
+    return Value.initInt(match_count);
 }
 
 /// preg_replace 实现
