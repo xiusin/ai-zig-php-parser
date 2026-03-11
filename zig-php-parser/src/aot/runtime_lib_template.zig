@@ -4486,6 +4486,94 @@ pub fn php_str_contains(haystack: Value, needle: Value) !Value {
 const pcre2_code = opaque {};
 const pcre2_match_data = opaque {};
 
+// 正则缓存条目
+const RegexCacheEntry = struct {
+    code: *pcre2_code,
+    last_used: i128, // 纳秒时间戳（i128）
+    
+    fn init(code: *pcre2_code) RegexCacheEntry {
+        return .{
+            .code = code,
+            .last_used = std.time.nanoTimestamp(),
+        };
+    }
+    
+    fn touch(self: *RegexCacheEntry) void {
+        self.last_used = std.time.nanoTimestamp();
+    }
+    
+    fn deinit(self: *RegexCacheEntry) void {
+        pcre2_code_free_8(self.code);
+    }
+};
+
+// 全局正则缓存
+const REGEX_CACHE_SIZE = 128;
+var regex_cache: std.StringHashMap(RegexCacheEntry) = undefined;
+var regex_cache_mutex: std.Thread.Mutex = .{};
+var regex_cache_initialized: bool = false;
+
+fn initRegexCache(allocator: Allocator) !void {
+    if (regex_cache_initialized) return;
+    regex_cache = std.StringHashMap(RegexCacheEntry).init(allocator);
+    regex_cache_initialized = true;
+}
+
+fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator) !*pcre2_code {
+    try initRegexCache(allocator);
+    
+    regex_cache_mutex.lock();
+    defer regex_cache_mutex.unlock();
+    
+    // 查找缓存
+    if (regex_cache.getPtr(pattern)) |entry| {
+        entry.touch();
+        return entry.code;
+    }
+    
+    // 缓存未命中，编译新模式
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(
+        pattern.ptr,
+        pattern.len,
+        options,
+        &errcode,
+        &erroffset,
+        null,
+    );
+    if (re_ptr == null) return error.RegexCompileFailed;
+    const re = re_ptr.?;
+    
+    // LRU淘汰：如果缓存满了，移除最旧的条目
+    if (regex_cache.count() >= REGEX_CACHE_SIZE) {
+        var oldest_key: ?[]const u8 = null;
+        var oldest_time: i128 = std.math.maxInt(i128);
+        
+        var iter = regex_cache.iterator();
+        while (iter.next()) |kv| {
+            if (kv.value_ptr.last_used < oldest_time) {
+                oldest_time = kv.value_ptr.last_used;
+                oldest_key = kv.key_ptr.*;
+            }
+        }
+        
+        if (oldest_key) |key| {
+            if (regex_cache.fetchRemove(key)) |removed| {
+                var entry = removed.value;
+                entry.deinit();
+                allocator.free(removed.key);
+            }
+        }
+    }
+    
+    // 添加到缓存
+    const key_copy = try allocator.dupe(u8, pattern);
+    try regex_cache.put(key_copy, RegexCacheEntry.init(re));
+    
+    return re;
+}
+
 extern fn pcre2_compile_8(
     pattern: [*]const u8,
     pattern_length: usize,
@@ -4600,7 +4688,6 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
 /// 完整PCRE2实现的preg_match
 /// 支持所有正则语法，与解释器/Bytecode行为一致
 pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
-    _ = allocator;
     if (!pattern_val.isString() or !subject_val.isString()) {
         return Value.initInt(0);
     }
@@ -4610,19 +4697,8 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) 
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
-    var errcode: c_int = 0;
-    var erroffset: usize = 0;
-    const re_ptr = pcre2_compile_8(
-        parsed.pattern.ptr,
-        parsed.pattern.len,
-        parsed.options,
-        &errcode,
-        &erroffset,
-        null
-    );
-    if (re_ptr == null) return Value.initInt(0);
-    const re = re_ptr.?;
-    defer pcre2_code_free_8(re);
+    // 使用缓存获取编译后的正则（不需要release，缓存管理生命周期）
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return Value.initInt(0);
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initInt(0);
     defer pcre2_match_data_free_8(match_data);
@@ -4654,22 +4730,11 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
     const subject_str = subject_val.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
-    var errcode: c_int = 0;
-    var erroffset: usize = 0;
-    const re_ptr = pcre2_compile_8(
-        parsed.pattern.ptr,
-        parsed.pattern.len,
-        parsed.options,
-        &errcode,
-        &erroffset,
-        null,
-    );
-    if (re_ptr == null) {
+    // 使用缓存获取编译后的正则
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
-    }
-    const re = re_ptr.?;
-    defer pcre2_code_free_8(re);
+    };
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
@@ -4800,19 +4865,8 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
-    var errcode: c_int = 0;
-    var erroffset: usize = 0;
-    const re_ptr = pcre2_compile_8(
-        parsed.pattern.ptr,
-        parsed.pattern.len,
-        parsed.options,
-        &errcode,
-        &erroffset,
-        null
-    );
-    if (re_ptr == null) return subject_val;
-    const re = re_ptr.?;
-    defer pcre2_code_free_8(re);
+    // 使用缓存获取编译后的正则
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return subject_val;
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return subject_val;
     defer pcre2_match_data_free_8(match_data);
@@ -4857,24 +4911,13 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, allocator: Allocator) 
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
-    var errcode: c_int = 0;
-    var erroffset: usize = 0;
-    const re_ptr = pcre2_compile_8(
-        parsed.pattern.ptr,
-        parsed.pattern.len,
-        parsed.options,
-        &errcode,
-        &erroffset,
-        null
-    );
-    if (re_ptr == null) {
+    // 使用缓存获取编译后的正则
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
         // 编译失败，返回包含原字符串的数组
         const arr = try PHPArray.init(allocator);
         try arr.push(allocator, subject_val);
         return Value.initArray(arr);
-    }
-    const re = re_ptr.?;
-    defer pcre2_code_free_8(re);
+    };
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
         const arr = try PHPArray.init(allocator);
