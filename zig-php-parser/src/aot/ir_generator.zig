@@ -4050,6 +4050,15 @@ pub const IRGenerator = struct {
                         }
                     }
                 }
+            } else if (std.mem.eql(u8, func_name, "preg_grep")) {
+                // preg_grep($pattern, $array, $flags = 0)
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
+                    args = padded;
+                }
             } else if (std.mem.eql(u8, func_name, "explode")) {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);

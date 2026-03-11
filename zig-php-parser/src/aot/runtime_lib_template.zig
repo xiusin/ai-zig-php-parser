@@ -5003,6 +5003,60 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, allocator: Allocator) 
     return Value.initArray(result_arr);
 }
 
+/// preg_grep - 返回匹配正则的数组元素
+pub fn preg_grep(pattern_val: Value, input_val: Value, flags_val: Value, allocator: Allocator) !Value {
+    if (!pattern_val.isString() or !input_val.isArray()) {
+        return Value.initArray(try PHPArray.init(allocator));
+    }
+
+    const pattern_str = pattern_val.asString();
+    const input_arr = input_val.asArray();
+    const flags = if (flags_val.isInt()) flags_val.asInt() else 0;
+    const invert = (flags & 1) != 0; // PREG_GREP_INVERT = 1
+
+    const parsed = parsePHPRegexPattern(pattern_str.data);
+    const re = try getOrCompileRegex(parsed.pattern, parsed.options, allocator);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        return Value.initArray(try PHPArray.init(allocator));
+    };
+    defer pcre2_match_data_free_8(match_data);
+
+    const result_arr = try PHPArray.init(allocator);
+
+    // 遍历输入数组（简化：只支持数字索引）
+    var i: usize = 0;
+    while (i < input_arr.elements.packed_values.items.len) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        const value = input_arr.get(key) orelse continue;
+
+        // 转换为字符串
+        const str_val = if (value.isString()) 
+            value.asString().data 
+        else if (value.isInt()) 
+            blk: {
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{value.asInt()}) catch "";
+                break :blk s;
+            }
+        else 
+            "";
+
+        // 匹配测试
+        const rc = pcre2_match_8(re, str_val.ptr, str_val.len, 0, 0, match_data, null);
+        const matched = (rc >= 0);
+
+        // 根据flags决定是否包含
+        const should_include = if (invert) !matched else matched;
+
+        if (should_include) {
+            try result_arr.push(allocator, value);
+        }
+    }
+
+    return Value.initArray(result_arr);
+}
+
 /// str_starts_with - 检查字符串是否以指定前缀开始 (PHP 8.0+)
 pub fn php_str_starts_with(haystack: Value, needle: Value) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);

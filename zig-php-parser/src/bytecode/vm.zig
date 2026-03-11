@@ -341,6 +341,7 @@ pub const BytecodeVM = struct {
             .{ .name = "preg_match", .func = builtinPregMatch },
             .{ .name = "preg_match_all", .func = builtinPregMatchAll },
             .{ .name = "preg_replace", .func = builtinPregReplace },
+            .{ .name = "preg_grep", .func = builtinPregGrep },
             .{ .name = "count", .func = builtinCount },
             .{ .name = "sizeof", .func = builtinCount },
             .{ .name = "array_push", .func = builtinArrayPush },
@@ -3199,6 +3200,46 @@ fn builtinPregMatchAll(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value 
     }
 
     return .{ .int_val = match_count };
+}
+
+fn builtinPregGrep(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .array_val = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory };
+    
+    const pattern = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
+    if (args[1] != .array_val) return .{ .array_val = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory };
+    
+    const input_arr = args[1].array_val;
+    const flags: i64 = if (args.len >= 3 and args[2] == .int_val) args[2].int_val else 0;
+    const invert = (flags & 1) != 0;
+    
+    const parsed = parsePHPRegexPattern(pattern);
+    var errcode: c_int = 0;
+    var erroffset: usize = 0;
+    const re_ptr = pcre2_compile_8(parsed.pattern.ptr, parsed.pattern.len, parsed.options, &errcode, &erroffset, null);
+    if (re_ptr == null) return .{ .array_val = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory };
+    const re = re_ptr.?;
+    defer pcre2_code_free_8(re);
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        return .{ .array_val = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory };
+    };
+    defer pcre2_match_data_free_8(match_data);
+
+    const result_arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+
+    for (input_arr.elements.items, 0..) |value, idx| {
+        const str_val = valueToString(vm, value) catch "";
+        const rc = pcre2_match_8(re, str_val.ptr, str_val.len, 0, 0, match_data, null);
+        const matched = (rc >= 0);
+        const should_include = if (invert) !matched else matched;
+
+        if (should_include) {
+            result_arr.elements.append(vm.allocator, value) catch return BytecodeVM.VMError.OutOfMemory;
+            _ = idx;
+        }
+    }
+
+    return .{ .array_val = result_arr };
 }
 
 fn builtinAbs(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {

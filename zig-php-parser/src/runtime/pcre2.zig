@@ -782,6 +782,71 @@ pub fn pregSplitFn(vm: *VM, args: []const Value) !Value {
     return Value.fromBox(box, Value.TYPE_ARRAY);
 }
 
+/// preg_grep 实现
+pub fn pregGrepFn(vm: *VM, args: []const Value) !Value {
+    const min_args: usize = 2;
+    if (args.len < min_args) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, min_args, @as(u32, @intCast(args.len)), "preg_grep", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const pattern_val = args[0];
+    const input_val = args[1];
+    const flags_val = if (args.len > 2) args[2] else null;
+
+    if (pattern_val.getTag() != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "preg_grep() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    if (input_val.getTag() != .array) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "preg_grep() expects parameter 2 to be array", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const pattern = pattern_val.getAsString().data.data;
+    const input_arr = input_val.getAsArray().data;
+    const flags: i64 = if (flags_val != null and flags_val.?.getTag() == .integer) flags_val.?.asInt() else 0;
+    const invert = (flags & 1) != 0;
+
+    const parsed = parsePHPRegexPattern(pattern);
+    var pcre_pattern = try PCRE2Pattern.compile(vm.allocator, parsed.pattern, parsed.options);
+    defer pcre_pattern.deinit();
+
+    const result_box = try vm.allocator.create(gc.Box(*PHPArray));
+    const result_arr = try vm.allocator.create(PHPArray);
+    result_arr.* = PHPArray.init(vm.allocator);
+    result_box.* = .{
+        .ref_count = 1,
+        .gc_info = .{},
+        .data = result_arr,
+    };
+
+    var iter = input_arr.*.getElements().iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        const str_val = if (value.getTag() == .string)
+            value.getAsString().data.data
+        else
+            "";
+
+        const rc = pcre2_match_8(pcre_pattern.re, str_val.ptr, str_val.len, 0, 0, pcre_pattern.match_data, null);
+        const matched = (rc >= 0);
+        const should_include = if (invert) !matched else matched;
+
+        if (should_include) {
+            try result_arr.*.set(vm.allocator, key, value);
+        }
+    }
+
+    return Value.fromBox(result_box, Value.TYPE_ARRAY);
+}
+
 /// preg_quote 实现
 pub fn pregQuoteFn(vm: *VM, args: []const Value) !Value {
     const min_args: usize = 1;
