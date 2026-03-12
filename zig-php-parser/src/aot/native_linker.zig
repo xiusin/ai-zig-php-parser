@@ -120,6 +120,7 @@ pub const NativeLinker = struct {
     current_unset_regs: ?*std.AutoHashMap(usize, void) = null,
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
+    current_make_ref_allocas: ?*const std.AutoHashMap(usize, void) = null,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
@@ -2091,6 +2092,21 @@ pub const NativeLinker = struct {
             }
         }
 
+        // 检测被 make_ref 的 alloca（父作用域引用捕获），
+        // 后续 store 到这些 alloca 需要通过 val_deref 写穿引用槽
+        var make_ref_allocas = std.AutoHashMap(usize, void).init(self.allocator);
+        defer make_ref_allocas.deinit();
+        for (func.blocks.items) |blk_scan| {
+            for (blk_scan.instructions.items) |inst_scan| {
+                if (inst_scan.op == .make_ref) {
+                    const ptr_id = inst_scan.op.make_ref.ptr.id;
+                    if (alloca_registers.contains(ptr_id)) {
+                        try make_ref_allocas.put(ptr_id, {});
+                    }
+                }
+            }
+        }
+
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
@@ -2311,6 +2327,9 @@ pub const NativeLinker = struct {
 
         self.current_ref_capture_allocas = &ref_capture_allocas;
         defer self.current_ref_capture_allocas = null;
+
+        self.current_make_ref_allocas = &make_ref_allocas;
+        defer self.current_make_ref_allocas = null;
 
         // std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
@@ -4646,6 +4665,16 @@ pub const NativeLinker = struct {
                             }
                             return;
                         }
+                    }
+                }
+
+                // make_ref'd alloca：使用 ref_aware_store 写穿引用槽
+                if (self.current_make_ref_allocas) |mra| {
+                    if (mra.contains(op.ptr.id)) {
+                        const value_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                        const val_suffix = if (value_is_alloca) ".*" else "";
+                        try writer.print("    runtime.ref_aware_store(reg_{d}, reg_{d}{s});\n", .{ op.ptr.id, op.value.id, val_suffix });
+                        return;
                     }
                 }
 
@@ -12113,6 +12142,16 @@ pub const NativeLinker = struct {
                             }
                             return;
                         }
+                    }
+                }
+
+                // make_ref'd alloca：使用 ref_aware_store 写穿引用槽
+                if (self.current_make_ref_allocas) |mra| {
+                    if (mra.contains(op.ptr.id)) {
+                        const value_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                        const val_suffix = if (value_is_alloca) ".*" else "";
+                        try writer.print("        runtime.ref_aware_store(reg_{d}, reg_{d}{s});\n", .{ op.ptr.id, op.value.id, val_suffix });
+                        return;
                     }
                 }
 

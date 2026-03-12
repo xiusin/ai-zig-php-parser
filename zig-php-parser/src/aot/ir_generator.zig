@@ -2518,6 +2518,12 @@ pub const IRGenerator = struct {
                         // 写入全局表
                         _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = value_reg } }, null);
 
+                        // 如果变量有本地 alloca（闭包引用捕获预创建），
+                        // 也 store 到 alloca 以更新引用槽
+                        if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                            _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = value_reg } }, null);
+                        }
+
                         // 如果在 __main__ 中，也标记为全局变量
                         if (is_main and !is_global) {
                             try self.global_vars.put(self.allocator, var_name, {});
@@ -4813,8 +4819,13 @@ pub const IRGenerator = struct {
                     try cap_names.append(self.allocator, var_name);
                     try cap_by_ref.append(self.allocator, true);
                 } else {
+                    // 变量尚不存在（如闭包自引用 use(&$factorial)），
+                    // 预创建 alloca + null，再 make_ref 创建共享引用槽
+                    const pre_ptr = try self.getOrCreateVarRegister(var_name, .php_value);
                     const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    try captures.append(self.allocator, null_reg);
+                    _ = try self.emit(.{ .store = .{ .ptr = pre_ptr, .value = null_reg } }, null);
+                    const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = pre_ptr } }, .php_value);
+                    try captures.append(self.allocator, ref_reg);
                     try cap_names.append(self.allocator, var_name);
                     try cap_by_ref.append(self.allocator, true);
                 }

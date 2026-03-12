@@ -2018,6 +2018,16 @@ pub fn val_assign(target: *Value, value: Value) void {
     target.* = value;
 }
 
+/// 引用感知的赋值：如果目标含引用则写穿到堆单元，否则直接赋值
+/// @pre  target 指向有效的 Value（可为 Ref 或普通值）
+/// @post 新值写入实际存储位置，旧值已 release，新值已 retain
+pub fn ref_aware_store(target: *Value, new_val: Value) void {
+    const dest = val_deref(target);
+    dest.*.release(runtime_allocator);
+    _ = new_val.retain();
+    dest.* = new_val;
+}
+
 /// 变量解引用
 pub fn val_deref(val: *Value) *Value {
     if (val.isRef()) {
@@ -2505,18 +2515,17 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
 }
 
 pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allocator) !Value {
-    if (callback.isFunction()) {
-        const closure = callback.asFunction();
-        // 传递闭包自身作为上下文
-        return closure.func(callback, args, allocator);
+    // 引用透明：闭包自引用场景中 callback 可能是 Ref(cell)
+    const actual_cb = if (callback.isRef()) callback.asRef().* else callback;
+    if (actual_cb.isFunction()) {
+        const closure = actual_cb.asFunction();
+        return closure.func(actual_cb, args, allocator);
     }
-    if (callback.isString()) {
-        const func_name = callback.asString().data;
+    if (actual_cb.isString()) {
+        const func_name = actual_cb.asString().data;
         if (lookupBuiltinFunction(func_name)) |func| {
-            // 普通函数调用，上下文为 null
             return func(Value.initNull(), args, allocator);
         }
-        // 查找用户定义函数
         if (user_function_registry) |registry| {
             if (registry.get(func_name)) |func| {
                 return func(Value.initNull(), args, allocator);
@@ -2524,8 +2533,8 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
         }
         return error.UnknownFunction;
     }
-    if (callback.isArray()) {
-        const arr = callback.asArray();
+    if (actual_cb.isArray()) {
+        const arr = actual_cb.asArray();
         if (arr.elements.count() != 2) return error.InvalidCallback;
 
         const key0 = ArrayKey{ .integer = 0 };
