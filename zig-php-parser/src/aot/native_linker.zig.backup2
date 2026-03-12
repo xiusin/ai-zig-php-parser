@@ -979,8 +979,8 @@ pub const NativeLinker = struct {
                         const tdef = tptr.*;
                         for (tdef.properties) |prop| {
                             const is_public = prop.visibility == .public;
-                            try writer.print("    if ({s}_meta.properties.get(\"{s}\") == null) {{\n", .{ short_cname, prop.name });
-                            try writer.print("        try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ short_cname, prop.name });
+                            try writer.print("    if ({s}_meta.properties.get(\"{s}\") == null) {{\n", .{ cname, prop.name });
+                            try writer.print("        try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ cname, prop.name });
                             if (prop.default_value) |dv| {
                                 switch (dv.op) {
                                     .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
@@ -1001,7 +1001,7 @@ pub const NativeLinker = struct {
                             try writer.print(", .is_static = {}, .is_public = {}, .is_readonly = false }});\n", .{ prop.is_static, is_public });
 
                             if (prop.is_static) {
-                                try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", ", .{ short_cname, prop.name });
+                                try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", ", .{ cname, prop.name });
                                 if (prop.default_value) |dv| {
                                     switch (dv.op) {
                                         .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
@@ -1030,7 +1030,7 @@ pub const NativeLinker = struct {
             for (0..method_counts[ci]) |mi| {
                 const mname = method_lists[ci][mi];
                 var full_name_buf: [512]u8 = undefined;
-                const full_name = try std.fmt.bufPrint(&full_name_buf, "{s}::{s}", .{ short_cname, mname });
+                const full_name = try std.fmt.bufPrint(&full_name_buf, "{s}::{s}", .{ cname, mname });
 
                 var is_static: bool = false;
                 if (self.findFunction(ir_module, full_name)) |method_func| {
@@ -1039,7 +1039,7 @@ pub const NativeLinker = struct {
                     }
                 }
 
-                try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = {} }});\n", .{ short_cname, mname, short_cname, mname, is_static });
+                try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = {} }});\n", .{ cname, mname, cname, mname, is_static });
             }
 
             if (type_def_idx[ci]) |tdi| {
@@ -1058,7 +1058,7 @@ pub const NativeLinker = struct {
 
                             try writer.print(
                                 "    if ({s}_meta.methods.get(\"{s}\") == null) try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = {} }});\n",
-                                .{ short_cname, tmname, short_cname, tmname, tname, tmname, is_static },
+                                .{ cname, tmname, cname, tmname, tname, tmname, is_static },
                             );
                         }
                     }
@@ -1066,9 +1066,9 @@ pub const NativeLinker = struct {
             }
 
             // 设置魔术方法指针
-            try writer.print("    if ({s}_meta.methods.get(\"__toString\")) |m| {s}_meta.magic_toString = m.func;\n", .{ short_cname, short_cname });
+            try writer.print("    if ({s}_meta.methods.get(\"__toString\")) |m| {s}_meta.magic_toString = m.func;\n", .{ cname, cname });
 
-            try writer.print("    try runtime.registerClass({s}_meta);\n", .{short_cname});
+            try writer.print("    try runtime.registerClass({s}_meta);\n", .{cname});
         }
 
         // 注册含静态属性的 trait（使 self::$prop 在 trait 方法中可用）
@@ -1137,9 +1137,7 @@ pub const NativeLinker = struct {
         for (0..class_count) |ci| {
             if (type_def_idx[ci]) |tdi| {
                 const td = ir_module.types.items[tdi].*;
-                const full_cname = class_names[ci];
-                const short_cname = class_short_names[ci];
-                _ = short_cname; // 这个循环中只需要full_cname
+                const cname = class_names[ci];
 
                 for (td.constants) |const_info| {
                     const value_code = switch (const_info.value) {
@@ -1158,8 +1156,7 @@ pub const NativeLinker = struct {
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
 
-                    // ✅ 使用完整类名设置静态属性
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ full_cname, escaped_name, value_code });
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ cname, escaped_name, value_code });
                 }
             }
         }
@@ -1167,19 +1164,18 @@ pub const NativeLinker = struct {
         for (0..class_count) |ci| {
             if (type_def_idx[ci]) |tdi| {
                 const td = ir_module.types.items[tdi].*;
-                const short_cname = class_short_names[ci];
                 if (td.parent) |parent_name| {
                     const escaped_parent = try self.escapeString(parent_name);
                     defer self.allocator.free(escaped_parent);
                     try writer.print(
                         "    {s}_meta.parent = if (runtime.findClass(\"{s}\")) |p| p else null;\n",
-                        .{ short_cname, escaped_parent },
+                        .{ class_names[ci], escaped_parent },
                     );
                 }
 
                 // 设置接口列表
                 if (td.interfaces.len > 0) {
-                    try writer.print("    {s}_meta.interfaces = &[_][]const u8{{", .{short_cname});
+                    try writer.print("    {s}_meta.interfaces = &[_][]const u8{{", .{class_names[ci]});
                     for (td.interfaces, 0..) |iface, idx| {
                         if (idx > 0) try writer.writeAll(", ");
                         const escaped_iface = try self.escapeString(iface);
@@ -1192,19 +1188,17 @@ pub const NativeLinker = struct {
         }
 
         for (0..class_count) |ci| {
-            const full_cname = class_names[ci];
-            const short_cname = class_short_names[ci];
-            try writer.print("    if ({s}_meta.findMethod(\"__construct\")) |m| {{ {s}_meta.magic_construct = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__destruct\")) |m| {{ {s}_meta.magic_destruct = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__get\")) |m| {{ {s}_meta.magic_get = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__set\")) |m| {{ {s}_meta.magic_set = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__call\")) |m| {{ {s}_meta.magic_call = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__callStatic\")) |m| {{ {s}_meta.magic_callStatic = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__sleep\")) |m| {{ {s}_meta.magic_sleep = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__wakeup\")) |m| {{ {s}_meta.magic_wakeup = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__serialize\")) |m| {{ {s}_meta.magic_serialize = m.func; }}\n", .{ short_cname, short_cname });
-            try writer.print("    if ({s}_meta.findMethod(\"__unserialize\")) |m| {{ {s}_meta.magic_unserialize = m.func; }}\n", .{ short_cname, short_cname });
-            _ = full_cname; // 避免未使用警告
+            const cname = class_names[ci];
+            try writer.print("    if ({s}_meta.findMethod(\"__construct\")) |m| {{ {s}_meta.magic_construct = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__destruct\")) |m| {{ {s}_meta.magic_destruct = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__get\")) |m| {{ {s}_meta.magic_get = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__set\")) |m| {{ {s}_meta.magic_set = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__call\")) |m| {{ {s}_meta.magic_call = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__callStatic\")) |m| {{ {s}_meta.magic_callStatic = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__sleep\")) |m| {{ {s}_meta.magic_sleep = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__wakeup\")) |m| {{ {s}_meta.magic_wakeup = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__serialize\")) |m| {{ {s}_meta.magic_serialize = m.func; }}\n", .{ cname, cname });
+            try writer.print("    if ({s}_meta.findMethod(\"__unserialize\")) |m| {{ {s}_meta.magic_unserialize = m.func; }}\n", .{ cname, cname });
         }
 
         try writer.writeAll("}\n");

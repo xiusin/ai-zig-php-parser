@@ -113,6 +113,16 @@ pub const IRGenerator = struct {
     current_has_this_param: bool = false,
     /// 引用参数集合（参数名 -> void）
     reference_params: std.StringHashMapUnmanaged(void),
+    
+    // ✅ 命名空间支持
+    /// 当前命名空间（如 "App\\Utils"）
+    current_namespace: ?[]const u8 = null,
+    /// 命名空间别名表：别名 -> 完整类名（use App\Service as S）
+    namespace_aliases: std.StringHashMapUnmanaged([]const u8),
+    /// 命名空间导入表：短名 -> 完整类名（use App\Service）
+    namespace_imports: std.StringHashMapUnmanaged([]const u8),
+    /// Trait 方法映射：trait_name::method_name -> 方法实现
+    trait_methods: std.StringHashMapUnmanaged(*Function),
 
     const Self = @This();
 
@@ -163,6 +173,9 @@ pub const IRGenerator = struct {
             .global_vars = .{},
             .static_vars = .{},
             .reference_params = .{},
+            .namespace_aliases = .{},
+            .namespace_imports = .{},
+            .trait_methods = .{},
         };
     }
 
@@ -637,6 +650,9 @@ pub const IRGenerator = struct {
             .echo_stmt => try self.generateEchoStmt(node),
             .lock_stmt => try self.generateLockStmt(node),
             .go_stmt => try self.generateGoStmt(node),
+            // ✅ 处理 namespace 和 use 语句
+            .namespace_stmt => try self.generateNamespaceStatement(node),
+            .use_stmt => try self.generateUseStatement(node),
             .expression_stmt => {
                 // Expression statement - just evaluate the expression
                 _ = try self.generateExpression(index);
@@ -1008,7 +1024,10 @@ pub const IRGenerator = struct {
 
         // 使用@field安全获取，如果失败则返回
         const class_data = node.data.container_decl;
-        const class_name = self.getString(class_data.name);
+        const short_class_name = self.getString(class_data.name);
+        
+        // ✅ 获取完整的类名（包含命名空间）
+        const class_name = try self.getFullClassName(short_class_name);
 
         var properties = std.ArrayListUnmanaged(TypeDef.Property){};
         var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
@@ -1026,26 +1045,32 @@ pub const IRGenerator = struct {
                 .literal_string => self.getString(impl_node.data.literal_string.value),
                 else => continue,
             };
-            try interfaces.append(self.allocator, iface_name);
+            // ✅ 解析接口名称（可能有命名空间）
+            const full_iface_name = try self.resolveClassName(iface_name);
+            try interfaces.append(self.allocator, full_iface_name);
         }
 
         const interfaces_slice = try interfaces.toOwnedSlice(self.allocator);
 
         // Create type definition
         const type_def = try self.allocator.create(TypeDef);
+        
+        // ✅ 解析父类名称（可能有命名空间）
+        const parent_name = if (class_data.extends) |ext_idx| blk: {
+            const ext_node = self.getNode(ext_idx) orelse break :blk null;
+            const parent_short_name = switch (ext_node.tag) {
+                .named_type => self.getString(ext_node.data.named_type.name),
+                .variable => self.getString(ext_node.data.variable.name),
+                .literal_string => self.getString(ext_node.data.literal_string.value),
+                else => break :blk null,
+            };
+            break :blk try self.resolveClassName(parent_short_name);
+        } else null;
+        
         type_def.* = .{
             .name = class_name,
             .kind = .class,
-            .parent = if (class_data.extends) |ext_idx| blk: {
-                const ext_node = self.getNode(ext_idx) orelse break :blk null;
-                switch (ext_node.tag) {
-                    .named_type => break :blk self.getString(ext_node.data.named_type.name),
-                    .variable => break :blk self.getString(ext_node.data.variable.name),
-                    .literal_string => break :blk self.getString(ext_node.data.literal_string.value),
-                    else => {},
-                }
-                break :blk null;
-            } else null,
+            .parent = parent_name,
             .interfaces = interfaces_slice,
             .traits = &.{},
             .properties = &.{},
@@ -3234,6 +3259,88 @@ pub const IRGenerator = struct {
         return null;
     }
 
+    /// 解析类名：处理命名空间、别名、导入
+    /// @param class_name 原始类名（可能是短名、别名、完全限定名）
+    /// @return 完整的类名（包含命名空间）
+    fn resolveClassName(self: *Self, class_name: []const u8) ![]const u8 {
+        // 1. 空类名
+        if (class_name.len == 0) return class_name;
+        
+        // 2. 完全限定名（以 \ 开头）
+        if (class_name[0] == '\\') {
+            return class_name[1..];  // 去掉前导 \
+        }
+        
+        // 3. 检查别名表（use App\Service as S）
+        if (self.namespace_aliases.get(class_name)) |full_name| {
+            return full_name;
+        }
+        
+        // 4. 检查导入表（use App\Service）
+        if (self.namespace_imports.get(class_name)) |full_name| {
+            return full_name;
+        }
+        
+        // 5. 加上当前命名空间
+        if (self.current_namespace) |ns| {
+            return try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ ns, class_name });
+        }
+        
+        return class_name;
+    }
+
+    /// 获取完整的类名（包含命名空间）
+    /// @param class_name 类的短名
+    /// @return 完整的类名
+    fn getFullClassName(self: *Self, class_name: []const u8) ![]const u8 {
+        if (self.current_namespace) |ns| {
+            return try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ ns, class_name });
+        }
+        return class_name;
+    }
+
+    /// 处理 use 语句
+    /// @param use_node use 语句节点
+    fn generateUseStatement(self: *Self, use_node: *const Node) !void {
+        if (use_node.tag != .use_stmt) return;
+        
+        const use_data = use_node.data.use_stmt;
+        const full_name = self.getString(use_data.namespace);
+        
+        if (use_data.alias) |alias_id| {
+            // use App\Service as S
+            const alias = self.getString(alias_id);
+            try self.namespace_aliases.put(self.allocator, alias, full_name);
+        } else {
+            // use App\Service
+            const short_name = getLastPart(full_name);
+            try self.namespace_imports.put(self.allocator, short_name, full_name);
+        }
+    }
+
+    /// 获取完整名称的最后一部分
+    /// @param full_name 完整名称（如 "App\\Utils\\Helper"）
+    /// @return 最后一部分（如 "Helper"）
+    fn getLastPart(full_name: []const u8) []const u8 {
+        var i: usize = full_name.len;
+        while (i > 0) {
+            i -= 1;
+            if (full_name[i] == '\\') {
+                return full_name[i + 1 ..];
+            }
+        }
+        return full_name;
+    }
+
+    /// 处理 namespace 语句
+    /// @param namespace_node namespace 语句节点
+    fn generateNamespaceStatement(self: *Self, namespace_node: *const Node) !void {
+        if (namespace_node.tag != .namespace_stmt) return;
+        
+        const ns_data = namespace_node.data.namespace_stmt;
+        self.current_namespace = self.getString(ns_data.name);
+    }
+
     /// Generate IR for binary expression
     fn generateBinaryExpr(self: *Self, node: *const Node) !Register {
         const bin_data = node.data.binary_expr;
@@ -4420,8 +4527,11 @@ pub const IRGenerator = struct {
     /// Generate IR for static method call
     fn generateStaticMethodCall(self: *Self, node: *const Node) !Register {
         const call_data = node.data.static_method_call;
-        const class_name = self.getString(call_data.class_name);
+        const short_class_name = self.getString(call_data.class_name);
         const method_name = self.getString(call_data.method_name);
+        
+        // ✅ 解析类名（处理命名空间、别名）
+        const class_name = try self.resolveClassName(short_class_name);
 
         // Generate arguments
         const args = try self.allocator.alloc(Register, call_data.args.len);
