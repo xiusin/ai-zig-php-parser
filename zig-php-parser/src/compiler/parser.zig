@@ -363,6 +363,7 @@ pub const Parser = struct {
     fn parseTraitUse(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_use);
         var traits = std.ArrayListUnmanaged(ast.Node.Index){};
+        var adaptations = std.ArrayListUnmanaged(ast.TraitAdaptation){};
 
         while (true) {
             try traits.append(self.allocator, try self.parseType());
@@ -373,24 +374,156 @@ pub const Parser = struct {
             }
         }
 
-        // Handle adaptations block { ... } or semicolon
         if (self.curr.tag == .l_brace) {
             _ = try self.eat(.l_brace);
-            var balance: usize = 1;
-            while (balance > 0 and self.curr.tag != .eof) {
-                if (self.curr.tag == .l_brace) balance += 1;
-                if (self.curr.tag == .r_brace) balance -= 1;
-                if (balance > 0) self.nextToken();
+            while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+                self.parseTraitAdaptation(&adaptations) catch {
+                    self.skipTraitAdaptationRecovery();
+                };
             }
-            if (self.curr.tag == .r_brace) self.nextToken();
+            _ = try self.eat(.r_brace);
         } else {
             _ = try self.eat(.semicolon);
         }
 
         const arena = self.context.arena.allocator();
         const traits_slice = try arena.dupe(ast.Node.Index, traits.items);
+        const adaptations_slice = try arena.dupe(
+            ast.TraitAdaptation,
+            adaptations.items,
+        );
         traits.deinit(self.allocator);
-        return self.createNode(.{ .tag = .trait_use, .main_token = token, .data = .{ .trait_use = .{ .traits = traits_slice } } });
+        adaptations.deinit(self.allocator);
+        return self.createNode(.{
+            .tag = .trait_use,
+            .main_token = token,
+            .data = .{ .trait_use = .{
+                .traits = traits_slice,
+                .adaptations = adaptations_slice,
+            } },
+        });
+    }
+
+    fn parseTraitAdaptation(
+        self: *Parser,
+        adaptations: *std.ArrayListUnmanaged(ast.TraitAdaptation),
+    ) anyerror!void {
+        const method_ref = try self.parseTraitMethodReference();
+
+        if (self.curr.tag == .t_string) {
+            const keyword = self.lexer.buffer[self.curr.loc.start..self.curr.loc.end];
+            if (std.mem.eql(u8, keyword, "insteadof")) {
+                self.nextToken();
+
+                var excluded_traits = std.ArrayListUnmanaged(u32){};
+                defer excluded_traits.deinit(self.allocator);
+
+                while (true) {
+                    try excluded_traits.append(
+                        self.allocator,
+                        try self.parseTraitIdentifier(),
+                    );
+                    if (self.curr.tag != .comma) break;
+                    self.nextToken();
+                }
+
+                _ = try self.eat(.semicolon);
+                try adaptations.append(self.allocator, .{
+                    .insteadof = .{
+                        .preferred = method_ref,
+                        .excluded_traits = try self.context
+                            .arena
+                            .allocator()
+                            .dupe(u32, excluded_traits.items),
+                    },
+                });
+                return;
+            }
+        }
+
+        _ = try self.eat(.k_as);
+
+        var visibility: ?ast.TraitVisibility = null;
+        if (isTraitVisibilityToken(self.curr.tag)) {
+            visibility = self.parseTraitVisibility();
+        }
+
+        var alias_name: ?u32 = null;
+        if (self.curr.tag != .semicolon) {
+            alias_name = try self.parseTraitIdentifier();
+        }
+
+        _ = try self.eat(.semicolon);
+        try adaptations.append(self.allocator, .{
+            .alias = .{
+                .original = method_ref,
+                .alias = alias_name,
+                .visibility = visibility,
+            },
+        });
+    }
+
+    fn parseTraitMethodReference(self: *Parser) anyerror!ast.TraitMethodReference {
+        const first_name = try self.parseTraitIdentifier();
+        if (self.curr.tag == .double_colon) {
+            self.nextToken();
+            return .{
+                .trait_name = first_name,
+                .method_name = try self.parseTraitIdentifier(),
+            };
+        }
+        return .{
+            .trait_name = null,
+            .method_name = first_name,
+        };
+    }
+
+    fn parseTraitIdentifier(self: *Parser) anyerror!u32 {
+        if (!self.curr.isIdentifier()) {
+            return error.UnexpectedToken;
+        }
+        const token = self.curr;
+        self.nextToken();
+        return try self.context.intern(
+            self.lexer.buffer[token.loc.start..token.loc.end],
+        );
+    }
+
+    fn isTraitVisibilityToken(tag: Token.Tag) bool {
+        return switch (tag) {
+            .k_public, .k_protected, .k_private => true,
+            else => false,
+        };
+    }
+
+    fn parseTraitVisibility(self: *Parser) ast.TraitVisibility {
+        return switch (self.curr.tag) {
+            .k_public => blk: {
+                self.nextToken();
+                break :blk .public;
+            },
+            .k_protected => blk: {
+                self.nextToken();
+                break :blk .protected;
+            },
+            .k_private => blk: {
+                self.nextToken();
+                break :blk .private;
+            },
+            else => unreachable,
+        };
+    }
+
+    fn skipTraitAdaptationRecovery(self: *Parser) void {
+        while (self.curr.tag != .semicolon and
+            self.curr.tag != .r_brace and
+            self.curr.tag != .eof)
+        {
+            self.nextToken();
+        }
+        if (self.curr.tag == .semicolon) {
+            self.nextToken();
+        }
     }
 
     fn parseContainerWithModifiers(self: *Parser, tag: ast.Node.Tag, attributes: []const ast.Node.Index, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {

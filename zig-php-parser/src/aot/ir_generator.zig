@@ -1030,9 +1030,11 @@ pub const IRGenerator = struct {
         // ✅ 获取完整的类名（包含命名空间）
         const class_name = try self.getFullClassName(short_class_name);
 
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
         var properties = std.ArrayListUnmanaged(TypeDef.Property){};
         var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
         var traits = std.ArrayListUnmanaged([]const u8){};
+        var trait_adaptations = std.ArrayListUnmanaged(TypeDef.TraitAdaptation){};
         defer traits.deinit(self.allocator);
 
         // 收集接口名称
@@ -1074,6 +1076,7 @@ pub const IRGenerator = struct {
             .parent = parent_name,
             .interfaces = interfaces_slice,
             .traits = &.{},
+            .trait_adaptations = &.{},
             .properties = &.{},
             .methods = &.{},
             .constants = &.{},
@@ -1094,7 +1097,10 @@ pub const IRGenerator = struct {
         for (class_data.members) |member_idx| {
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
-                .method_decl => try self.generateMethodDecl(member, class_name),
+                .method_decl => {
+                    try methods.append(self.allocator, self.getMethodMeta(member));
+                    try self.generateMethodDecl(member, class_name);
+                },
                 .expr_list => {
                     // Handle multiple property declarations (e.g., private $a, $b;)
                     const expr_list = member.data.expr_list;
@@ -1183,20 +1189,47 @@ pub const IRGenerator = struct {
                     for (tu.traits) |tidx| {
                         const tnode = self.getNode(tidx) orelse continue;
                         switch (tnode.tag) {
-                            .named_type => try traits.append(self.allocator, self.getString(tnode.data.named_type.name)),
-                            .variable => try traits.append(self.allocator, self.getString(tnode.data.variable.name)),
-                            .literal_string => try traits.append(self.allocator, self.getString(tnode.data.literal_string.value)),
+                            .named_type => try traits.append(
+                                self.allocator,
+                                try self.resolveClassName(
+                                    self.getString(tnode.data.named_type.name),
+                                ),
+                            ),
+                            .variable => try traits.append(
+                                self.allocator,
+                                try self.resolveClassName(
+                                    self.getString(tnode.data.variable.name),
+                                ),
+                            ),
+                            .literal_string => try traits.append(
+                                self.allocator,
+                                try self.resolveClassName(
+                                    self.getString(
+                                        tnode.data.literal_string.value,
+                                    ),
+                                ),
+                            ),
                             else => {},
                         }
+                    }
+                    for (tu.adaptations) |adaptation| {
+                        try trait_adaptations.append(
+                            self.allocator,
+                            try self.lowerTraitAdaptation(adaptation),
+                        );
                     }
                 },
                 else => {},
             }
         }
 
+        type_def.methods = try methods.toOwnedSlice(self.allocator);
         type_def.properties = try properties.toOwnedSlice(self.allocator);
         type_def.constants = try constants.toOwnedSlice(self.allocator);
         type_def.traits = try traits.toOwnedSlice(self.allocator);
+        type_def.trait_adaptations = try trait_adaptations.toOwnedSlice(
+            self.allocator,
+        );
 
         // 构建常量缓存：O(1) 查找
         for (type_def.constants) |const_info| {
@@ -1249,6 +1282,7 @@ pub const IRGenerator = struct {
             .parent = null,
             .interfaces = &.{},
             .traits = &.{},
+            .trait_adaptations = &.{},
             .properties = &.{},
             .methods = &.{},
             .constants = &.{},
@@ -1263,9 +1297,14 @@ pub const IRGenerator = struct {
     /// Generate IR for trait declaration
     fn generateTraitDecl(self: *Self, node: *const Node) !void {
         const trait_data = node.data.container_decl;
-        const trait_name = self.getString(trait_data.name);
+        const short_trait_name = self.getString(trait_data.name);
+        const trait_name = try self.getFullClassName(short_trait_name);
 
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
         var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
+        var traits = std.ArrayListUnmanaged([]const u8){};
+        var trait_adaptations = std.ArrayListUnmanaged(TypeDef.TraitAdaptation){};
 
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
@@ -1274,6 +1313,7 @@ pub const IRGenerator = struct {
             .parent = null,
             .interfaces = &.{},
             .traits = &.{},
+            .trait_adaptations = &.{},
             .properties = &.{},
             .methods = &.{},
             .constants = &.{},
@@ -1290,7 +1330,10 @@ pub const IRGenerator = struct {
         for (trait_data.members) |member_idx| {
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
-                .method_decl => try self.generateMethodDecl(member, trait_name),
+                .method_decl => {
+                    try methods.append(self.allocator, self.getMethodMeta(member));
+                    try self.generateMethodDecl(member, trait_name);
+                },
                 .property_decl => {
                     const prop_data = member.data.property_decl;
                     const prop_name = self.getString(prop_data.name);
@@ -1314,12 +1357,168 @@ pub const IRGenerator = struct {
 
                     try self.generatePropertyDecl(member, trait_name);
                 },
-                .const_decl => try self.generateClassConstDecl(member, trait_name),
+                .const_decl => {
+                    const const_data = member.data.const_decl;
+                    const const_name = self.getString(const_data.name);
+                    const value_node = self.getNode(const_data.value) orelse continue;
+                    const const_value: ?TypeDef.ConstantValue = switch (value_node.tag) {
+                        .literal_int => .{ .int = value_node.data.literal_int.value },
+                        .literal_float => .{ .float = value_node.data.literal_float.value },
+                        .literal_string => .{
+                            .string = self.getString(
+                                value_node.data.literal_string.value,
+                            ),
+                        },
+                        .literal_bool => blk: {
+                            const is_true = value_node.main_token.tag == .k_true;
+                            break :blk .{ .bool = is_true };
+                        },
+                        .literal_null => .{ .null = {} },
+                        else => null,
+                    };
+
+                    if (const_value) |cv| {
+                        try constants.append(self.allocator, .{
+                            .name = const_name,
+                            .value = cv,
+                            .visibility = .public,
+                        });
+                    }
+
+                    try self.generateClassConstDecl(member, trait_name);
+                },
+                .trait_use => {
+                    const tu = member.data.trait_use;
+                    for (tu.traits) |tidx| {
+                        const tnode = self.getNode(tidx) orelse continue;
+                        switch (tnode.tag) {
+                            .named_type => try traits.append(
+                                self.allocator,
+                                try self.resolveClassName(
+                                    self.getString(tnode.data.named_type.name),
+                                ),
+                            ),
+                            .variable => try traits.append(
+                                self.allocator,
+                                try self.resolveClassName(
+                                    self.getString(tnode.data.variable.name),
+                                ),
+                            ),
+                            .literal_string => try traits.append(
+                                self.allocator,
+                                try self.resolveClassName(
+                                    self.getString(
+                                        tnode.data.literal_string.value,
+                                    ),
+                                ),
+                            ),
+                            else => {},
+                        }
+                    }
+                    for (tu.adaptations) |adaptation| {
+                        try trait_adaptations.append(
+                            self.allocator,
+                            try self.lowerTraitAdaptation(adaptation),
+                        );
+                    }
+                },
                 else => {},
             }
         }
 
+        type_def.methods = try methods.toOwnedSlice(self.allocator);
         type_def.properties = try properties.toOwnedSlice(self.allocator);
+        type_def.constants = try constants.toOwnedSlice(self.allocator);
+        type_def.traits = try traits.toOwnedSlice(self.allocator);
+        type_def.trait_adaptations = try trait_adaptations.toOwnedSlice(
+            self.allocator,
+        );
+    }
+
+    fn getMethodMeta(self: *Self, node: *const Node) TypeDef.Method {
+        const method_data = node.data.method_decl;
+        return .{
+            .name = self.getString(method_data.name),
+            .visibility = self.getVisibility(method_data.modifiers),
+            .is_static = method_data.modifiers.is_static,
+        };
+    }
+
+    fn getVisibility(
+        self: *Self,
+        modifiers: Node.Modifier,
+    ) TypeDef.Visibility {
+        _ = self;
+        if (modifiers.is_private) return .private;
+        if (modifiers.is_protected) return .protected;
+        return .public;
+    }
+
+    fn lowerTraitAdaptation(
+        self: *Self,
+        adaptation: ast.TraitAdaptation,
+    ) !TypeDef.TraitAdaptation {
+        return switch (adaptation) {
+            .insteadof => |data| blk: {
+                var excluded_traits = std.ArrayListUnmanaged([]const u8){};
+                for (data.excluded_traits) |excluded_trait_id| {
+                    try excluded_traits.append(
+                        self.allocator,
+                        try self.resolveClassName(
+                            self.getString(excluded_trait_id),
+                        ),
+                    );
+                }
+                break :blk .{
+                    .insteadof = .{
+                        .preferred = try self.lowerTraitMethodRef(
+                            data.preferred,
+                        ),
+                        .excluded_traits = try excluded_traits.toOwnedSlice(
+                            self.allocator,
+                        ),
+                    },
+                };
+            },
+            .alias => |data| .{
+                .alias = .{
+                    .original = try self.lowerTraitMethodRef(data.original),
+                    .alias = if (data.alias) |alias_id|
+                        self.getString(alias_id)
+                    else
+                        null,
+                    .visibility = if (data.visibility) |visibility|
+                        self.lowerTraitVisibility(visibility)
+                    else
+                        null,
+                },
+            },
+        };
+    }
+
+    fn lowerTraitMethodRef(
+        self: *Self,
+        method_ref: ast.TraitMethodReference,
+    ) !TypeDef.TraitMethodRef {
+        return .{
+            .trait_name = if (method_ref.trait_name) |trait_name|
+                try self.resolveClassName(self.getString(trait_name))
+            else
+                null,
+            .method_name = self.getString(method_ref.method_name),
+        };
+    }
+
+    fn lowerTraitVisibility(
+        self: *Self,
+        visibility: ast.TraitVisibility,
+    ) TypeDef.Visibility {
+        _ = self;
+        return switch (visibility) {
+            .public => .public,
+            .protected => .protected,
+            .private => .private,
+        };
     }
 
     /// Generate IR for method declaration
@@ -4642,6 +4841,7 @@ pub const IRGenerator = struct {
             } else null,
             .interfaces = &.{},
             .traits = &.{},
+            .trait_adaptations = &.{},
             .properties = &.{},
             .methods = &.{},
             .constants = &.{},

@@ -160,12 +160,14 @@ pub const TypeDef = struct {
     parent: ?[]const u8,
     /// Implemented interfaces
     interfaces: []const []const u8,
-    /// Used traits (for classes)
+    /// Used traits (for classes/traits)
     traits: []const []const u8,
+    /// Trait adaptations
+    trait_adaptations: []const TraitAdaptation,
     /// Properties
     properties: []const Property,
-    /// Methods (references to functions)
-    methods: []const []const u8,
+    /// Methods defined by this type
+    methods: []const Method,
     /// Constants
     constants: []const Constant,
     /// Source location
@@ -187,6 +189,12 @@ pub const TypeDef = struct {
         visibility: Visibility,
     };
 
+    pub const Method = struct {
+        name: []const u8,
+        visibility: Visibility,
+        is_static: bool,
+    };
+
     pub const Constant = struct {
         name: []const u8,
         value: ConstantValue,
@@ -205,6 +213,23 @@ pub const TypeDef = struct {
         public,
         protected,
         private,
+    };
+
+    pub const TraitMethodRef = struct {
+        trait_name: ?[]const u8 = null,
+        method_name: []const u8,
+    };
+
+    pub const TraitAdaptation = union(enum) {
+        insteadof: struct {
+            preferred: TraitMethodRef,
+            excluded_traits: []const []const u8,
+        },
+        alias: struct {
+            original: TraitMethodRef,
+            alias: ?[]const u8 = null,
+            visibility: ?Visibility = null,
+        },
     };
 };
 
@@ -1283,7 +1308,19 @@ pub const IRPrinter = struct {
         }
 
         for (type_def.methods) |method| {
-            try self.print("  method {s}\n", .{method});
+            const vis_str = switch (method.visibility) {
+                .public => "public",
+                .protected => "protected",
+                .private => "private",
+            };
+            try self.print(
+                "  method {s} {s}{s}\n",
+                .{
+                    vis_str,
+                    if (method.is_static) "static " else "",
+                    method.name,
+                },
+            );
         }
 
         try self.write("}\n");

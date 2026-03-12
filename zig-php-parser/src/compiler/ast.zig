@@ -17,6 +17,29 @@ pub const MagicConstantKind = enum {
     namespace, // __NAMESPACE__
 };
 
+pub const TraitVisibility = enum {
+    public,
+    protected,
+    private,
+};
+
+pub const TraitMethodReference = struct {
+    trait_name: ?u32 = null,
+    method_name: u32,
+};
+
+pub const TraitAdaptation = union(enum) {
+    insteadof: struct {
+        preferred: TraitMethodReference,
+        excluded_traits: []const u32,
+    },
+    alias: struct {
+        original: TraitMethodReference,
+        alias: ?u32 = null,
+        visibility: ?TraitVisibility = null,
+    },
+};
+
 pub const Node = struct {
     tag: Tag,
     main_token: Token,
@@ -205,7 +228,10 @@ pub const Node = struct {
         literal_float: struct { value: f64 },
         magic_constant: struct { kind: MagicConstantKind },
         named_arg: struct { name: StringId, value: Index },
-        trait_use: struct { traits: []const Index },
+        trait_use: struct {
+            traits: []const Index,
+            adaptations: []const TraitAdaptation = &.{},
+        },
         named_type: struct { name: StringId },
         nullable_type: struct { inner: Index },
         union_type: struct { types: []const Index },

@@ -142,6 +142,23 @@ pub const OptimizeLevel = enum {
 pub const NativeLinker = struct {
     const Self = @This();
 
+    const ComposedTraitMethod = struct {
+        provider_trait: []const u8,
+        function_trait: []const u8,
+        exposed_name: []const u8,
+        original_name: []const u8,
+        visibility: IR.TypeDef.Visibility,
+        is_static: bool,
+    };
+
+    const ComposedTraitProperty = struct {
+        prop: IR.TypeDef.Property,
+    };
+
+    const ComposedTraitConstant = struct {
+        constant: IR.TypeDef.Constant,
+    };
+
     allocator: Allocator,
     config: NativeLinkerConfig,
     diagnostics: *DiagnosticEngine,
@@ -849,6 +866,493 @@ pub const NativeLinker = struct {
         return null;
     }
 
+    fn findTypeDef(
+        self: *Self,
+        ir_module: *const IR.Module,
+        name: []const u8,
+        kind: IR.TypeDef.Kind,
+    ) ?*const IR.TypeDef {
+        _ = self;
+        for (ir_module.types.items) |td_ptr| {
+            const td = td_ptr.*;
+            if (td.kind == kind and std.mem.eql(u8, td.name, name)) {
+                return td_ptr;
+            }
+        }
+        return null;
+    }
+
+    fn findTypeMethod(
+        self: *Self,
+        type_def: *const IR.TypeDef,
+        name: []const u8,
+    ) ?IR.TypeDef.Method {
+        _ = self;
+        for (type_def.methods) |method| {
+            if (std.mem.eql(u8, method.name, name)) return method;
+        }
+        return null;
+    }
+
+    fn findTypeProperty(
+        self: *Self,
+        type_def: *const IR.TypeDef,
+        name: []const u8,
+    ) ?IR.TypeDef.Property {
+        _ = self;
+        for (type_def.properties) |prop| {
+            if (std.mem.eql(u8, prop.name, name)) return prop;
+        }
+        return null;
+    }
+
+    fn findTypeConstant(
+        self: *Self,
+        type_def: *const IR.TypeDef,
+        name: []const u8,
+    ) ?IR.TypeDef.Constant {
+        _ = self;
+        for (type_def.constants) |constant| {
+            if (std.mem.eql(u8, constant.name, name)) return constant;
+        }
+        return null;
+    }
+
+    fn constInstructionsEqual(
+        self: *Self,
+        lhs: ?*const IR.Instruction,
+        rhs: ?*const IR.Instruction,
+    ) bool {
+        _ = self;
+        if (lhs == null and rhs == null) return true;
+        if (lhs == null or rhs == null) return false;
+
+        const l = lhs.?;
+        const r = rhs.?;
+        return switch (l.op) {
+            .const_int => |lv| switch (r.op) {
+                .const_int => |rv| lv == rv,
+                else => false,
+            },
+            .const_float => |lv| switch (r.op) {
+                .const_float => |rv| lv == rv,
+                else => false,
+            },
+            .const_bool => |lv| switch (r.op) {
+                .const_bool => |rv| lv == rv,
+                else => false,
+            },
+            .const_null => switch (r.op) {
+                .const_null => true,
+                else => false,
+            },
+            .const_string => |lv| switch (r.op) {
+                .const_string => |rv| lv == rv,
+                else => false,
+            },
+            .array_new => switch (r.op) {
+                .array_new => true,
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    fn constantsEqual(
+        self: *Self,
+        lhs: IR.TypeDef.ConstantValue,
+        rhs: IR.TypeDef.ConstantValue,
+    ) bool {
+        _ = self;
+        return switch (lhs) {
+            .int => |lv| switch (rhs) {
+                .int => |rv| lv == rv,
+                else => false,
+            },
+            .float => |lv| switch (rhs) {
+                .float => |rv| lv == rv,
+                else => false,
+            },
+            .string => |lv| switch (rhs) {
+                .string => |rv| std.mem.eql(u8, lv, rv),
+                else => false,
+            },
+            .bool => |lv| switch (rhs) {
+                .bool => |rv| lv == rv,
+                else => false,
+            },
+            .null => switch (rhs) {
+                .null => true,
+                else => false,
+            },
+        };
+    }
+
+    fn traitPropertiesCompatible(
+        self: *Self,
+        lhs: IR.TypeDef.Property,
+        rhs: IR.TypeDef.Property,
+    ) bool {
+        return lhs.is_static == rhs.is_static and
+            lhs.visibility == rhs.visibility and
+            std.meta.eql(lhs.type_, rhs.type_) and
+            self.constInstructionsEqual(lhs.default_value, rhs.default_value);
+    }
+
+    fn traitConstantsCompatible(
+        self: *Self,
+        lhs: IR.TypeDef.Constant,
+        rhs: IR.TypeDef.Constant,
+    ) bool {
+        return lhs.visibility == rhs.visibility and
+            self.constantsEqual(lhs.value, rhs.value);
+    }
+
+    fn traitMethodsEquivalent(
+        self: *Self,
+        lhs: ComposedTraitMethod,
+        rhs: ComposedTraitMethod,
+    ) bool {
+        _ = self;
+        return std.mem.eql(u8, lhs.exposed_name, rhs.exposed_name) and
+            std.mem.eql(u8, lhs.function_trait, rhs.function_trait) and
+            std.mem.eql(u8, lhs.original_name, rhs.original_name) and
+            lhs.visibility == rhs.visibility and
+            lhs.is_static == rhs.is_static;
+    }
+
+    fn appendTraitProperty(
+        self: *Self,
+        list: *std.ArrayListUnmanaged(ComposedTraitProperty),
+        prop: IR.TypeDef.Property,
+    ) !void {
+        for (list.items) |existing| {
+            if (!std.mem.eql(u8, existing.prop.name, prop.name)) continue;
+            if (!self.traitPropertiesCompatible(existing.prop, prop)) {
+                return error.TraitPropertyConflict;
+            }
+            return;
+        }
+        try list.append(self.allocator, .{ .prop = prop });
+    }
+
+    fn appendTraitConstant(
+        self: *Self,
+        list: *std.ArrayListUnmanaged(ComposedTraitConstant),
+        constant: IR.TypeDef.Constant,
+    ) !void {
+        for (list.items) |existing| {
+            if (!std.mem.eql(u8, existing.constant.name, constant.name)) continue;
+            if (!self.traitConstantsCompatible(existing.constant, constant)) {
+                return error.TraitConstantConflict;
+            }
+            return;
+        }
+        try list.append(self.allocator, .{ .constant = constant });
+    }
+
+    fn appendUniqueTraitMethod(
+        self: *Self,
+        list: *std.ArrayListUnmanaged(ComposedTraitMethod),
+        method: ComposedTraitMethod,
+    ) !void {
+        for (list.items) |existing| {
+            if (!std.mem.eql(u8, existing.exposed_name, method.exposed_name)) {
+                continue;
+            }
+            if (self.traitMethodsEquivalent(existing, method)) return;
+            return error.TraitMethodConflict;
+        }
+        try list.append(self.allocator, method);
+    }
+
+    fn resolveTraitMethodTarget(
+        self: *Self,
+        methods: []ComposedTraitMethod,
+        method_ref: IR.TypeDef.TraitMethodRef,
+    ) !usize {
+        _ = self;
+        var found_idx: ?usize = null;
+        for (methods, 0..) |method, idx| {
+            if (!std.mem.eql(u8, method.exposed_name, method_ref.method_name)) {
+                continue;
+            }
+            if (method_ref.trait_name) |trait_name| {
+                if (!std.mem.eql(u8, method.provider_trait, trait_name)) continue;
+            }
+            if (found_idx != null) return error.AmbiguousTraitMethodReference;
+            found_idx = idx;
+        }
+        return found_idx orelse error.UnknownTraitMethodReference;
+    }
+
+    fn applyTraitAdaptations(
+        self: *Self,
+        type_def: *const IR.TypeDef,
+        methods: *std.ArrayListUnmanaged(ComposedTraitMethod),
+    ) !void {
+        const base_methods = try self.allocator.dupe(
+            ComposedTraitMethod,
+            methods.items,
+        );
+        defer self.allocator.free(base_methods);
+
+        for (type_def.trait_adaptations) |adaptation| {
+            switch (adaptation) {
+                .insteadof => |data| {
+                    _ = try self.resolveTraitMethodTarget(
+                        methods.items,
+                        data.preferred,
+                    );
+                    var write_idx: usize = 0;
+                    for (methods.items) |method| {
+                        var excluded = false;
+                        if (std.mem.eql(
+                            u8,
+                            method.exposed_name,
+                            data.preferred.method_name,
+                        )) {
+                            for (data.excluded_traits) |excluded_trait| {
+                                if (std.mem.eql(
+                                    u8,
+                                    method.provider_trait,
+                                    excluded_trait,
+                                )) {
+                                    excluded = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!excluded) {
+                            methods.items[write_idx] = method;
+                            write_idx += 1;
+                        }
+                    }
+                    methods.items.len = write_idx;
+                },
+                .alias => |data| {
+                    if (data.alias) |alias_name| {
+                        const target_idx = try self.resolveTraitMethodTarget(
+                            base_methods,
+                            data.original,
+                        );
+                        var alias_method = base_methods[target_idx];
+                        alias_method.exposed_name = alias_name;
+                        if (data.visibility) |visibility| {
+                            alias_method.visibility = visibility;
+                        }
+                        try methods.append(self.allocator, alias_method);
+                    } else if (data.visibility) |visibility| {
+                        const target_idx = self.resolveTraitMethodTarget(
+                            methods.items,
+                            data.original,
+                        ) catch continue;
+                        methods.items[target_idx].visibility = visibility;
+                    }
+                },
+            }
+        }
+    }
+
+    fn resolveTraitExports(
+        self: *Self,
+        ir_module: *const IR.Module,
+        trait_name: []const u8,
+        out_methods: *std.ArrayListUnmanaged(ComposedTraitMethod),
+        out_properties: *std.ArrayListUnmanaged(ComposedTraitProperty),
+        out_constants: *std.ArrayListUnmanaged(ComposedTraitConstant),
+    ) !void {
+        const trait_td = self.findTypeDef(ir_module, trait_name, .trait) orelse {
+            return error.TraitNotFound;
+        };
+
+        var imported_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        var resolved_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        var imported_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+        var resolved_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+        var imported_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+        var resolved_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+
+        for (trait_td.traits) |used_trait_name| {
+            var nested_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+            var nested_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+            var nested_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+            try self.resolveTraitExports(
+                ir_module,
+                used_trait_name,
+                &nested_methods,
+                &nested_properties,
+                &nested_constants,
+            );
+
+            for (nested_methods.items) |method| {
+                var imported = method;
+                imported.provider_trait = used_trait_name;
+                try imported_methods.append(self.allocator, imported);
+            }
+            for (nested_properties.items) |prop| {
+                try self.appendTraitProperty(&imported_properties, prop.prop);
+            }
+            for (nested_constants.items) |constant| {
+                try self.appendTraitConstant(
+                    &imported_constants,
+                    constant.constant,
+                );
+            }
+        }
+
+        try self.applyTraitAdaptations(trait_td, &imported_methods);
+
+        for (imported_methods.items) |method| {
+            if (self.findTypeMethod(trait_td, method.exposed_name) != null) {
+                continue;
+            }
+            try self.appendUniqueTraitMethod(&resolved_methods, method);
+        }
+
+        for (trait_td.methods) |method| {
+            try self.appendUniqueTraitMethod(&resolved_methods, .{
+                .provider_trait = trait_td.name,
+                .function_trait = trait_td.name,
+                .exposed_name = method.name,
+                .original_name = method.name,
+                .visibility = method.visibility,
+                .is_static = method.is_static,
+            });
+        }
+
+        for (imported_properties.items) |prop| {
+            if (self.findTypeProperty(trait_td, prop.prop.name)) |own_prop| {
+                if (!self.traitPropertiesCompatible(own_prop, prop.prop)) {
+                    return error.TraitPropertyConflict;
+                }
+                continue;
+            }
+            try self.appendTraitProperty(&resolved_properties, prop.prop);
+        }
+        for (trait_td.properties) |prop| {
+            try self.appendTraitProperty(&resolved_properties, prop);
+        }
+
+        for (imported_constants.items) |constant| {
+            if (self.findTypeConstant(trait_td, constant.constant.name)) |own_constant| {
+                if (!self.traitConstantsCompatible(
+                    own_constant,
+                    constant.constant,
+                )) {
+                    return error.TraitConstantConflict;
+                }
+                continue;
+            }
+            try self.appendTraitConstant(&resolved_constants, constant.constant);
+        }
+        for (trait_td.constants) |constant| {
+            try self.appendTraitConstant(&resolved_constants, constant);
+        }
+
+        for (resolved_methods.items) |method| {
+            var exported = method;
+            exported.provider_trait = trait_td.name;
+            try out_methods.append(self.allocator, exported);
+        }
+        for (resolved_properties.items) |prop| {
+            try self.appendTraitProperty(out_properties, prop.prop);
+        }
+        for (resolved_constants.items) |constant| {
+            try self.appendTraitConstant(out_constants, constant.constant);
+        }
+    }
+
+    fn resolveClassTraitMembers(
+        self: *Self,
+        ir_module: *const IR.Module,
+        class_td: *const IR.TypeDef,
+        out_methods: *std.ArrayListUnmanaged(ComposedTraitMethod),
+        out_properties: *std.ArrayListUnmanaged(ComposedTraitProperty),
+        out_constants: *std.ArrayListUnmanaged(ComposedTraitConstant),
+    ) !void {
+        var imported_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        var imported_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+        var imported_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+
+        for (class_td.traits) |trait_name| {
+            try self.resolveTraitExports(
+                ir_module,
+                trait_name,
+                &imported_methods,
+                &imported_properties,
+                &imported_constants,
+            );
+        }
+
+        try self.applyTraitAdaptations(class_td, &imported_methods);
+
+        for (imported_methods.items) |method| {
+            if (self.findTypeMethod(class_td, method.exposed_name) != null) {
+                continue;
+            }
+            try self.appendUniqueTraitMethod(out_methods, method);
+        }
+
+        for (imported_properties.items) |prop| {
+            if (self.findTypeProperty(class_td, prop.prop.name)) |own_prop| {
+                if (!self.traitPropertiesCompatible(own_prop, prop.prop)) {
+                    return error.TraitPropertyConflict;
+                }
+                continue;
+            }
+            try self.appendTraitProperty(out_properties, prop.prop);
+        }
+
+        for (imported_constants.items) |constant| {
+            if (self.findTypeConstant(class_td, constant.constant.name)) |own_constant| {
+                if (!self.traitConstantsCompatible(
+                    own_constant,
+                    constant.constant,
+                )) {
+                    return error.TraitConstantConflict;
+                }
+                continue;
+            }
+            try self.appendTraitConstant(out_constants, constant.constant);
+        }
+    }
+
+    fn emitMethodRegistration(
+        self: *Self,
+        writer: anytype,
+        meta_name: []const u8,
+        exposed_name: []const u8,
+        function_trait: []const u8,
+        original_name: []const u8,
+        visibility: IR.TypeDef.Visibility,
+        is_static: bool,
+    ) !void {
+        const full_method_name = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}::{s}",
+            .{ function_trait, original_name },
+        );
+        defer self.allocator.free(full_method_name);
+        const escaped_method_name = try escapeBackslashes(
+            self.allocator,
+            full_method_name,
+        );
+        defer self.allocator.free(escaped_method_name);
+        try writer.print(
+            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {} }});\n",
+            .{
+                meta_name,
+                exposed_name,
+                escaped_method_name,
+                is_static,
+                visibility == .public,
+                visibility == .protected,
+                visibility == .private,
+            },
+        );
+    }
+
     /// 检查函数是否有返回值
     fn functionHasReturnValue(self: *Self, func: *const IR.Function) bool {
         _ = self;
@@ -883,8 +1387,6 @@ pub const NativeLinker = struct {
         var class_names: [64][]const u8 = undefined;  // 完整类名（用于注册）
         var class_short_names: [64][]const u8 = undefined;  // 短名（用于变量名）
         var type_def_idx: [64]?usize = [_]?usize{null} ** 64;
-        var method_lists: [64][64][]const u8 = undefined;
-        var method_counts: [64]usize = [_]usize{0} ** 64;
 
         for (ir_module.types.items, 0..) |td_ptr, idx| {
             const td = td_ptr.*;
@@ -895,28 +1397,6 @@ pub const NativeLinker = struct {
             class_short_names[class_count] = getLastPartOfClassName(td.name);
             type_def_idx[class_count] = idx;
             class_count += 1;
-        }
-
-        for (ir_module.functions.items) |func| {
-            if (std.mem.indexOf(u8, func.name, "::")) |sep_pos| {
-                const cname = func.name[0..sep_pos];
-                const mname = func.name[sep_pos + 2 ..];
-
-                var found_idx: ?usize = null;
-                for (0..class_count) |i| {
-                    if (std.mem.eql(u8, class_names[i], cname)) {
-                        found_idx = i;
-                        break;
-                    }
-                }
-
-                if (found_idx) |idx| {
-                    if (method_counts[idx] < 64) {
-                        method_lists[idx][method_counts[idx]] = mname;
-                        method_counts[idx] += 1;
-                    }
-                }
-            }
         }
 
         if (class_count == 0) {
@@ -947,7 +1427,19 @@ pub const NativeLinker = struct {
             try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ short_cname, escaped_full_cname });
 
             if (type_def_idx[ci]) |tdi| {
-                const td = ir_module.types.items[tdi].*;
+                const td_ptr = ir_module.types.items[tdi];
+                const td = td_ptr.*;
+                var trait_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+                var trait_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+                var trait_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+                try self.resolveClassTraitMembers(
+                    ir_module,
+                    td_ptr,
+                    &trait_methods,
+                    &trait_properties,
+                    &trait_constants,
+                );
+
                 for (td.properties) |prop| {
                     const is_public = prop.visibility == .public;
                     try writer.print("    try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ short_cname, prop.name });
@@ -990,108 +1482,83 @@ pub const NativeLinker = struct {
                         try writer.writeAll(");\n");
                     }
                 }
-
-                for (td.traits) |tname| {
-                    var trait_td: ?*const IR.TypeDef = null;
-                    for (ir_module.types.items) |tptr| {
-                        const tdef = tptr.*;
-                        if (tdef.kind == .trait and std.mem.eql(u8, tdef.name, tname)) {
-                            trait_td = tptr;
-                            break;
+                for (trait_properties.items) |trait_prop_info| {
+                    const prop = trait_prop_info.prop;
+                    const is_public = prop.visibility == .public;
+                    try writer.print(
+                        "    if ({s}_meta.properties.get(\"{s}\") == null) {{\n",
+                        .{ short_cname, prop.name },
+                    );
+                    try writer.print(
+                        "        try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ",
+                        .{ short_cname, prop.name },
+                    );
+                    if (prop.default_value) |dv| {
+                        switch (dv.op) {
+                            .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+                            .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                            .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
+                            .const_null => try writer.writeAll("runtime.Value.initNull()"),
+                            .const_string => |sid| try writer.print(
+                                "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
+                                .{sid},
+                            ),
+                            .array_new => try writer.writeAll("runtime.Value.initInt(-1)"),
+                            else => try writer.writeAll("runtime.Value.initNull()"),
                         }
+                    } else {
+                        try writer.writeAll("runtime.Value.initNull()");
                     }
+                    try writer.print(", .is_static = {}, .is_public = {}, .is_readonly = false }});\n", .{ prop.is_static, is_public });
 
-                    if (trait_td) |tptr| {
-                        const tdef = tptr.*;
-                        for (tdef.properties) |prop| {
-                            const is_public = prop.visibility == .public;
-                            try writer.print("    if ({s}_meta.properties.get(\"{s}\") == null) {{\n", .{ short_cname, prop.name });
-                            try writer.print("        try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ short_cname, prop.name });
-                            if (prop.default_value) |dv| {
-                                switch (dv.op) {
-                                    .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                                    .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
-                                    .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
-                                    .const_null => try writer.writeAll("runtime.Value.initNull()"),
-                                    .const_string => |sid| try writer.print(
-                                        "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
-                                        .{sid},
-                                    ),
-                                    // 数组默认值标记为特殊值，在对象初始化时创建
-                                    .array_new => try writer.writeAll("runtime.Value.initInt(-1)"),
-                                    else => try writer.writeAll("runtime.Value.initNull()"),
-                                }
-                            } else {
-                                try writer.writeAll("runtime.Value.initNull()");
+                    if (prop.is_static) {
+                        try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", ", .{ short_cname, prop.name });
+                        if (prop.default_value) |dv| {
+                            switch (dv.op) {
+                                .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+                                .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                                .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
+                                .const_null => try writer.writeAll("runtime.Value.initNull()"),
+                                .const_string => |sid| try writer.print(
+                                    "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
+                                    .{sid},
+                                ),
+                                .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
+                                else => try writer.writeAll("runtime.Value.initNull()"),
                             }
-                            try writer.print(", .is_static = {}, .is_public = {}, .is_readonly = false }});\n", .{ prop.is_static, is_public });
-
-                            if (prop.is_static) {
-                                try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", ", .{ short_cname, prop.name });
-                                if (prop.default_value) |dv| {
-                                    switch (dv.op) {
-                                        .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                                        .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
-                                        .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
-                                        .const_null => try writer.writeAll("runtime.Value.initNull()"),
-                                        .const_string => |sid| try writer.print(
-                                            "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
-                                            .{sid},
-                                        ),
-                                        // 静态数组需要创建实例
-                                        .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
-                                        else => try writer.writeAll("runtime.Value.initNull()"),
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(");\n");
-                            }
-                            try writer.writeAll("    }\n");
+                        } else {
+                            try writer.writeAll("runtime.Value.initNull()");
                         }
+                        try writer.writeAll(");\n");
                     }
-                }
-            }
-
-            for (0..method_counts[ci]) |mi| {
-                const mname = method_lists[ci][mi];
-                var full_name_buf: [512]u8 = undefined;
-                // ✅ 使用完整类名查找方法
-                const full_method_name = try std.fmt.bufPrint(&full_name_buf, "{s}::{s}", .{ full_cname, mname });
-
-                var is_static: bool = false;
-                if (self.findFunction(ir_module, full_method_name)) |method_func| {
-                    if (!(method_func.params.items.len > 0 and std.mem.eql(u8, method_func.params.items[0].name, "this"))) {
-                        is_static = true;
-                    }
+                    try writer.writeAll("    }\n");
                 }
 
-                // ✅ 转义完整方法名用于函数引用
-                const escaped_method_name = try escapeBackslashes(self.allocator, full_method_name);
-                defer self.allocator.free(escaped_method_name);
-                try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {} }});\n", .{ short_cname, mname, escaped_method_name, is_static });
-            }
-
-            if (type_def_idx[ci]) |tdi| {
-                const td = ir_module.types.items[tdi].*;
-                for (td.traits) |tname| {
-                    for (ir_module.functions.items) |tfunc| {
-                        if (std.mem.indexOf(u8, tfunc.name, "::")) |sep_pos| {
-                            const tcname = tfunc.name[0..sep_pos];
-                            if (!std.mem.eql(u8, tcname, tname)) continue;
-                            const tmname = tfunc.name[sep_pos + 2 ..];
-
-                            var is_static: bool = false;
-                            if (!(tfunc.params.items.len > 0 and std.mem.eql(u8, tfunc.params.items[0].name, "this"))) {
-                                is_static = true;
-                            }
-
-                            try writer.print(
-                                "    if ({s}_meta.methods.get(\"{s}\") == null) try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = {} }});\n",
-                                .{ short_cname, tmname, short_cname, tmname, tname, tmname, is_static },
-                            );
-                        }
-                    }
+                for (td.methods) |method| {
+                    try self.emitMethodRegistration(
+                        writer,
+                        short_cname,
+                        method.name,
+                        full_cname,
+                        method.name,
+                        method.visibility,
+                        method.is_static,
+                    );
+                }
+                for (trait_methods.items) |method| {
+                    try writer.print(
+                        "    if ({s}_meta.methods.get(\"{s}\") == null) ",
+                        .{ short_cname, method.exposed_name },
+                    );
+                    try self.emitMethodRegistration(
+                        writer,
+                        short_cname,
+                        method.exposed_name,
+                        method.function_trait,
+                        method.original_name,
+                        method.visibility,
+                        method.is_static,
+                    );
                 }
             }
 
@@ -1166,10 +1633,21 @@ pub const NativeLinker = struct {
         // 初始化类常量
         for (0..class_count) |ci| {
             if (type_def_idx[ci]) |tdi| {
-                const td = ir_module.types.items[tdi].*;
+                const td_ptr = ir_module.types.items[tdi];
+                const td = td_ptr.*;
                 const full_cname = class_names[ci];
                 const short_cname = class_short_names[ci];
                 _ = short_cname; // 这个循环中只需要full_cname
+                var trait_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+                var trait_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+                var trait_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+                try self.resolveClassTraitMembers(
+                    ir_module,
+                    td_ptr,
+                    &trait_methods,
+                    &trait_properties,
+                    &trait_constants,
+                );
                 
                 // ✅ 转义完整类名
                 const escaped_full_cname = try escapeBackslashes(self.allocator, full_cname);
@@ -1193,6 +1671,27 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_name);
 
                     // ✅ 使用完整类名设置静态属性
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ escaped_full_cname, escaped_name, value_code });
+                }
+
+                for (trait_constants.items) |trait_const_info| {
+                    const const_info = trait_const_info.constant;
+                    const value_code = switch (const_info.value) {
+                        .int => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt({d})", .{v}),
+                        .float => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat({d})", .{v}),
+                        .string => |s| blk: {
+                            const escaped = try self.escapeString(s);
+                            defer self.allocator.free(escaped);
+                            break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", .{escaped});
+                        },
+                        .bool => |b| try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
+                        .null => try std.fmt.allocPrint(self.allocator, "runtime.Value.initNull()", .{}),
+                    };
+                    defer self.allocator.free(value_code);
+
+                    const escaped_name = try self.escapeString(const_info.name);
+                    defer self.allocator.free(escaped_name);
+
                     try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ escaped_full_cname, escaped_name, value_code });
                 }
             }
