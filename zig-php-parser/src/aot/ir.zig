@@ -176,6 +176,8 @@ pub const TypeDef = struct {
     backing_type: ?[]const u8 = null,
     /// Whether the class/enum is readonly
     is_readonly: bool = false,
+    /// PHP attributes (#[...]) on this type
+    attributes: []const Attribute = &.{},
     /// Source location
     location: SourceLocation,
 
@@ -230,6 +232,12 @@ pub const TypeDef = struct {
     pub const EnumCase = struct {
         name: []const u8,
         value: ?ConstantValue = null,
+    };
+
+    /// PHP attribute (#[...]) on a class/method/property
+    pub const Attribute = struct {
+        name: []const u8,
+        args: []const []const u8 = &.{},
     };
 
     pub const TraitAdaptation = union(enum) {

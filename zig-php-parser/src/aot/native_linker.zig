@@ -642,6 +642,8 @@ pub const NativeLinker = struct {
             \\    const name = name_val.asString().data;
             \\    // 从全局变量表中删除并释放
             \\    if (global_vars.getPtr(name)) |val_ptr| {
+            \\        // 通知弱引用系统：对象即将被 unset
+            \\        runtime.php_weak_mark_dead(val_ptr.*);
             \\        // Release setGlobalVar的retain
             \\        val_ptr.release(runtime.runtime_allocator);
             \\        // 从表中删除
@@ -1590,6 +1592,35 @@ pub const NativeLinker = struct {
                         try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", enum_val);\n", .{ short_cname, escaped_case });
                         try writer.writeAll("    }\n");
                     }
+                }
+            }
+
+            // 注册类上的 PHP attributes (#[...])
+            if (type_def_idx[ci]) |tdi3| {
+                const td3 = ir_module.types.items[tdi3].*;
+                if (td3.attributes.len > 0) {
+                    try writer.print("    {{\n", .{});
+                    try writer.print("        const attr_arr = try runtime.PHPArray.init(allocator);\n", .{});
+                    for (td3.attributes) |attr| {
+                        const escaped_attr = try self.escapeString(attr.name);
+                        defer self.allocator.free(escaped_attr);
+                        try writer.print("        {{\n", .{});
+                        try writer.print("            const attr_obj = try runtime.php_object_new(\"ReflectionAttribute\", allocator);\n", .{});
+                        try writer.print("            const attr_o = runtime.Value_asObject(attr_obj);\n", .{});
+                        try writer.print("            try attr_o.setProperty(\"__name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_attr});
+                        // 存储参数数组
+                        try writer.print("            const args_arr = try runtime.PHPArray.init(allocator);\n", .{});
+                        for (attr.args) |arg| {
+                            const escaped_arg = try self.escapeString(arg);
+                            defer self.allocator.free(escaped_arg);
+                            try writer.print("            try args_arr.push(allocator, runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_arg});
+                        }
+                        try writer.print("            try attr_o.setProperty(\"__args\", runtime.Value.initArray(args_arr));\n", .{});
+                        try writer.print("            try attr_arr.push(allocator, attr_obj);\n", .{});
+                        try writer.print("        }}\n", .{});
+                    }
+                    try writer.print("        try {s}_meta.setStaticProperty(\"__attributes\", runtime.Value.initArray(attr_arr));\n", .{short_cname});
+                    try writer.print("    }}\n", .{});
                 }
             }
 
@@ -7500,17 +7531,23 @@ pub const NativeLinker = struct {
                         if (inst.result) |reg| {
                             try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                             if (has_return) {
-                                try writer.print("    reg_{d} = try @\"{s}\"(reg_{d}, ", .{ reg.id, escaped_direct, op.object.id });
+                                try writer.print("    reg_{d} = try @\"{s}\"(", .{ reg.id, escaped_direct });
+                                try self.writeRegRef(writer, op.object.id);
+                                try writer.writeAll(", ");
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else {
-                                try writer.print("    _ = try @\"{s}\"(reg_{d}, ", .{ escaped_direct, op.object.id });
+                                try writer.print("    _ = try @\"{s}\"(", .{escaped_direct});
+                                try self.writeRegRef(writer, op.object.id);
+                                try writer.writeAll(", ");
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                                 try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                             }
                         } else {
-                            try writer.print("    _ = try @\"{s}\"(reg_{d}, ", .{ escaped_direct, op.object.id });
+                            try writer.print("    _ = try @\"{s}\"(", .{escaped_direct});
+                            try self.writeRegRef(writer, op.object.id);
+                            try writer.writeAll(", ");
                             try self.writeValueArgsArray(writer, op.args);
                             try writer.writeAll(", runtime.runtime_allocator);\n");
                         }
@@ -7536,11 +7573,15 @@ pub const NativeLinker = struct {
 
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = try runtime.php_object_call(reg_{d}, \"{s}\", ", .{ reg.id, op.object.id, escaped_method });
+                    try writer.print("    reg_{d} = try runtime.php_object_call(", .{reg.id});
+                    try self.writeRegRef(writer, op.object.id);
+                    try writer.print(", \"{s}\", ", .{escaped_method});
                     try self.writeValueArgsArray(writer, op.args);
                     try writer.writeAll(");\n");
                 } else {
-                    try writer.print("    _ = try runtime.php_object_call(reg_{d}, \"{s}\", ", .{ op.object.id, escaped_method });
+                    try writer.writeAll("    _ = try runtime.php_object_call(");
+                    try self.writeRegRef(writer, op.object.id);
+                    try writer.print(", \"{s}\", ", .{escaped_method});
                     try self.writeValueArgsArray(writer, op.args);
                     try writer.writeAll(");\n");
                 }
@@ -8056,15 +8097,17 @@ pub const NativeLinker = struct {
                         try regs.put(op.operand.id, {});
                     }
 
-                    // alloca寄存器：release两次（完全释放）
+                    // alloca寄存器：通知弱引用 + release
                     try writer.print("    if (!reg_{d}.*.isNull()) {{\n", .{op.operand.id});
+                    try writer.print("        runtime.php_weak_mark_dead(reg_{d}.*);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.* = runtime.Value.initNull();\n", .{op.operand.id});
                     try writer.print("    }}\n", .{});
                 } else {
-                    // 普通寄存器：release两次（完全释放）
+                    // 普通寄存器：通知弱引用 + release
                     try writer.print("    if (!reg_{d}.isNull()) {{\n", .{op.operand.id});
+                    try writer.print("        runtime.php_weak_mark_dead(reg_{d});\n", .{op.operand.id});
                     try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d} = runtime.Value.initNull();\n", .{op.operand.id});

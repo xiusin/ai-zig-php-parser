@@ -323,6 +323,7 @@ pub const IRGenerator = struct {
 
                 if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
                     stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl or
+                    stmt_node.tag == .enum_decl or
                     stmt_node.tag == .namespace_stmt or stmt_node.tag == .use_stmt)
                 {
                     // Process declarations and namespace/use statements directly
@@ -1323,6 +1324,43 @@ pub const IRGenerator = struct {
         type_def.trait_adaptations = try trait_adaptations.toOwnedSlice(
             self.allocator,
         );
+
+        // 收集类上的 PHP attributes (#[...])
+        if (class_data.attributes.len > 0) {
+            var attrs = std.ArrayListUnmanaged(TypeDef.Attribute){};
+            for (class_data.attributes) |attr_idx| {
+                const attr_node = self.getNode(attr_idx) orelse continue;
+                if (attr_node.tag != .attribute) continue;
+                const attr_data = attr_node.data.attribute;
+                const attr_name = self.getString(attr_data.name);
+                var arg_strs = std.ArrayListUnmanaged([]const u8){};
+                for (attr_data.args) |arg_idx| {
+                    const arg_node = self.getNode(arg_idx) orelse continue;
+                    const val = self.getConstantValue(arg_node);
+                    if (val) |cv| {
+                        if (cv.string_val) |s| {
+                            try arg_strs.append(self.allocator, s);
+                        } else if (cv.int_val) |iv| {
+                            const s = try std.fmt.allocPrint(
+                                self.allocator,
+                                "{d}",
+                                .{iv},
+                            );
+                            try arg_strs.append(self.allocator, s);
+                        }
+                    }
+                }
+                try attrs.append(self.allocator, .{
+                    .name = attr_name,
+                    .args = try arg_strs.toOwnedSlice(
+                        self.allocator,
+                    ),
+                });
+            }
+            type_def.attributes = try attrs.toOwnedSlice(
+                self.allocator,
+            );
+        }
 
         // 构建常量缓存：O(1) 查找
         for (type_def.constants) |const_info| {
@@ -5122,6 +5160,10 @@ pub const IRGenerator = struct {
         const anon_class_name_sid = try self.module.?.internString(anon_class_name_temp);
         const anon_class_name = self.module.?.getString(anon_class_name_sid) orelse return error.StringNotFound;
 
+        // 收集成员元数据
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
+        var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+
         // 创建类型定义
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
@@ -5153,15 +5195,41 @@ pub const IRGenerator = struct {
         _ = try self.symbol_table.enterScope(.class, anon_class_name);
         defer self.symbol_table.leaveScope();
 
-        // 处理成员
+        // 处理成员：收集元数据并生成IR
         for (anon_data.members) |member_idx| {
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
-                .method_decl => try self.generateMethodDecl(member, anon_class_name),
-                .property_decl => try self.generatePropertyDecl(member, anon_class_name),
+                .method_decl => {
+                    try methods.append(self.allocator, self.getMethodMeta(member));
+                    try self.generateMethodDecl(member, anon_class_name);
+                },
+                .property_decl => {
+                    const prop_data = member.data.property_decl;
+                    const prop_name = self.getString(prop_data.name);
+                    const prop_type = if (prop_data.type) |t| try self.resolveTypeNode(t) else .php_value;
+                    const default_inst = if (prop_data.default_value) |dv| try self.tryMakeConstInstruction(dv) else null;
+                    const visibility: TypeDef.Visibility = if (prop_data.modifiers.is_private)
+                        .private
+                    else if (prop_data.modifiers.is_protected)
+                        .protected
+                    else
+                        .public;
+                    try properties.append(self.allocator, .{
+                        .name = prop_name,
+                        .type_ = prop_type,
+                        .default_value = default_inst,
+                        .is_static = prop_data.modifiers.is_static,
+                        .visibility = visibility,
+                    });
+                    try self.generatePropertyDecl(member, anon_class_name);
+                },
                 else => {},
             }
         }
+
+        // 更新TypeDef的方法和属性
+        type_def.methods = try methods.toOwnedSlice(self.allocator);
+        type_def.properties = try properties.toOwnedSlice(self.allocator);
 
         // 生成构造函数参数
         var ctor_args = std.ArrayListUnmanaged(Register){};
@@ -5334,6 +5402,13 @@ pub const IRGenerator = struct {
 
         const class_name = self.getString(class_name_id);
         const const_name = self.getString(const_name_id);
+
+        // 特殊处理 ClassName::class → 返回类名字符串
+        if (std.mem.eql(u8, const_name, "class")) {
+            const resolved = try self.resolveClassName(class_name);
+            const str_id = try self.module.?.internString(resolved);
+            return self.emitWithResult(.{ .const_string = str_id }, .php_string);
+        }
 
         // 优化：O(1) 哈希表查找 + 编译时内联
         var key_buf: [256]u8 = undefined;

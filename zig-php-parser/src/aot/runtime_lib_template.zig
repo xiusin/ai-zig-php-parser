@@ -6591,6 +6591,8 @@ pub const ClassMeta = struct {
         try registerWeakReferenceClass(allocator);
         // Register WeakMap class
         try registerWeakMapClass(allocator);
+        // Register Reflection classes
+        try registerReflectionClasses(allocator);
     }
 
     /// Register built-in WeakReference class
@@ -6604,14 +6606,19 @@ pub const ClassMeta = struct {
                 fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     if (args.len == 0) return Value.initNull();
                     const target = args[0];
-                    // Create a WeakReference object storing the target
                     const obj = if (findClass("WeakReference")) |m|
                         try PHPObject.initWithMeta(alloc, m)
                     else
                         try PHPObject.init(alloc, "WeakReference");
-                    // Store target directly as property (simplified weak ref)
+                    // 存储目标对象（retain 防止内存释放）
                     _ = target.retain();
                     try obj.setProperty("__target", target);
+                    // 存储对象指针地址用于死亡检测
+                    if (Value_isObject(target)) {
+                        const target_obj = Value_asObject(target);
+                        const addr = @intFromPtr(target_obj);
+                        try obj.setProperty("__target_addr", Value.initInt(@as(i64, @intCast(addr))));
+                    }
                     if (global_object_registry) |*registry| {
                         try registry.append(alloc, obj);
                     }
@@ -6622,13 +6629,18 @@ pub const ClassMeta = struct {
             .is_static = true,
         });
 
-        // $weak->get() - returns object or null
+        // $weak->get() - returns object or null (checks dead tracking)
         try meta.addMethod(.{
             .name = "get",
             .func = struct {
                 fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
+                    // 检查目标对象是否已被 unset 标记为死亡
+                    if (this.getPropertyDirect("__target_addr")) |addr_val| {
+                        const addr: usize = @intCast(addr_val.toInt());
+                        if (!php_weak_is_alive(addr)) return Value.initNull();
+                    }
                     if (this.getPropertyDirect("__target")) |val| {
                         return val;
                     }
@@ -6664,16 +6676,18 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{
             .name = "offsetSet",
             .func = struct {
-                fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     if (args.len < 2) return Value.initNull();
                     const this = Value_asObject(ctx);
                     if (Value_isObject(args[0])) {
                         const key_obj = Value_asObject(args[0]);
                         const addr = @intFromPtr(key_obj);
-                        var buf: [20]u8 = undefined;
-                        const key_str = std.fmt.bufPrint(&buf, "{d}", .{addr}) catch return Value.initNull();
-                        _ = key_str;
-                        // Increment count
+                        // 存储地址到内部数组用于死亡检测
+                        if (this.getPropertyDirect("__entries")) |entries_val| {
+                            const arr = entries_val.asArray();
+                            const addr_val = Value.initInt(@as(i64, @intCast(addr)));
+                            try arr.push(alloc, addr_val);
+                        }
                         if (this.getPropertyDirect("__count")) |cnt| {
                             try this.setProperty("__count", Value.initInt(cnt.toInt() + 1));
                         }
@@ -6690,6 +6704,23 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initInt(0);
                     const this = Value_asObject(ctx);
+                    // 计算存活的条目数（排除已被 unset 标记为死亡的对象）
+                    if (this.getPropertyDirect("__entries")) |entries_val| {
+                        const arr = entries_val.asArray();
+                        const total = arr.count();
+                        var alive_count: i64 = 0;
+                        var idx: i64 = 0;
+                        while (idx < @as(i64, @intCast(total))) : (idx += 1) {
+                            const key = ArrayKey{ .integer = idx };
+                            if (arr.elements.get(key)) |addr_val| {
+                                const addr: usize = @intCast(addr_val.toInt());
+                                if (php_weak_is_alive(addr)) {
+                                    alive_count += 1;
+                                }
+                            }
+                        }
+                        return Value.initInt(alive_count);
+                    }
                     if (this.getPropertyDirect("__count")) |cnt| {
                         return cnt;
                     }
@@ -6700,6 +6731,200 @@ pub const ClassMeta = struct {
         });
 
         try registerClass(meta);
+    }
+
+    /// Register Reflection classes for PHP reflection API
+    fn registerReflectionClasses(allocator: Allocator) !void {
+        // ReflectionAttribute
+        const attr_meta = try ClassMeta.init(allocator, "ReflectionAttribute");
+        try attr_meta.addMethod(.{
+            .name = "getName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try attr_meta.addMethod(.{
+            .name = "getArguments",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__args")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initArray(try PHPArray.init(alloc));
+                }
+            }.call,
+            .is_static = false,
+        });
+        try registerClass(attr_meta);
+
+        // ReflectionClass
+        const rc_meta = try ClassMeta.init(allocator, "ReflectionClass");
+        try rc_meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len == 0) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    // 参数是类名字符串
+                    const name_str = try args[0].toString(alloc);
+                    try this.setProperty("__class_name", Value.initString(name_str));
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rc_meta.addMethod(.{
+            .name = "getName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__class_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rc_meta.addMethod(.{
+            .name = "getAttributes",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    // 查找类元数据中的属性
+                    if (this.getPropertyDirect("__class_name")) |name_val| {
+                        if (name_val.isString()) {
+                            const cname = name_val.asString().data;
+                            if (findClass(cname)) |cmeta| {
+                                // 从类元数据的 __attributes 读取
+                                if (cmeta.static_properties.get("__attributes")) |attrs_val| {
+                                    _ = attrs_val.retain();
+                                    return attrs_val;
+                                }
+                            }
+                        }
+                    }
+                    return Value.initArray(try PHPArray.init(alloc));
+                }
+            }.call,
+            .is_static = false,
+        });
+        rc_meta.magic_construct = rc_meta.methods.get("__construct").?.func;
+        try registerClass(rc_meta);
+
+        // ReflectionEnum (extends ReflectionClass behavior)
+        const re_meta = try ClassMeta.init(allocator, "ReflectionEnum");
+        try re_meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len == 0) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const name_str = try args[0].toString(alloc);
+                    try this.setProperty("__class_name", Value.initString(name_str));
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try re_meta.addMethod(.{
+            .name = "getName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__class_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        re_meta.magic_construct = re_meta.methods.get("__construct").?.func;
+        try registerClass(re_meta);
+
+        // ReflectionClassConstant
+        const rcc_meta = try ClassMeta.init(allocator, "ReflectionClassConstant");
+        try rcc_meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len < 2) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const class_str = try args[0].toString(alloc);
+                    const const_str = try args[1].toString(alloc);
+                    try this.setProperty("__class_name", Value.initString(class_str));
+                    try this.setProperty("__const_name", Value.initString(const_str));
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rcc_meta.addMethod(.{
+            .name = "getValue",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    const kname_val = this.getPropertyDirect("__const_name") orelse return Value.initNull();
+                    if (!cname_val.isString() or !kname_val.isString()) return Value.initNull();
+                    const cname = cname_val.asString().data;
+                    const kname = kname_val.asString().data;
+                    // 查找类常量: "ClassName::CONST"
+                    var buf: [512]u8 = undefined;
+                    const full_key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cname, kname }) catch return Value.initNull();
+                    if (constants.get(full_key)) |val| {
+                        _ = val.retain();
+                        return val;
+                    }
+                    // 尝试从类元数据的静态属性获取
+                    if (findClass(cname)) |cmeta| {
+                        if (cmeta.static_properties.get(kname)) |val| {
+                            _ = val.retain();
+                            return val;
+                        }
+                    }
+                    _ = alloc;
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rcc_meta.addMethod(.{
+            .name = "getName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__const_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        rcc_meta.magic_construct = rcc_meta.methods.get("__construct").?.func;
+        try registerClass(rcc_meta);
     }
 
     /// 添加属性定义
@@ -6753,6 +6978,30 @@ pub var class_registry: ?std.StringHashMap(*ClassMeta) = null;
 
 /// 全局对象跟踪（用于内存泄露检测和清理）
 pub var global_object_registry: ?std.ArrayList(*PHPObject) = null;
+
+/// 弱引用死亡追踪：存储已被 unset 的对象指针地址
+var weak_dead_objects: ?std.AutoHashMap(usize, void) = null;
+
+/// 标记对象为"逻辑死亡"（unset 时调用）
+pub fn php_weak_mark_dead(val: Value) void {
+    if (!Value_isObject(val)) return;
+    const obj = Value_asObject(val);
+    const addr = @intFromPtr(obj);
+    if (weak_dead_objects == null) {
+        weak_dead_objects = std.AutoHashMap(usize, void).init(runtime_allocator);
+    }
+    if (weak_dead_objects) |*set| {
+        set.put(addr, {}) catch {};
+    }
+}
+
+/// 检查对象是否仍然存活（未被 unset 标记为死亡）
+fn php_weak_is_alive(addr: usize) bool {
+    if (weak_dead_objects) |*set| {
+        return !set.contains(addr);
+    }
+    return true;
+}
 
 fn getCurrentCalledClass() ?*const ClassMeta {
     const ptr = concurrency.getExecutionContext().called_class orelse return null;

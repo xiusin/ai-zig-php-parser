@@ -1,29 +1,11 @@
 # 高级特性不支持清单
 
-**生成时间**: 2026-03-12T12:55:16.882920
+**生成时间**: 2026-03-12T16:21:04.187895
 
 ## 概述
 
 本报告列出了PHP解释器/AOT编译器当前**不支持的高级特性**。
 
-
-## ANON 类特性 (1个不支持)
-
-
-### OTHER
-
-- **anon_class_086.php**: 高级特性测试
-  - 代码: `$obj = new class {     public function greet() {         return "hello";     } }; echo $obj->greet()...`
-  - AOT错误: `warning: unable to open library directory '/usr/local/lib': FileNotFound main.zi`
-
-## ATTRIBUTES 类特性 (1个不支持)
-
-
-### AOT_ATTRIBUTE_UNSUPPORTED
-
-- **attributes_077.php**: 高级特性测试
-  - 代码: `#[Attribute] class MyAttr {     public function __construct(public string $value) {} } #[MyAttr("tes...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
 
 ## CHANNEL 类特性 (5个不支持)
 
@@ -85,24 +67,6 @@
   - 代码: `// go function test go function() {     echo "coroutine"; }();`
   - PHP错误: `PHP Parse error:  syntax error, unexpected token "function" in /Users/tuoke/Desk`
 
-## CTOR 类特性 (1个不支持)
-
-
-### OTHER
-
-- **ctor_promotion_078.php**: 高级特性测试
-  - 代码: `class Point {     public function __construct(public int $x, public int $y) {} } $p = new Point(1, 2...`
-
-## ENUM 类特性 (2个不支持)
-
-
-### OTHER
-
-- **enum_066.php**: 枚举测试
-  - 代码: `enum Status {     case Draft;     case Published;     case Archived; } echo Status::Draft->name;...`
-- **enum_backed_067.php**: 枚举测试
-  - 代码: `enum Color: string {     case Red = 'red';     case Green = 'green';     case Blue = 'blue'; } echo ...`
-
 ## FIBER 类特性 (8个不支持)
 
 
@@ -110,37 +74,28 @@
 
 - **fiber_basic_012.php**: Fiber测试
   - 代码: `$fiber = new Fiber(function () {     echo "in fiber";     Fiber::suspend();     echo "resumed"; }); ...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 - **fiber_getCurrent_014.php**: Fiber测试
   - 代码: `$fiber = new Fiber(function () {     $f = Fiber::getCurrent();     echo $f ? "yes" : "no"; }); $fibe...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 - **fiber_loop_019.php**: Fiber测试
   - 代码: `$fiber = new Fiber(function () {     for ($i = 0; $i < 3; $i++) {         Fiber::suspend($i);     } ...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 - **fiber_nested_018.php**: Fiber测试
   - 代码: `$f1 = new Fiber(function () {     $f2 = new Fiber(function () {         echo "inner";     });     $f...`
-  - AOT错误: `warning: unable to open library directory '/usr/local/lib': FileNotFound main.zi`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 - **fiber_return_016.php**: Fiber测试
   - 代码: `$fiber = new Fiber(function () {     Fiber::suspend();     return "done"; }); $fiber->start(); $fibe...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 - **fiber_states_015.php**: Fiber测试
   - 代码: `$fiber = new Fiber(function () {     Fiber::suspend(); }); echo $fiber->isStarted() ? "1" : "0"; $fi...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 - **fiber_throw_017.php**: Fiber测试
   - 代码: `$fiber = new Fiber(function () {     try {         Fiber::suspend();     } catch (Exception $e) {   ...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 - **fiber_value_013.php**: Fiber测试
   - 代码: `$fiber = new Fiber(function () {     $x = Fiber::suspend(1);     echo $x; }); $val = $fiber->start()...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
-
-## FIRST 类特性 (1个不支持)
-
-
-### OTHER
-
-- **first_class_callable_069.php**: 高级特性测试
-  - 代码: `$strlen = strlen(...); echo $strlen("hello");`
-  - AOT错误: `error: InvalidCallback /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gem`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 
 ## GENERATOR 类特性 (11个不支持)
 
@@ -149,22 +104,22 @@
 
 - **generator_getReturn_005.php**: Generator测试
   - 代码: `function gen() {     yield 1;     return "done"; } $g = gen(); foreach ($g as $val) {} echo $g->getR...`
-  - AOT错误: `error: UnknownMethod /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemin`
+  - AOT错误: `error: UnknownMethod /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigp`
 - **generator_recursive_007.php**: Generator测试
   - 代码: `function gen($n) {     if ($n > 0) {         yield $n;         yield from gen($n - 1);     } } forea...`
   - AOT错误: `warning: unable to open library directory '/usr/local/lib': FileNotFound main.zi`
 - **generator_rewind_010.php**: Generator测试
   - 代码: `function gen() {     yield 1;     yield 2; } $g = gen(); echo $g->current(); $g->next(); echo $g->cu...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
+  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp`
 - **generator_send_003.php**: Generator测试
   - 代码: `function gen() {     $x = yield 1;     yield $x + 10; } $g = gen(); echo $g->current(); $g->send(5);...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
+  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp`
 - **generator_throw_006.php**: Generator测试
   - 代码: `function gen() {     try {         yield 1;     } catch (Exception $e) {         yield "caught";    ...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
+  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp`
 - **generator_valid_009.php**: Generator测试
   - 代码: `function gen() {     yield 1;     yield 2; } $g = gen(); while ($g->valid()) {     echo $g->current(...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
+  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp`
 - **generator_yield_from_002.php**: Generator测试
   - 代码: `function gen1() {     yield 1;     yield 2; } function gen2() {     yield from gen1();     yield 3; ...`
   - AOT错误: `warning: unable to open library directory '/usr/local/lib': FileNotFound main.zi`
@@ -246,14 +201,6 @@
   - 代码: `$fifo = "/tmp/test_fifo"; if (posix_mkfifo($fifo, 0666)) {     echo "fifo";     unlink($fifo); }...`
   - AOT错误: `warning: unable to open library directory '/usr/local/lib': FileNotFound main.zi`
 
-## PROPERTY 类特性 (1个不支持)
-
-
-### OTHER
-
-- **property_hooks_064.php**: 高级特性测试
-  - 代码: `class Prop {     public string $name {         get => $this->name;         set => $this->name = strt...`
-
 ## PTHREADS 类特性 (4个不支持)
 
 
@@ -272,41 +219,14 @@
   - 代码: `$worker = new Worker(); $worker->start(); $worker->stack(new class extends Threaded {     public fun...`
   - PHP错误: `PHP Fatal error:  Uncaught Error: Class "Worker" not found in /Users/tuoke/Deskt`
 
-## READONLY 类特性 (1个不支持)
+## REFL 类特性 (2个不支持)
 
-
-### AOT_READONLY_CLASS_UNSUPPORTED
-
-- **readonly_class_065.php**: 只读测试
-  - 代码: `readonly class Point {     public function __construct(public int $x, public int $y) {} } $p = new P...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
-
-## REFL 类特性 (5个不支持)
-
-
-### AOT_ATTRIBUTE_UNSUPPORTED
-
-- **refl_attribute_091.php**: 反射测试
-  - 代码: `#[Attribute] class MyAttr {} #[MyAttr] class Test {} $refl = new ReflectionClass(Test::class); $attr...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
-
-### AOT_ENUM_UNSUPPORTED
-
-- **refl_enum_089.php**: 枚举测试
-  - 代码: `enum Status { case Active; case Inactive; } $refl = new ReflectionEnum(Status::class); echo $refl->g...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
 
 ### AOT_GENERATOR_UNSUPPORTED
 
 - **refl_generator_087.php**: Generator测试
   - 代码: `function gen() { yield 1; } $r = new ReflectionGenerator(gen()); echo $r->getExecutingLine();`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
-
-### OTHER
-
-- **refl_class_const_090.php**: 反射测试
-  - 代码: `class Foo {     public const X = 1; } $refl = new ReflectionClassConstant(Foo::class, 'X'); echo $re...`
-  - AOT错误: `error: NotAnObject /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemini_`
+  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zig`
 
 ### PHP_FATAL
 
@@ -393,6 +313,18 @@
   - 代码: `$val = null; $result = $val ?? throw new Exception("null");`
   - PHP错误: `PHP Fatal error:  Uncaught Exception: null in /Users/tuoke/Desktop/ai-zig-php-pa`
 
+## TRAIT 类特性 (2个不支持)
+
+
+### PHP_FATAL
+
+- **trait_conflict_086.php**: 高级特性测试
+  - 代码: `trait TConflictA { public function foo() { return "A"; } } trait TConflictB { public function foo() ...`
+  - PHP错误: `PHP Fatal error:  Trait method TConflictB::foo has not been applied as TraitConf`
+- **trait_constants_conflict_090.php**: 高级特性测试
+  - 代码: `trait ConflictConstOne { const VALUE = "A"; } trait ConflictConstTwo { const VALUE = "B"; } class Co...`
+  - PHP错误: `PHP Fatal error:  ConflictConstOne and ConflictConstTwo define the same constant`
+
 ## UNPACK 类特性 (1个不支持)
 
 
@@ -400,19 +332,7 @@
 
 - **unpack_string_keys_074.php**: 高级特性测试
   - 代码: `$a = ['x' => 1]; $b = ['y' => 2]; $c = [...$a, ...$b]; print_r($c);`
-  - AOT错误: `Array (     [0] => 1     [1] => 2 ) `
-
-## WEAK 类特性 (2个不支持)
-
-
-### OTHER
-
-- **weak_map_063.php**: 弱引用测试
-  - 代码: `$map = new WeakMap(); $obj = new stdClass(); $map[$obj] = "value"; echo count($map); unset($obj); ec...`
-  - AOT错误: `error: MethodNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemi`
-- **weak_ref_062.php**: 弱引用测试
-  - 代码: `$obj = new stdClass(); $weak = WeakReference::create($obj); echo $weak->get() ? "exists" : "gone"; u...`
-  - AOT错误: `error: ClassNotFound /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/gemin`
+  - AOT错误: `Array (     [x] => 1     [y] => 2 ) `
 
 ## 后续开发建议
 

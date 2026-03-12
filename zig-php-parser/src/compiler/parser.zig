@@ -1881,9 +1881,11 @@ pub const Parser = struct {
                     const prop_id = try self.context.intern(prop_str);
                     left = try self.createNode(.{ .tag = .static_property_access, .main_token = op, .data = .{ .static_property_access = .{ .class_name = class_name_id, .property_name = prop_id } } });
                 } else {
-                    // Allow k_get and k_set as valid member names (for self::get() and self::set() calls)
+                    // Allow keywords as valid member names after ::
                     const member_name_tok = if (self.curr.tag == .k_get or self.curr.tag == .k_set)
                         try self.eat(if (self.curr.tag == .k_get) .k_get else .k_set)
+                    else if (self.curr.tag == .k_class)
+                        try self.eat(.k_class)
                     else
                         try self.eat(.t_string);
                     const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
