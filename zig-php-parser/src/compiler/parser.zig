@@ -824,20 +824,34 @@ pub const Parser = struct {
 
         // Handle namespace with semicolon: namespace Foo;
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .expression_stmt, .main_token = token, .data = .{ .none = {} } });
+        return self.createNode(.{ .tag = .namespace_stmt, .main_token = token, .data = .{ .namespace_stmt = .{ .name = name_id } } });
     }
 
     fn parseUse(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_use);
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        
+        // Extract last part for default alias
         var parts = std.mem.splitScalar(u8, self.lexer.buffer[name_tok.loc.start..name_tok.loc.end], '\\');
         var last_part: []const u8 = "";
         while (parts.next()) |part| last_part = part;
-        const alias_id = try self.context.intern(last_part);
-        try self.context.imports.put(self.allocator, alias_id, name_id);
+        const default_alias_id = try self.context.intern(last_part);
+        
+        // Check for explicit alias: use App\Service as S;
+        var alias_id: ?u32 = null;
+        if (self.curr.tag == .k_as) {
+            self.nextToken();
+            const alias_tok = try self.eat(.t_string);
+            alias_id = try self.context.intern(self.lexer.buffer[alias_tok.loc.start..alias_tok.loc.end]);
+            try self.context.imports.put(self.allocator, alias_id.?, name_id);
+        } else {
+            // Use default alias (last part of namespace)
+            try self.context.imports.put(self.allocator, default_alias_id, name_id);
+        }
+        
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .expression_stmt, .main_token = token, .data = .{ .none = {} } });
+        return self.createNode(.{ .tag = .use_stmt, .main_token = token, .data = .{ .use_stmt = .{ .namespace = name_id, .alias = alias_id, .use_type = 0 } } });
     }
 
     fn parseAttributes(self: *Parser) anyerror![]const ast.Node.Index {

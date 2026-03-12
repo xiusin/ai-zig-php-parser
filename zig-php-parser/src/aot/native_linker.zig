@@ -39,6 +39,29 @@ fn getLastPartOfClassName(full_name: []const u8) []const u8 {
     return full_name;
 }
 
+/// 转义字符串中的反斜杠（用于Zig标识符）
+fn escapeBackslashes(allocator: std.mem.Allocator, str: []const u8) ![]const u8 {
+    var count: usize = 0;
+    for (str) |c| {
+        if (c == '\\') count += 1;
+    }
+    if (count == 0) return try allocator.dupe(u8, str);
+    
+    var result = try allocator.alloc(u8, str.len + count);
+    var i: usize = 0;
+    for (str) |c| {
+        if (c == '\\') {
+            result[i] = '\\';
+            result[i + 1] = '\\';
+            i += 2;
+        } else {
+            result[i] = c;
+            i += 1;
+        }
+    }
+    return result;
+}
+
 /// 原生链接器配置
 pub const NativeLinkerConfig = struct {
     /// 目标平台
@@ -917,8 +940,11 @@ pub const NativeLinker = struct {
         for (0..class_count) |ci| {
             const full_cname = class_names[ci];  // 完整类名
             const short_cname = class_short_names[ci];  // 短名（用于变量名）
+            // ✅ 转义完整类名中的反斜杠
+            const escaped_full_cname = try escapeBackslashes(self.allocator, full_cname);
+            defer self.allocator.free(escaped_full_cname);
             // ✅ 使用短名作为变量名，但注册时使用完整类名
-            try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ short_cname, full_cname });
+            try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ short_cname, escaped_full_cname });
 
             if (type_def_idx[ci]) |tdi| {
                 const td = ir_module.types.items[tdi].*;
@@ -1030,16 +1056,20 @@ pub const NativeLinker = struct {
             for (0..method_counts[ci]) |mi| {
                 const mname = method_lists[ci][mi];
                 var full_name_buf: [512]u8 = undefined;
-                const full_name = try std.fmt.bufPrint(&full_name_buf, "{s}::{s}", .{ short_cname, mname });
+                // ✅ 使用完整类名查找方法
+                const full_method_name = try std.fmt.bufPrint(&full_name_buf, "{s}::{s}", .{ full_cname, mname });
 
                 var is_static: bool = false;
-                if (self.findFunction(ir_module, full_name)) |method_func| {
+                if (self.findFunction(ir_module, full_method_name)) |method_func| {
                     if (!(method_func.params.items.len > 0 and std.mem.eql(u8, method_func.params.items[0].name, "this"))) {
                         is_static = true;
                     }
                 }
 
-                try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}::{s}\", .is_static = {} }});\n", .{ short_cname, mname, short_cname, mname, is_static });
+                // ✅ 转义完整方法名用于函数引用
+                const escaped_method_name = try escapeBackslashes(self.allocator, full_method_name);
+                defer self.allocator.free(escaped_method_name);
+                try writer.print("    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {} }});\n", .{ short_cname, mname, escaped_method_name, is_static });
             }
 
             if (type_def_idx[ci]) |tdi| {
@@ -1140,6 +1170,10 @@ pub const NativeLinker = struct {
                 const full_cname = class_names[ci];
                 const short_cname = class_short_names[ci];
                 _ = short_cname; // 这个循环中只需要full_cname
+                
+                // ✅ 转义完整类名
+                const escaped_full_cname = try escapeBackslashes(self.allocator, full_cname);
+                defer self.allocator.free(escaped_full_cname);
 
                 for (td.constants) |const_info| {
                     const value_code = switch (const_info.value) {
@@ -1159,7 +1193,7 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_name);
 
                     // ✅ 使用完整类名设置静态属性
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ full_cname, escaped_name, value_code });
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ escaped_full_cname, escaped_name, value_code });
                 }
             }
         }
@@ -1600,7 +1634,10 @@ pub const NativeLinker = struct {
         // 生成函数签名
         // 所有函数都是public的，以便相互调用
         try code.appendSlice(self.allocator, "\n// MARKER: generateFunction called\npub fn @\"");
-        try code.appendSlice(self.allocator, func.name);
+        // 转义函数名中的反斜杠
+        const escaped_name = try escapeBackslashes(self.allocator, func.name);
+        defer self.allocator.free(escaped_name);
+        try code.appendSlice(self.allocator, escaped_name);
         try code.appendSlice(self.allocator, "\"(");
 
         // 统一函数签名：(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value

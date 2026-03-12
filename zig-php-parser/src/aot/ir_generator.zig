@@ -322,9 +322,10 @@ pub const IRGenerator = struct {
                 const stmt_node = self.getNode(stmt_idx) orelse continue;
 
                 if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
-                    stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl)
+                    stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl or
+                    stmt_node.tag == .namespace_stmt or stmt_node.tag == .use_stmt)
                 {
-                    // Process declarations directly (they create their own functions)
+                    // Process declarations and namespace/use statements directly
                     try self.generateStatement(stmt_idx);
                 } else {
                     // Collect top-level statements for __main__
@@ -3271,17 +3272,22 @@ pub const IRGenerator = struct {
             return class_name[1..];  // 去掉前导 \
         }
         
-        // 3. 检查别名表（use App\Service as S）
+        // 3. 检查是否包含命名空间分隔符（已经是完整名）
+        if (std.mem.indexOf(u8, class_name, "\\")) |_| {
+            return class_name;
+        }
+        
+        // 4. 检查别名表（use App\Service as S）
         if (self.namespace_aliases.get(class_name)) |full_name| {
             return full_name;
         }
         
-        // 4. 检查导入表（use App\Service）
+        // 5. 检查导入表（use App\Service）
         if (self.namespace_imports.get(class_name)) |full_name| {
             return full_name;
         }
         
-        // 5. 加上当前命名空间
+        // 6. 加上当前命名空间
         if (self.current_namespace) |ns| {
             return try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ ns, class_name });
         }
