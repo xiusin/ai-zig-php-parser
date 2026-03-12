@@ -9319,6 +9319,540 @@ pub const VM = struct {
         }
     }
 
+    const ComposedTraitMethod = struct {
+        provider_trait: []const u8,
+        original_name: []const u8,
+        exposed_name: []const u8,
+        method: *const types.Method,
+        visibility: types.Property.Visibility,
+    };
+
+    const ComposedTraitProperty = struct {
+        provider_trait: []const u8,
+        property: *const types.Property,
+    };
+
+    const ComposedTraitConstant = struct {
+        provider_trait: []const u8,
+        name: []const u8,
+        value: *const Value,
+    };
+
+    fn cloneMethodForTrait(
+        self: *VM,
+        source: *const types.Method,
+        exposed_name: []const u8,
+        visibility: types.Property.Visibility,
+    ) !types.Method {
+        const php_name = try types.PHPString.init(
+            self.allocator,
+            exposed_name,
+        );
+        defer php_name.release(self.allocator);
+
+        var cloned = types.Method.init(php_name);
+        cloned.return_type = source.return_type;
+        cloned.modifiers = source.modifiers;
+        cloned.modifiers.visibility = visibility;
+        cloned.body = source.body;
+
+        if (source.parameters.len > 0) {
+            const parameters = try self.allocator.alloc(
+                types.Method.Parameter,
+                source.parameters.len,
+            );
+            errdefer self.allocator.free(parameters);
+
+            for (source.parameters, 0..) |param, i| {
+                parameters[i] = param;
+                parameters[i].name.retain();
+                if (parameters[i].default_value) |default_value| {
+                    parameters[i].default_value = default_value.retain();
+                }
+            }
+            cloned.parameters = parameters;
+        }
+
+        return cloned;
+    }
+
+    fn clonePropertyForTrait(
+        self: *VM,
+        source: *const types.Property,
+    ) !types.Property {
+        const php_name = try types.PHPString.init(
+            self.allocator,
+            source.name.data,
+        );
+        defer php_name.release(self.allocator);
+
+        var cloned = types.Property.init(php_name);
+        cloned.type = source.type;
+        cloned.modifiers = source.modifiers;
+        if (source.default_value) |default_value| {
+            cloned.default_value = default_value.retain();
+        }
+        if (source.hooks.len > 0) {
+            cloned.hooks = try self.allocator.dupe(
+                types.PropertyHook,
+                source.hooks,
+            );
+        }
+        return cloned;
+    }
+
+    fn traitValueCompatible(self: *VM, lhs: ?Value, rhs: ?Value) bool {
+        if (lhs == null and rhs == null) return true;
+        if (lhs == null or rhs == null) return false;
+        return self.valuesStrictEqual(lhs.?, rhs.?);
+    }
+
+    fn traitPropertyCompatible(
+        self: *VM,
+        lhs: *const types.Property,
+        rhs: *const types.Property,
+    ) bool {
+        return lhs.modifiers.visibility == rhs.modifiers.visibility and
+            lhs.modifiers.is_static == rhs.modifiers.is_static and
+            lhs.modifiers.is_readonly == rhs.modifiers.is_readonly and
+            std.meta.eql(lhs.type, rhs.type) and
+            self.traitValueCompatible(lhs.default_value, rhs.default_value);
+    }
+
+    fn traitConstantCompatible(
+        self: *VM,
+        lhs: *const Value,
+        rhs: *const Value,
+    ) bool {
+        return self.valuesStrictEqual(lhs.*, rhs.*);
+    }
+
+    fn traitMethodsEquivalent(
+        self: *VM,
+        lhs: ComposedTraitMethod,
+        rhs: ComposedTraitMethod,
+    ) bool {
+        _ = self;
+        return std.mem.eql(u8, lhs.provider_trait, rhs.provider_trait) and
+            std.mem.eql(u8, lhs.original_name, rhs.original_name) and
+            std.mem.eql(u8, lhs.exposed_name, rhs.exposed_name) and
+            lhs.visibility == rhs.visibility and
+            lhs.method == rhs.method;
+    }
+
+    fn appendComposedTraitMethod(
+        self: *VM,
+        methods: *std.ArrayListUnmanaged(ComposedTraitMethod),
+        method: ComposedTraitMethod,
+    ) !void {
+        for (methods.items) |existing| {
+            if (!std.mem.eql(u8, existing.exposed_name, method.exposed_name)) {
+                continue;
+            }
+            if (self.traitMethodsEquivalent(existing, method)) return;
+            return error.TraitMethodConflict;
+        }
+        try methods.append(self.allocator, method);
+    }
+
+    fn appendComposedTraitProperty(
+        self: *VM,
+        properties: *std.ArrayListUnmanaged(ComposedTraitProperty),
+        property: ComposedTraitProperty,
+    ) !void {
+        for (properties.items) |existing| {
+            if (!std.mem.eql(
+                u8,
+                existing.property.name.data,
+                property.property.name.data,
+            )) continue;
+            if (!self.traitPropertyCompatible(
+                existing.property,
+                property.property,
+            )) {
+                return error.TraitPropertyConflict;
+            }
+            return;
+        }
+        try properties.append(self.allocator, property);
+    }
+
+    fn appendComposedTraitConstant(
+        self: *VM,
+        constants: *std.ArrayListUnmanaged(ComposedTraitConstant),
+        constant: ComposedTraitConstant,
+    ) !void {
+        for (constants.items) |existing| {
+            if (!std.mem.eql(u8, existing.name, constant.name)) continue;
+            if (!self.traitConstantCompatible(existing.value, constant.value)) {
+                return error.TraitConstantConflict;
+            }
+            return;
+        }
+        try constants.append(self.allocator, constant);
+    }
+
+    fn resolveTraitMethodTarget(
+        self: *VM,
+        methods: []ComposedTraitMethod,
+        method_ref: ast.TraitMethodReference,
+    ) !usize {
+        const method_name = self.context.string_pool.keys()[method_ref.method_name];
+        const trait_name = if (method_ref.trait_name) |name_id|
+            self.context.string_pool.keys()[name_id]
+        else
+            null;
+
+        var found_idx: ?usize = null;
+        for (methods, 0..) |method, idx| {
+            if (!std.mem.eql(u8, method.exposed_name, method_name)) continue;
+            if (trait_name) |required_trait| {
+                if (!std.mem.eql(u8, method.provider_trait, required_trait)) {
+                    continue;
+                }
+            }
+            if (found_idx != null) return error.AmbiguousTraitMethodReference;
+            found_idx = idx;
+        }
+        return found_idx orelse error.UnknownTraitMethodReference;
+    }
+
+    fn visibilityFromTraitVisibility(
+        self: *VM,
+        visibility: ast.TraitVisibility,
+    ) types.Property.Visibility {
+        _ = self;
+        return switch (visibility) {
+            .public => .public,
+            .protected => .protected,
+            .private => .private,
+        };
+    }
+
+    fn applyTraitAdaptations(
+        self: *VM,
+        methods: *std.ArrayListUnmanaged(ComposedTraitMethod),
+        adaptations: []const ast.TraitAdaptation,
+    ) !void {
+        const base_methods = try self.allocator.dupe(
+            ComposedTraitMethod,
+            methods.items,
+        );
+        defer self.allocator.free(base_methods);
+
+        for (adaptations) |adaptation| {
+            switch (adaptation) {
+                .insteadof => |data| {
+                    _ = try self.resolveTraitMethodTarget(
+                        methods.items,
+                        data.preferred,
+                    );
+                    const method_name = self.context
+                        .string_pool
+                        .keys()[data.preferred.method_name];
+
+                    var write_idx: usize = 0;
+                    for (methods.items) |method| {
+                        var excluded = false;
+                        if (std.mem.eql(u8, method.exposed_name, method_name)) {
+                            for (data.excluded_traits) |excluded_trait_id| {
+                                const excluded_trait = self.context
+                                    .string_pool
+                                    .keys()[excluded_trait_id];
+                                if (std.mem.eql(
+                                    u8,
+                                    method.provider_trait,
+                                    excluded_trait,
+                                )) {
+                                    excluded = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!excluded) {
+                            methods.items[write_idx] = method;
+                            write_idx += 1;
+                        }
+                    }
+                    methods.items.len = write_idx;
+                },
+                .alias => |data| {
+                    if (data.alias) |alias_id| {
+                        const target_idx = try self.resolveTraitMethodTarget(
+                            base_methods,
+                            data.original,
+                        );
+                        var alias_method = base_methods[target_idx];
+                        alias_method.exposed_name = self.context
+                            .string_pool
+                            .keys()[alias_id];
+                        if (data.visibility) |visibility| {
+                            alias_method.visibility =
+                                self.visibilityFromTraitVisibility(visibility);
+                        }
+                        try methods.append(self.allocator, alias_method);
+                    } else if (data.visibility) |visibility| {
+                        const target_idx = self.resolveTraitMethodTarget(
+                            methods.items,
+                            data.original,
+                        ) catch continue;
+                        methods.items[target_idx].visibility =
+                            self.visibilityFromTraitVisibility(visibility);
+                    }
+                },
+            }
+        }
+    }
+
+    fn throwTraitCompositionError(
+        self: *VM,
+        owner_kind: []const u8,
+        owner_name: []const u8,
+        err: anyerror,
+    ) !void {
+        const message = switch (err) {
+            error.TraitMethodConflict => try std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s} has colliding trait methods and no conflict resolution was provided",
+                .{ owner_kind, owner_name },
+            ),
+            error.TraitPropertyConflict => try std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s} has incompatible trait property definitions",
+                .{ owner_kind, owner_name },
+            ),
+            error.TraitConstantConflict => try std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s} has incompatible trait constant definitions",
+                .{ owner_kind, owner_name },
+            ),
+            error.TraitNotFound => try std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s} references an undefined trait",
+                .{ owner_kind, owner_name },
+            ),
+            error.UnknownTraitMethodReference => try std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s} contains a trait adaptation for an unknown method",
+                .{ owner_kind, owner_name },
+            ),
+            error.AmbiguousTraitMethodReference => try std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s} contains an ambiguous trait method reference",
+                .{ owner_kind, owner_name },
+            ),
+            else => return err,
+        };
+        defer self.allocator.free(message);
+
+        const exception = try ExceptionFactory.createTypeError(
+            self.allocator,
+            message,
+            self.current_file,
+            self.current_line,
+        );
+        _ = try self.throwException(exception);
+    }
+
+    fn collectTraitUseMembers(
+        self: *VM,
+        trait_use_data: anytype,
+        methods: *std.ArrayListUnmanaged(ComposedTraitMethod),
+        properties: *std.ArrayListUnmanaged(ComposedTraitProperty),
+        constants: *std.ArrayListUnmanaged(ComposedTraitConstant),
+    ) !void {
+        for (trait_use_data.traits) |trait_idx| {
+            const trait_node = self.context.nodes.items[trait_idx];
+            if (trait_node.tag != .named_type) continue;
+
+            const trait_name = self.context
+                .string_pool
+                .keys()[trait_node.data.named_type.name];
+            const trait_obj = self.getTrait(trait_name) orelse {
+                return error.TraitNotFound;
+            };
+
+            var method_iter = trait_obj.methods.iterator();
+            while (method_iter.next()) |entry| {
+                const method_name = entry.key_ptr.*;
+                try methods.append(self.allocator, .{
+                    .provider_trait = trait_name,
+                    .original_name = method_name,
+                    .exposed_name = method_name,
+                    .method = entry.value_ptr,
+                    .visibility = entry.value_ptr.modifiers.visibility,
+                });
+            }
+
+            var property_iter = trait_obj.properties.iterator();
+            while (property_iter.next()) |entry| {
+                try self.appendComposedTraitProperty(properties, .{
+                    .provider_trait = trait_name,
+                    .property = entry.value_ptr,
+                });
+            }
+
+            var constant_iter = trait_obj.constants.iterator();
+            while (constant_iter.next()) |entry| {
+                try self.appendComposedTraitConstant(constants, .{
+                    .provider_trait = trait_name,
+                    .name = entry.key_ptr.*,
+                    .value = entry.value_ptr,
+                });
+            }
+        }
+
+        try self.applyTraitAdaptations(methods, trait_use_data.adaptations);
+
+        var resolved_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        defer resolved_methods.deinit(self.allocator);
+        for (methods.items) |method| {
+            try self.appendComposedTraitMethod(&resolved_methods, method);
+        }
+        methods.items.len = 0;
+        for (resolved_methods.items) |method| {
+            try methods.append(self.allocator, method);
+        }
+    }
+
+    fn mergeTraitUseIntoTrait(
+        self: *VM,
+        owner_name: []const u8,
+        php_trait: *types.PHPTrait,
+        trait_use_data: anytype,
+    ) !void {
+        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        defer methods.deinit(self.allocator);
+        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+        defer properties.deinit(self.allocator);
+        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+        defer constants.deinit(self.allocator);
+
+        self.collectTraitUseMembers(
+            trait_use_data,
+            &methods,
+            &properties,
+            &constants,
+        ) catch |err| {
+            try self.throwTraitCompositionError("Trait", owner_name, err);
+            return error.UncaughtException;
+        };
+
+        for (methods.items) |method_info| {
+            if (php_trait.methods.contains(method_info.exposed_name)) continue;
+            const cloned = try self.cloneMethodForTrait(
+                method_info.method,
+                method_info.exposed_name,
+                method_info.visibility,
+            );
+            try php_trait.methods.put(method_info.exposed_name, cloned);
+        }
+
+        for (properties.items) |property_info| {
+            const property_name = property_info.property.name.data;
+            if (php_trait.properties.getPtr(property_name)) |existing| {
+                if (!self.traitPropertyCompatible(existing, property_info.property)) {
+                    try self.throwTraitCompositionError(
+                        "Trait",
+                        owner_name,
+                        error.TraitPropertyConflict,
+                    );
+                    return error.UncaughtException;
+                }
+                continue;
+            }
+            const cloned = try self.clonePropertyForTrait(property_info.property);
+            try php_trait.properties.put(property_name, cloned);
+        }
+
+        for (constants.items) |constant_info| {
+            if (php_trait.constants.getPtr(constant_info.name)) |existing| {
+                if (!self.traitConstantCompatible(existing, constant_info.value)) {
+                    try self.throwTraitCompositionError(
+                        "Trait",
+                        owner_name,
+                        error.TraitConstantConflict,
+                    );
+                    return error.UncaughtException;
+                }
+                continue;
+            }
+            try php_trait.constants.put(
+                constant_info.name,
+                constant_info.value.*.retain(),
+            );
+        }
+    }
+
+    fn mergeTraitUseIntoClass(
+        self: *VM,
+        owner_name: []const u8,
+        class: *types.PHPClass,
+        trait_use_data: anytype,
+    ) !void {
+        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        defer methods.deinit(self.allocator);
+        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+        defer properties.deinit(self.allocator);
+        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+        defer constants.deinit(self.allocator);
+
+        self.collectTraitUseMembers(
+            trait_use_data,
+            &methods,
+            &properties,
+            &constants,
+        ) catch |err| {
+            try self.throwTraitCompositionError("Class", owner_name, err);
+            return error.UncaughtException;
+        };
+
+        for (methods.items) |method_info| {
+            if (class.methods.contains(method_info.exposed_name)) continue;
+            const cloned = try self.cloneMethodForTrait(
+                method_info.method,
+                method_info.exposed_name,
+                method_info.visibility,
+            );
+            try class.methods.put(method_info.exposed_name, cloned);
+        }
+
+        for (properties.items) |property_info| {
+            const property_name = property_info.property.name.data;
+            if (class.properties.getPtr(property_name)) |existing| {
+                if (!self.traitPropertyCompatible(existing, property_info.property)) {
+                    try self.throwTraitCompositionError(
+                        "Class",
+                        owner_name,
+                        error.TraitPropertyConflict,
+                    );
+                    return error.UncaughtException;
+                }
+                continue;
+            }
+            const cloned = try self.clonePropertyForTrait(property_info.property);
+            try class.properties.put(property_name, cloned);
+        }
+
+        for (constants.items) |constant_info| {
+            if (class.constants.getPtr(constant_info.name)) |existing| {
+                if (!self.traitConstantCompatible(existing, constant_info.value)) {
+                    try self.throwTraitCompositionError(
+                        "Class",
+                        owner_name,
+                        error.TraitConstantConflict,
+                    );
+                    return error.UncaughtException;
+                }
+                continue;
+            }
+            try class.constants.put(
+                constant_info.name,
+                constant_info.value.*.retain(),
+            );
+        }
+    }
+
     fn evaluateTraitDeclaration(self: *VM, trait_data: anytype) !Value {
         const trait_name = self.context.string_pool.keys()[trait_data.name];
         const php_trait_name = try types.PHPString.init(self.allocator, trait_name);
@@ -9337,9 +9871,18 @@ pub const VM = struct {
                 .property_decl => {
                     try self.processTraitPropertyDeclaration(&php_trait, member_node.data.property_decl);
                 },
+                .const_decl => {
+                    try self.processTraitConstantDeclaration(
+                        &php_trait,
+                        member_node.data.const_decl,
+                    );
+                },
                 .trait_use => {
-                    // Handle nested trait use: trait B { use A; }
-                    try self.processNestedTraitUse(&php_trait, member_node.data.trait_use);
+                    try self.processNestedTraitUse(
+                        trait_name,
+                        &php_trait,
+                        member_node.data.trait_use,
+                    );
                 },
                 else => {},
             }
@@ -9353,34 +9896,17 @@ pub const VM = struct {
         return Value.initNull();
     }
 
-    fn processNestedTraitUse(self: *VM, php_trait: *types.PHPTrait, trait_use_data: anytype) !void {
-        // Process each trait in the use statement and add to this trait
-        for (trait_use_data.traits) |trait_idx| {
-            const trait_node = self.context.nodes.items[trait_idx];
-            if (trait_node.tag == .named_type) {
-                const inner_trait_name = self.context.string_pool.keys()[trait_node.data.named_type.name];
-                if (self.getTrait(inner_trait_name)) |inner_trait| {
-                    // Copy methods from inner trait
-                    var method_iter = inner_trait.methods.iterator();
-                    while (method_iter.next()) |entry| {
-                        const method_name = entry.key_ptr.*;
-                        if (!php_trait.methods.contains(method_name)) {
-                            const method_copy = entry.value_ptr.*;
-                            try php_trait.methods.put(method_name, method_copy);
-                        }
-                    }
-                    // Copy properties from inner trait
-                    var prop_iter = inner_trait.properties.iterator();
-                    while (prop_iter.next()) |entry| {
-                        const prop_name = entry.key_ptr.*;
-                        if (!php_trait.properties.contains(prop_name)) {
-                            const prop_copy = entry.value_ptr.*;
-                            try php_trait.properties.put(prop_name, prop_copy);
-                        }
-                    }
-                }
-            }
-        }
+    fn processNestedTraitUse(
+        self: *VM,
+        trait_name: []const u8,
+        php_trait: *types.PHPTrait,
+        trait_use_data: anytype,
+    ) !void {
+        try self.mergeTraitUseIntoTrait(
+            trait_name,
+            php_trait,
+            trait_use_data,
+        );
     }
 
     fn processTraitMethodDeclaration(self: *VM, trait_obj: *types.PHPTrait, method_data: anytype) !void {
@@ -9417,60 +9943,23 @@ pub const VM = struct {
         try trait_obj.properties.put(prop_name, property);
     }
 
-    fn processTraitUse(self: *VM, class: *types.PHPClass, trait_use_data: anytype) !void {
-        // Process each trait in the use statement
-        for (trait_use_data.traits) |trait_idx| {
-            const trait_node = self.context.nodes.items[trait_idx];
-            if (trait_node.tag == .named_type) {
-                const trait_name = self.context.string_pool.keys()[trait_node.data.named_type.name];
-                if (self.getTrait(trait_name)) |trait_obj| {
-                    // Mix in trait methods (class methods take precedence)
-                    var method_iter = trait_obj.methods.iterator();
-                    while (method_iter.next()) |entry| {
-                        const method_name = entry.key_ptr.*;
-                        // Only add if class doesn't already have this method
-                        if (!class.methods.contains(method_name)) {
-                            var method_copy = entry.value_ptr.*;
-                            // Retain the method name reference
-                            method_copy.name.retain();
+    fn processTraitConstantDeclaration(
+        self: *VM,
+        trait_obj: *types.PHPTrait,
+        const_data: anytype,
+    ) !void {
+        const const_name = self.context.string_pool.keys()[const_data.name];
+        const const_value = try self.eval(const_data.value);
+        try trait_obj.constants.put(const_name, const_value);
+    }
 
-                            // Allocate new parameter array and retain parameter names
-                            if (method_copy.parameters.len > 0) {
-                                const new_params = try self.allocator.alloc(types.Method.Parameter, method_copy.parameters.len);
-                                for (method_copy.parameters, 0..) |param, i| {
-                                    new_params[i] = param;
-                                    new_params[i].name.retain();
-                                }
-                                method_copy.parameters = new_params;
-                            }
-
-                            try class.methods.put(method_name, method_copy);
-                        }
-                    }
-
-                    // Mix in trait properties
-                    var prop_iter = trait_obj.properties.iterator();
-                    while (prop_iter.next()) |entry| {
-                        const prop_name = entry.key_ptr.*;
-                        if (!class.properties.contains(prop_name)) {
-                            var prop_copy = entry.value_ptr.*;
-                            // Retain the property name reference
-                            prop_copy.name.retain();
-                            // Retain default value if present
-                            if (prop_copy.default_value) |val| {
-                                switch (val.getTag()) {
-                                    .string => _ = val.getAsString().retain(),
-                                    .array => _ = val.getAsArray().retain(),
-                                    .object => _ = val.getAsObject().retain(),
-                                    else => {},
-                                }
-                            }
-                            try class.properties.put(prop_name, prop_copy);
-                        }
-                    }
-                }
-            }
-        }
+    fn processTraitUse(
+        self: *VM,
+        class_name: []const u8,
+        class: *types.PHPClass,
+        trait_use_data: anytype,
+    ) !void {
+        try self.mergeTraitUseIntoClass(class_name, class, trait_use_data);
     }
 
     fn evaluateClassDeclaration(self: *VM, class_data: anytype) !Value {
@@ -9548,7 +10037,11 @@ pub const VM = struct {
 
             switch (member_node.tag) {
                 .trait_use => {
-                    try self.processTraitUse(&php_class, member_node.data.trait_use);
+                    try self.processTraitUse(
+                        class_name,
+                        &php_class,
+                        member_node.data.trait_use,
+                    );
                 },
                 .method_decl => {
                     try self.processMethodDeclaration(&php_class, member_node.data.method_decl);

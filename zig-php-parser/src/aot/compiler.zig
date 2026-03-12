@@ -1071,10 +1071,25 @@ pub const AOTCompiler = struct {
 
         // 生成 Zig 代码
         const zig_code = native_linker.generateZigCode(ir_module) catch |err| {
+            const linker_message = switch (err) {
+                error.TraitMethodConflict =>
+                    "trait method conflict: colliding methods require insteadof/as resolution",
+                error.TraitPropertyConflict =>
+                    "trait property conflict: imported properties are not definition-compatible",
+                error.TraitConstantConflict =>
+                    "trait constant conflict: imported constants are not definition-compatible",
+                error.UnknownTraitMethodReference =>
+                    "trait adaptation error: referenced method was not found in imported traits",
+                error.AmbiguousTraitMethodReference =>
+                    "trait adaptation error: referenced method is ambiguous across imported traits",
+                error.TraitNotFound =>
+                    "trait adaptation error: referenced trait was not found",
+                else => @errorName(err),
+            };
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
                 "Zig code generation failed: {s}",
-                .{@errorName(err)},
+                .{linker_message},
             );
             return;
         };

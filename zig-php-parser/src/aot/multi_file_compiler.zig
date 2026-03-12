@@ -352,7 +352,29 @@ pub const MultiFileCompiler = struct {
         defer linker.deinit();
 
         // 生成 Zig 代码
-        const zig_code = try linker.generateZigCode(self.merged_module.?);
+        const zig_code = linker.generateZigCode(self.merged_module.?) catch |err| {
+            const linker_message = switch (err) {
+                error.TraitMethodConflict =>
+                    "trait method conflict: colliding methods require insteadof/as resolution",
+                error.TraitPropertyConflict =>
+                    "trait property conflict: imported properties are not definition-compatible",
+                error.TraitConstantConflict =>
+                    "trait constant conflict: imported constants are not definition-compatible",
+                error.UnknownTraitMethodReference =>
+                    "trait adaptation error: referenced method was not found in imported traits",
+                error.AmbiguousTraitMethodReference =>
+                    "trait adaptation error: referenced method is ambiguous across imported traits",
+                error.TraitNotFound =>
+                    "trait adaptation error: referenced trait was not found",
+                else => @errorName(err),
+            };
+            self.diagnostics.reportError(
+                .{ .file = self.options.input_file },
+                "Zig code generation failed: {s}",
+                .{linker_message},
+            );
+            return err;
+        };
         defer self.allocator.free(zig_code);
         
         // 编译到可执行文件

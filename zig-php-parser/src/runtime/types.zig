@@ -1065,6 +1065,7 @@ pub const PHPTrait = struct {
     name: *PHPString,
     properties: std.StringHashMap(Property),
     methods: std.StringHashMap(Method),
+    constants: std.StringHashMap(Value),
 
     pub fn init(allocator: std.mem.Allocator, name: *PHPString) PHPTrait {
         name.retain();
@@ -1072,6 +1073,7 @@ pub const PHPTrait = struct {
             .name = name,
             .properties = std.StringHashMap(Property).init(allocator),
             .methods = std.StringHashMap(Method).init(allocator),
+            .constants = std.StringHashMap(Value).init(allocator),
         };
     }
 
@@ -1087,6 +1089,11 @@ pub const PHPTrait = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.methods.deinit();
+        var const_iter = self.constants.iterator();
+        while (const_iter.next()) |entry| {
+            entry.value_ptr.release(allocator);
+        }
+        self.constants.deinit();
     }
 };
 
