@@ -636,6 +636,7 @@ pub const IRGenerator = struct {
             .class_decl => try self.generateClassDecl(node),
             .interface_decl => try self.generateInterfaceDecl(node),
             .trait_decl => try self.generateTraitDecl(node),
+            .enum_decl => try self.generateEnumDecl(node),
             .if_stmt => try self.generateIfStmt(node),
             .while_stmt => try self.generateWhileStmt(node),
             .do_while_stmt => try self.generateDoWhileStmt(node),
@@ -1099,6 +1100,36 @@ pub const IRGenerator = struct {
             switch (member.tag) {
                 .method_decl => {
                     try methods.append(self.allocator, self.getMethodMeta(member));
+                    // Constructor promotion: promoted params become properties
+                    const md = member.data.method_decl;
+                    if (std.mem.eql(u8, self.getString(md.name), "__construct")) {
+                        for (md.params) |param_idx| {
+                            const pnode = self.getNode(param_idx) orelse continue;
+                            if (pnode.tag != .parameter) continue;
+                            const pd = pnode.data.parameter;
+                            if (!pd.is_promoted) continue;
+                            const pname_raw = self.getString(pd.name);
+                            // Strip '$' prefix: param "$x" -> property "x"
+                            const pname = if (pname_raw.len > 0 and pname_raw[0] == '$')
+                                pname_raw[1..]
+                            else
+                                pname_raw;
+                            const ptype = if (pd.type) |t| try self.resolveTypeNode(t) else .php_value;
+                            const vis: TypeDef.Visibility = if (pd.modifiers.is_private)
+                                .private
+                            else if (pd.modifiers.is_protected)
+                                .protected
+                            else
+                                .public;
+                            try properties.append(self.allocator, .{
+                                .name = pname,
+                                .type_ = ptype,
+                                .default_value = null,
+                                .is_static = false,
+                                .visibility = vis,
+                            });
+                        }
+                    }
                     try self.generateMethodDecl(member, class_name);
                 },
                 .expr_list => {
@@ -1153,6 +1184,68 @@ pub const IRGenerator = struct {
                     });
 
                     try self.generatePropertyDecl(member, class_name);
+
+                    // Generate hook methods for properties with hooks
+                    for (prop_data.hooks) |hook_idx| {
+                        const hook_node = self.getNode(hook_idx) orelse continue;
+                        if (hook_node.tag != .property_hook) continue;
+                        const hook_data = hook_node.data.property_hook;
+                        const hook_name = self.getString(hook_data.name);
+                        // Generate synthetic method: __prop_get_<name> or __prop_set_<name>
+                        var method_buf: [256]u8 = undefined;
+                        const method_name_str = std.fmt.bufPrint(&method_buf, "__prop_{s}_{s}", .{ hook_name, prop_name }) catch continue;
+                        const method_full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name_str });
+                        const hook_func = try self.allocator.create(Function);
+                        hook_func.* = Function.init(self.allocator, method_full_name);
+                        hook_func.name_owned = true;
+                        hook_func.is_method = true;
+                        hook_func.class_name = class_name;
+                        hook_func.location = self.current_location;
+                        if (self.module) |module| {
+                            try module.addFunction(hook_func);
+                        }
+                        try methods.append(self.allocator, .{
+                            .name = try self.allocator.dupe(u8, method_name_str),
+                            .visibility = .public,
+                            .is_static = false,
+                        });
+                        // Generate hook method body
+                        const prev_function = self.current_function;
+                        const prev_class = self.current_class;
+                        const prev_block = self.current_block;
+                        const prev_var_registers = self.var_registers;
+                        self.current_function = hook_func;
+                        self.current_class = class_name;
+                        self.var_registers = .{};
+                        self.block_counter = 0;
+                        const entry = try hook_func.createBlock("entry");
+                        self.setCurrentBlock(entry);
+                        // Add $this param
+                        try hook_func.addParam(.{ .name = "this", .type_ = Type{ .php_object = class_name }, .has_default = false, .is_variadic = false, .is_reference = false });
+                        self.current_has_this_param = true;
+                        const param_reg = try self.emitWithResult(.{ .param = .{ .index = 0, .name = "this" } }, Type{ .php_object = class_name });
+                        const this_reg = try self.getOrCreateVarRegister("this", .php_value);
+                        _ = try self.emit(.{ .store = .{ .ptr = this_reg, .value = param_reg } }, null);
+                        try self.putVarRegister("$this", this_reg);
+                        // For set hooks, add $value param
+                        if (std.mem.eql(u8, hook_name, "set")) {
+                            try hook_func.addParam(.{ .name = "$value", .type_ = .php_value, .has_default = false, .is_variadic = false, .is_reference = false });
+                            const value_param = try self.emitWithResult(.{ .param = .{ .index = 1, .name = "$value" } }, .php_value);
+                            const value_reg = try self.getOrCreateVarRegister("$value", .php_value);
+                            _ = try self.emit(.{ .store = .{ .ptr = value_reg, .value = value_param } }, null);
+                        }
+                        // Generate hook body
+                        const body_result = try self.generateExpression(hook_data.body);
+                        if (!self.isBlockTerminated()) {
+                            self.setTerminator(.{ .ret = body_result });
+                        }
+                        self.current_has_this_param = false;
+                        self.var_registers.deinit(self.allocator);
+                        self.var_registers = prev_var_registers;
+                        self.current_function = prev_function;
+                        self.current_class = prev_class;
+                        self.current_block = prev_block;
+                    }
                 },
                 .const_decl => {
                     // 收集常量信息
@@ -1292,6 +1385,157 @@ pub const IRGenerator = struct {
         if (self.module) |module| {
             try module.addTypeDef(type_def);
         }
+    }
+
+    /// Generate IR for enum declaration
+    fn generateEnumDecl(self: *Self, node: *const Node) !void {
+        if (node.tag != .enum_decl) return;
+        const enum_data = node.data.container_decl;
+        const short_name = self.getString(enum_data.name);
+        const enum_name = try self.getFullClassName(short_name);
+
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
+        var enum_cases = std.ArrayListUnmanaged(TypeDef.EnumCase){};
+
+        // Resolve backing type from extends field
+        var backing_type: ?[]const u8 = null;
+        if (enum_data.extends) |ext_idx| {
+            const ext_node = self.getNode(ext_idx) orelse null;
+            if (ext_node) |en| {
+                backing_type = switch (en.tag) {
+                    .named_type => self.getString(en.data.named_type.name),
+                    else => null,
+                };
+            }
+        }
+
+        // Collect interfaces
+        var interfaces = try std.ArrayList([]const u8).initCapacity(
+            self.allocator,
+            enum_data.implements.len,
+        );
+        defer interfaces.deinit(self.allocator);
+        for (enum_data.implements) |impl_idx| {
+            const impl_node = self.getNode(impl_idx) orelse continue;
+            const iface_name = switch (impl_node.tag) {
+                .named_type => self.getString(impl_node.data.named_type.name),
+                .variable => self.getString(impl_node.data.variable.name),
+                .literal_string => self.getString(impl_node.data.literal_string.value),
+                else => continue,
+            };
+            const full_iface = try self.resolveClassName(iface_name);
+            try interfaces.append(self.allocator, full_iface);
+        }
+        const interfaces_slice = try interfaces.toOwnedSlice(self.allocator);
+
+        // Create type definition early so methods can reference it
+        const type_def = try self.allocator.create(TypeDef);
+        type_def.* = .{
+            .name = enum_name,
+            .kind = .@"enum",
+            .parent = null,
+            .interfaces = interfaces_slice,
+            .traits = &.{},
+            .trait_adaptations = &.{},
+            .properties = &.{},
+            .methods = &.{},
+            .constants = &.{},
+            .backing_type = backing_type,
+            .location = self.current_location,
+        };
+
+        if (self.module) |module| {
+            try module.addTypeDef(type_def);
+        }
+
+        // Register enum in symbol table as a class
+        try self.symbol_table.defineClass(
+            enum_name,
+            null,
+            interfaces_slice,
+            self.current_location,
+        );
+
+        _ = try self.symbol_table.enterScope(.class, enum_name);
+
+        // Process enum members
+        for (enum_data.members) |member_idx| {
+            const member = self.getNode(member_idx) orelse continue;
+            switch (member.tag) {
+                .enum_case => {
+                    const case_data = member.data.enum_case;
+                    const case_name = self.getString(case_data.name);
+                    // Extract case value if present
+                    var case_value: ?TypeDef.ConstantValue = null;
+                    if (case_data.value) |val_idx| {
+                        const vn = self.getNode(val_idx);
+                        if (vn) |value_node| {
+                            case_value = switch (value_node.tag) {
+                                .literal_int => .{ .int = value_node.data.literal_int.value },
+                                .literal_float => .{ .float = value_node.data.literal_float.value },
+                                .literal_string => .{ .string = self.getString(value_node.data.literal_string.value) },
+                                .literal_bool => blk: {
+                                    const is_true = value_node.main_token.tag == .k_true;
+                                    break :blk .{ .bool = is_true };
+                                },
+                                .literal_null => .{ .null = {} },
+                                else => null,
+                            };
+                        }
+                    }
+                    try enum_cases.append(self.allocator, .{
+                        .name = case_name,
+                        .value = case_value,
+                    });
+                },
+                .method_decl => {
+                    try methods.append(self.allocator, self.getMethodMeta(member));
+                    try self.generateMethodDecl(member, enum_name);
+                },
+                .const_decl => {
+                    const const_data = member.data.const_decl;
+                    const const_name = self.getString(const_data.name);
+                    const value_node = self.getNode(const_data.value) orelse continue;
+                    const const_value: ?TypeDef.ConstantValue = switch (value_node.tag) {
+                        .literal_int => .{ .int = value_node.data.literal_int.value },
+                        .literal_float => .{ .float = value_node.data.literal_float.value },
+                        .literal_string => .{ .string = self.getString(value_node.data.literal_string.value) },
+                        .literal_bool => blk: {
+                            const is_true = value_node.main_token.tag == .k_true;
+                            break :blk .{ .bool = is_true };
+                        },
+                        .literal_null => .{ .null = {} },
+                        else => null,
+                    };
+                    if (const_value) |cv| {
+                        try constants.append(self.allocator, .{
+                            .name = const_name,
+                            .value = cv,
+                            .visibility = .public,
+                        });
+                    }
+                    try self.generateClassConstDecl(member, enum_name);
+                },
+                else => {},
+            }
+        }
+
+        self.symbol_table.leaveScope();
+
+        // Finalize type_def with collected data
+        type_def.enum_cases = try self.allocator.dupe(
+            TypeDef.EnumCase,
+            enum_cases.items,
+        );
+        type_def.methods = try self.allocator.dupe(
+            TypeDef.Method,
+            methods.items,
+        );
+        type_def.constants = try self.allocator.dupe(
+            TypeDef.Constant,
+            constants.items,
+        );
     }
 
     /// Generate IR for trait declaration
@@ -1581,6 +1825,38 @@ pub const IRGenerator = struct {
 
             // Process parameters
             try self.generateParameters(method_data.params);
+
+            // Constructor promotion: emit $this->prop = $param for promoted params
+            if (std.mem.eql(u8, method_name, "__construct") and !method_data.modifiers.is_static) {
+                for (method_data.params) |param_idx| {
+                    const pn = self.getNode(param_idx) orelse continue;
+                    if (pn.tag != .parameter) continue;
+                    const pd = pn.data.parameter;
+                    if (!pd.is_promoted) continue;
+                    const pname_raw = self.getString(pd.name);
+                    // Strip '$' prefix: param is "$x" but property is "x"
+                    const prop_name = if (pname_raw.len > 0 and pname_raw[0] == '$')
+                        pname_raw[1..]
+                    else
+                        pname_raw;
+                    // Load parameter value (param register uses "$x" key)
+                    const param_val = blk: {
+                        if (self.getVarRegister(pname_raw)) |reg| {
+                            break :blk try self.emitWithResult(.{ .load = .{ .ptr = reg, .type_ = .php_value } }, .php_value);
+                        }
+                        break :blk try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    };
+                    // Load $this
+                    const this_val = blk: {
+                        if (self.getVarRegister("this")) |reg| {
+                            break :blk try self.emitWithResult(.{ .load = .{ .ptr = reg, .type_ = .php_value } }, .php_value);
+                        }
+                        break :blk try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    };
+                    // Set property on $this (without '$' prefix)
+                    _ = try self.emit(.{ .property_set = .{ .object = this_val, .property_name = prop_name, .value = param_val } }, null);
+                }
+            }
 
             // Generate body
             try self.generateStatement(body_idx);
@@ -4084,6 +4360,25 @@ pub const IRGenerator = struct {
             func_name = self.getString(name_node.data.literal_string.value);
         } else {
             indirect_callee = try self.generateExpression(call_data.name);
+        }
+
+        // PHP 8.1 first-class callable: Closure::fromCallable(func_name)
+        // The parser rewrites strlen(...) to Closure::fromCallable(strlen)
+        if (std.mem.eql(u8, func_name, "Closure::fromCallable") and call_data.args.len == 1) {
+            const arg_node = self.getNode(call_data.args[0]) orelse {
+                return self.emitWithResult(.{ .const_null = {} }, .php_value);
+            };
+            // Extract the function name from the argument node
+            const callable_name = switch (arg_node.tag) {
+                .variable => self.getString(arg_node.data.variable.name),
+                .literal_string => self.getString(arg_node.data.literal_string.value),
+                else => "",
+            };
+            if (callable_name.len > 0) {
+                const sid = try self.module.?.internString(callable_name);
+                return self.emitWithResult(.{ .const_string = sid }, .php_string);
+            }
+            return self.emitWithResult(.{ .const_null = {} }, .php_value);
         }
 
         var has_unpacking: bool = false;

@@ -298,7 +298,14 @@ pub const Parser = struct {
             .k_continue => self.parseContinue(),
             .k_require, .k_require_once, .k_include, .k_include_once => self.parseInclude(),
             .k_abstract, .k_final => self.parseModifiedClassOrMember(attributes),
-            .k_public, .k_protected, .k_private, .k_readonly => self.parseClassMember(attributes, false),
+            .k_readonly => {
+                // readonly class X or readonly property
+                if (self.peek.tag == .k_class) {
+                    return self.parseModifiedClassOrMember(attributes);
+                }
+                return self.parseClassMember(attributes, false);
+            },
+            .k_public, .k_protected, .k_private => self.parseClassMember(attributes, false),
             .k_switch => self.parseSwitch(),
             .k_yield => self.parseYield(),
             .k_list => self.parseListAssignment(),
@@ -1025,11 +1032,24 @@ pub const Parser = struct {
         else
             try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+
+        // PHP enum backed type: enum Color: string { ... }
+        var backed_type: ?ast.Node.Index = null;
+        if (tag == .enum_decl and self.curr.tag == .colon) {
+            self.nextToken();
+            backed_type = try self.parseType();
+        }
+
         var extends: ?ast.Node.Index = null;
         if (self.curr.tag == .k_extends) {
             self.nextToken();
             extends = try self.parseExpression(0);
         }
+        // For enums, backed_type is stored in extends field
+        if (tag == .enum_decl and backed_type != null) {
+            extends = backed_type;
+        }
+
         var implements = std.ArrayListUnmanaged(ast.Node.Index){};
         if (self.curr.tag == .k_implements) {
             self.nextToken();
@@ -1044,21 +1064,41 @@ pub const Parser = struct {
         var members = std.ArrayListUnmanaged(ast.Node.Index){};
 
         const is_interface = (tag == .interface_decl);
+        const is_enum = (tag == .enum_decl);
 
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             var member_attributes: []const ast.Node.Index = &.{};
             if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
 
-            if (self.curr.tag == .k_use) {
+            if (is_enum and self.curr.tag == .k_case) {
+                try members.append(self.allocator, try self.parseEnumCase());
+            } else if (self.curr.tag == .k_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else {
-                // parseClassMember 会处理修饰符、const、函数和属性
-                try members.append(self.allocator, try self.parseClassMember(member_attributes, is_interface));
+                try members.append(self.allocator, try self.parseClassMember(&.{}, is_interface));
             }
         }
         _ = try self.eat(.r_brace);
 
         return self.createNode(.{ .tag = tag, .main_token = token, .data = .{ .container_decl = .{ .attributes = attributes, .name = name_id, .modifiers = .{}, .extends = extends, .implements = try self.context.arena.allocator().dupe(ast.Node.Index, implements.items), .members = try self.context.arena.allocator().dupe(ast.Node.Index, members.items) } } });
+    }
+
+    /// Parse an enum case declaration: case Name; or case Name = value;
+    fn parseEnumCase(self: *Parser) anyerror!ast.Node.Index {
+        const case_token = try self.eat(.k_case);
+        const name_tok = try self.eat(.t_string);
+        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        var value: ?ast.Node.Index = null;
+        if (self.curr.tag == .equal) {
+            self.nextToken();
+            value = try self.parseExpression(0);
+        }
+        _ = try self.eat(.semicolon);
+        return self.createNode(.{
+            .tag = .enum_case,
+            .main_token = case_token,
+            .data = .{ .enum_case = .{ .name = name_id, .value = value } },
+        });
     }
 
     fn parseFunction(self: *Parser, attributes: []const ast.Node.Index) anyerror!ast.Node.Index {
@@ -1862,6 +1902,28 @@ pub const Parser = struct {
                     }
                 }
             } else if (tag == .l_paren) {
+                // PHP 8.1 first-class callable: func(...)
+                if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
+                    self.nextToken(); // consume ...
+                    _ = try self.eat(.r_paren);
+                    // Create a Closure::fromCallable wrapper - store function name as string
+                    const closure_name_node = left;
+                    const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                    callable_args[0] = closure_name_node;
+                    left = try self.createNode(.{
+                        .tag = .function_call,
+                        .main_token = op,
+                        .data = .{ .function_call = .{
+                            .name = try self.createNode(.{
+                                .tag = .variable,
+                                .main_token = op,
+                                .data = .{ .variable = .{ .name = try self.context.intern("Closure::fromCallable") } },
+                            }),
+                            .args = callable_args,
+                        } },
+                    });
+                    continue;
+                }
                 var args = std.ArrayListUnmanaged(ast.Node.Index){};
                 while (self.curr.tag != .r_paren) {
                     // Check for named parameter: name: value
@@ -1988,6 +2050,27 @@ pub const Parser = struct {
                 // Function call
                 const op = self.curr;
                 self.nextToken();
+                // PHP 8.1 first-class callable: func(...)
+                if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
+                    self.nextToken(); // consume ...
+                    _ = try self.eat(.r_paren);
+                    const closure_name_node = left;
+                    const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                    callable_args[0] = closure_name_node;
+                    left = try self.createNode(.{
+                        .tag = .function_call,
+                        .main_token = op,
+                        .data = .{ .function_call = .{
+                            .name = try self.createNode(.{
+                                .tag = .variable,
+                                .main_token = op,
+                                .data = .{ .variable = .{ .name = try self.context.intern("Closure::fromCallable") } },
+                            }),
+                            .args = callable_args,
+                        } },
+                    });
+                    continue;
+                }
                 var args = std.ArrayList(ast.Node.Index){};
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                     // Check for named argument: name: value

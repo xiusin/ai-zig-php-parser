@@ -55,6 +55,7 @@ pub const Node = struct {
         interface_decl,
         trait_decl,
         enum_decl,
+        enum_case,
         struct_decl,
         property_decl,
         property_hook,
@@ -237,6 +238,7 @@ pub const Node = struct {
         union_type: struct { types: []const Index },
         intersection_type: struct { types: []const Index },
         cast_expr: struct { cast_type: Token.Tag, expr: Index },
+        enum_case: struct { name: StringId, value: ?Index },
         expr_list: struct { exprs: []const Index },
         none: void,
     };

@@ -5790,8 +5790,8 @@ pub fn php_array_merge(arrays: []const Value, allocator: Allocator) !Value {
 }
 
 /// Merge array into target (for spread operator)
+/// PHP 8.1+: string keys are preserved, integer keys are renumbered
 pub fn php_array_merge_into(target: Value, source: Value, allocator: Allocator) !Value {
-    _ = allocator;
     if (!target.isArray()) return target;
     if (!source.isArray()) return target;
 
@@ -5800,8 +5800,7 @@ pub fn php_array_merge_into(target: Value, source: Value, allocator: Allocator) 
 
     // 安全检查：确保source_arr有效
     if (source_arr.elements.mixed) |*m| {
-        // 检查mixed map是否有效
-        if (m.count() > 1000000) { // 不合理的大小
+        if (m.count() > 1000000) {
             return target;
         }
     }
@@ -5810,10 +5809,19 @@ pub fn php_array_merge_into(target: Value, source: Value, allocator: Allocator) 
     var iter = source_arr.elements.iterator();
     while (iter.next()) |entry| {
         const value = entry.value_ptr.*.retain();
-        // 使用整数键追加到目标数组
-        const new_key = ArrayKey{ .integer = target_arr.next_index };
-        try target_arr.elements.put(new_key, value);
-        target_arr.next_index += 1;
+        switch (entry.key_ptr.*) {
+            .string => |s| {
+                // String keys: preserve original key
+                const key_copy = try PHPString.init(allocator, s.data);
+                try target_arr.elements.put(ArrayKey{ .string = key_copy }, value);
+            },
+            .integer => {
+                // Integer keys: renumber sequentially
+                const new_key = ArrayKey{ .integer = target_arr.next_index };
+                try target_arr.elements.put(new_key, value);
+                target_arr.next_index += 1;
+            },
+        }
     }
 
     return target;
@@ -6576,6 +6584,120 @@ pub const ClassMeta = struct {
         });
 
         meta.magic_toString = meta.methods.get("__toString").?.func;
+
+        try registerClass(meta);
+
+        // Register WeakReference class
+        try registerWeakReferenceClass(allocator);
+        // Register WeakMap class
+        try registerWeakMapClass(allocator);
+    }
+
+    /// Register built-in WeakReference class
+    fn registerWeakReferenceClass(allocator: Allocator) !void {
+        const meta = try ClassMeta.init(allocator, "WeakReference");
+
+        // WeakReference::create($object) - static factory
+        try meta.addMethod(.{
+            .name = "create",
+            .func = struct {
+                fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len == 0) return Value.initNull();
+                    const target = args[0];
+                    // Create a WeakReference object storing the target
+                    const obj = if (findClass("WeakReference")) |m|
+                        try PHPObject.initWithMeta(alloc, m)
+                    else
+                        try PHPObject.init(alloc, "WeakReference");
+                    // Store target directly as property (simplified weak ref)
+                    _ = target.retain();
+                    try obj.setProperty("__target", target);
+                    if (global_object_registry) |*registry| {
+                        try registry.append(alloc, obj);
+                    }
+                    alloc_counters.php_object_live_objects += 1;
+                    return Value_initObject(obj);
+                }
+            }.call,
+            .is_static = true,
+        });
+
+        // $weak->get() - returns object or null
+        try meta.addMethod(.{
+            .name = "get",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__target")) |val| {
+                        return val;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        try registerClass(meta);
+    }
+
+    /// Register built-in WeakMap class
+    fn registerWeakMapClass(allocator: Allocator) !void {
+        const meta = try ClassMeta.init(allocator, "WeakMap");
+
+        // __construct()
+        try meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    // Use an internal array to store entries
+                    const arr = try PHPArray.init(alloc);
+                    try this.setProperty("__entries", Value.initArray(arr));
+                    try this.setProperty("__count", Value.initInt(0));
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        try meta.addMethod(.{
+            .name = "offsetSet",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                    if (args.len < 2) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (Value_isObject(args[0])) {
+                        const key_obj = Value_asObject(args[0]);
+                        const addr = @intFromPtr(key_obj);
+                        var buf: [20]u8 = undefined;
+                        const key_str = std.fmt.bufPrint(&buf, "{d}", .{addr}) catch return Value.initNull();
+                        _ = key_str;
+                        // Increment count
+                        if (this.getPropertyDirect("__count")) |cnt| {
+                            try this.setProperty("__count", Value.initInt(cnt.toInt() + 1));
+                        }
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        try meta.addMethod(.{
+            .name = "count",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initInt(0);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__count")) |cnt| {
+                        return cnt;
+                    }
+                    return Value.initInt(0);
+                }
+            }.call,
+            .is_static = false,
+        });
 
         try registerClass(meta);
     }

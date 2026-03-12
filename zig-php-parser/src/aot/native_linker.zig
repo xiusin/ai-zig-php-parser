@@ -1390,10 +1390,9 @@ pub const NativeLinker = struct {
 
         for (ir_module.types.items, 0..) |td_ptr, idx| {
             const td = td_ptr.*;
-            if (td.kind != .class) continue;
+            if (td.kind != .class and td.kind != .@"enum") continue;
             if (class_count >= 64) break;
-            class_names[class_count] = td.name;  // 完整类名
-            // 提取短名（最后一部分）
+            class_names[class_count] = td.name;
             class_short_names[class_count] = getLastPartOfClassName(td.name);
             type_def_idx[class_count] = idx;
             class_count += 1;
@@ -1559,6 +1558,38 @@ pub const NativeLinker = struct {
                         method.visibility,
                         method.is_static,
                     );
+                }
+            }
+
+            // Register enum cases as static properties
+            if (type_def_idx[ci]) |tdi2| {
+                const td2 = ir_module.types.items[tdi2].*;
+                if (td2.kind == .@"enum") {
+                    for (td2.enum_cases) |ec| {
+                        const escaped_case = try self.escapeString(ec.name);
+                        defer self.allocator.free(escaped_case);
+                        const escaped_enum = try escapeBackslashes(self.allocator, td2.name);
+                        defer self.allocator.free(escaped_enum);
+                        try writer.writeAll("    {\n");
+                        try writer.print("        const enum_val = try runtime.php_object_new(\"{s}\", allocator);\n", .{escaped_enum});
+                        try writer.print("        const enum_obj = runtime.Value_asObject(enum_val);\n", .{});
+                        try writer.print("        try enum_obj.setProperty(\"name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_case});
+                        if (ec.value) |cv| {
+                            switch (cv) {
+                                .int => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initInt({d}));\n", .{v}),
+                                .float => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initFloat({d}));\n", .{v}),
+                                .string => |s| {
+                                    const escaped_val = try self.escapeString(s);
+                                    defer self.allocator.free(escaped_val);
+                                    try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_val});
+                                },
+                                .bool => |b| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initBool({s}));\n", .{if (b) "true" else "false"}),
+                                .null => try writer.writeAll("        try enum_obj.setProperty(\"value\", runtime.Value.initNull());\n"),
+                            }
+                        }
+                        try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", enum_val);\n", .{ short_cname, escaped_case });
+                        try writer.writeAll("    }\n");
+                    }
                 }
             }
 
@@ -7425,9 +7456,35 @@ pub const NativeLinker = struct {
 
                 const escaped_prop = try self.escapeString(op.property_name);
                 defer self.allocator.free(escaped_prop);
-                try writer.print("    _ = try runtime.php_object_set(reg_{d}, \"{s}\", ", .{ op.object.id, escaped_prop });
-                try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
-                try writer.writeAll(");\n");
+                // Check for property set hook: __prop_set_<name>
+                const hook_name = try std.fmt.allocPrint(self.allocator, "__prop_set_{s}", .{escaped_prop});
+                defer self.allocator.free(hook_name);
+                const has_hook = blk: {
+                    // Skip hook interception if we're inside the hook method itself (prevent infinite recursion)
+                    if (self.current_function_for_resolve) |cur_func| {
+                        if (std.mem.endsWith(u8, cur_func.name, hook_name)) {
+                            break :blk false;
+                        }
+                    }
+                    // Check if any registered function matches the hook pattern
+                    var fit = self.func_return_types.iterator();
+                    while (fit.next()) |entry| {
+                        if (std.mem.endsWith(u8, entry.key_ptr.*, hook_name)) {
+                            break :blk true;
+                        }
+                    }
+                    break :blk false;
+                };
+                if (has_hook) {
+                    // Call hook method instead of direct set
+                    try writer.print("    _ = try runtime.php_object_call(reg_{d}, \"{s}\", &[_]runtime.Value{{", .{ op.object.id, hook_name });
+                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
+                    try writer.writeAll("});\n");
+                } else {
+                    try writer.print("    _ = try runtime.php_object_set(reg_{d}, \"{s}\", ", .{ op.object.id, escaped_prop });
+                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
+                    try writer.writeAll(");\n");
+                }
             },
             .method_call => |op| blk: {
                 const obj_tag = @as(std.meta.Tag(IR.Type), op.object.type_);

@@ -170,6 +170,12 @@ pub const TypeDef = struct {
     methods: []const Method,
     /// Constants
     constants: []const Constant,
+    /// Enum cases (only for kind == .@"enum")
+    enum_cases: []const EnumCase = &.{},
+    /// Enum backing type name (e.g. "string", "int"; null for unit enums)
+    backing_type: ?[]const u8 = null,
+    /// Whether the class/enum is readonly
+    is_readonly: bool = false,
     /// Source location
     location: SourceLocation,
 
@@ -218,6 +224,12 @@ pub const TypeDef = struct {
     pub const TraitMethodRef = struct {
         trait_name: ?[]const u8 = null,
         method_name: []const u8,
+    };
+
+    /// An enum case declaration
+    pub const EnumCase = struct {
+        name: []const u8,
+        value: ?ConstantValue = null,
     };
 
     pub const TraitAdaptation = union(enum) {
