@@ -652,6 +652,27 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         return;
     };
 
+    // 检查解析错误：生成输出 PHP 格式 Parse error 的二进制
+    if (context.errors.items.len > 0) {
+        const abs_path = std.fs.cwd().realpathAlloc(
+            allocator,
+            options.input_file,
+        ) catch options.input_file;
+        const first_err = context.errors.items[0];
+        const line_num = first_err.line;
+        const err_msg = first_err.msg;
+
+        // 生成 parse error 二进制
+        try generateParseErrorBinary(
+            allocator,
+            options,
+            abs_path,
+            err_msg,
+            line_num,
+        );
+        return;
+    }
+
     if (options.verbose) {
         std.debug.print("  Parsing completed: root node index = {d}\n", .{root_index});
         std.debug.print("  Total nodes: {d}\n", .{context.nodes.items.len});
@@ -719,6 +740,106 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 
 
 
+
+/// 生成输出 PHP 格式 Parse error 的最小二进制
+fn generateParseErrorBinary(
+    allocator: std.mem.Allocator,
+    options: aot.CompileOptions,
+    abs_path: []const u8,
+    err_msg: []const u8,
+    line_num: u32,
+) !void {
+    const build_dir = ".zigphp_aot_build";
+    std.fs.cwd().makeDir(build_dir) catch {};
+
+    // stdout 消息（PHP display_errors 格式，单空格）
+    const stdout_msg = try std.fmt.allocPrint(
+        allocator,
+        "\nParse error: {s} in {s} on line {d}\n",
+        .{ err_msg, abs_path, line_num },
+    );
+    defer allocator.free(stdout_msg);
+
+    // stderr 消息
+    const stderr_msg = try std.fmt.allocPrint(
+        allocator,
+        "PHP Parse error:  {s} in {s} on line {d}\n",
+        .{ err_msg, abs_path, line_num },
+    );
+    defer allocator.free(stderr_msg);
+
+    // 转义字符串中的特殊字符用于 Zig 字符串字面量
+    var zig_src = std.ArrayListUnmanaged(u8){};
+    defer zig_src.deinit(allocator);
+    const w = zig_src.writer(allocator);
+    try w.writeAll("const std = @import(\"std\");\n");
+    try w.writeAll("pub fn main() void {\n");
+    try w.writeAll("    const stdout = std.fs.File{ .handle = 1 };\n");
+    try w.writeAll("    const stderr = std.fs.File{ .handle = 2 };\n");
+    // stdout 输出
+    try w.writeAll("    stdout.writeAll(\"");
+    for (stdout_msg) |c| {
+        switch (c) {
+            '\n' => try w.writeAll("\\n"),
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeAll("\") catch {};\n");
+    // stderr 输出
+    try w.writeAll("    stderr.writeAll(\"");
+    for (stderr_msg) |c| {
+        switch (c) {
+            '\n' => try w.writeAll("\\n"),
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeAll("\") catch {};\n");
+    try w.writeAll("    std.process.exit(255);\n");
+    try w.writeAll("}\n");
+
+    // 写入 main.zig
+    const zig_path = try std.fs.path.join(
+        allocator,
+        &[_][]const u8{ build_dir, "main.zig" },
+    );
+    defer allocator.free(zig_path);
+    {
+        const f = try std.fs.cwd().createFile(zig_path, .{});
+        defer f.close();
+        try f.writeAll(zig_src.items);
+    }
+
+    // 获取输出路径
+    const output_path = options.output_file orelse blk: {
+        const input = options.input_file;
+        if (std.mem.endsWith(u8, input, ".php")) {
+            break :blk input[0 .. input.len - 4];
+        }
+        break :blk input;
+    };
+
+    // 编译
+    const emit_arg = try std.fmt.allocPrint(
+        allocator,
+        "-femit-bin={s}",
+        .{output_path},
+    );
+    defer allocator.free(emit_arg);
+    const argv = [_][]const u8{
+        "zig", "build-exe", zig_path, emit_arg,
+    };
+
+    var child = std.process.Child.init(&argv, allocator);
+    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    _ = try child.spawnAndWait();
+
+    std.debug.print("Success: Compiled to {s}\n", .{output_path});
+}
 
 /// Build string table from parser's string pool
 fn buildStringTable(allocator: std.mem.Allocator, string_pool: *std.StringArrayHashMapUnmanaged(void)) ![][]const u8 {

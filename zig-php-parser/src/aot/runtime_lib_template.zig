@@ -227,6 +227,15 @@ const GC_ROOT_THRESHOLD: usize = 256;
 threadlocal var current_exception: Value = undefined;
 threadlocal var has_exception: bool = false;
 
+/// 源码位置跟踪（用于 Deprecated 警告输出）
+threadlocal var src_file: []const u8 = "";
+threadlocal var src_line: u32 = 0;
+
+pub fn setSourceLocation(file: []const u8, line: u32) void {
+    src_file = file;
+    src_line = line;
+}
+
 fn allocPHPString(allocator: Allocator) !*PHPString {
     if (php_string_pool) |*p| return p.create();
     return try allocator.create(PHPString);
@@ -1946,23 +1955,9 @@ pub const Value = struct {
             return PHPString.init(allocator, str);
         }
         if (self.isFloat()) {
-            const f = self.asFloat();
-            // PHP兼容的浮点数格式化（默认精度14位，但实际输出会截断）
             var buf: [64]u8 = undefined;
-            const str = std.fmt.bufPrint(&buf, "{d:.13}", .{f}) catch {
-                const fallback = try std.fmt.allocPrint(allocator, "{d}", .{f});
-                defer allocator.free(fallback);
-                return PHPString.init(allocator, fallback);
-            };
-
-            // 去除尾部的0和小数点
-            var end = str.len;
-            if (std.mem.indexOfScalar(u8, str, '.')) |_| {
-                while (end > 0 and str[end - 1] == '0') : (end -= 1) {}
-                if (end > 0 and str[end - 1] == '.') end -= 1;
-            }
-
-            return PHPString.init(allocator, str[0..end]);
+            const str = phpFormatFloat(&buf, self.asFloat());
+            return PHPString.init(allocator, str);
         }
         if (self.isString()) {
             // 对于已经是字符串的值，创建一个新副本
@@ -2737,15 +2732,53 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
 
 /// 取模运算（PHP语义）
 pub fn php_mod(lhs: Value, rhs: Value) !Value {
+    // PHP 8.1+: float→int 隐式转换精度丢失时输出 Deprecated
+    if (lhs.isFloat()) {
+        const f = lhs.asFloat();
+        const i: f64 = @floatFromInt(lhs.toInt());
+        if (f != i) emitDeprecatedFloatToInt(f);
+    }
+    if (rhs.isFloat()) {
+        const f = rhs.asFloat();
+        const i: f64 = @floatFromInt(rhs.toInt());
+        if (f != i) emitDeprecatedFloatToInt(f);
+    }
     const a = lhs.toInt();
     const b = rhs.toInt();
     if (b == 0) {
-        // PHP在除零时抛出DivisionByZeroError异常
         _ = try throwException("Modulo by zero", runtime_allocator);
         return Value.initNull();
     }
-    // PHP 使用 remainder（保留符号），不是 modulo
     return Value.initInt(@rem(a, b));
+}
+
+/// 输出 PHP 8.1+ Deprecated 警告到 stdout（匹配 display_errors=On）
+fn emitDeprecatedFloatToInt(f: f64) void {
+    const stdout = std.fs.File{ .handle = 1 };
+    const stderr = std.fs.File{ .handle = 2 };
+    // 警告信息中使用完整精度（PHP serialize_precision），不是 echo 的 precision=14
+    var fbuf: [64]u8 = undefined;
+    const fstr = std.fmt.bufPrint(&fbuf, "{d}", .{f}) catch "?";
+    // stdout: PHP display_errors 输出
+    var msg_buf: [512]u8 = undefined;
+    const stdout_msg = std.fmt.bufPrint(
+        &msg_buf,
+        "\nDeprecated: Implicit conversion from float" ++
+            " {s} to int loses precision in {s} on line" ++
+            " {d}\n",
+        .{ fstr, src_file, src_line },
+    ) catch return;
+    stdout.writeAll(stdout_msg) catch {};
+    // stderr: PHP CLI 标准错误输出
+    var err_buf: [512]u8 = undefined;
+    const stderr_msg = std.fmt.bufPrint(
+        &err_buf,
+        "PHP Deprecated:  Implicit conversion from" ++
+            " float {s} to int loses precision in {s}" ++
+            " on line {d}\n",
+        .{ fstr, src_file, src_line },
+    ) catch return;
+    stderr.writeAll(stderr_msg) catch {};
 }
 
 /// 幂运算（PHP语义）
@@ -3042,6 +3075,100 @@ pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
 // 输出函数
 // ============================================================================
 
+/// PHP 兼容浮点格式化（14 位有效数字，去尾零）
+/// @pre buf.len >= 64
+/// @post 返回 buf 中的有效切片
+pub fn phpFormatFloat(buf: []u8, f: f64) []const u8 {
+    const PHP_PRECISION: usize = 14;
+
+    if (std.math.isNan(f)) return "NAN";
+    if (std.math.isInf(f)) {
+        return if (f > 0) "INF" else "-INF";
+    }
+    if (f == 0.0) {
+        if (std.math.signbit(f)) return "-0";
+        return "0";
+    }
+
+    var work: [64]u8 = undefined;
+    const full = std.fmt.bufPrint(&work, "{d}", .{f}) catch
+        return "0";
+
+    var i: usize = 0;
+    const sign_len: usize = if (full[0] == '-') 1 else 0;
+    i = sign_len;
+
+    var sig_count: usize = 0;
+    var started = false;
+    var round_pos: usize = full.len;
+
+    while (i < full.len) : (i += 1) {
+        if (full[i] == '.') continue;
+        if (!started) {
+            if (full[i] == '0') continue;
+            started = true;
+        }
+        sig_count += 1;
+        if (sig_count == PHP_PRECISION) {
+            round_pos = i + 1;
+            break;
+        }
+    }
+
+    if (sig_count < PHP_PRECISION) {
+        @memcpy(buf[0..full.len], full[0..full.len]);
+        return phpStripTrailingZeros(buf[0..full.len]);
+    }
+
+    var next = round_pos;
+    if (next < full.len and full[next] == '.') next += 1;
+    const round_up = (next < full.len and full[next] >= '5');
+
+    var end = round_pos;
+    @memcpy(buf[0..end], full[0..end]);
+
+    if (round_up) {
+        var j: usize = end;
+        while (j > sign_len) {
+            j -= 1;
+            if (buf[j] == '.') continue;
+            if (buf[j] < '9') {
+                buf[j] += 1;
+                break;
+            }
+            buf[j] = '0';
+            if (j == sign_len) {
+                std.mem.copyBackwards(
+                    u8,
+                    buf[sign_len + 1 .. end + 1],
+                    buf[sign_len..end],
+                );
+                buf[sign_len] = '1';
+                end += 1;
+                break;
+            }
+        }
+    }
+
+    return phpStripTrailingZeros(buf[0..end]);
+}
+
+fn phpStripTrailingZeros(s: []u8) []const u8 {
+    var has_dot = false;
+    for (s) |c| {
+        if (c == '.') {
+            has_dot = true;
+            break;
+        }
+    }
+    if (!has_dot) return s;
+
+    var end = s.len;
+    while (end > 0 and s[end - 1] == '0') : (end -= 1) {}
+    if (end > 0 and s[end - 1] == '.') end -= 1;
+    return s[0..end];
+}
+
 /// echo语句
 pub fn php_echo(value: Value) !void {
     const stdout_file = std.fs.File{ .handle = 1 };
@@ -3059,8 +3186,8 @@ pub fn php_echo(value: Value) !void {
         const str = try std.fmt.bufPrint(&buf, "{d}", .{value.asInt()});
         try stdout_file.writeAll(str);
     } else if (value.isFloat()) {
-        var buf: [32]u8 = undefined;
-        const str = try std.fmt.bufPrint(&buf, "{d}", .{value.asFloat()});
+        var buf: [64]u8 = undefined;
+        const str = phpFormatFloat(&buf, value.asFloat());
         try stdout_file.writeAll(str);
     } else if (value.isString()) {
         const str = value.asString();

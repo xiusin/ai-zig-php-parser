@@ -3621,8 +3621,28 @@ pub const IRGenerator = struct {
                 switch (target_node.tag) {
                     .variable => {
                         const var_name = self.getString(target_node.data.variable.name);
-                        const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
-                        _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+
+                        if (self.isRefVar(var_name)) {
+                            if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                                const assign_args = try self.allocator.alloc(Register, 2);
+                                assign_args[0] = ptr_reg;
+                                assign_args[1] = result_reg;
+                                _ = try self.emit(.{ .call = .{
+                                    .func_name = "php_ref_assign_ptr",
+                                    .args = assign_args,
+                                    .return_type = .void,
+                                } }, null);
+                            }
+                        } else {
+                            const is_global = self.global_vars.contains(var_name);
+                            const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                            if (is_global or is_main) {
+                                _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = result_reg } }, null);
+                            } else {
+                                const var_reg = try self.getOrCreateVarRegister(var_name, result_reg.type_);
+                                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = result_reg } }, null);
+                            }
+                        }
                         try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
                     },
                     .array_access => {

@@ -5995,6 +5995,10 @@ pub const NativeLinker = struct {
                 }
             },
             .mod => |op| {
+                // 设置源码位置，供 Deprecated 警告使用
+                if (inst.location.line > 0) {
+                    try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
+                }
                 if (inst.result) |reg| {
                     const lhs_fallback = if (self.current_register_types) |types|
                         (types.get(op.lhs.id) orelse op.lhs.type_)
@@ -13051,7 +13055,10 @@ pub const NativeLinker = struct {
                 }
             },
             .mod => |op| {
-                // 所有寄存器都是 Value 类型，必须使用 php_mod
+                // 设置源码位置，供 Deprecated 警告使用
+                if (inst.location.line > 0) {
+                    try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
+                }
                 if (inst.result) |_| {
                     try writer.print("        {s} = try runtime.php_mod(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                 }

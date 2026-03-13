@@ -936,13 +936,14 @@ pub const AOTCompiler = struct {
 
         // Generate IR module using the correct root index
         const rel_path = self.diagnostics.relativizePath(self.options.input_file);
+        const abs_path = std.fs.cwd().realpathAlloc(self.allocator, self.options.input_file) catch self.options.input_file;
         self.ir_module = ir_gen.generateFromRoot(
             self.ast_nodes.?,
             self.string_table.?,
             self.source.?,
             self.root_index,
             rel_path,
-            rel_path,
+            abs_path,
         ) catch |err| {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },

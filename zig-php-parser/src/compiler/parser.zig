@@ -106,9 +106,15 @@ pub const Parser = struct {
     }
 
     fn reportError(self: *Parser, msg: []const u8) void {
+        // 从当前 token 位置计算行号
+        var line: u32 = 1;
+        const pos = self.curr.loc.start;
+        for (self.lexer.buffer[0..@min(pos, self.lexer.buffer.len)]) |c| {
+            if (c == '\n') line += 1;
+        }
         const err = @import("root.zig").Error{
             .msg = self.context.arena.allocator().dupe(u8, msg) catch msg,
-            .line = 0,
+            .line = line,
             .column = 0,
         };
         self.context.errors.append(self.allocator, err) catch {};
@@ -148,8 +154,43 @@ pub const Parser = struct {
             self.nextToken();
             return t;
         }
-        self.reportError("Unexpected Token");
+        // PHP 风格错误：unexpected <actual>, expecting <expected>
+        const actual_desc = self.describeToken(self.curr);
+        const expected_desc = tagToExpected(tag);
+        const arena = self.context.arena.allocator();
+        const msg = std.fmt.allocPrint(arena, "syntax error, unexpected {s}, expecting \"{s}\"", .{ actual_desc, expected_desc }) catch "Unexpected Token";
+        self.reportError(msg);
         return error.UnexpectedToken;
+    }
+
+    fn describeToken(self: *Parser, tok: Token) []const u8 {
+        return switch (tok.tag) {
+            .t_variable => blk: {
+                const text = self.lexer.buffer[tok.loc.start..tok.loc.end];
+                const arena = self.context.arena.allocator();
+                break :blk std.fmt.allocPrint(arena, "variable \"{s}\"", .{text}) catch "variable";
+            },
+            .t_string => "identifier",
+            .semicolon => "\";\"",
+            .l_paren => "\"(\"",
+            .r_paren => "\")\"",
+            .l_brace => "\"{\"",
+            .r_brace => "\"}\"",
+            .eof => "end of file",
+            else => "token",
+        };
+    }
+
+    fn tagToExpected(tag: Token.Tag) []const u8 {
+        return switch (tag) {
+            .l_paren => "(",
+            .r_paren => ")",
+            .l_brace => "{",
+            .r_brace => "}",
+            .semicolon => ";",
+            .t_string => "identifier",
+            else => "token",
+        };
     }
 
     fn synchronize(self: *Parser) void {
