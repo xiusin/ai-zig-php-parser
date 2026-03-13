@@ -2219,12 +2219,19 @@ pub const NativeLinker = struct {
 
         // 生成函数签名
         // 所有函数都是public的，以便相互调用
-        try code.appendSlice(self.allocator, "\n// MARKER: generateFunction called\npub fn @\"");
-        // 转义函数名中的反斜杠
         const escaped_name = try escapeBackslashes(self.allocator, func.name);
         defer self.allocator.free(escaped_name);
-        try code.appendSlice(self.allocator, escaped_name);
-        try code.appendSlice(self.allocator, "\"(");
+
+        if (func.is_generator) {
+            // Generator body function: private, same signature
+            try code.appendSlice(self.allocator, "\n// MARKER: generator body function\nfn @\"__gen_body_");
+            try code.appendSlice(self.allocator, escaped_name);
+            try code.appendSlice(self.allocator, "\"(");
+        } else {
+            try code.appendSlice(self.allocator, "\n// MARKER: generateFunction called\npub fn @\"");
+            try code.appendSlice(self.allocator, escaped_name);
+            try code.appendSlice(self.allocator, "\"(");
+        }
 
         // 统一函数签名：(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value
         try code.appendSlice(self.allocator, "ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {\n");
@@ -2258,6 +2265,11 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "    defer runtime.profiler.exitGlobal(\"");
         try code.appendSlice(self.allocator, escaped_prof_name);
         try code.appendSlice(self.allocator, "\");\n");
+
+        // Generator: extract context from thread-local
+        if (func.is_generator) {
+            try code.appendSlice(self.allocator, "    const __gen_ctx = runtime.php_generator_get_context();\n");
+        }
 
         // 变量声明
 
@@ -3198,6 +3210,16 @@ pub const NativeLinker = struct {
         }
 
         try code.appendSlice(self.allocator, "}\n");
+
+        // Generator: generate wrapper function with original name
+        if (func.is_generator) {
+            try code.appendSlice(self.allocator, "\n// MARKER: generator wrapper\npub fn @\"");
+            try code.appendSlice(self.allocator, escaped_name);
+            try code.appendSlice(self.allocator, "\"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {\n");
+            try code.appendSlice(self.allocator, "    return runtime.php_create_generator(&@\"__gen_body_");
+            try code.appendSlice(self.allocator, escaped_name);
+            try code.appendSlice(self.allocator, "\", ctx, args, allocator);\n}\n");
+        }
 
         // 清空临时指针
         self.current_register_types = null;
@@ -6152,6 +6174,54 @@ pub const NativeLinker = struct {
                 }
             },
             .nop => {},
+            .yield_val => |op| {
+                // yield $value or yield $key => $value
+                // Calls runtime.php_generator_yield(gen_ctx, key, value)
+                // Result register receives the "sent" value
+                const value_str = if (op.value) |v|
+                    try std.fmt.allocPrint(self.allocator, "reg_{d}", .{v.id})
+                else
+                    try self.allocator.dupe(u8, "runtime.Value.initNull()");
+                defer self.allocator.free(value_str);
+
+                const key_str = if (op.key) |k|
+                    try std.fmt.allocPrint(self.allocator, "reg_{d}", .{k.id})
+                else
+                    try self.allocator.dupe(u8, "runtime.Value.initNull()");
+                defer self.allocator.free(key_str);
+
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = try runtime.php_generator_yield(__gen_ctx, {s}, {s});\n", .{ reg.id, key_str, value_str });
+                } else {
+                    try writer.print("    _ = try runtime.php_generator_yield(__gen_ctx, {s}, {s});\n", .{ key_str, value_str });
+                }
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
+            },
+            .yield_from => |op| {
+                // yield from $iterable
+                if (inst.result) |reg| {
+                    try writer.print("    reg_{d} = try runtime.php_generator_yield_from(__gen_ctx, reg_{d});\n", .{ reg.id, op.operand.id });
+                } else {
+                    try writer.print("    _ = try runtime.php_generator_yield_from(__gen_ctx, reg_{d});\n", .{op.operand.id});
+                }
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
+            },
             .param => |op| {
                 if (inst.result) |reg| {
                     if (std.mem.eql(u8, op.name, "this")) {

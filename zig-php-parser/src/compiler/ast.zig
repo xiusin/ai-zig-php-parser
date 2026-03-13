@@ -87,6 +87,7 @@ pub const Node = struct {
         finally_clause,
         throw_stmt,
         yield_expr,
+        yield_from_expr,
         method_call,
         property_access,
         safe_property_access, // 安全导航操作符 ?-> 或 ?.
@@ -187,6 +188,7 @@ pub const Node = struct {
         match_expr: struct { expression: Index, arms: []const Index, default: ?Index },
         match_arm: struct { conditions: []const Index, body: Index },
         yield_expr: struct { key: ?Index, value: ?Index },
+        yield_from_expr: struct { expr: Index },
         method_call: struct { target: Index, method_name: StringId, args: []const Index },
         property_access: struct { target: Index, property_name: StringId },
         safe_property_access: struct { target: Index, property_name: StringId },

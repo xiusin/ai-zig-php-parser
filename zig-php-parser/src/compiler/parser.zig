@@ -2227,6 +2227,7 @@ pub const Parser = struct {
                 self.nextToken();
                 return self.createNode(.{ .tag = .magic_constant, .main_token = t, .data = .{ .magic_constant = .{ .kind = kind } } });
             },
+            .k_yield => return self.parseYieldExpr(),
             .ellipsis => {
                 const token = self.curr;
                 self.nextToken();
@@ -2650,28 +2651,43 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .switch_stmt, .main_token = token, .data = .{ .switch_stmt = .{ .expression = expr, .cases = cases_slice, .default = default_case } } });
     }
 
-    fn parseYield(self: *Parser) anyerror!ast.Node.Index {
+    fn parseYieldExpr(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_yield);
+
+        // yield from <expr>
+        if (self.curr.tag == .k_from) {
+            self.nextToken(); // consume 'from'
+            const expr = try self.parseExpression(0);
+            return self.createNode(.{
+                .tag = .yield_from_expr,
+                .main_token = token,
+                .data = .{ .yield_from_expr = .{
+                    .expr = expr,
+                } },
+            });
+        }
+
         var key: ?ast.Node.Index = null;
         var value: ?ast.Node.Index = null;
 
         if (self.curr.tag != .semicolon and self.curr.tag != .r_brace and self.curr.tag != .r_paren) {
-            // Check for yield key => value
             value = try self.parseExpression(0);
             if (self.curr.tag == .fat_arrow) {
                 self.nextToken();
-                // Actually, we parsed the key, need to reparse
                 key = value;
                 value = try self.parseExpression(0);
             }
         }
 
-        // Consume semicolon if present (yield as statement)
+        return self.createNode(.{ .tag = .yield_expr, .main_token = token, .data = .{ .yield_expr = .{ .key = key, .value = value } } });
+    }
+
+    fn parseYield(self: *Parser) anyerror!ast.Node.Index {
+        const idx = try self.parseYieldExpr();
         if (self.curr.tag == .semicolon) {
             self.nextToken();
         }
-
-        return self.createNode(.{ .tag = .yield_expr, .main_token = token, .data = .{ .yield_expr = .{ .key = key, .value = value } } });
+        return idx;
     }
 
     fn parseNewOrAnonymousClass(self: *Parser) anyerror!ast.Node.Index {

@@ -282,6 +282,8 @@ pub const Function = struct {
     global_vars: std.ArrayListUnmanaged([]const u8) = .{},
     /// Reference parameter indices (0-based)
     ref_params: std.ArrayListUnmanaged(u32) = .{},
+    /// Whether this function is a generator (contains yield)
+    is_generator: bool = false,
 
     const Self = @This();
 
@@ -915,6 +917,12 @@ pub const Instruction = struct {
         arg_count: void,
         /// Check whether argument at index is present and not missing
         has_arg: HasArgOp,
+
+        // ============ Generator Operations ============
+        /// Yield a value (key, value) from generator
+        yield_val: YieldOp,
+        /// Yield from another generator/iterable
+        yield_from: UnaryOp,
     };
 
     /// Parameter operation
@@ -932,6 +940,12 @@ pub const Instruction = struct {
 
     pub const HasArgOp = struct {
         index: u32,
+    };
+
+    /// Yield operation (generator)
+    pub const YieldOp = struct {
+        key: ?Register,
+        value: ?Register,
     };
 
     /// Binary operation operands
@@ -1622,6 +1636,8 @@ pub const IRPrinter = struct {
             .capture_get => |op| try self.print("capture_get {d} ({s})", .{ op.index, op.name }),
             .arg_count => try self.write("arg_count"),
             .has_arg => |op| try self.print("has_arg {d}", .{op.index}),
+            .yield_val => try self.write("yield"),
+            .yield_from => |op| try self.print("yield_from {any}", .{op.operand}),
         }
     }
 

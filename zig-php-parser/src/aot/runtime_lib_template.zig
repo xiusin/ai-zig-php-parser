@@ -6631,6 +6631,8 @@ pub const ClassMeta = struct {
         try registerWeakReferenceClass(allocator);
         // Register WeakMap class
         try registerWeakMapClass(allocator);
+        // Register Generator class
+        try registerGeneratorClass(allocator);
         // Register Reflection classes
         try registerReflectionClasses(allocator);
     }
@@ -13432,4 +13434,361 @@ pub fn setStaticVar(func_name_val: Value, var_name_val: Value, value: Value) !Va
     
     try static_vars.?.put(key, value);
     return value;
+}
+
+// ============================================================================
+// Generator Runtime Implementation
+// ============================================================================
+
+const GeneratorState = enum(u8) {
+    created,
+    running,
+    suspended,
+    completed,
+};
+
+pub const GeneratorContext = struct {
+    mutex: std.Thread.Mutex = .{},
+    caller_cond: std.Thread.Condition = .{},
+    gen_cond: std.Thread.Condition = .{},
+    state: GeneratorState = .created,
+    current_key: Value = Value.initNull(),
+    current_value: Value = Value.initNull(),
+    sent_value: Value = Value.initNull(),
+    return_value: Value = Value.initNull(),
+    caller_ctx: Value = Value.initNull(),
+    caller_args_storage: []Value = &.{},
+    body_fn: ?*const fn (Value, []const Value, Allocator) anyerror!Value = null,
+    thread: ?std.Thread = null,
+    auto_key: i64 = 0,
+    has_error: bool = false,
+    throw_value: Value = Value.initNull(),
+    has_throw: bool = false,
+};
+
+threadlocal var tl_generator_ctx: ?*GeneratorContext = null;
+
+pub fn php_generator_get_context() *GeneratorContext {
+    return tl_generator_ctx.?;
+}
+
+fn generatorThreadRunner(gen_ctx: *GeneratorContext) void {
+    tl_generator_ctx = gen_ctx;
+    const body = gen_ctx.body_fn orelse {
+        gen_ctx.mutex.lock();
+        gen_ctx.state = .completed;
+        gen_ctx.caller_cond.signal();
+        gen_ctx.mutex.unlock();
+        return;
+    };
+    const result = body(
+        gen_ctx.caller_ctx,
+        gen_ctx.caller_args_storage,
+        runtime_allocator,
+    ) catch {
+        gen_ctx.mutex.lock();
+        gen_ctx.has_error = true;
+        gen_ctx.state = .completed;
+        gen_ctx.caller_cond.signal();
+        gen_ctx.mutex.unlock();
+        return;
+    };
+    gen_ctx.mutex.lock();
+    gen_ctx.return_value = result;
+    gen_ctx.state = .completed;
+    gen_ctx.caller_cond.signal();
+    gen_ctx.mutex.unlock();
+}
+
+pub fn php_create_generator(
+    body_fn: *const fn (Value, []const Value, Allocator) anyerror!Value,
+    ctx: Value,
+    args: []const Value,
+    allocator: Allocator,
+) !Value {
+    const gen_ctx = try allocator.create(GeneratorContext);
+    gen_ctx.* = GeneratorContext{};
+    gen_ctx.body_fn = body_fn;
+    gen_ctx.caller_ctx = ctx;
+    if (args.len > 0) {
+        gen_ctx.caller_args_storage = try allocator.alloc(Value, args.len);
+        @memcpy(gen_ctx.caller_args_storage, args);
+    }
+    const meta = findClass("Generator");
+    const obj = if (meta) |m|
+        try PHPObject.initWithMeta(allocator, m)
+    else
+        try PHPObject.init(allocator, "Generator");
+    try obj.setProperty("__gen_ctx", Value.initInt(
+        @as(i64, @intCast(@intFromPtr(gen_ctx))),
+    ));
+    return Value_initObject(obj);
+}
+
+fn getGenCtx(ctx: Value) ?*GeneratorContext {
+    if (!Value_isObject(ctx)) return null;
+    const obj = Value_asObject(ctx);
+    const ptr_val = obj.getPropertyDirect("__gen_ctx") orelse return null;
+    if (!ptr_val.isInt()) return null;
+    const addr = ptr_val.toInt();
+    if (addr <= 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(addr)));
+}
+
+fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
+    gen_ctx.mutex.lock();
+    if (gen_ctx.state == .created) {
+        gen_ctx.state = .running;
+        gen_ctx.mutex.unlock();
+        gen_ctx.thread = std.Thread.spawn(
+            .{},
+            generatorThreadRunner,
+            .{gen_ctx},
+        ) catch {
+            gen_ctx.mutex.lock();
+            gen_ctx.state = .completed;
+            gen_ctx.mutex.unlock();
+            return;
+        };
+        gen_ctx.mutex.lock();
+        while (gen_ctx.state == .running) {
+            gen_ctx.caller_cond.wait(&gen_ctx.mutex);
+        }
+        gen_ctx.mutex.unlock();
+    } else {
+        gen_ctx.mutex.unlock();
+    }
+}
+
+fn generatorAdvance(gen_ctx: *GeneratorContext) void {
+    gen_ctx.mutex.lock();
+    if (gen_ctx.state != .suspended) {
+        gen_ctx.mutex.unlock();
+        return;
+    }
+    gen_ctx.state = .running;
+    gen_ctx.gen_cond.signal();
+    while (gen_ctx.state == .running) {
+        gen_ctx.caller_cond.wait(&gen_ctx.mutex);
+    }
+    gen_ctx.mutex.unlock();
+}
+
+pub fn php_generator_yield(
+    gen_ctx: *GeneratorContext,
+    key: Value,
+    value: Value,
+) !Value {
+    gen_ctx.mutex.lock();
+    if (key.isNull()) {
+        gen_ctx.current_key = Value.initInt(gen_ctx.auto_key);
+        gen_ctx.auto_key += 1;
+    } else {
+        gen_ctx.current_key = key;
+    }
+    gen_ctx.current_value = value;
+    gen_ctx.state = .suspended;
+    gen_ctx.caller_cond.signal();
+    while (gen_ctx.state == .suspended) {
+        gen_ctx.gen_cond.wait(&gen_ctx.mutex);
+    }
+    if (gen_ctx.state == .completed) {
+        gen_ctx.mutex.unlock();
+        return error.GeneratorClosed;
+    }
+    if (gen_ctx.has_throw) {
+        const throw_val = gen_ctx.throw_value;
+        gen_ctx.throw_value = Value.initNull();
+        gen_ctx.has_throw = false;
+        gen_ctx.mutex.unlock();
+        setException(throw_val);
+        return Value.initNull();
+    }
+    const sent = gen_ctx.sent_value;
+    gen_ctx.sent_value = Value.initNull();
+    gen_ctx.mutex.unlock();
+    return sent;
+}
+
+pub fn php_generator_yield_from(
+    gen_ctx: *GeneratorContext,
+    iterable: Value,
+) !Value {
+    if (Value_isObject(iterable)) {
+        const obj = Value_asObject(iterable);
+        if (std.mem.eql(u8, obj.class_name, "Generator")) {
+            if (getGenCtx(iterable)) |inner| {
+                generatorEnsureStarted(inner);
+                while (inner.state != .completed) {
+                    _ = try php_generator_yield(
+                        gen_ctx,
+                        inner.current_key,
+                        inner.current_value,
+                    );
+                    generatorAdvance(inner);
+                }
+                return inner.return_value;
+            }
+        }
+    }
+    if (iterable.isArray()) {
+        const arr = iterable.asArray();
+        var iter = arr.elements.iterator();
+        while (iter.next()) |entry| {
+            const k = entry.key_ptr.*;
+            const v = entry.value_ptr.*;
+            const key_val = switch (k) {
+                .integer => |i| Value.initInt(i),
+                .string => |s| Value.initString(s),
+            };
+            _ = try php_generator_yield(gen_ctx, key_val, v);
+        }
+    }
+    return Value.initNull();
+}
+
+fn registerGeneratorClass(allocator: Allocator) !void {
+    const meta = try ClassMeta.init(allocator, "Generator");
+
+    try meta.addMethod(.{
+        .name = "rewind",
+        .func = struct {
+            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    generatorEnsureStarted(gc);
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "valid",
+        .func = struct {
+            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    generatorEnsureStarted(gc);
+                    return Value.initBool(gc.state != .completed);
+                }
+                return Value.initBool(false);
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "current",
+        .func = struct {
+            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    generatorEnsureStarted(gc);
+                    if (gc.state == .completed) return Value.initNull();
+                    _ = gc.current_value.retain();
+                    return gc.current_value;
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "key",
+        .func = struct {
+            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    generatorEnsureStarted(gc);
+                    if (gc.state == .completed) return Value.initNull();
+                    _ = gc.current_key.retain();
+                    return gc.current_key;
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "next",
+        .func = struct {
+            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    generatorEnsureStarted(gc);
+                    generatorAdvance(gc);
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "send",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    generatorEnsureStarted(gc);
+                    if (args.len > 0) {
+                        gc.mutex.lock();
+                        gc.sent_value = args[0];
+                        gc.mutex.unlock();
+                    }
+                    generatorAdvance(gc);
+                    if (gc.state == .completed) return Value.initNull();
+                    _ = gc.current_value.retain();
+                    return gc.current_value;
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "throw",
+        .func = struct {
+            fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    generatorEnsureStarted(gc);
+                    if (gc.state == .completed) return Value.initNull();
+                    gc.mutex.lock();
+                    if (args.len > 0) {
+                        gc.throw_value = args[0];
+                        gc.has_throw = true;
+                    }
+                    gc.state = .running;
+                    gc.gen_cond.signal();
+                    while (gc.state == .running) {
+                        gc.caller_cond.wait(&gc.mutex);
+                    }
+                    gc.mutex.unlock();
+                    if (gc.state == .completed) return Value.initNull();
+                    _ = gc.current_value.retain();
+                    return gc.current_value;
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try meta.addMethod(.{
+        .name = "getReturn",
+        .func = struct {
+            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                if (getGenCtx(ctx)) |gc| {
+                    if (gc.state != .completed) {
+                        return error.GeneratorNotCompleted;
+                    }
+                    _ = gc.return_value.retain();
+                    return gc.return_value;
+                }
+                return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    try registerClass(meta);
 }

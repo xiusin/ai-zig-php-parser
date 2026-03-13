@@ -2874,6 +2874,13 @@ pub const IROptimizer = struct {
                 }
             },
             .nop => {},
+            .yield_val => |op| {
+                if (op.key) |k| try self.used_registers.put(k.id, {});
+                if (op.value) |v| try self.used_registers.put(v.id, {});
+            },
+            .yield_from => |op| {
+                try self.used_registers.put(op.operand.id, {});
+            },
         }
     }
 
@@ -2940,6 +2947,7 @@ pub const IROptimizer = struct {
             .mutex_lock, .mutex_unlock, .mutex_new => true,
             .go_spawn, .channel_new, .channel_send, .channel_recv, .channel_close, .select_, .await_ => true,
             .debug_print => true,
+            .yield_val, .yield_from => true,
             .nop => false,
         };
     }

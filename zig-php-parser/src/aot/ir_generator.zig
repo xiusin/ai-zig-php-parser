@@ -3556,6 +3556,10 @@ pub const IRGenerator = struct {
             .closure => self.generateClosure(node),
             .arrow_function => self.generateArrowFunction(node),
 
+            // Generator expressions
+            .yield_expr => self.generateYieldExpr(node),
+            .yield_from_expr => self.generateYieldFromExpr(node),
+
             // Special expressions
             .match_expr => self.generateMatchExpr(node),
             .clone_with_expr => self.generateCloneWithExpr(node),
@@ -5694,6 +5698,48 @@ pub const IRGenerator = struct {
             .args = args,
             .return_type = .php_callable,
         } }, .php_callable);
+    }
+
+    /// Generate IR for yield expression
+    fn generateYieldExpr(self: *Self, node: *const Node) !Register {
+        const yield_data = node.data.yield_expr;
+
+        // Mark current function as generator
+        if (self.current_function) |func| {
+            func.is_generator = true;
+        }
+
+        // Generate key and value registers
+        var key_reg: ?Register = null;
+        var value_reg: ?Register = null;
+
+        if (yield_data.value) |val_idx| {
+            value_reg = try self.generateExpression(val_idx);
+        }
+        if (yield_data.key) |key_idx| {
+            key_reg = try self.generateExpression(key_idx);
+        }
+
+        // Emit yield instruction; result = sent value
+        return self.emitWithResult(.{ .yield_val = .{
+            .key = key_reg,
+            .value = value_reg,
+        } }, .php_value);
+    }
+
+    /// Generate IR for yield from expression
+    fn generateYieldFromExpr(self: *Self, node: *const Node) !Register {
+        const expr_idx = node.data.yield_from_expr.expr;
+
+        // Mark current function as generator
+        if (self.current_function) |func| {
+            func.is_generator = true;
+        }
+
+        const iterable_reg = try self.generateExpression(expr_idx);
+        return self.emitWithResult(.{ .yield_from = .{
+            .operand = iterable_reg,
+        } }, .php_value);
     }
 
     /// Generate IR for match expression
