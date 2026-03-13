@@ -6,8 +6,6 @@ zig-out/
 test_ci_reports/
 .zigphp_aot_build/
 test/aot_diff/
-test_*
 tests_*
-*php
 _debug*
 /.idea/*
