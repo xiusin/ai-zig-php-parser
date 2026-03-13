@@ -2130,6 +2130,31 @@ pub const NativeLinker = struct {
         .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
+
+        // PCNTL 函数
+        .{ "pcntl_fork", bi(.{ .runtime_name = "php_pcntl_fork", .needs_allocator = false }) },
+        .{ "pcntl_waitpid", bi(.{ .runtime_name = "php_pcntl_waitpid", .needs_allocator = true }) },
+        .{ "pcntl_wait", bi(.{ .runtime_name = "php_pcntl_wait", .needs_allocator = true }) },
+        .{ "pcntl_wexitstatus", bi(.{ .runtime_name = "php_pcntl_wexitstatus", .needs_allocator = false }) },
+        .{ "pcntl_signal", bi(.{ .runtime_name = "php_pcntl_signal", .needs_allocator = true }) },
+        .{ "pcntl_signal_dispatch", bi(.{ .runtime_name = "php_pcntl_signal_dispatch", .needs_allocator = true }) },
+        .{ "pcntl_alarm", bi(.{ .runtime_name = "php_pcntl_alarm", .needs_allocator = false }) },
+        .{ "pcntl_sigprocmask", bi(.{ .runtime_name = "php_pcntl_sigprocmask", .needs_allocator = true }) },
+        // POSIX 函数
+        .{ "posix_getpid", bi(.{ .runtime_name = "php_posix_getpid", .needs_allocator = false }) },
+        .{ "posix_kill", bi(.{ .runtime_name = "php_posix_kill", .needs_allocator = false }) },
+        .{ "posix_mkfifo", bi(.{ .runtime_name = "php_posix_mkfifo", .needs_allocator = true }) },
+        // IPC 函数
+        .{ "ftok", bi(.{ .runtime_name = "php_ftok", .needs_allocator = true }) },
+        .{ "msg_get_queue", bi(.{ .runtime_name = "php_msg_get_queue", .needs_allocator = true }) },
+        .{ "msg_remove_queue", bi(.{ .runtime_name = "php_msg_remove_queue", .needs_allocator = false }) },
+        .{ "sem_get", bi(.{ .runtime_name = "php_sem_get", .needs_allocator = true }) },
+        .{ "sem_remove", bi(.{ .runtime_name = "php_sem_remove", .needs_allocator = false }) },
+        .{ "shmop_open", bi(.{ .runtime_name = "php_shmop_open", .needs_allocator = true }) },
+        .{ "shmop_close", bi(.{ .runtime_name = "php_shmop_close", .needs_allocator = false }) },
+        // Socket 函数
+        .{ "socket_create_pair", bi(.{ .runtime_name = "php_socket_create_pair", .needs_allocator = true }) },
+        .{ "socket_close", bi(.{ .runtime_name = "php_socket_close", .needs_allocator = false }) },
     }));
 
     fn bi(info: BuiltinInfo) BuiltinInfo {

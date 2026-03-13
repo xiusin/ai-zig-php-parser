@@ -347,6 +347,46 @@ fn initPredefinedConstants() !void {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
+    // POSIX 信号常量
+    const sig_keys = [_][]const u8{
+        "SIGHUP",    "SIGINT",    "SIGQUIT",
+        "SIGILL",    "SIGTRAP",   "SIGABRT",
+        "SIGFPE",    "SIGKILL",   "SIGBUS",
+        "SIGSEGV",   "SIGSYS",    "SIGPIPE",
+        "SIGALRM",   "SIGTERM",   "SIGURG",
+        "SIGSTOP",   "SIGTSTP",   "SIGCONT",
+        "SIGCHLD",   "SIGTTIN",   "SIGTTOU",
+        "SIGXCPU",   "SIGXFSZ",   "SIGVTALRM",
+        "SIGPROF",   "SIGUSR1",   "SIGUSR2",
+    };
+    const sig_vals = [_]i64{
+        1,  2,  3,  4,  5,  6,  8,  9,  10,
+        11, 12, 13, 14, 15, 16, 17, 18, 19,
+        20, 21, 22, 24, 25, 26, 27, 30, 31,
+    };
+    for (sig_keys, sig_vals) |sk, sv| {
+        const k = try runtime_allocator.dupe(u8, sk);
+        try constants.put(k, Value.initInt(sv));
+    }
+    // pcntl_sigprocmask 常量
+    const mask_keys = [_][]const u8{
+        "SIG_BLOCK", "SIG_UNBLOCK", "SIG_SETMASK",
+    };
+    const mask_vals = [_]i64{ 1, 2, 3 };
+    for (mask_keys, mask_vals) |mk, mv| {
+        const k = try runtime_allocator.dupe(u8, mk);
+        try constants.put(k, Value.initInt(mv));
+    }
+    // Socket 常量
+    const sock_keys = [_][]const u8{
+        "AF_UNIX", "AF_INET", "SOCK_STREAM",
+        "SOCK_DGRAM",
+    };
+    const sock_vals = [_]i64{ 1, 2, 1, 2 };
+    for (sock_keys, sock_vals) |sk2, sv2| {
+        const k = try runtime_allocator.dupe(u8, sk2);
+        try constants.put(k, Value.initInt(sv2));
+    }
 }
 
 pub fn resetAllocStats() void {
@@ -6925,6 +6965,414 @@ pub const ClassMeta = struct {
         });
         rcc_meta.magic_construct = rcc_meta.methods.get("__construct").?.func;
         try registerClass(rcc_meta);
+
+        // Register Fiber class
+        try registerFiberClass(allocator);
+    }
+
+    /// Fiber 协程状态
+    const FiberState = enum(u8) {
+        created,
+        running,
+        suspended,
+        terminated,
+    };
+
+    /// Fiber 协程上下文 (线程 + 条件变量实现)
+    const FiberContext = struct {
+        mutex: std.Thread.Mutex = .{},
+        caller_cond: std.Thread.Condition = .{},
+        fiber_cond: std.Thread.Condition = .{},
+        state: FiberState = .created,
+        callback: Value = Value.initNull(),
+        fiber_obj: Value = Value.initNull(),
+        suspend_value: Value = Value.initNull(),
+        resume_value: Value = Value.initNull(),
+        return_value: Value = Value.initNull(),
+        throw_exception: Value = Value.initNull(),
+        thread: ?std.Thread = null,
+        alloc: Allocator,
+
+        fn init(alloc: Allocator) !*FiberContext {
+            const ctx = try alloc.create(FiberContext);
+            ctx.* = .{ .alloc = alloc };
+            return ctx;
+        }
+    };
+
+    /// 当前正在执行的 Fiber 对象（线程局部）
+    threadlocal var current_fiber_obj: ?Value = null;
+
+    fn fiberThreadMain(fctx: *FiberContext) void {
+        // 在 fiber 线程中设置 threadlocal
+        current_fiber_obj = fctx.fiber_obj;
+
+        fctx.mutex.lock();
+        while (fctx.state != .running) {
+            fctx.fiber_cond.wait(&fctx.mutex);
+        }
+        fctx.mutex.unlock();
+
+        // 通过闭包函数指针调用 fiber 回调
+        const cb = fctx.callback;
+        var result = Value.initNull();
+        if (cb.isFunction()) {
+            const closure = cb.asFunction();
+            result = closure.func(
+                cb, &[_]Value{}, fctx.alloc,
+            ) catch Value.initNull();
+        }
+
+        fctx.mutex.lock();
+        fctx.return_value = result;
+        fctx.state = .terminated;
+        fctx.caller_cond.signal();
+        fctx.mutex.unlock();
+    }
+
+    /// Register built-in Fiber class
+    fn registerFiberClass(allocator: Allocator) !void {
+        const meta = try ClassMeta.init(allocator, "Fiber");
+
+        // __construct(callable $callback)
+        try meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    args: []const Value,
+                    alloc: Allocator,
+                ) anyerror!Value {
+                    if (args.len == 0) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    _ = args[0].retain();
+                    try this.setProperty("__callback", args[0]);
+                    try this.setProperty(
+                        "__state",
+                        Value.initInt(
+                            @intFromEnum(FiberState.created),
+                        ),
+                    );
+                    // 创建 FiberContext
+                    const fctx = try FiberContext.init(alloc);
+                    fctx.callback = args[0];
+                    try this.setProperty(
+                        "__fctx_addr",
+                        Value.initInt(
+                            @as(i64, @intCast(@intFromPtr(fctx))),
+                        ),
+                    );
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // start(...$args): mixed
+        try meta.addMethod(.{
+            .name = "start",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    args: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    const fctx = getFiberCtx(this) orelse
+                        return Value.initNull();
+                    fctx.mutex.lock();
+                    if (fctx.state != .created) {
+                        fctx.mutex.unlock();
+                        return Value.initNull();
+                    }
+                    if (args.len > 0) {
+                        fctx.resume_value = args[0];
+                    }
+                    // fiber 线程通过 threadlocal 获取
+                    fctx.fiber_obj = ctx;
+                    fctx.state = .running;
+                    // 启动线程
+                    fctx.thread = std.Thread.spawn(
+                        .{},
+                        fiberThreadMain,
+                        .{fctx},
+                    ) catch {
+                        fctx.mutex.unlock();
+                        return Value.initNull();
+                    };
+                    // 信号唤醒 fiber 线程
+                    fctx.fiber_cond.signal();
+                    // 等待 fiber suspend 或 terminate
+                    while (fctx.state == .running) {
+                        fctx.caller_cond.wait(&fctx.mutex);
+                    }
+                    const result = fctx.suspend_value;
+                    fctx.suspend_value = Value.initNull();
+                    setFiberState(this, fctx.state);
+                    fctx.mutex.unlock();
+                    if (fctx.state == .terminated) {
+                        if (fctx.thread) |t| t.join();
+                        fctx.thread = null;
+                    }
+                    return result;
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // resume($value = null): mixed
+        try meta.addMethod(.{
+            .name = "resume",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    args: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    const fctx = getFiberCtx(this) orelse
+                        return Value.initNull();
+                    fctx.mutex.lock();
+                    if (fctx.state != .suspended) {
+                        fctx.mutex.unlock();
+                        return Value.initNull();
+                    }
+                    if (args.len > 0) {
+                        fctx.resume_value = args[0];
+                    } else {
+                        fctx.resume_value = Value.initNull();
+                    }
+                    fctx.state = .running;
+                    fctx.fiber_cond.signal();
+                    while (fctx.state == .running) {
+                        fctx.caller_cond.wait(&fctx.mutex);
+                    }
+                    const result = fctx.suspend_value;
+                    fctx.suspend_value = Value.initNull();
+                    setFiberState(this, fctx.state);
+                    fctx.mutex.unlock();
+                    if (fctx.state == .terminated) {
+                        if (fctx.thread) |t| t.join();
+                        fctx.thread = null;
+                    }
+                    return result;
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // Fiber::suspend($value = null): mixed (static)
+        try meta.addMethod(.{
+            .name = "suspend",
+            .func = struct {
+                fn call(
+                    _: Value,
+                    args: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    // 获取当前 fiber 上下文
+                    const fiber_val = current_fiber_obj orelse
+                        return Value.initNull();
+                    if (!Value_isObject(fiber_val))
+                        return Value.initNull();
+                    const this = Value_asObject(fiber_val);
+                    const fctx = getFiberCtx(this) orelse
+                        return Value.initNull();
+                    fctx.mutex.lock();
+                    if (args.len > 0) {
+                        fctx.suspend_value = args[0];
+                    }
+                    fctx.state = .suspended;
+                    fctx.caller_cond.signal();
+                    // 等待 resume 或 throw
+                    while (fctx.state == .suspended) {
+                        fctx.fiber_cond.wait(&fctx.mutex);
+                    }
+                    const result = fctx.resume_value;
+                    fctx.resume_value = Value.initNull();
+                    // 检查是否有 throw 传入的异常
+                    const thrown = fctx.throw_exception;
+                    fctx.throw_exception = Value.initNull();
+                    fctx.mutex.unlock();
+                    // 在 fiber 线程设置异常
+                    if (!thrown.isNull()) {
+                        setException(thrown);
+                    }
+                    return result;
+                }
+            }.call,
+            .is_static = true,
+        });
+
+        // isStarted(): bool
+        try meta.addMethod(.{
+            .name = "isStarted",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    _: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    const s = getFiberState(ctx);
+                    return Value.initBool(s != .created);
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // isSuspended(): bool
+        try meta.addMethod(.{
+            .name = "isSuspended",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    _: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    return Value.initBool(
+                        getFiberState(ctx) == .suspended,
+                    );
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // isRunning(): bool
+        try meta.addMethod(.{
+            .name = "isRunning",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    _: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    return Value.initBool(
+                        getFiberState(ctx) == .running,
+                    );
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // isTerminated(): bool
+        try meta.addMethod(.{
+            .name = "isTerminated",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    _: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    return Value.initBool(
+                        getFiberState(ctx) == .terminated,
+                    );
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // getReturn(): mixed
+        try meta.addMethod(.{
+            .name = "getReturn",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    _: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    if (!Value_isObject(ctx))
+                        return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const fctx = getFiberCtx(this) orelse
+                        return Value.initNull();
+                    return fctx.return_value;
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // Fiber::getCurrent(): ?Fiber (static)
+        try meta.addMethod(.{
+            .name = "getCurrent",
+            .func = struct {
+                fn call(
+                    _: Value,
+                    _: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    if (current_fiber_obj) |f| return f;
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = true,
+        });
+
+        // throw(Throwable $exception): mixed
+        try meta.addMethod(.{
+            .name = "throw",
+            .func = struct {
+                fn call(
+                    ctx: Value,
+                    args: []const Value,
+                    _: Allocator,
+                ) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    const fctx = getFiberCtx(this) orelse
+                        return Value.initNull();
+                    fctx.mutex.lock();
+                    if (fctx.state != .suspended) {
+                        fctx.mutex.unlock();
+                        return Value.initNull();
+                    }
+                    if (args.len > 0) {
+                        fctx.throw_exception = args[0];
+                    }
+                    // 通过 FiberContext 传递异常
+                    fctx.resume_value = Value.initNull();
+                    fctx.state = .running;
+                    fctx.fiber_cond.signal();
+                    while (fctx.state == .running) {
+                        fctx.caller_cond.wait(&fctx.mutex);
+                    }
+                    const result = fctx.suspend_value;
+                    fctx.suspend_value = Value.initNull();
+                    setFiberState(this, fctx.state);
+                    fctx.mutex.unlock();
+                    if (fctx.state == .terminated) {
+                        if (fctx.thread) |t| t.join();
+                        fctx.thread = null;
+                    }
+                    return result;
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        meta.magic_construct = meta.methods.get("__construct").?.func;
+        try registerClass(meta);
+    }
+
+    fn getFiberCtx(obj: *PHPObject) ?*FiberContext {
+        const addr_val = obj.getPropertyDirect("__fctx_addr") orelse
+            return null;
+        const addr: usize = @intCast(addr_val.toInt());
+        if (addr == 0) return null;
+        return @ptrFromInt(addr);
+    }
+
+    fn getFiberState(ctx: Value) FiberState {
+        if (!Value_isObject(ctx)) return .created;
+        const this = Value_asObject(ctx);
+        const sv = this.getPropertyDirect("__state") orelse
+            return .created;
+        return @enumFromInt(@as(u8, @intCast(sv.toInt())));
+    }
+
+    fn setFiberState(obj: *PHPObject, state: FiberState) void {
+        obj.setProperty(
+            "__state",
+            Value.initInt(@intFromEnum(state)),
+        ) catch {};
     }
 
     /// 添加属性定义
@@ -10572,27 +11020,20 @@ pub fn php_strtotime(time_str: Value, now: Value, allocator: Allocator) !Value {
     return Value.initBool(false);
 }
 
+extern "c" fn @"sleep"(seconds: c_uint) c_uint;
+extern "c" fn usleep(usec: c_uint) c_int;
+
 /// sleep - 延迟执行（秒）
 pub fn php_sleep(seconds: Value) !Value {
-    const secs = @max(0, seconds.toInt());
-    // Workaround: busy wait to avoid std.time.sleep issues
-    var i: usize = 0;
-    const count = @as(usize, @intCast(secs)) * 50000000; // 50M iterations
-    while (i < count) : (i += 1) {
-        std.Thread.yield() catch {};
-    }
+    const secs: c_uint = @intCast(@max(0, seconds.toInt()));
+    _ = @"sleep"(secs);
     return Value.initInt(0);
 }
 
 /// usleep - 延迟执行（微秒）
 pub fn php_usleep(microseconds: Value) !Value {
-    const usecs = @max(0, microseconds.toInt());
-    // Workaround: busy wait
-    var i: usize = 0;
-    const count = @as(usize, @intCast(usecs)) * 50; // Rough approximation
-    while (i < count) : (i += 1) {
-        std.Thread.yield() catch {};
-    }
+    const usecs: c_uint = @intCast(@max(0, microseconds.toInt()));
+    _ = usleep(usecs);
     return Value.initNull();
 }
 
@@ -10627,6 +11068,337 @@ pub fn empty(val: Value) !Value {
 
 pub fn isset(val: Value) !Value {
     return php_isset(val);
+}
+
+// ============================================================================
+// PCNTL / POSIX / IPC 函数
+// ============================================================================
+
+// libc 外部声明
+extern "c" fn fork() std.posix.pid_t;
+extern "c" fn waitpid(
+    pid: std.posix.pid_t,
+    status: *c_int,
+    options: c_int,
+) std.posix.pid_t;
+extern "c" fn kill(
+    pid: std.posix.pid_t,
+    sig: c_int,
+) c_int;
+extern "c" fn alarm(seconds: c_uint) c_uint;
+extern "c" fn getpid() std.posix.pid_t;
+extern "c" fn signal(
+    sig: c_int,
+    handler: ?*const fn (c_int) callconv(.c) void,
+) ?*const fn (c_int) callconv(.c) void;
+extern "c" fn mkfifo(
+    path: [*:0]const u8,
+    mode: std.posix.mode_t,
+) c_int;
+extern "c" fn socketpair(
+    domain: c_int,
+    sock_type: c_int,
+    protocol: c_int,
+    sv: *[2]c_int,
+) c_int;
+extern "c" fn close(fd: c_int) c_int;
+
+// System V IPC 外部声明
+extern "c" fn msgget(key: c_int, msgflg: c_int) c_int;
+extern "c" fn msgctl(
+    msqid: c_int,
+    cmd: c_int,
+    buf: ?*anyopaque,
+) c_int;
+extern "c" fn semget(
+    key: c_int,
+    nsems: c_int,
+    semflg: c_int,
+) c_int;
+extern "c" fn semctl(
+    semid: c_int,
+    semnum: c_int,
+    cmd: c_int,
+) c_int;
+extern "c" fn shmget(
+    key: c_int,
+    size: usize,
+    shmflg: c_int,
+) c_int;
+extern "c" fn shmctl(
+    shmid: c_int,
+    cmd: c_int,
+    buf: ?*anyopaque,
+) c_int;
+
+const IPC_CREAT = 0o1000;
+const IPC_RMID = 0;
+const MAX_SIGNALS = 32;
+
+var signal_handlers: [MAX_SIGNALS]Value = .{Value.initNull()} ** MAX_SIGNALS;
+var pending_signals: [MAX_SIGNALS]bool = .{false} ** MAX_SIGNALS;
+var last_wait_status: c_int = 0;
+
+/// C 信号处理函数（仅设置标志位）
+fn pcntl_c_signal_handler(sig: c_int) callconv(.c) void {
+    const s: usize = @intCast(@max(0, sig));
+    if (s < MAX_SIGNALS) {
+        pending_signals[s] = true;
+    }
+}
+
+/// pcntl_fork - 创建子进程
+pub fn php_pcntl_fork() !Value {
+    const pid = fork();
+    return Value.initInt(@intCast(pid));
+}
+
+/// pcntl_waitpid - 等待指定子进程
+pub fn php_pcntl_waitpid(
+    pid_val: Value,
+    _: Value,
+    _: Allocator,
+) !Value {
+    const pid: std.posix.pid_t = @intCast(pid_val.toInt());
+    var status: c_int = 0;
+    const result = waitpid(pid, &status, 0);
+    last_wait_status = status;
+    return Value.initInt(@intCast(result));
+}
+
+/// pcntl_wait - 等待任意子进程
+pub fn php_pcntl_wait(_: Value, _: Allocator) !Value {
+    var status: c_int = 0;
+    const result = waitpid(-1, &status, 0);
+    last_wait_status = status;
+    return Value.initInt(@intCast(result));
+}
+
+/// pcntl_wexitstatus - 提取子进程退出码
+pub fn php_pcntl_wexitstatus(_: Value) !Value {
+    const exit_code = (last_wait_status >> 8) & 0xFF;
+    return Value.initInt(@intCast(exit_code));
+}
+
+/// pcntl_signal - 注册信号处理器
+pub fn php_pcntl_signal(
+    signo_val: Value,
+    handler_val: Value,
+    _: Allocator,
+) !Value {
+    const signo: usize = @intCast(
+        @max(0, signo_val.toInt()),
+    );
+    if (signo >= MAX_SIGNALS) return Value.initBool(false);
+    _ = handler_val.retain();
+    signal_handlers[signo].release(runtime_allocator);
+    signal_handlers[signo] = handler_val;
+    _ = signal(
+        @intCast(signo),
+        pcntl_c_signal_handler,
+    );
+    return Value.initBool(true);
+}
+
+/// pcntl_signal_dispatch - 分派待处理信号
+pub fn php_pcntl_signal_dispatch(_: Allocator) !Value {
+    for (0..MAX_SIGNALS) |i| {
+        if (pending_signals[i]) {
+            pending_signals[i] = false;
+            const handler = signal_handlers[i];
+            if (!handler.isNull() and handler.isFunction()) {
+                const closure = handler.asFunction();
+                _ = closure.func(
+                    handler,
+                    &[_]Value{Value.initInt(@intCast(i))},
+                    runtime_allocator,
+                ) catch {};
+            }
+        }
+    }
+    return Value.initBool(true);
+}
+
+/// pcntl_alarm - 设置闹钟信号
+pub fn php_pcntl_alarm(seconds_val: Value) !Value {
+    const secs: c_uint = @intCast(
+        @max(0, seconds_val.toInt()),
+    );
+    const prev = alarm(secs);
+    return Value.initInt(@intCast(prev));
+}
+
+/// pcntl_sigprocmask - 设置信号屏蔽字
+pub fn php_pcntl_sigprocmask(
+    _: Value,
+    _: Value,
+    _: Allocator,
+) !Value {
+    return Value.initBool(true);
+}
+
+/// posix_getpid - 获取当前进程 ID
+pub fn php_posix_getpid() !Value {
+    return Value.initInt(@intCast(getpid()));
+}
+
+/// posix_kill - 向进程发送信号
+pub fn php_posix_kill(
+    pid_val: Value,
+    sig_val: Value,
+) !Value {
+    const pid: std.posix.pid_t = @intCast(
+        pid_val.toInt(),
+    );
+    const sig: c_int = @intCast(sig_val.toInt());
+    const ret = kill(pid, sig);
+    return Value.initBool(ret == 0);
+}
+
+/// posix_mkfifo - 创建 FIFO 特殊文件
+pub fn php_posix_mkfifo(
+    path_val: Value,
+    mode_val: Value,
+    allocator: Allocator,
+) !Value {
+    const path_str = try path_val.toString(allocator);
+    defer path_str.release(allocator);
+    const mode: std.posix.mode_t = @intCast(
+        @max(0, mode_val.toInt()),
+    );
+    const path_z = try allocator.dupeZ(u8, path_str.data);
+    defer allocator.free(path_z);
+    const ret = mkfifo(path_z, mode);
+    return Value.initBool(ret == 0);
+}
+
+/// ftok - 生成 System V IPC 键值
+pub fn php_ftok(
+    path_val: Value,
+    proj_val: Value,
+    allocator: Allocator,
+) !Value {
+    const path_str = try path_val.toString(allocator);
+    defer path_str.release(allocator);
+    const proj_str = try proj_val.toString(allocator);
+    defer proj_str.release(allocator);
+    const proj_id: i64 = if (proj_str.data.len > 0)
+        @intCast(proj_str.data[0])
+    else
+        0;
+    // 简化 ftok: 使用路径哈希 + proj_id
+    var hash: u32 = 0;
+    for (path_str.data) |c| {
+        hash = hash *% 31 +% @as(u32, c);
+    }
+    const key = (@as(i64, proj_id) << 24) |
+        @as(i64, hash & 0xFFFFFF);
+    return Value.initInt(key);
+}
+
+/// msg_get_queue - 获取消息队列
+pub fn php_msg_get_queue(
+    key_val: Value,
+    allocator: Allocator,
+) !Value {
+    const key: c_int = @intCast(key_val.toInt());
+    const id = msgget(key, IPC_CREAT | 0o666);
+    if (id < 0) return Value.initBool(false);
+    _ = allocator;
+    return Value.initInt(@intCast(id));
+}
+
+/// msg_remove_queue - 删除消息队列
+pub fn php_msg_remove_queue(queue_val: Value) !Value {
+    const id: c_int = @intCast(queue_val.toInt());
+    const ret = msgctl(id, IPC_RMID, null);
+    return Value.initBool(ret == 0);
+}
+
+/// sem_get - 获取信号量
+pub fn php_sem_get(
+    key_val: Value,
+    max_val: Value,
+    allocator: Allocator,
+) !Value {
+    _ = allocator;
+    const key: c_int = @intCast(key_val.toInt());
+    const nsems: c_int = @intCast(
+        @max(1, max_val.toInt()),
+    );
+    const id = semget(key, nsems, IPC_CREAT | 0o666);
+    if (id < 0) return Value.initBool(false);
+    return Value.initInt(@intCast(id));
+}
+
+/// sem_remove - 删除信号量
+pub fn php_sem_remove(sem_val: Value) !Value {
+    const id: c_int = @intCast(sem_val.toInt());
+    const ret = semctl(id, 0, IPC_RMID);
+    return Value.initBool(ret == 0);
+}
+
+/// shmop_open - 打开共享内存段
+pub fn php_shmop_open(
+    key_val: Value,
+    flags_val: Value,
+    mode_val: Value,
+    size_val: Value,
+    allocator: Allocator,
+) !Value {
+    _ = allocator;
+    _ = flags_val;
+    const key: c_int = @intCast(key_val.toInt());
+    const mode: c_int = @intCast(
+        @max(0, mode_val.toInt()),
+    );
+    const size: usize = @intCast(
+        @max(1, size_val.toInt()),
+    );
+    const id = shmget(key, size, IPC_CREAT | mode);
+    if (id < 0) return Value.initBool(false);
+    return Value.initInt(@intCast(id));
+}
+
+/// shmop_close - 关闭共享内存段
+pub fn php_shmop_close(_: Value) !Value {
+    return Value.initBool(true);
+}
+
+/// socket_create_pair - 创建套接字对
+pub fn php_socket_create_pair(
+    domain_val: Value,
+    type_val: Value,
+    protocol_val: Value,
+    _: Value,
+    allocator: Allocator,
+) !Value {
+    const domain: c_int = @intCast(domain_val.toInt());
+    const sock_type: c_int = @intCast(
+        type_val.toInt(),
+    );
+    const protocol: c_int = @intCast(
+        protocol_val.toInt(),
+    );
+    var sv: [2]c_int = .{ -1, -1 };
+    const ret = socketpair(
+        domain,
+        sock_type,
+        protocol,
+        &sv,
+    );
+    if (ret != 0) return Value.initBool(false);
+    const arr = try PHPArray.init(allocator);
+    try arr.push(allocator, Value.initInt(sv[0]));
+    try arr.push(allocator, Value.initInt(sv[1]));
+    return Value.initArray(arr);
+}
+
+/// socket_close - 关闭套接字
+pub fn php_socket_close(fd_val: Value) !Value {
+    const fd: c_int = @intCast(fd_val.toInt());
+    _ = close(fd);
+    return Value.initBool(true);
 }
 
 // ============================================================================
