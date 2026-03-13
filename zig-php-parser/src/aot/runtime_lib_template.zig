@@ -6627,6 +6627,34 @@ pub const ClassMeta = struct {
 
         try registerClass(meta);
 
+        // Register standard PHP exception subclasses
+        const exception_subclasses = [_][]const u8{
+            "RuntimeException",
+            "LogicException",
+            "BadMethodCallException",
+            "BadFunctionCallException",
+            "DomainException",
+            "InvalidArgumentException",
+            "LengthException",
+            "OutOfRangeException",
+            "OverflowException",
+            "RangeException",
+            "UnderflowException",
+            "UnexpectedValueException",
+            "TypeError",
+            "ValueError",
+            "Error",
+            "ArithmeticError",
+            "DivisionByZeroError",
+        };
+        for (exception_subclasses) |name| {
+            const child = try ClassMeta.init(allocator, name);
+            child.parent = meta;
+            child.magic_construct = meta.magic_construct;
+            child.magic_toString = meta.magic_toString;
+            try registerClass(child);
+        }
+
         // Register WeakReference class
         try registerWeakReferenceClass(allocator);
         // Register WeakMap class
@@ -7196,9 +7224,11 @@ pub const ClassMeta = struct {
                     const thrown = fctx.throw_exception;
                     fctx.throw_exception = Value.initNull();
                     fctx.mutex.unlock();
-                    // 在 fiber 线程设置异常
+                    // 在 fiber 线程设置异常（不返回 Zig 错误，
+                    // 由生成代码的 hasException() 路由到 catch）
                     if (!thrown.isNull()) {
                         setException(thrown);
+                        return Value.initNull();
                     }
                     return result;
                 }
