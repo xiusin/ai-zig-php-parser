@@ -3157,36 +3157,82 @@ pub fn php_not_identical(lhs: Value, rhs: Value) !Value {
     return Value.initBool(!result.asBool());
 }
 
+/// PHP 8 比较核心：返回 -1, 0, 1
+fn phpCompare(lhs: Value, rhs: Value) i2 {
+    // 1. 两边都是 int
+    if (lhs.isInt() and rhs.isInt()) {
+        const l = lhs.asInt();
+        const r = rhs.asInt();
+        if (l < r) return -1;
+        if (l > r) return 1;
+        return 0;
+    }
+    // 2. null vs string → "" vs string（字符串比较）
+    if (lhs.isNull() and rhs.isString()) {
+        const r = rhs.asString();
+        if (r.length == 0) return 0;
+        return -1;
+    }
+    if (lhs.isString() and rhs.isNull()) {
+        const l = lhs.asString();
+        if (l.length == 0) return 0;
+        return 1;
+    }
+    // 3. 两边都是 string
+    if (lhs.isString() and rhs.isString()) {
+        const ls = lhs.asString();
+        const rs = rhs.asString();
+        // 两边都是数字字符串 → 数字比较
+        if (isNumericString(ls.data[0..ls.length]) and
+            isNumericString(rs.data[0..rs.length]))
+        {
+            const lf = lhs.toFloat();
+            const rf = rhs.toFloat();
+            if (lf < rf) return -1;
+            if (lf > rf) return 1;
+            return 0;
+        }
+        // 字符串字典序比较
+        const cmp = std.mem.order(
+            u8,
+            ls.data[0..ls.length],
+            rs.data[0..rs.length],
+        );
+        return switch (cmp) {
+            .lt => -1,
+            .gt => 1,
+            .eq => 0,
+        };
+    }
+    // 4. null vs array → null < array
+    if (lhs.isNull() and rhs.isArray()) return -1;
+    if (lhs.isArray() and rhs.isNull()) return 1;
+    // 5. 其他情况：数字比较
+    const l = lhs.toFloat();
+    const r = rhs.toFloat();
+    if (l < r) return -1;
+    if (l > r) return 1;
+    return 0;
+}
+
 /// 小于运算
 pub fn php_lt(lhs: Value, rhs: Value) !Value {
-    if (lhs.isInt() and rhs.isInt()) {
-        return Value.initBool(lhs.asInt() < rhs.asInt());
-    }
-    return Value.initBool(lhs.toFloat() < rhs.toFloat());
+    return Value.initBool(phpCompare(lhs, rhs) < 0);
 }
 
 /// 小于等于运算
 pub fn php_le(lhs: Value, rhs: Value) !Value {
-    if (lhs.isInt() and rhs.isInt()) {
-        return Value.initBool(lhs.asInt() <= rhs.asInt());
-    }
-    return Value.initBool(lhs.toFloat() <= rhs.toFloat());
+    return Value.initBool(phpCompare(lhs, rhs) <= 0);
 }
 
 /// 大于运算
 pub fn php_gt(lhs: Value, rhs: Value) !Value {
-    if (lhs.isInt() and rhs.isInt()) {
-        return Value.initBool(lhs.asInt() > rhs.asInt());
-    }
-    return Value.initBool(lhs.toFloat() > rhs.toFloat());
+    return Value.initBool(phpCompare(lhs, rhs) > 0);
 }
 
 /// 大于等于运算
 pub fn php_ge(lhs: Value, rhs: Value) !Value {
-    if (lhs.isInt() and rhs.isInt()) {
-        return Value.initBool(lhs.asInt() >= rhs.asInt());
-    }
-    return Value.initBool(lhs.toFloat() >= rhs.toFloat());
+    return Value.initBool(phpCompare(lhs, rhs) >= 0);
 }
 
 /// Spaceship 运算符 (<=>)
