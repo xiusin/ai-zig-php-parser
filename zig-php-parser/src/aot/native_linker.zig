@@ -831,7 +831,13 @@ pub const NativeLinker = struct {
             // std.debug.print("Writing main call\n", .{});
             try writer.writeAll(
                 \\
-                \\    _ = try @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator);
+                \\    _ = @"__main__"(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch |err| {
+                \\        if (runtime.hasException()) {
+                \\            runtime.php_handle_uncaught_exception();
+                \\            return;
+                \\        }
+                \\        return err;
+                \\    };
                 \\
             );
             // std.debug.print("After main call\n", .{});
@@ -879,9 +885,10 @@ pub const NativeLinker = struct {
             if (std.mem.indexOf(u8, func.name, "::") != null) continue;
             // 跳过内部函数
             if (std.mem.eql(u8, func.name, "__main__")) continue;
+            if (!func.register_at_startup) continue;
 
             // 直接注册函数，因为函数签名已经统一
-            try writer.print("    try runtime.registerUserFunction(\"{s}\", @\"{s}\");\n", .{ func.name, func.name });
+            try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ func.name, func.name, func.location.file, func.location.line });
         }
 
         try writer.writeAll(
@@ -1870,6 +1877,7 @@ pub const NativeLinker = struct {
 
     fn functionMayRaise(self: *const Self, func_name: []const u8) bool {
         _ = self;
+        if (std.mem.startsWith(u8, func_name, "__declare_function__::")) return false;
         if (builtinInfo(func_name)) |info| return info.may_raise;
         return true;
     }
@@ -6174,6 +6182,16 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .mod => |op| {
                 // 设置源码位置，供 Deprecated 警告使用
@@ -6258,6 +6276,16 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .pow => |op| {
                 if (inst.result) |reg| {
@@ -7110,9 +7138,21 @@ pub const NativeLinker = struct {
                 // 生成函数调用
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
+                const is_runtime_declare = std.mem.startsWith(u8, op.func_name, "__declare_function__::");
 
                 // 生成函数调用
-                if (inst.result) |reg| {
+                if (is_runtime_declare) {
+                    const declared_name = op.func_name["__declare_function__::".len..];
+                    if (self.ir_module) |module| {
+                        if (module.findFunction(declared_name)) |func| {
+                            try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                        }
+                    }
+                    if (inst.result) |reg| {
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
+                        try writer.writeAll("runtime.Value.initNull();\n");
+                    }
+                } else if (inst.result) |reg| {
                     const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     if (type_tag != .i64 and type_tag != .f64 and type_tag != .bool) {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
@@ -7406,7 +7446,14 @@ pub const NativeLinker = struct {
                     }
                 } else {
                     // 无返回值寄存器
-                    if (is_builtin) {
+                    if (is_runtime_declare) {
+                        const declared_name = op.func_name["__declare_function__::".len..];
+                        if (self.ir_module) |module| {
+                            if (module.findFunction(declared_name)) |func| {
+                                try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                            }
+                        }
+                    } else if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
 
@@ -13282,6 +13329,7 @@ pub const NativeLinker = struct {
                 if (inst.result) |_| {
                     try writer.print("        {s} = try runtime.php_div(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                 }
+                try writer.writeAll("        if (runtime.hasException()) return error.RuntimeError;\n");
             },
             .mod => |op| {
                 // 设置源码位置，供 Deprecated 警告使用
@@ -13291,6 +13339,7 @@ pub const NativeLinker = struct {
                 if (inst.result) |_| {
                     try writer.print("        {s} = try runtime.php_mod(reg_{d}, reg_{d});\n", .{ result_reg.?, op.lhs.id, op.rhs.id });
                 }
+                try writer.writeAll("        if (runtime.hasException()) return error.RuntimeError;\n");
             },
             .pow => |op| {
                 if (inst.result) |reg| {
@@ -13535,10 +13584,21 @@ pub const NativeLinker = struct {
             .call => |op| {
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
+                const is_runtime_declare = std.mem.startsWith(u8, op.func_name, "__declare_function__::");
                 const in_try_block = self.current_exception_handler != null;
 
                 // 生成函数调用
-                if (result_reg) |r| {
+                if (is_runtime_declare) {
+                    const declared_name = op.func_name["__declare_function__::".len..];
+                    if (self.ir_module) |module| {
+                        if (module.findFunction(declared_name)) |func| {
+                            try writer.print("        try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                        }
+                    }
+                    if (result_reg) |r| {
+                        try writer.print("        {s} = runtime.Value.initNull();\n", .{r});
+                    }
+                } else if (result_reg) |r| {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
@@ -13600,7 +13660,14 @@ pub const NativeLinker = struct {
                         }
                     }
                 } else {
-                    if (is_builtin) {
+                    if (is_runtime_declare) {
+                        const declared_name = op.func_name["__declare_function__::".len..];
+                        if (self.ir_module) |module| {
+                            if (module.findFunction(declared_name)) |func| {
+                                try writer.print("        try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                            }
+                        }
+                    } else if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
 

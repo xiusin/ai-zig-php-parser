@@ -274,6 +274,7 @@ pub const Function = struct {
     blocks: std.ArrayListUnmanaged(*BasicBlock),
     /// Whether this function is exported (callable from outside)
     is_exported: bool,
+    register_at_startup: bool = true,
     /// Whether this is a method
     is_method: bool,
     /// Class name if this is a method
@@ -304,6 +305,7 @@ pub const Function = struct {
             .return_type = .void,
             .blocks = .{},
             .is_exported = false,
+            .register_at_startup = true,
             .is_method = false,
             .class_name = null,
             .location = .{},

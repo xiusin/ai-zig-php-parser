@@ -698,6 +698,7 @@ pub const IRGenerator = struct {
     fn generateFunctionDecl(self: *Self, node: *const Node) !void {
         const func_data = node.data.function_decl;
         const func_name = self.getString(func_data.name);
+        const runtime_decl = self.current_function != null;
 
         const params_info = try self.allocator.alloc(SymbolTableMod.Symbol.ParameterInfo, func_data.params.len);
         for (func_data.params, 0..) |param_idx, i| {
@@ -725,6 +726,7 @@ pub const IRGenerator = struct {
         const func = try self.allocator.create(Function);
         func.* = Function.init(self.allocator, func_name);
         func.is_exported = true;
+        func.register_at_startup = !runtime_decl;
         func.location = self.current_location;
 
         // Add to module
@@ -785,6 +787,16 @@ pub const IRGenerator = struct {
         self.entry_allocas = prev_entry_allocas;
         self.current_function = prev_function;
         self.current_block = prev_block;
+
+        if (runtime_decl) {
+            const declare_name = try std.fmt.allocPrint(self.allocator, "__declare_function__::{s}", .{func_name});
+            const empty_args = try self.allocator.alloc(Register, 0);
+            _ = try self.emit(.{ .call = .{
+                .func_name = declare_name,
+                .args = empty_args,
+                .return_type = .void,
+            } }, null);
+        }
     }
 
     const ParamInfo = struct {
@@ -3928,8 +3940,15 @@ pub const IRGenerator = struct {
         }
 
         // Generate operands
-        const lhs_reg = try self.generateExpression(bin_data.lhs);
-        const rhs_reg = try self.generateExpression(bin_data.rhs);
+        var lhs_reg: Register = undefined;
+        var rhs_reg: Register = undefined;
+        if (bin_data.op == .dot) {
+            rhs_reg = try self.generateExpression(bin_data.rhs);
+            lhs_reg = try self.generateExpression(bin_data.lhs);
+        } else {
+            lhs_reg = try self.generateExpression(bin_data.lhs);
+            rhs_reg = try self.generateExpression(bin_data.rhs);
+        }
 
         // 推断算术运算的结果类型
         // 如果任一操作数是php_value，结果就是php_value

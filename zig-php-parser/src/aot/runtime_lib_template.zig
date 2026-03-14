@@ -40,6 +40,11 @@ var EMPTY_STRING: PHPString = .{
 
 /// 用户定义函数注册表
 pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) = null;
+const FunctionDeclLocation = struct {
+    file: []const u8,
+    line: u32,
+};
+pub var user_function_decl_locations: ?std.StringHashMap(FunctionDeclLocation) = null;
 
 /// 全局常量表
 pub var constants: std.StringHashMap(Value) = undefined;
@@ -332,6 +337,7 @@ pub fn initRuntime(allocator: Allocator) void {
     registerZigChannel(runtime_allocator) catch {};
     registerZigSelect(runtime_allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
+    user_function_decl_locations = std.StringHashMap(FunctionDeclLocation).init(runtime_allocator);
     constants = std.StringHashMap(Value).init(runtime_allocator);
     static_vars = std.StringHashMap(Value).init(runtime_allocator);
     array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(runtime_allocator);
@@ -494,7 +500,45 @@ pub fn peekException() Value {
 
 pub fn php_handle_uncaught_exception() void {
     if (has_exception) {
-        has_exception = false;
+        var ex = getException();
+        defer ex.release(runtime_allocator);
+
+        var class_name: []const u8 = "Exception";
+        var message: []const u8 = "";
+
+        if (Value_isObject(ex)) {
+            const obj = Value_asObject(ex);
+            class_name = obj.class_name;
+            if (obj.getProperty("message")) |msg_val| {
+                if (msg_val.isString()) {
+                    message = msg_val.asString().data;
+                }
+            }
+        } else if (ex.isString()) {
+            message = ex.asString().data;
+        }
+
+        const stdout = std.fs.File{ .handle = 1 };
+        const stderr = std.fs.File{ .handle = 2 };
+        var buf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: Uncaught {s}: {s} in {s}:{d}\n" ++
+                "Stack trace:\n#0 {{main}}\n" ++
+                "  thrown in {s} on line {d}\n",
+            .{ class_name, message, src_file, src_line, src_file, src_line },
+        ) catch "";
+        stdout.writeAll(msg) catch {};
+        var ebuf: [1024]u8 = undefined;
+        const emsg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  Uncaught {s}: {s} in {s}:{d}\n" ++
+                "Stack trace:\n#0 {{main}}\n" ++
+                "  thrown in {s} on line {d}\n",
+            .{ class_name, message, src_file, src_line, src_file, src_line },
+        ) catch "";
+        stderr.writeAll(emsg) catch {};
+        std.process.exit(255);
     }
 }
 
@@ -506,6 +550,10 @@ pub fn deinitRuntime() void {
     if (user_function_registry) |*registry| {
         registry.deinit();
         user_function_registry = null;
+    }
+    if (user_function_decl_locations) |*locations| {
+        locations.deinit();
+        user_function_decl_locations = null;
     }
 
     // 清理constants
@@ -553,8 +601,42 @@ pub fn deinitRuntime() void {
 
 /// 注册用户定义函数
 pub fn registerUserFunction(name: []const u8, func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) !void {
+    try registerUserFunctionWithLocation(name, func, "", 0);
+}
+
+pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value, file: []const u8, line: u32) !void {
     if (user_function_registry) |*registry| {
+        if (registry.get(name) != null) {
+            var prev_file = file;
+            var prev_line = line;
+            if (user_function_decl_locations) |*locations| {
+                if (locations.get(name)) |loc| {
+                    prev_file = loc.file;
+                    prev_line = loc.line;
+                }
+            }
+            const stdout = std.fs.File{ .handle = 1 };
+            const stderr = std.fs.File{ .handle = 2 };
+            var buf: [1024]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "\nFatal error: Cannot redeclare function {s}() (previously declared in {s}:{d}) in {s} on line {d}\n",
+                .{ name, prev_file, prev_line, file, line },
+            ) catch "";
+            stdout.writeAll(msg) catch {};
+            var ebuf: [1024]u8 = undefined;
+            const emsg = std.fmt.bufPrint(
+                &ebuf,
+                "PHP Fatal error:  Cannot redeclare function {s}() (previously declared in {s}:{d}) in {s} on line {d}\n",
+                .{ name, prev_file, prev_line, file, line },
+            ) catch "";
+            stderr.writeAll(emsg) catch {};
+            std.process.exit(255);
+        }
         try registry.put(name, func);
+        if (user_function_decl_locations) |*locations| {
+            try locations.put(name, .{ .file = file, .line = line });
+        }
     }
 }
 
@@ -2641,6 +2723,8 @@ pub fn php_add(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "+");
     }
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     // 整数 + 整数 = 整数（可能溢出为浮点）
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
@@ -2664,6 +2748,8 @@ pub fn php_sub(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "-");
     }
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
@@ -2696,6 +2782,8 @@ pub fn php_mul(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "*");
     }
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
@@ -2716,6 +2804,8 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "/");
     }
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     // PHP 将 null/bool 视为整数参与整除判断
     const lhs_is_int = lhs.isInt() or lhs.isNull() or lhs.isBool();
     const rhs_is_int = rhs.isInt() or rhs.isNull() or rhs.isBool();
@@ -2723,7 +2813,7 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
         const a = lhs.toInt();
         const b = rhs.toInt();
         if (b == 0) {
-            _ = try throwException("Division by zero", runtime_allocator);
+            _ = try throwThrowable("DivisionByZeroError", "Division by zero", runtime_allocator);
             return Value.initNull();
         }
         if (@mod(a, b) == 0) {
@@ -2737,7 +2827,7 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
     const a = lhs.toFloat();
     const b = rhs.toFloat();
     if (b == 0.0) {
-        _ = try throwException("Division by zero", runtime_allocator);
+        _ = try throwThrowable("DivisionByZeroError", "Division by zero", runtime_allocator);
         return Value.initNull();
     }
     return Value.initFloat(a / b);
@@ -2748,6 +2838,8 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "%");
     }
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     // PHP 8.1+: float→int 隐式转换精度丢失时输出 Deprecated
     if (lhs.isFloat()) {
         const f = lhs.asFloat();
@@ -2762,7 +2854,7 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
     const a = lhs.toInt();
     const b = rhs.toInt();
     if (b == 0) {
-        _ = try throwException("Modulo by zero", runtime_allocator);
+        _ = try throwThrowable("DivisionByZeroError", "Modulo by zero", runtime_allocator);
         return Value.initNull();
     }
     return Value.initInt(@rem(a, b));
@@ -2796,11 +2888,48 @@ fn isNumericString(data: []const u8) bool {
     return i >= data.len;
 }
 
+fn numericPrefixLength(data: []const u8) usize {
+    if (data.len == 0) return 0;
+    var i: usize = 0;
+    while (i < data.len and std.ascii.isWhitespace(data[i])) : (i += 1) {}
+    if (i < data.len and (data[i] == '+' or data[i] == '-')) i += 1;
+    const start_digits = i;
+    while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {}
+    var has_digits = i > start_digits;
+    if (i < data.len and data[i] == '.') {
+        i += 1;
+        const frac_start = i;
+        while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {}
+        if (i > frac_start) has_digits = true;
+    }
+    if (!has_digits) return 0;
+    if (i < data.len and (data[i] == 'e' or data[i] == 'E')) {
+        var j = i + 1;
+        if (j < data.len and (data[j] == '+' or data[j] == '-')) j += 1;
+        const exp_start = j;
+        while (j < data.len and std.ascii.isDigit(data[j])) : (j += 1) {}
+        if (j > exp_start) i = j;
+    }
+    return i;
+}
+
+fn hasNumericPrefix(data: []const u8) bool {
+    return numericPrefixLength(data) > 0;
+}
+
+fn emitArithmeticStringWarningIfNeeded(v: Value) void {
+    if (!v.isString()) return;
+    const str = v.asString().data[0..v.asString().length];
+    if (hasNumericPrefix(str) and !isNumericString(str)) {
+        emitWarning("A non-numeric value encountered");
+    }
+}
+
 /// 检查 Value 是否可参与算术运算（PHP 8.x）
 fn checkArithmeticOperand(v: Value) bool {
     if (v.isString()) {
         const str = v.asString();
-        return isNumericString(str.data[0..str.length]);
+        return hasNumericPrefix(str.data[0..str.length]);
     }
     return !v.isArray();
 }
@@ -3324,18 +3453,18 @@ pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
     }
 
     // 慢速路径：需要类型转换
+    const rhs_str = rhs.toString(allocator) catch {
+        // 类型转换失败（如数组转字符串），异常已设置
+        return Value.initString(try PHPString.init(allocator, ""));
+    };
+    defer rhs_str.release(allocator);
+
     const lhs_str = lhs.toString(allocator) catch {
         // 类型转换失败（如数组转字符串），异常已设置
         // 返回空字符串以继续执行（异常会在后续被检查）
         return Value.initString(try PHPString.init(allocator, ""));
     };
     defer lhs_str.release(allocator);
-
-    const rhs_str = rhs.toString(allocator) catch {
-        // 类型转换失败（如数组转字符串），异常已设置
-        return Value.initString(try PHPString.init(allocator, ""));
-    };
-    defer rhs_str.release(allocator);
 
     const result = try lhs_str.concat(rhs_str, allocator);
     return Value.initString(result);
@@ -3888,7 +4017,18 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
     }
 
     // 普通数组
-    if (!array_val.isArray()) return Value.initInt(0);
+    if (!array_val.isArray()) {
+        if (!Value_isObject(array_val)) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "foreach() argument must be of type array|object, {s} given",
+                .{valueTypeName(array_val)},
+            ) catch "foreach() argument must be of type array|object";
+            emitWarning(msg);
+        }
+        return Value.initInt(0);
+    }
     const array = array_val.asArray();
 
     // 增加数组引用计数，确保迭代期间数组不被释放
@@ -9182,6 +9322,20 @@ pub fn clearException() void {
 pub fn throwException(message: []const u8, allocator: Allocator) !Value {
     const msg_str = try PHPString.init(allocator, message);
     const exception = Value.initString(msg_str);
+    setException(exception);
+    return exception;
+}
+
+pub fn throwThrowable(class_name: []const u8, message: []const u8, allocator: Allocator) !Value {
+    const obj = if (findClass(class_name)) |meta|
+        try PHPObject.initWithMeta(allocator, meta)
+    else
+        try PHPObject.init(allocator, class_name);
+    const exception = Value_initObject(obj);
+    const msg_str = try PHPString.init(allocator, message);
+    const msg_val = Value.initString(msg_str);
+    defer msg_val.release(allocator);
+    try obj.setProperty("message", msg_val);
     setException(exception);
     return exception;
 }

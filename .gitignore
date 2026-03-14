@@ -8,3 +8,4 @@ zig-php-parser/ci/*
 zig-php-parser/.perf_reports/*
 *.kiro
 zig-php-parser/gemini_scripts/*
+zig-php-parser/test_scripts/*
