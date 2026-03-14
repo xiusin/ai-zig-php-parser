@@ -175,6 +175,7 @@ pub const NativeLinker = struct {
     current_byref_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_switch_value_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_global_get_names: ?*const std.AutoHashMap(usize, []const u8) = null,
+    current_concat_operand_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_unset_regs: ?*std.AutoHashMap(usize, void) = null,
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
@@ -333,6 +334,7 @@ pub const NativeLinker = struct {
             .current_exception_handler = null,
             .current_cleanup_regs = null,
             .current_alloca_regs = null,
+            .current_concat_operand_regs = null,
         };
         return self;
     }
@@ -3095,18 +3097,25 @@ pub const NativeLinker = struct {
 
         // 预扫描：记录 global_get 指令的结果寄存器 → 变量名映射
         var global_get_names = std.AutoHashMap(usize, []const u8).init(self.allocator);
+        var concat_operand_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer global_get_names.deinit();
+        defer concat_operand_regs.deinit();
         for (func.blocks.items) |blk_scan| {
             for (blk_scan.instructions.items) |inst_scan| {
                 if (inst_scan.op == .global_get) {
                     if (inst_scan.result) |reg| {
                         try global_get_names.put(reg.id, inst_scan.op.global_get.name);
                     }
+                } else if (inst_scan.op == .concat) {
+                    try concat_operand_regs.put(inst_scan.op.concat.lhs.id, {});
+                    try concat_operand_regs.put(inst_scan.op.concat.rhs.id, {});
                 }
             }
         }
         self.current_global_get_names = &global_get_names;
         defer self.current_global_get_names = null;
+        self.current_concat_operand_regs = &concat_operand_regs;
+        defer self.current_concat_operand_regs = null;
 
         self.current_unset_regs = &unset_registers;
         defer self.current_unset_regs = null;
@@ -5804,6 +5813,10 @@ pub const NativeLinker = struct {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
 
+                    const lhs_name = if (self.current_global_get_names) |gn| gn.get(op.lhs.id) else null;
+                    const rhs_name = if (self.current_global_get_names) |gn| gn.get(op.rhs.id) else null;
+                    const use_undef_helper = lhs_name != null or rhs_name != null;
+
                     // 使用 current_register_types 获取真实类型
                     const lhs_type_tag = if (self.current_register_types) |types| blk: {
                         if (types.get(op.lhs.id)) |corrected_type| {
@@ -5820,7 +5833,11 @@ pub const NativeLinker = struct {
                     } else @as(std.meta.Tag(IR.Type), op.rhs.type_);
 
                     try self.writeRegAssignmentPrefix(writer, reg.id);
-                    try writer.writeAll("try runtime.php_concat(");
+                    if (use_undef_helper) {
+                        try writer.writeAll("try runtime.php_concat_with_undef(");
+                    } else {
+                        try writer.writeAll("try runtime.php_concat(");
+                    }
 
                     // 左操作数 - 所有寄存器都是 Value，需要类型转换
                     if (lhs_type_tag == .i64) {
@@ -5854,6 +5871,18 @@ pub const NativeLinker = struct {
                         try writer.print("reg_{d}{s}", .{ op.rhs.id, rhs_suffix });
                     }
 
+                    if (use_undef_helper) {
+                        if (lhs_name) |name| {
+                            try writer.print(", !globalVarIsDefined(\"{s}\"), \"{s}\"", .{ name, name });
+                        } else {
+                            try writer.writeAll(", false, \"\"");
+                        }
+                        if (rhs_name) |name| {
+                            try writer.print(", !globalVarIsDefined(\"{s}\"), \"{s}\"", .{ name, name });
+                        } else {
+                            try writer.writeAll(", false, \"\"");
+                        }
+                    }
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                 }
             },
@@ -8104,12 +8133,13 @@ pub const NativeLinker = struct {
                     try writer.writeAll(".release(runtime.runtime_allocator);\n");
                     const is_byref = if (self.current_byref_regs) |br| br.contains(reg.id) else false;
                     const is_switch_val = if (self.current_switch_value_regs) |sv| sv.contains(reg.id) else false;
+                    const is_concat_operand = if (self.current_concat_operand_regs) |cr| cr.contains(reg.id) else false;
                     if (is_switch_val) {
                         // switch 值：不在此处发 Warning，改为在每个 case 比较处发
                         try writer.print("    const __sw_undef_{d} = !globalVarIsDefined(\"{s}\");\n", .{ reg.id, op.name });
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{op.name});
-                    } else if (is_byref) {
+                    } else if (is_byref or is_concat_operand) {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{op.name});
                     } else {
@@ -13543,6 +13573,9 @@ pub const NativeLinker = struct {
             .concat => |op| {
                 var lhs_buf: [128]u8 = undefined;
                 var rhs_buf: [128]u8 = undefined;
+                const lhs_name = if (self.current_global_get_names) |gn| gn.get(op.lhs.id) else null;
+                const rhs_name = if (self.current_global_get_names) |gn| gn.get(op.rhs.id) else null;
+                const use_undef_helper = lhs_name != null or rhs_name != null;
 
                 // 检查操作数类型，需要时转换为 Value
                 const lhs_type = op.lhs.type_;
@@ -13569,7 +13602,19 @@ pub const NativeLinker = struct {
                 else
                     try std.fmt.bufPrint(&rhs_buf, "reg_{d}", .{op.rhs.id});
 
-                try writer.print("        {s} = try runtime.php_concat({s}, {s}, runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs });
+                if (use_undef_helper) {
+                    if (lhs_name) |ln| {
+                        if (rhs_name) |rn| {
+                            try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, !globalVarIsDefined(\"{s}\"), \"{s}\", !globalVarIsDefined(\"{s}\"), \"{s}\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, ln, ln, rn, rn });
+                        } else {
+                            try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, !globalVarIsDefined(\"{s}\"), \"{s}\", false, \"\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, ln, ln });
+                        }
+                    } else if (rhs_name) |rn| {
+                        try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, false, \"\", !globalVarIsDefined(\"{s}\"), \"{s}\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, rn, rn });
+                    }
+                } else {
+                    try writer.print("        {s} = try runtime.php_concat({s}, {s}, runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs });
+                }
             },
 
             // ========================================================================

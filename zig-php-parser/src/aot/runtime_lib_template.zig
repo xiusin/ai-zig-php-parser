@@ -2954,6 +2954,25 @@ pub fn emitWarning(msg: []const u8) void {
     stderr.writeAll(emsg) catch {};
 }
 
+pub fn emitUndefinedVariableWarning(name: []const u8) void {
+    const stdout = std.fs.File{ .handle = 1 };
+    const stderr = std.fs.File{ .handle = 2 };
+    var buf: [1024]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(
+        &buf,
+        "\nWarning: Undefined variable {s} in {s} on line {d}\n",
+        .{ name, src_file, src_line },
+    ) catch "";
+    stdout.writeAll(wmsg) catch {};
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Warning:  Undefined variable {s} in {s} on line {d}\n",
+        .{ name, src_file, src_line },
+    ) catch "";
+    stderr.writeAll(emsg) catch {};
+}
+
 /// 输出 Unsupported operand types TypeError 并终止
 fn emitUnsupportedOperandError(
     lhs: Value,
@@ -3463,6 +3482,31 @@ pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
         // 类型转换失败（如数组转字符串），异常已设置
         // 返回空字符串以继续执行（异常会在后续被检查）
         return Value.initString(try PHPString.init(allocator, ""));
+    };
+    defer lhs_str.release(allocator);
+
+    const result = try lhs_str.concat(rhs_str, allocator);
+    return Value.initString(result);
+}
+
+pub fn php_concat_with_undef(lhs: Value, rhs: Value, lhs_undef: bool, lhs_name: []const u8, rhs_undef: bool, rhs_name: []const u8, allocator: Allocator) !Value {
+    if (!lhs_undef and !rhs_undef) {
+        return php_concat(lhs, rhs, allocator);
+    }
+
+    const rhs_str = blk: {
+        if (rhs_undef) emitUndefinedVariableWarning(rhs_name);
+        break :blk rhs.toString(allocator) catch {
+            return Value.initString(try PHPString.init(allocator, ""));
+        };
+    };
+    defer rhs_str.release(allocator);
+
+    const lhs_str = blk: {
+        if (lhs_undef) emitUndefinedVariableWarning(lhs_name);
+        break :blk lhs.toString(allocator) catch {
+            return Value.initString(try PHPString.init(allocator, ""));
+        };
     };
     defer lhs_str.release(allocator);
 
