@@ -7563,12 +7563,24 @@ pub const NativeLinker = struct {
                 }
             },
             .call_indirect => |op| {
+                // 检查func_ptr是否是alloca寄存器，需要解引用
+                const func_ptr_is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                    alloca_regs.contains(op.func_ptr.id)
+                else
+                    false;
+                
+                const func_ptr_expr = if (func_ptr_is_alloca)
+                    try std.fmt.allocPrint(self.allocator, "reg_{d}.*", .{op.func_ptr.id})
+                else
+                    try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.func_ptr.id});
+                defer self.allocator.free(func_ptr_expr);
+                
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_invoke_callable(reg_{d}, ", .{op.func_ptr.id});
+                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
                     try self.writeValueArgsArray(writer, op.args);
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                 } else {
-                    try writer.print("    _ = try runtime.php_invoke_callable(reg_{d}, ", .{op.func_ptr.id});
+                    try writer.print("    _ = try runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
                     try self.writeValueArgsArray(writer, op.args);
                     try writer.writeAll(", runtime.runtime_allocator);\n");
                 }

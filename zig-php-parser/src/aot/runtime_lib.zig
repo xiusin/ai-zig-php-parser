@@ -1733,20 +1733,22 @@ pub fn php_echo(val: *PHPValue) !void {
     defer php_gc_release(str_val);
 
     if (str_val.data.string_ptr) |str| {
-        std.debug.print("{s}", .{str.data[0..str.length]});
+        const stdout = std.io.getStdOut().writer();
+        stdout.writeAll(str.data[0..str.length]) catch {};
     }
 }
 
 /// Print a value (output with return value 1)
 pub fn php_print(val: *PHPValue) i64 {
-    php_echo(val);
+    php_echo(val) catch {};
     return 1;
 }
 
 /// Print with newline
 pub fn php_println(val: *PHPValue) void {
-    php_echo(val);
-    std.debug.print("\n", .{});
+    php_echo(val) catch {};
+    const stdout = std.io.getStdOut().writer();
+    stdout.writeAll("\n") catch {};
 }
 
 /// Print formatted string (printf-style)
@@ -1794,7 +1796,8 @@ pub fn php_builtin_var_dump(val: *PHPValue) void {
     defer buffer.deinit(allocator);
     
     dumpValue(buffer.writer(), val, 0) catch {};
-    std.debug.print("{s}", .{buffer.items});
+    const stdout = std.io.getStdOut().writer();
+    stdout.writeAll(buffer.items) catch {};
 }
 
 /// print_r - Print human-readable representation
@@ -1808,7 +1811,8 @@ pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
-        std.debug.print("{s}", .{buffer.items});
+        const stdout = std.io.getStdOut().writer();
+        stdout.writeAll(buffer.items) catch {};
         return php_value_create_bool(true);
     }
 }
@@ -1824,7 +1828,8 @@ pub fn php_builtin_var_export(val: *PHPValue, return_output: bool) *PHPValue {
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
-        std.debug.print("{s}", .{buffer.items});
+        const stdout = std.io.getStdOut().writer();
+        stdout.writeAll(buffer.items) catch {};
         return php_value_create_null();
     }
 }

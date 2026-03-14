@@ -4134,6 +4134,30 @@ pub const IRGenerator = struct {
                             .return_type = .void,
                         } }, null);
                     }
+                } else if (self.static_vars.contains(var_name)) {
+                    // Static变量：使用setStaticVar
+                    const func_name = if (self.current_function) |f| f.name else "global";
+                    const func_name_id = try self.module.?.internString(func_name);
+                    const func_name_reg = try self.emitWithResult(.{ .const_string = func_name_id }, .php_value);
+                    const var_name_id = try self.module.?.internString(var_name);
+                    const var_name_reg = try self.emitWithResult(.{ .const_string = var_name_id }, .php_value);
+                    
+                    const set_args = try self.allocator.alloc(Register, 3);
+                    set_args[0] = func_name_reg;
+                    set_args[1] = var_name_reg;
+                    set_args[2] = new_value;
+                    _ = try self.emitWithResult(.{ 
+                        .call = .{ 
+                            .func_name = "setStaticVar", 
+                            .args = set_args,
+                            .return_type = .php_value
+                        } 
+                    }, .php_value);
+                    
+                    // 同时更新局部变量指针
+                    if (self.lookupVarRegister(var_name)) |ptr_reg| {
+                        _ = try self.emit(.{ .store = .{ .ptr = ptr_reg, .value = new_value } }, null);
+                    }
                 } else {
                     // 检查是否是全局变量或在 __main__ 函数中
                     const is_global = self.global_vars.contains(var_name);

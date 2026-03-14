@@ -1969,6 +1969,11 @@ pub const Value = struct {
             
             return if (negative) -result else result;
         }
+        // 数组转整数：非空数组返回1，空数组返回0
+        if (self.isArray()) {
+            const arr = self.asArray();
+            return if (arr.count() > 0) 1 else 0;
+        }
         return 0;
     }
 
@@ -1978,6 +1983,11 @@ pub const Value = struct {
         if (self.isInt()) return @floatFromInt(self.asInt());
         if (self.isBool()) return if (self.asBool()) 1.0 else 0.0;
         if (self.isNull()) return 0.0;
+        // 数组转浮点数：非空数组返回1.0，空数组返回0.0
+        if (self.isArray()) {
+            const arr = self.asArray();
+            return if (arr.count() > 0) 1.0 else 0.0;
+        }
         if (self.isString()) {
             const str = self.asString();
             if (str.length == 0) return 0.0;
@@ -3668,32 +3678,50 @@ pub fn php_print(value: Value) !Value {
 
 /// var_dump函数
 pub fn php_var_dump(value: Value) !Value {
+    const stdout_file = std.fs.File{ .handle = 1 };
     if (value.isNull()) {
-        std.debug.print("NULL\n", .{});
+        try stdout_file.writeAll("NULL\n");
     } else if (value.isBool()) {
-        std.debug.print("bool({})\n", .{value.asBool()});
+        var buf: [32]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "bool({})\n", .{value.asBool()});
+        try stdout_file.writeAll(str);
     } else if (value.isInt()) {
-        std.debug.print("int({})\n", .{value.asInt()});
+        var buf: [64]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "int({})\n", .{value.asInt()});
+        try stdout_file.writeAll(str);
     } else if (value.isFloat()) {
-        std.debug.print("float({})\n", .{value.asFloat()});
+        var buf: [64]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "float({})\n", .{value.asFloat()});
+        try stdout_file.writeAll(str);
     } else if (value.isString()) {
         const str = value.asString();
-        std.debug.print("string({}) \"{s}\"\n", .{ str.length, str.data });
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "string({}) \"{s}\"\n", .{ str.length, str.data });
+        try stdout_file.writeAll(msg);
     } else if (value.isArray()) {
         const arr = value.asArray();
-        std.debug.print("array({d}) {{\n", .{arr.count()});
+        var buf: [64]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "array({d}) {{\n", .{arr.count()});
+        try stdout_file.writeAll(msg);
         // 遍历数组
         var iter = arr.elements.iterator();
         while (iter.next()) |entry| {
-            std.debug.print("  ", .{});
+            try stdout_file.writeAll("  ");
             switch (entry.key_ptr.*) {
-                .integer => |i| std.debug.print("[{d}]", .{i}),
-                .string => |s| std.debug.print("[\"{s}\"]", .{s.data}),
+                .integer => |i| {
+                    const key_msg = try std.fmt.bufPrint(&buf, "[{d}]", .{i});
+                    try stdout_file.writeAll(key_msg);
+                },
+                .string => |s| {
+                    var key_buf: [256]u8 = undefined;
+                    const key_msg = try std.fmt.bufPrint(&key_buf, "[\"{s}\"]", .{s.data});
+                    try stdout_file.writeAll(key_msg);
+                },
             }
-            std.debug.print(" =>\n  ", .{});
+            try stdout_file.writeAll(" =>\n  ");
             _ = php_var_dump(entry.value_ptr.*) catch {};
         }
-        std.debug.print("}}\n", .{});
+        try stdout_file.writeAll("}}\n");
     }
     return Value.initNull();
 }
@@ -3713,7 +3741,8 @@ pub fn print_r(value: Value, return_output: Value) !Value {
     if (want_return) {
         return Value.initString(try PHPString.init(runtime_allocator, buffer.items));
     }
-    std.debug.print("{s}", .{buffer.items});
+    const stdout_file = std.fs.File{ .handle = 1 };
+    try stdout_file.writeAll(buffer.items);
     return Value.initBool(true);
 }
 
@@ -3727,7 +3756,8 @@ pub fn var_export(value: Value, return_output: Value) !Value {
     if (want_return) {
         return Value.initString(try PHPString.init(runtime_allocator, buffer.items));
     }
-    std.debug.print("{s}", .{buffer.items});
+    const stdout_file = std.fs.File{ .handle = 1 };
+    try stdout_file.writeAll(buffer.items);
     return Value.initNull();
 }
 
