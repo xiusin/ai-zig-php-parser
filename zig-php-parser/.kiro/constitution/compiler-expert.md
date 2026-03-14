@@ -1,14 +1,88 @@
-# PHP-Zig编译器专家宪法
+# PHP-Zig编译器系统宪法
 
-**版本**: 1.0.0  
+**版本**: 2.0.0  
 **生效日期**: 2026-03-14  
-**适用范围**: 所有编译器相关开发（Parser、Lexer、VM、JIT、AOT、IR、优化器、GC等）  
+**适用范围**: 整个编译器系统的所有组件  
+**宪法性质**: 强制性、不可违背的开发准则  
 
 ---
 
-## 🎯 核心使命
+## 📜 前言
 
-开发**世界级性能**的PHP编译器系统，在保证**完全兼容PHP 8.5**的前提下，实现**接近C语言**的执行效率。
+本宪法是PHP-Zig编译器系统的最高开发准则，定义了从词法分析到机器码生成的完整编译器开发标准。我们将PHP-Zig视为一门**完整的编程语言实现**，而非简单的解释器项目。
+
+### 项目定位
+
+**目标**: 开发世界级性能的生产级PHP编译器系统  
+**标准**: 对标V8、LuaJIT、PyPy等顶级语言实现  
+**性能**: 在完全兼容PHP 8.5的前提下，达到C语言90-95%的执行效率  
+**质量**: 工业级代码质量，可用于生产环境  
+
+### 系统架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     PHP-Zig编译器系统                        │
+├─────────────────────────────────────────────────────────────┤
+│  前端 (Frontend)                                             │
+│  ├─ Lexer (词法分析器)                                       │
+│  ├─ Parser (语法分析器)                                      │
+│  ├─ AST (抽象语法树)                                         │
+│  └─ Semantic Analyzer (语义分析器)                          │
+├─────────────────────────────────────────────────────────────┤
+│  中端 (Middle-end)                                           │
+│  ├─ IR Generator (中间表示生成器)                           │
+│  ├─ Type Inference (类型推断)                               │
+│  ├─ Optimizer (优化器)                                       │
+│  │  ├─ SSA Construction (SSA构造)                           │
+│  │  ├─ Dead Code Elimination (死代码消除)                   │
+│  │  ├─ Constant Folding (常量折叠)                          │
+│  │  ├─ Loop Optimization (循环优化)                         │
+│  │  ├─ Inlining (内联)                                      │
+│  │  └─ Escape Analysis (逃逸分析)                           │
+│  └─ Data Flow Analysis (数据流分析)                         │
+├─────────────────────────────────────────────────────────────┤
+│  后端 (Backend)                                              │
+│  ├─ Code Generator (代码生成器)                             │
+│  │  ├─ Register Allocation (寄存器分配)                     │
+│  │  ├─ Instruction Selection (指令选择)                     │
+│  │  └─ Peephole Optimization (窥孔优化)                     │
+│  ├─ JIT Compiler (即时编译器)                               │
+│  │  ├─ Hotspot Detection (热点检测)                         │
+│  │  ├─ Tiered Compilation (分层编译)                        │
+│  │  └─ On-Stack Replacement (栈上替换)                      │
+│  └─ AOT Compiler (提前编译器)                               │
+│     ├─ Native Code Generation (本地代码生成)                │
+│     ├─ Link-Time Optimization (链接时优化)                  │
+│     └─ Profile-Guided Optimization (性能引导优化)           │
+├─────────────────────────────────────────────────────────────┤
+│  运行时 (Runtime)                                            │
+│  ├─ VM (虚拟机)                                              │
+│  │  ├─ Bytecode Interpreter (字节码解释器)                  │
+│  │  ├─ Stack Management (栈管理)                            │
+│  │  └─ Exception Handling (异常处理)                        │
+│  ├─ Memory Management (内存管理)                            │
+│  │  ├─ Garbage Collector (垃圾回收器)                       │
+│  │  │  ├─ Generational GC (分代GC)                         │
+│  │  │  ├─ Incremental GC (增量GC)                          │
+│  │  │  ├─ Concurrent GC (并发GC)                           │
+│  │  │  └─ Compacting GC (压缩GC)                           │
+│  │  ├─ Object Pool (对象池)                                 │
+│  │  └─ Arena Allocator (区域分配器)                         │
+│  ├─ Type System (类型系统)                                  │
+│  │  ├─ Value Representation (值表示)                        │
+│  │  ├─ Type Checking (类型检查)                             │
+│  │  └─ Type Coercion (类型转换)                             │
+│  ├─ Concurrency (并发)                                      │
+│  │  ├─ Coroutine (协程)                                     │
+│  │  ├─ Scheduler (调度器)                                   │
+│  │  └─ Channel (通道)                                       │
+│  └─ Standard Library (标准库)                               │
+│     ├─ Built-in Functions (内置函数)                        │
+│     ├─ Built-in Classes (内置类)                            │
+│     └─ Extension System (扩展系统)                          │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
