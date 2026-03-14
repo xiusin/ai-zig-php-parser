@@ -3159,7 +3159,40 @@ pub fn php_not_identical(lhs: Value, rhs: Value) !Value {
 
 /// PHP 8 比较核心：返回 -1, 0, 1
 fn phpCompare(lhs: Value, rhs: Value) i2 {
-    // 1. 两边都是 int
+    // PHP 8 comparison table (in priority order):
+    // 1. null|string vs string → null→"", string comparison
+    // 2. bool|null vs anything → both→bool, false < true
+    // 3. int vs int → integer comparison
+    // 4. number vs number (at least one float) → float comparison
+    // 5. string vs string → numeric strings: number cmp, else lexicographic
+    // 6. string vs number → convert string to number
+    // 7. array vs non-array → array is always greater
+
+    // Rule 1: null|string vs string → string comparison
+    if ((lhs.isNull() or lhs.isString()) and rhs.isString()) {
+        if (lhs.isNull()) {
+            const r = rhs.asString();
+            if (r.length == 0) return 0;
+            return -1;
+        }
+        // both string → fall through to Rule 5
+    } else if (lhs.isString() and (rhs.isNull() or rhs.isString())) {
+        if (rhs.isNull()) {
+            const l = lhs.asString();
+            if (l.length == 0) return 0;
+            return 1;
+        }
+        // both string → fall through to Rule 5
+    } else if (lhs.isNull() or lhs.isBool() or rhs.isNull() or rhs.isBool()) {
+        // Rule 2: bool|null vs non-string → bool comparison
+        const lb = lhs.toBool();
+        const rb = rhs.toBool();
+        if (!lb and rb) return -1;
+        if (lb and !rb) return 1;
+        return 0;
+    }
+
+    // Rule 3: int vs int
     if (lhs.isInt() and rhs.isInt()) {
         const l = lhs.asInt();
         const r = rhs.asInt();
@@ -3167,22 +3200,11 @@ fn phpCompare(lhs: Value, rhs: Value) i2 {
         if (l > r) return 1;
         return 0;
     }
-    // 2. null vs string → "" vs string（字符串比较）
-    if (lhs.isNull() and rhs.isString()) {
-        const r = rhs.asString();
-        if (r.length == 0) return 0;
-        return -1;
-    }
-    if (lhs.isString() and rhs.isNull()) {
-        const l = lhs.asString();
-        if (l.length == 0) return 0;
-        return 1;
-    }
-    // 3. 两边都是 string
+
+    // Rule 5: string vs string
     if (lhs.isString() and rhs.isString()) {
         const ls = lhs.asString();
         const rs = rhs.asString();
-        // 两边都是数字字符串 → 数字比较
         if (isNumericString(ls.data[0..ls.length]) and
             isNumericString(rs.data[0..rs.length]))
         {
@@ -3192,7 +3214,6 @@ fn phpCompare(lhs: Value, rhs: Value) i2 {
             if (lf > rf) return 1;
             return 0;
         }
-        // 字符串字典序比较
         const cmp = std.mem.order(
             u8,
             ls.data[0..ls.length],
@@ -3204,10 +3225,12 @@ fn phpCompare(lhs: Value, rhs: Value) i2 {
             .eq => 0,
         };
     }
-    // 4. null vs array → null < array
-    if (lhs.isNull() and rhs.isArray()) return -1;
-    if (lhs.isArray() and rhs.isNull()) return 1;
-    // 5. 其他情况：数字比较
+
+    // Rule 7: array vs non-array
+    if (lhs.isArray() and !rhs.isArray()) return 1;
+    if (!lhs.isArray() and rhs.isArray()) return -1;
+
+    // Rule 4/6: numeric comparison (fallback)
     const l = lhs.toFloat();
     const r = rhs.toFloat();
     if (l < r) return -1;
