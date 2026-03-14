@@ -171,6 +171,8 @@ pub const NativeLinker = struct {
     current_exception_handler: ?u32 = null,
     current_cleanup_regs: ?[]const usize = null,
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
+    current_var_name_map: ?*const std.AutoHashMap(usize, []const u8) = null,
+    current_byref_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_unset_regs: ?*std.AutoHashMap(usize, void) = null,
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
@@ -611,10 +613,33 @@ pub const NativeLinker = struct {
             \\        return const_val;
             \\    }
             \\    // 再查找全局变量表
+            \\    if (!global_vars_initialized) {
+            \\        var wbuf: [256]u8 = undefined;
+            \\        const wmsg = std.fmt.bufPrint(&wbuf, "Undefined variable {s}", .{name}) catch "Undefined variable";
+            \\        runtime.emitWarning(wmsg);
+            \\        return runtime.Value.initNull();
+            \\    }
+            \\    if (global_vars.get(name)) |value| {
+            \\        _ = value.retain();
+            \\        return value;
+            \\    }
+            \\    var wbuf2: [256]u8 = undefined;
+            \\    const wmsg2 = std.fmt.bufPrint(&wbuf2, "Undefined variable {s}", .{name}) catch "Undefined variable";
+            \\    runtime.emitWarning(wmsg2);
+            \\    return runtime.Value.initNull();
+            \\}
+            \\
+            \\pub fn getGlobalVarNoWarn(name: []const u8) runtime.Value {
+            \\    if (runtime.constants.get(name)) |const_val| {
+            \\        _ = const_val.retain();
+            \\        return const_val;
+            \\    }
             \\    if (!global_vars_initialized) return runtime.Value.initNull();
-            \\    const value = global_vars.get(name) orelse runtime.Value.initNull();
-            \\    _ = value.retain();
-            \\    return value;
+            \\    if (global_vars.get(name)) |value| {
+            \\        _ = value.retain();
+            \\        return value;
+            \\    }
+            \\    return runtime.Value.initNull();
             \\}
             \\
             \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
@@ -2303,6 +2328,16 @@ pub const NativeLinker = struct {
         var alloca_registers = std.AutoHashMap(usize, void).init(self.allocator);
         defer alloca_registers.deinit();
 
+        // PHP 变量名映射：reg_id → var_name（从 func.var_names 获取，跨优化持久）
+        var var_name_map = std.AutoHashMap(usize, []const u8).init(self.allocator);
+        defer var_name_map.deinit();
+        {
+            var vn_it = func.var_names.iterator();
+            while (vn_it.next()) |entry| {
+                try var_name_map.put(@intCast(entry.key_ptr.*), entry.value_ptr.*);
+            }
+        }
+
         // 跟踪已unset的寄存器（避免cleanup时访问已释放内存）
         var unset_registers = std.AutoHashMap(usize, void).init(self.allocator);
         defer unset_registers.deinit();
@@ -2410,7 +2445,6 @@ pub const NativeLinker = struct {
                     try all_registers.put(reg.id, corrected_type);
                     if (inst.op == .alloca) {
                         try alloca_registers.put(reg.id, {});
-                        // std.debug.print("alloca reg_{d}, type={s}\n", .{ reg.id, @tagName(@as(std.meta.Tag(IR.Type), corrected_type)) });
                     }
                     // 注意：nop 指令（被优化掉的 alloca）不应该被添加到 alloca_registers
 
@@ -2823,6 +2857,10 @@ pub const NativeLinker = struct {
                         try code.appendSlice(self.allocator, "    _ = &reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
                         try code.appendSlice(self.allocator, ";\n");
+                        // PHP 变量：生成 defined 标记用于 Undefined variable Warning
+                        if (var_name_map.get(reg_id)) |_| {
+                            try code.writer(self.allocator).print("    var __def_{d}: bool = false;\n    _ = &__def_{d};\n", .{ reg_id, reg_id });
+                        }
                     }
                 } else {
                     // 检查是否是引用参数寄存器
@@ -2867,6 +2905,10 @@ pub const NativeLinker = struct {
                         try code.appendSlice(self.allocator, "    _ = &reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
                         try code.appendSlice(self.allocator, ";\n");
+                        // mem2reg 提升的 PHP 变量：生成 defined 标记
+                        if (var_name_map.get(reg_id)) |_| {
+                            try code.writer(self.allocator).print("    var __def_{d}: bool = false;\n    _ = &__def_{d};\n", .{ reg_id, reg_id });
+                        }
                     }
                 }
             }
@@ -2986,6 +3028,37 @@ pub const NativeLinker = struct {
 
         self.current_alloca_regs = &alloca_registers;
         defer self.current_alloca_regs = null;
+
+        self.current_var_name_map = &var_name_map;
+        defer self.current_var_name_map = null;
+
+        // 预扫描：找出被传给 by-ref 内建函数第一个参数的寄存器
+        var byref_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer byref_regs.deinit();
+        {
+            const byref_funcs = [_][]const u8{
+                "array_push", "array_pop", "array_shift", "array_unshift",
+                "sort", "rsort", "usort", "uksort", "uasort",
+                "shuffle", "array_splice", "array_walk",
+            };
+            for (func.blocks.items) |blk_scan| {
+                for (blk_scan.instructions.items) |inst_scan| {
+                    if (inst_scan.op == .call) {
+                        const call_op = inst_scan.op.call;
+                        if (call_op.args.len > 0) {
+                            for (byref_funcs) |bf| {
+                                if (std.mem.eql(u8, call_op.func_name, bf)) {
+                                    try byref_regs.put(call_op.args[0].id, {});
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.current_byref_regs = &byref_regs;
+        defer self.current_byref_regs = null;
 
         self.current_unset_regs = &unset_registers;
         defer self.current_unset_regs = null;
@@ -5195,9 +5268,10 @@ pub const NativeLinker = struct {
 
         var writer = code.writer(self.allocator);
 
-        // Add source location comment
+        // Add source location comment and set runtime location
         if (inst.location.line > 0) {
             try writer.print("    // {s}:{d}\n", .{ inst.location.file, inst.location.line });
+            try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
         }
 
         switch (inst.op) {
@@ -5492,6 +5566,13 @@ pub const NativeLinker = struct {
                         }
                     }
                 } // end of optimized_alloca else
+
+                // PHP 变量：标记已定义
+                if (self.current_var_name_map) |vnm| {
+                    if (vnm.get(op.ptr.id)) |_| {
+                        try writer.print("    __def_{d} = true;\n", .{op.ptr.id});
+                    }
+                }
             },
             .make_ref => |op| {
                 if (inst.result) |reg| {
@@ -5518,6 +5599,13 @@ pub const NativeLinker = struct {
                             // 重定向：从param读取而不是alloca
                             try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, param_reg_id });
                             return;
+                        }
+                    }
+
+                    // PHP 变量 undefined 检查
+                    if (self.current_var_name_map) |vnm| {
+                        if (vnm.get(op.ptr.id)) |vname| {
+                            try writer.print("    if (!__def_{d}) runtime.emitWarning(\"Undefined variable {s}\");\n", .{ op.ptr.id, vname });
                         }
                     }
 
@@ -7557,11 +7645,6 @@ pub const NativeLinker = struct {
                     else
                         false;
 
-                    // 设置源码位置（用于 class not found 等运行时错误）
-                    if (inst.location.line > 0) {
-                        try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
-                    }
-
                     // 创建对象
                     const escaped_class = try self.escapeString(op.class_name);
                     defer self.allocator.free(escaped_class);
@@ -7888,7 +7971,12 @@ pub const NativeLinker = struct {
                     }
                     try writer.writeAll(".release(runtime.runtime_allocator);\n");
                     try self.writeRegAssignmentPrefix(writer, reg.id);
-                    try writer.print("getGlobalVar(\"{s}\");\n", .{op.name});
+                    const is_byref = if (self.current_byref_regs) |br| br.contains(reg.id) else false;
+                    if (is_byref) {
+                        try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{op.name});
+                    } else {
+                        try writer.print("getGlobalVar(\"{s}\");\n", .{op.name});
+                    }
                 }
             },
             .global_set => |op| {

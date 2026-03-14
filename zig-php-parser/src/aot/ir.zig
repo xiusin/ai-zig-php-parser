@@ -290,6 +290,8 @@ pub const Function = struct {
     ref_params: std.ArrayListUnmanaged(u32) = .{},
     /// Whether this function is a generator (contains yield)
     is_generator: bool = false,
+    /// PHP variable register ID → variable name (survives optimization)
+    var_names: std.AutoHashMapUnmanaged(u32, []const u8) = .{},
 
     const Self = @This();
 
@@ -324,6 +326,7 @@ pub const Function = struct {
         self.blocks.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.ref_params.deinit(self.allocator);
+        self.var_names.deinit(self.allocator);
     }
 
     /// Add a parameter
@@ -970,6 +973,7 @@ pub const Instruction = struct {
         type_: Type,
         count: u32, // Number of elements (for arrays)
         no_optimize: bool = false, // Prevent mem2reg optimization
+        var_name: []const u8 = "", // PHP variable name (e.g. "$v1")
     };
 
     /// Load from memory

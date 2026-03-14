@@ -1965,10 +1965,9 @@ pub const Value = struct {
             return PHPString.init(allocator, self.asString().data);
         }
         if (self.isArray()) {
-            // PHP 8+行为：数组转字符串抛出TypeError
-            _ = try throwException("Array to string conversion", allocator);
-            // 返回error以中断执行流
-            return error.TypeError;
+            // PHP 行为：发出 Warning 并返回 "Array"
+            emitWarning("Array to string conversion");
+            return PHPString.init(allocator, "Array");
         }
         if (self.isFunction()) {
             // 函数转字符串也应该抛出异常（PHP 8+）
@@ -2639,6 +2638,9 @@ pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, alloca
 
 /// 加法运算（PHP语义）
 pub fn php_add(lhs: Value, rhs: Value) !Value {
+    if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
+        emitUnsupportedOperandError(lhs, rhs, "+");
+    }
     // 整数 + 整数 = 整数（可能溢出为浮点）
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
@@ -2659,6 +2661,9 @@ pub fn php_add(lhs: Value, rhs: Value) !Value {
 
 /// 减法运算（PHP语义）
 pub fn php_sub(lhs: Value, rhs: Value) !Value {
+    if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
+        emitUnsupportedOperandError(lhs, rhs, "-");
+    }
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
@@ -2688,6 +2693,9 @@ pub fn php_neg(val: Value) !Value {
 
 /// 乘法运算（PHP语义）
 pub fn php_mul(lhs: Value, rhs: Value) !Value {
+    if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
+        emitUnsupportedOperandError(lhs, rhs, "*");
+    }
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
@@ -2705,6 +2713,9 @@ pub fn php_mul(lhs: Value, rhs: Value) !Value {
 
 /// 除法运算（PHP语义）
 pub fn php_div(lhs: Value, rhs: Value) !Value {
+    if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
+        emitUnsupportedOperandError(lhs, rhs, "/");
+    }
     // PHP除法总是返回浮点数（除非整除）
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
@@ -2732,6 +2743,9 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
 
 /// 取模运算（PHP语义）
 pub fn php_mod(lhs: Value, rhs: Value) !Value {
+    if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
+        emitUnsupportedOperandError(lhs, rhs, "%");
+    }
     // PHP 8.1+: float→int 隐式转换精度丢失时输出 Deprecated
     if (lhs.isFloat()) {
         const f = lhs.asFloat();
@@ -2750,6 +2764,109 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
         return Value.initNull();
     }
     return Value.initInt(@rem(a, b));
+}
+
+/// 检查字符串是否为 PHP 数字字符串
+fn isNumericString(data: []const u8) bool {
+    if (data.len == 0) return false;
+    var i: usize = 0;
+    while (i < data.len and std.ascii.isWhitespace(data[i])) : (i += 1) {}
+    if (i < data.len and (data[i] == '+' or data[i] == '-')) i += 1;
+    if (i >= data.len) return false;
+    var has_digits = false;
+    while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {
+        has_digits = true;
+    }
+    if (i < data.len and data[i] == '.') {
+        i += 1;
+        while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {
+            has_digits = true;
+        }
+    }
+    if (!has_digits) return false;
+    if (i < data.len and (data[i] == 'e' or data[i] == 'E')) {
+        i += 1;
+        if (i < data.len and (data[i] == '+' or data[i] == '-')) i += 1;
+        if (i >= data.len or !std.ascii.isDigit(data[i])) return false;
+        while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {}
+    }
+    while (i < data.len and std.ascii.isWhitespace(data[i])) : (i += 1) {}
+    return i >= data.len;
+}
+
+/// 检查 Value 是否可参与算术运算（PHP 8.x）
+fn checkArithmeticOperand(v: Value) bool {
+    if (v.isString()) {
+        const str = v.asString();
+        return isNumericString(str.data[0..str.length]);
+    }
+    return !v.isArray();
+}
+
+/// 输出 PHP Warning 到 stdout 和 stderr
+pub fn emitWarning(msg: []const u8) void {
+    const stdout = std.fs.File{ .handle = 1 };
+    const stderr = std.fs.File{ .handle = 2 };
+    var buf: [1024]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(
+        &buf,
+        "\nWarning: {s} in {s} on line {d}\n",
+        .{ msg, src_file, src_line },
+    ) catch "";
+    stdout.writeAll(wmsg) catch {};
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Warning:  {s} in {s} on line {d}\n",
+        .{ msg, src_file, src_line },
+    ) catch "";
+    stderr.writeAll(emsg) catch {};
+}
+
+/// 输出 Unsupported operand types TypeError 并终止
+fn emitUnsupportedOperandError(
+    lhs: Value,
+    rhs: Value,
+    op: []const u8,
+) noreturn {
+    const stdout = std.fs.File{ .handle = 1 };
+    const stderr = std.fs.File{ .handle = 2 };
+    const ltype = valueTypeName(lhs);
+    const rtype = valueTypeName(rhs);
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "\nFatal error: Uncaught TypeError: Unsupported" ++
+            " operand types: {s} {s} {s} in {s}:{d}\n" ++
+            "Stack trace:\n#0 {{main}}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{
+            ltype, op, rtype,
+            src_file, src_line,
+            src_file, src_line,
+        },
+    ) catch {
+        stdout.writeAll("\nFatal error: TypeError\n") catch {};
+        std.process.exit(255);
+    };
+    stdout.writeAll(msg) catch {};
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  Uncaught TypeError: Unsupported" ++
+            " operand types: {s} {s} {s} in {s}:{d}\n" ++
+            "Stack trace:\n#0 {{main}}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{
+            ltype, op, rtype,
+            src_file, src_line,
+            src_file, src_line,
+        },
+    ) catch {
+        std.process.exit(255);
+    };
+    stderr.writeAll(emsg) catch {};
+    std.process.exit(255);
 }
 
 /// 获取 Value 的 PHP 类型名称
@@ -2772,13 +2889,12 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
     const stdout_msg = std.fmt.bufPrint(
         &buf,
         "\nFatal error: Uncaught TypeError: {s}(): Argument" ++
-            " #{d} ($array) must be of type {s}, {s} given," ++
-            " called in {s} on line {d} and defined in" ++
-            " {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
+            " #{d} ($array) must be of type {s}, {s} given" ++
+            " in {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
             "  thrown in {s} on line {d}\n",
         .{
             func_name, arg_num, expected, got,
-            src_file,  src_line, src_file, src_line,
+            src_file,  src_line,
             src_file,  src_line,
         },
     ) catch {
@@ -2790,13 +2906,12 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
     const stderr_msg = std.fmt.bufPrint(
         &ebuf,
         "PHP Fatal error:  Uncaught TypeError: {s}(): Argument" ++
-            " #{d} ($array) must be of type {s}, {s} given," ++
-            " called in {s} on line {d} and defined in" ++
-            " {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
+            " #{d} ($array) must be of type {s}, {s} given" ++
+            " in {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
             "  thrown in {s} on line {d}\n",
         .{
             func_name, arg_num, expected, got,
-            src_file,  src_line, src_file, src_line,
+            src_file,  src_line,
             src_file,  src_line,
         },
     ) catch {

@@ -274,6 +274,27 @@ pub const Parser = struct {
                 self.nextToken();
                 continue;
             }
+            // 检测重复 <?php 标签（lexer 在 script 模式将 < 解析为 .less）
+            if (self.curr.tag == .less) {
+                const pos = self.curr.loc.start;
+                const buf = self.lexer.buffer;
+                if (pos + 4 < buf.len and
+                    buf[pos] == '<' and buf[pos + 1] == '?' and
+                    buf[pos + 2] == 'p' and buf[pos + 3] == 'h' and
+                    buf[pos + 4] == 'p')
+                {
+                    var line: u32 = 1;
+                    for (buf[0..pos]) |c| {
+                        if (c == '\n') line += 1;
+                    }
+                    try self.context.errors.append(self.allocator, .{
+                        .msg = "syntax error, unexpected token \"<\", expecting end of file",
+                        .line = line,
+                        .column = 0,
+                    });
+                    break;
+                }
+            }
             const stmt = self.parseStatement() catch {
                 self.synchronize();
                 continue;

@@ -531,12 +531,15 @@ pub const IRGenerator = struct {
         const inst = try self.allocator.create(Instruction);
         inst.* = .{
             .result = result,
-            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1 } },
+            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .var_name = name } },
             .location = self.current_location,
         };
 
         // Prepend to entry block to ensure it's before any potential use
         try self.entry_allocas.append(self.allocator, inst);
+
+        // 记录变量名到 Function（在优化后仍可用）
+        try func.var_names.put(func.allocator, result.id, name);
 
         try self.putVarRegister(name, result);
         // Mark variable as defined but not used yet, store definition location
