@@ -2472,9 +2472,11 @@ pub const IRGenerator = struct {
                 }
             } else 0;
 
+            const case_loc = self.diagnostics.getLocation(case_value_node.main_token.loc.start);
             try ir_cases.append(self.allocator, .{
                 .value = case_value,
                 .block = case_blocks.items[i],
+                .source_line = case_loc.line,
             });
         }
 

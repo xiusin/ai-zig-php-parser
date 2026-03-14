@@ -540,6 +540,7 @@ pub const Terminator = union(enum) {
     pub const SwitchCase = struct {
         value: i64,
         block: *BasicBlock,
+        source_line: u32 = 0,
     };
 };
 

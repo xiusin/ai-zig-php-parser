@@ -173,6 +173,8 @@ pub const NativeLinker = struct {
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_var_name_map: ?*const std.AutoHashMap(usize, []const u8) = null,
     current_byref_regs: ?*const std.AutoHashMap(usize, void) = null,
+    current_switch_value_regs: ?*const std.AutoHashMap(usize, void) = null,
+    current_global_get_names: ?*const std.AutoHashMap(usize, []const u8) = null,
     current_unset_regs: ?*std.AutoHashMap(usize, void) = null,
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
@@ -640,6 +642,12 @@ pub const NativeLinker = struct {
             \\        return value;
             \\    }
             \\    return runtime.Value.initNull();
+            \\}
+            \\
+            \\pub fn globalVarIsDefined(name: []const u8) bool {
+            \\    if (runtime.constants.get(name) != null) return true;
+            \\    if (!global_vars_initialized) return false;
+            \\    return global_vars.get(name) != null;
             \\}
             \\
             \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
@@ -2000,6 +2008,10 @@ pub const NativeLinker = struct {
         .{ "uniqid", bi(.{ .runtime_name = "php_uniqid", .needs_allocator = true }) },
         .{ "ord", bi(.{ .runtime_name = "php_ord", .needs_allocator = false }) },
         .{ "chr", bi(.{ .runtime_name = "php_chr", .needs_allocator = true }) },
+        .{ "urlencode", bi(.{ .runtime_name = "php_urlencode", .needs_allocator = true }) },
+        .{ "urldecode", bi(.{ .runtime_name = "php_urldecode", .needs_allocator = true }) },
+        .{ "rawurlencode", bi(.{ .runtime_name = "php_rawurlencode", .needs_allocator = true }) },
+        .{ "rawurldecode", bi(.{ .runtime_name = "php_rawurldecode", .needs_allocator = true }) },
 
         .{ "count", bi(.{ .runtime_name = "php_count", .needs_allocator = false }) },
         .{ "in_array", bi(.{ .runtime_name = "php_in_array", .needs_allocator = false }) },
@@ -3059,6 +3071,34 @@ pub const NativeLinker = struct {
         }
         self.current_byref_regs = &byref_regs;
         defer self.current_byref_regs = null;
+
+        // 预扫描：找出 switch 终止器使用的 value 寄存器
+        var switch_value_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer switch_value_regs.deinit();
+        for (func.blocks.items) |blk_scan| {
+            if (blk_scan.terminator) |term| {
+                if (term == .switch_) {
+                    try switch_value_regs.put(term.switch_.value.id, {});
+                }
+            }
+        }
+        self.current_switch_value_regs = &switch_value_regs;
+        defer self.current_switch_value_regs = null;
+
+        // 预扫描：记录 global_get 指令的结果寄存器 → 变量名映射
+        var global_get_names = std.AutoHashMap(usize, []const u8).init(self.allocator);
+        defer global_get_names.deinit();
+        for (func.blocks.items) |blk_scan| {
+            for (blk_scan.instructions.items) |inst_scan| {
+                if (inst_scan.op == .global_get) {
+                    if (inst_scan.result) |reg| {
+                        try global_get_names.put(reg.id, inst_scan.op.global_get.name);
+                    }
+                }
+            }
+        }
+        self.current_global_get_names = &global_get_names;
+        defer self.current_global_get_names = null;
 
         self.current_unset_regs = &unset_registers;
         defer self.current_unset_regs = null;
@@ -4710,34 +4750,79 @@ pub const NativeLinker = struct {
                 try writer.print("                    prev_block = current_block;\n                    current_block = {d};\n                }}\n", .{else_idx});
             },
             .switch_ => |sw| {
-                // 生成 switch 语句
                 try writer.writeAll("                prev_block = current_block;\n");
-                try writer.print("                switch (reg_{d}.toInt()) {{\n", .{sw.value.id});
 
-                // 生成 case 分支
-                for (sw.cases) |case| {
-                    const case_value = case.value;
-                    var case_idx: usize = 0;
+                // 查找 switch value 对应的 global_get 变量名
+                const sw_var_name = if (self.current_global_get_names) |gn| gn.get(sw.value.id) else null;
+                const src_file = blk_src: {
+                    if (func.location.file.len > 0 and !std.mem.eql(u8, func.location.file, "<unknown>")) break :blk_src func.location.file;
+                    // fallback: 从块内指令取源文件路径
+                    for (func.blocks.items) |blk_s| {
+                        for (blk_s.instructions.items) |inst_s| {
+                            if (inst_s.location.line > 0 and inst_s.location.file.len > 0) break :blk_src inst_s.location.file;
+                        }
+                    }
+                    break :blk_src "<unknown>";
+                };
+
+                if (sw_var_name != null and sw.cases.len > 0) {
+                    // PHP 行为：每个 case 比较处发 Warning + 使用 case 行号
+                    try writer.print("                {{\n", .{});
+                    try writer.print("                    const __sw_v = reg_{d}.toInt();\n", .{sw.value.id});
+                    try writer.print("                    var __sw_done: bool = false;\n", .{});
+                    try writer.print("                    _ = &__sw_done;\n", .{});
+
+                    for (sw.cases) |case| {
+                        var case_idx: usize = 0;
+                        for (func.blocks.items, 0..) |block, idx| {
+                            if (block == case.block) {
+                                case_idx = idx;
+                                break;
+                            }
+                        }
+
+                        try writer.print("                    if (!__sw_done) {{\n", .{});
+                        if (case.source_line > 0) {
+                            try writer.print("                        runtime.setSourceLocation(\"{s}\", {d});\n", .{ src_file, case.source_line });
+                        }
+                        try writer.print("                        if (__sw_undef_{d}) runtime.emitWarning(\"Undefined variable {s}\");\n", .{ sw.value.id, sw_var_name.? });
+                        try writer.print("                        if (__sw_v == {d}) {{ current_block = {d}; __sw_done = true; }}\n", .{ case.value, case_idx });
+                        try writer.print("                    }}\n", .{});
+                    }
+
+                    // default 分支
+                    var default_idx: usize = 0;
                     for (func.blocks.items, 0..) |block, idx| {
-                        if (block == case.block) {
-                            case_idx = idx;
+                        if (block == sw.default) {
+                            default_idx = idx;
                             break;
                         }
                     }
-                    try writer.print("                    {d} => current_block = {d},\n", .{ case_value, case_idx });
-                }
-
-                // 生成 default 分支
-                var default_idx: usize = 0;
-                for (func.blocks.items, 0..) |block, idx| {
-                    if (block == sw.default) {
-                        default_idx = idx;
-                        break;
+                    try writer.print("                    if (!__sw_done) {{ current_block = {d}; }}\n", .{default_idx});
+                    try writer.print("                }}\n", .{});
+                } else {
+                    // 非 global_get 变量或无 case：保持原始 Zig switch
+                    try writer.print("                switch (reg_{d}.toInt()) {{\n", .{sw.value.id});
+                    for (sw.cases) |case| {
+                        var case_idx: usize = 0;
+                        for (func.blocks.items, 0..) |block, idx| {
+                            if (block == case.block) {
+                                case_idx = idx;
+                                break;
+                            }
+                        }
+                        try writer.print("                    {d} => current_block = {d},\n", .{ case.value, case_idx });
                     }
+                    var default_idx: usize = 0;
+                    for (func.blocks.items, 0..) |block, idx| {
+                        if (block == sw.default) {
+                            default_idx = idx;
+                            break;
+                        }
+                    }
+                    try writer.print("                    else => current_block = {d},\n", .{default_idx});
+                    try writer.writeAll("                }\n");
                 }
-                try writer.print("                    else => current_block = {d},\n", .{default_idx});
-
-                try writer.writeAll("                }\n");
             },
             .throw => |ex_reg| {
                 const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(ex_reg.id) else false;
@@ -7970,11 +8055,18 @@ pub const NativeLinker = struct {
                         try writer.writeAll(".*");
                     }
                     try writer.writeAll(".release(runtime.runtime_allocator);\n");
-                    try self.writeRegAssignmentPrefix(writer, reg.id);
                     const is_byref = if (self.current_byref_regs) |br| br.contains(reg.id) else false;
-                    if (is_byref) {
+                    const is_switch_val = if (self.current_switch_value_regs) |sv| sv.contains(reg.id) else false;
+                    if (is_switch_val) {
+                        // switch 值：不在此处发 Warning，改为在每个 case 比较处发
+                        try writer.print("    const __sw_undef_{d} = !globalVarIsDefined(\"{s}\");\n", .{ reg.id, op.name });
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
+                        try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{op.name});
+                    } else if (is_byref) {
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{op.name});
                     } else {
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVar(\"{s}\");\n", .{op.name});
                     }
                 }
@@ -12594,15 +12686,47 @@ pub const NativeLinker = struct {
                 try writer.writeAll("                }\n");
             },
             .switch_ => |switch_data| {
-                // Switch语句
-                try writer.print("                switch (reg_{d}.toInt()) {{\n", .{switch_data.value.id});
-                for (switch_data.cases) |case| {
-                    const case_idx = self.findBlockIndex(func, case.block);
-                    try writer.print("                    {d} => current_block = {d},\n", .{ case.value, case_idx });
+                const sw_var_name2 = if (self.current_global_get_names) |gn| gn.get(switch_data.value.id) else null;
+                const src_file2 = blk_src2: {
+                    if (func.location.file.len > 0 and !std.mem.eql(u8, func.location.file, "<unknown>")) break :blk_src2 func.location.file;
+                    for (func.blocks.items) |blk_s| {
+                        for (blk_s.instructions.items) |inst_s| {
+                            if (inst_s.location.line > 0 and inst_s.location.file.len > 0) break :blk_src2 inst_s.location.file;
+                        }
+                    }
+                    break :blk_src2 "<unknown>";
+                };
+
+                if (sw_var_name2 != null and switch_data.cases.len > 0) {
+                    try writer.print("                {{\n", .{});
+                    try writer.print("                    const __sw_v = reg_{d}.toInt();\n", .{switch_data.value.id});
+                    try writer.print("                    var __sw_done: bool = false;\n", .{});
+                    try writer.print("                    _ = &__sw_done;\n", .{});
+
+                    for (switch_data.cases) |case| {
+                        const case_idx = self.findBlockIndex(func, case.block);
+                        try writer.print("                    if (!__sw_done) {{\n", .{});
+                        if (case.source_line > 0) {
+                            try writer.print("                        runtime.setSourceLocation(\"{s}\", {d});\n", .{ src_file2, case.source_line });
+                        }
+                        try writer.print("                        if (__sw_undef_{d}) runtime.emitWarning(\"Undefined variable {s}\");\n", .{ switch_data.value.id, sw_var_name2.? });
+                        try writer.print("                        if (__sw_v == {d}) {{ current_block = {d}; __sw_done = true; }}\n", .{ case.value, case_idx });
+                        try writer.print("                    }}\n", .{});
+                    }
+
+                    const default_idx = self.findBlockIndex(func, switch_data.default);
+                    try writer.print("                    if (!__sw_done) {{ current_block = {d}; }}\n", .{default_idx});
+                    try writer.print("                }}\n", .{});
+                } else {
+                    try writer.print("                switch (reg_{d}.toInt()) {{\n", .{switch_data.value.id});
+                    for (switch_data.cases) |case| {
+                        const case_idx = self.findBlockIndex(func, case.block);
+                        try writer.print("                    {d} => current_block = {d},\n", .{ case.value, case_idx });
+                    }
+                    const default_idx = self.findBlockIndex(func, switch_data.default);
+                    try writer.print("                    else => current_block = {d},\n", .{default_idx});
+                    try writer.writeAll("                }\n");
                 }
-                const default_idx = self.findBlockIndex(func, switch_data.default);
-                try writer.print("                    else => current_block = {d},\n", .{default_idx});
-                try writer.writeAll("                }\n");
             },
             .throw => |exception_reg| {
                 try writer.print("                return error.PHPException; // Exception: reg_{d}\n", .{exception_reg.id});

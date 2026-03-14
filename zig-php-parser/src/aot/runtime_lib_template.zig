@@ -2716,10 +2716,12 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "/");
     }
-    // PHP除法总是返回浮点数（除非整除）
-    if (lhs.isInt() and rhs.isInt()) {
-        const a = lhs.asInt();
-        const b = rhs.asInt();
+    // PHP 将 null/bool 视为整数参与整除判断
+    const lhs_is_int = lhs.isInt() or lhs.isNull() or lhs.isBool();
+    const rhs_is_int = rhs.isInt() or rhs.isNull() or rhs.isBool();
+    if (lhs_is_int and rhs_is_int) {
+        const a = lhs.toInt();
+        const b = rhs.toInt();
         if (b == 0) {
             _ = try throwException("Division by zero", runtime_allocator);
             return Value.initNull();
@@ -10621,6 +10623,119 @@ pub fn php_chr(code: Value, allocator: Allocator) !Value {
     const buffer = [_]u8{ascii};
     const result = try PHPString.init(allocator, &buffer);
     return Value.initString(result);
+}
+
+/// urlencode - PHP URL 编码（空格→+，其他特殊字符→%XX）
+pub fn php_urlencode(input: Value, allocator: Allocator) !Value {
+    if (!input.isString()) {
+        const s = try input.toString(allocator);
+        defer s.deinit(allocator);
+        return php_urlencode(Value.initString(s), allocator);
+    }
+    const data = input.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
+    defer result.deinit(allocator);
+    const hex = "0123456789ABCDEF";
+    for (data) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') {
+            try result.append(allocator, c);
+        } else if (c == ' ') {
+            try result.append(allocator, '+');
+        } else {
+            try result.append(allocator, '%');
+            try result.append(allocator, hex[c >> 4]);
+            try result.append(allocator, hex[c & 0x0F]);
+        }
+    }
+    const str = try PHPString.init(allocator, result.items);
+    return Value.initString(str);
+}
+
+/// urldecode - PHP URL 解码（+→空格，%XX→字符）
+pub fn php_urldecode(input: Value, allocator: Allocator) !Value {
+    if (!input.isString()) return Value.initString(try PHPString.init(allocator, ""));
+    const data = input.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
+    defer result.deinit(allocator);
+    var i: usize = 0;
+    while (i < data.len) {
+        if (data[i] == '+') {
+            try result.append(allocator, ' ');
+            i += 1;
+        } else if (data[i] == '%' and i + 2 < data.len) {
+            const hi = std.fmt.charToDigit(data[i + 1], 16) catch {
+                try result.append(allocator, '%');
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(data[i + 2], 16) catch {
+                try result.append(allocator, '%');
+                i += 1;
+                continue;
+            };
+            try result.append(allocator, (hi << 4) | lo);
+            i += 3;
+        } else {
+            try result.append(allocator, data[i]);
+            i += 1;
+        }
+    }
+    const str = try PHPString.init(allocator, result.items);
+    return Value.initString(str);
+}
+
+/// rawurlencode - RFC 3986 编码（空格→%20）
+pub fn php_rawurlencode(input: Value, allocator: Allocator) !Value {
+    if (!input.isString()) {
+        const s = try input.toString(allocator);
+        defer s.deinit(allocator);
+        return php_rawurlencode(Value.initString(s), allocator);
+    }
+    const data = input.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
+    defer result.deinit(allocator);
+    const hex = "0123456789ABCDEF";
+    for (data) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+            try result.append(allocator, c);
+        } else {
+            try result.append(allocator, '%');
+            try result.append(allocator, hex[c >> 4]);
+            try result.append(allocator, hex[c & 0x0F]);
+        }
+    }
+    const str = try PHPString.init(allocator, result.items);
+    return Value.initString(str);
+}
+
+/// rawurldecode - RFC 3986 解码（%XX→字符，+不转换）
+pub fn php_rawurldecode(input: Value, allocator: Allocator) !Value {
+    if (!input.isString()) return Value.initString(try PHPString.init(allocator, ""));
+    const data = input.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
+    defer result.deinit(allocator);
+    var i: usize = 0;
+    while (i < data.len) {
+        if (data[i] == '%' and i + 2 < data.len) {
+            const hi = std.fmt.charToDigit(data[i + 1], 16) catch {
+                try result.append(allocator, '%');
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(data[i + 2], 16) catch {
+                try result.append(allocator, '%');
+                i += 1;
+                continue;
+            };
+            try result.append(allocator, (hi << 4) | lo);
+            i += 3;
+        } else {
+            try result.append(allocator, data[i]);
+            i += 1;
+        }
+    }
+    const str = try PHPString.init(allocator, result.items);
+    return Value.initString(str);
 }
 
 /// stripos - 不区分大小写查找子字符串位置
