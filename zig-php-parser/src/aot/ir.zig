@@ -88,8 +88,14 @@ pub const Module = struct {
         self.string_table.deinit(self.allocator);
     }
 
-    /// Add a function to the module
+    /// Add a function to the module (replaces existing if duplicate name)
     pub fn addFunction(self: *Self, func: *Function) !void {
+        for (self.functions.items, 0..) |existing, i| {
+            if (std.mem.eql(u8, existing.name, func.name)) {
+                self.functions.items[i] = func;
+                return;
+            }
+        }
         try self.functions.append(self.allocator, func);
     }
 

@@ -2752,6 +2752,90 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
     return Value.initInt(@rem(a, b));
 }
 
+/// 获取 Value 的 PHP 类型名称
+fn valueTypeName(v: Value) []const u8 {
+    if (v.isNull()) return "null";
+    if (v.isBool()) return "bool";
+    if (v.isInt()) return "int";
+    if (v.isFloat()) return "float";
+    if (v.isString()) return "string";
+    if (v.isArray()) return "array";
+    if (Value_isObject(v)) return "object";
+    return "unknown";
+}
+
+/// 输出 PHP Fatal TypeError 并终止执行
+fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8, got: []const u8) noreturn {
+    const stdout = std.fs.File{ .handle = 1 };
+    const stderr = std.fs.File{ .handle = 2 };
+    var buf: [1024]u8 = undefined;
+    const stdout_msg = std.fmt.bufPrint(
+        &buf,
+        "\nFatal error: Uncaught TypeError: {s}(): Argument" ++
+            " #{d} ($array) must be of type {s}, {s} given," ++
+            " called in {s} on line {d} and defined in" ++
+            " {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{
+            func_name, arg_num, expected, got,
+            src_file,  src_line, src_file, src_line,
+            src_file,  src_line,
+        },
+    ) catch {
+        stdout.writeAll("\nFatal error: TypeError\n") catch {};
+        std.process.exit(255);
+    };
+    stdout.writeAll(stdout_msg) catch {};
+    var ebuf: [1024]u8 = undefined;
+    const stderr_msg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  Uncaught TypeError: {s}(): Argument" ++
+            " #{d} ($array) must be of type {s}, {s} given," ++
+            " called in {s} on line {d} and defined in" ++
+            " {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{
+            func_name, arg_num, expected, got,
+            src_file,  src_line, src_file, src_line,
+            src_file,  src_line,
+        },
+    ) catch {
+        std.process.exit(255);
+    };
+    stderr.writeAll(stderr_msg) catch {};
+    std.process.exit(255);
+}
+
+/// 调用未定义函数时输出 PHP Fatal error 并终止执行
+pub fn php_call_undefined_function(name: []const u8) noreturn {
+    const stdout = std.fs.File{ .handle = 1 };
+    const stderr = std.fs.File{ .handle = 2 };
+    var buf: [1024]u8 = undefined;
+    const stdout_msg = std.fmt.bufPrint(
+        &buf,
+        "\nFatal error: Uncaught Error: Call to undefined" ++
+            " function {s}() in {s}:{d}\nStack trace:\n" ++
+            "#0 {{main}}\n  thrown in {s} on line {d}\n",
+        .{ name, src_file, src_line, src_file, src_line },
+    ) catch {
+        stdout.writeAll("\nFatal error: Call to undefined function\n") catch {};
+        std.process.exit(255);
+    };
+    stdout.writeAll(stdout_msg) catch {};
+    var ebuf: [1024]u8 = undefined;
+    const stderr_msg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  Uncaught Error: Call to undefined" ++
+            " function {s}() in {s}:{d}\nStack trace:\n" ++
+            "#0 {{main}}\n  thrown in {s} on line {d}\n",
+        .{ name, src_file, src_line, src_file, src_line },
+    ) catch {
+        std.process.exit(255);
+    };
+    stderr.writeAll(stderr_msg) catch {};
+    std.process.exit(255);
+}
+
 /// 输出 PHP 8.1+ Deprecated 警告到 stdout（匹配 display_errors=On）
 fn emitDeprecatedFloatToInt(f: f64) void {
     const stdout = std.fs.File{ .handle = 1 };
@@ -3193,6 +3277,26 @@ pub fn php_echo(value: Value) !void {
         const str = value.asString();
         try stdout_file.writeAll(str.data);
     } else if (value.isArray()) {
+        // PHP Warning: Array to string conversion
+        const stderr_file = std.fs.File{ .handle = 2 };
+        var wbuf: [512]u8 = undefined;
+        const wmsg = std.fmt.bufPrint(
+            &wbuf,
+            "\nWarning: Array to string conversion in" ++
+                " {s} on line {d}\n",
+            .{ src_file, src_line },
+        ) catch "";
+        if (wmsg.len > 0) {
+            stdout_file.writeAll(wmsg) catch {};
+            var ebuf: [512]u8 = undefined;
+            const emsg = std.fmt.bufPrint(
+                &ebuf,
+                "PHP Warning:  Array to string conversion in" ++
+                    " {s} on line {d}\n",
+                .{ src_file, src_line },
+            ) catch "";
+            if (emsg.len > 0) stderr_file.writeAll(emsg) catch {};
+        }
         try stdout_file.writeAll("Array");
     }
 }
@@ -5764,7 +5868,10 @@ fn countRecursive(arr: *PHPArray) usize {
 
 /// array_push - 追加元素到数组
 pub fn php_array_push(arr: Value, values: []const Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return error.InvalidArgument;
+    if (!arr.isArray()) {
+        const got = valueTypeName(arr);
+        emitTypeFatalError("array_push", 1, "array", got);
+    }
 
     const php_arr = arr.asArray();
     for (values) |val| {
@@ -5776,7 +5883,10 @@ pub fn php_array_push(arr: Value, values: []const Value, allocator: Allocator) !
 
 /// array_pop - 弹出数组最后一个元素
 pub fn php_array_pop(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initNull();
+    if (!arr.isArray()) {
+        const got = valueTypeName(arr);
+        emitTypeFatalError("array_pop", 1, "array", got);
+    }
 
     const php_arr = arr.asArray();
     const value = array_ops_shared.pop(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index) orelse return Value.initNull();
@@ -8265,10 +8375,37 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         }
     }
 
-    const obj = if (meta) |m|
-        try PHPObject.initWithMeta(allocator, m)
-    else
-        try PHPObject.init(allocator, resolved);
+    if (meta == null) {
+        // PHP Fatal error: Class "X" not found
+        const stdout = std.fs.File{ .handle = 1 };
+        const stderr = std.fs.File{ .handle = 2 };
+        var buf: [1024]u8 = undefined;
+        const stdout_msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: Uncaught Error: Class \"{s}\"" ++
+                " not found in {s}:{d}\nStack trace:\n" ++
+                "#0 {{main}}\n  thrown in {s} on line {d}\n",
+            .{ resolved, src_file, src_line, src_file, src_line },
+        ) catch {
+            stdout.writeAll("\nFatal error: Class not found\n") catch {};
+            std.process.exit(255);
+        };
+        stdout.writeAll(stdout_msg) catch {};
+        var ebuf: [1024]u8 = undefined;
+        const stderr_msg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  Uncaught Error: Class \"{s}\"" ++
+                " not found in {s}:{d}\nStack trace:\n" ++
+                "#0 {{main}}\n  thrown in {s} on line {d}\n",
+            .{ resolved, src_file, src_line, src_file, src_line },
+        ) catch {
+            std.process.exit(255);
+        };
+        stderr.writeAll(stderr_msg) catch {};
+        std.process.exit(255);
+    }
+
+    const obj = try PHPObject.initWithMeta(allocator, meta.?);
 
     const obj_val = Value_initObject(obj);
 
@@ -9863,7 +10000,10 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
 }
 
 pub fn php_sort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) {
+        const got = valueTypeName(arr);
+        emitTypeFatalError("sort", 1, "array", got);
+    }
     const php_arr = arr.asArray();
     const n = php_arr.count();
     var values = try allocator.alloc(Value, n);

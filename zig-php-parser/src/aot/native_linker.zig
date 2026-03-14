@@ -1850,6 +1850,14 @@ pub const NativeLinker = struct {
         return builtinInfo(func_name) != null;
     }
 
+    /// 检查用户定义函数是否存在于 IR module 中
+    fn isUserDefinedFunction(self: *const Self, func_name: []const u8) bool {
+        if (self.ir_module) |module| {
+            return module.findFunction(func_name) != null;
+        }
+        return false;
+    }
+
     /// 检查函数是否是"语句函数"（返回值通常被忽略）
     fn isStatementFunction(self: *const Self, func_name: []const u8) bool {
         _ = self;
@@ -7168,42 +7176,46 @@ pub const NativeLinker = struct {
                             }
                         }
                     } else {
-                        // 用户定义函数 - 检查是否返回值
-                        const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
-                        const in_try_block = self.current_exception_handler != null;
-
-                        // 查找函数的引用参数信息
-                        const target_func = if (self.ir_module) |module| module.findFunction(op.func_name) else null;
-                        const ref_params = if (target_func) |func| func.ref_params.items else &[_]u32{};
-
-                        if (func_has_return_value) {
-                            // 函数返回Value
-                            if (in_try_block) {
-                                // 在 try 块中，捕获错误但不传播
-                                try self.writeRegAssignmentPrefix(writer, reg.id);
-                                try writer.print("@\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
-                                try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
-                            } else {
-                                // 不在 try 块中，使用 try 传播错误
-                                try self.writeRegAssignmentPrefix(writer, reg.id);
-                                try writer.print("try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                        // 用户定义函数 - 先检查是否存在
+                        if (!self.isUserDefinedFunction(op.func_name)) {
+                            // 函数未定义：生成运行时 Fatal error
+                            if (inst.location.line > 0) {
+                                try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
                             }
+                            try writer.print("    runtime.php_call_undefined_function(\"{s}\");\n", .{op.func_name});
                         } else {
-                            // 函数返回void
-                            if (in_try_block) {
-                                try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
-                                try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
+                            const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
+                            const in_try_block = self.current_exception_handler != null;
+
+                            // 查找函数的引用参数信息
+                            const target_func = if (self.ir_module) |module| module.findFunction(op.func_name) else null;
+                            const ref_params = if (target_func) |func| func.ref_params.items else &[_]u32{};
+
+                            if (func_has_return_value) {
+                                if (in_try_block) {
+                                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                                    try writer.print("@\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                    try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                                } else {
+                                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                                    try writer.print("try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                }
                             } else {
-                                try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
-                                try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                if (in_try_block) {
+                                    try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                    try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
+                                } else {
+                                    try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                }
+                                try self.writeRegAssignmentPrefix(writer, reg.id);
+                                try writer.writeAll("runtime.Value.initNull();\n");
                             }
-                            try self.writeRegAssignmentPrefix(writer, reg.id);
-                            try writer.writeAll("runtime.Value.initNull();\n");
                         }
                     }
 
@@ -7544,6 +7556,11 @@ pub const NativeLinker = struct {
                         alloca_regs.contains(reg.id)
                     else
                         false;
+
+                    // 设置源码位置（用于 class not found 等运行时错误）
+                    if (inst.location.line > 0) {
+                        try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
+                    }
 
                     // 创建对象
                     const escaped_class = try self.escapeString(op.class_name);
@@ -13339,6 +13356,12 @@ pub const NativeLinker = struct {
                         } else {
                             try writer.writeAll(");\n");
                         }
+                    } else if (!self.isUserDefinedFunction(op.func_name)) {
+                        // 函数未定义：生成运行时 Fatal error
+                        if (inst.location.line > 0) {
+                            try writer.print("        runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
+                        }
+                        try writer.print("        runtime.php_call_undefined_function(\"{s}\");\n", .{op.func_name});
                     } else {
                         // 用户定义函数 - 构建参数数组
                         if (op.args.len == 0) {
@@ -13355,7 +13378,6 @@ pub const NativeLinker = struct {
                             }
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
-                                // 统一使用 writeRegRef 处理 alloca 解引用
                                 try self.writeRegRef(writer, arg.id);
                             }
                             if (in_try_block) {
@@ -13373,13 +13395,18 @@ pub const NativeLinker = struct {
                         try writer.print("        _ = try runtime.{s}(", .{runtime_name});
                         for (op.args, 0..) |arg, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            // 统一使用 writeRegRef 处理 alloca 解引用
                             try self.writeRegRef(writer, arg.id);
                         }
                         if (needs_alloc) {
                             try writer.writeAll(", runtime.runtime_allocator");
                         }
                         try writer.writeAll(");\n");
+                    } else if (!self.isUserDefinedFunction(op.func_name)) {
+                        // 函数未定义：生成运行时 Fatal error
+                        if (inst.location.line > 0) {
+                            try writer.print("        runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
+                        }
+                        try writer.print("        runtime.php_call_undefined_function(\"{s}\");\n", .{op.func_name});
                     } else {
                         // 用户定义函数 - 构建参数数组
                         if (op.args.len == 0) {
@@ -13388,7 +13415,6 @@ pub const NativeLinker = struct {
                             try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{op.func_name});
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
-                                // 统一使用 writeRegRef 处理 alloca 解引用
                                 try self.writeRegRef(writer, arg.id);
                             }
                             try writer.writeAll("}, runtime.runtime_allocator);\n");

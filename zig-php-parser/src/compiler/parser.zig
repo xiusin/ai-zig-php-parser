@@ -244,8 +244,33 @@ pub const Parser = struct {
         var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
         defer stmts.deinit(self.allocator);
 
+        var in_php_mode = false;
         while (self.curr.tag != .eof) {
-            if (self.curr.tag == .t_open_tag or self.curr.tag == .t_close_tag or self.curr.tag == .t_inline_html) {
+            if (self.curr.tag == .t_open_tag) {
+                if (in_php_mode) {
+                    // PHP 模式中遇到第二个 <?php → parse error
+                    const loc = self.curr.loc;
+                    var line: u32 = 1;
+                    for (self.lexer.buffer[0..@min(loc.start, self.lexer.buffer.len)]) |c| {
+                        if (c == '\n') line += 1;
+                    }
+                    try self.context.errors.append(self.allocator, .{
+                        .msg = "syntax error, unexpected token \"<\", expecting end of file",
+                        .line = line,
+                        .column = 0,
+                    });
+                    break;
+                }
+                in_php_mode = true;
+                self.nextToken();
+                continue;
+            }
+            if (self.curr.tag == .t_close_tag) {
+                in_php_mode = false;
+                self.nextToken();
+                continue;
+            }
+            if (self.curr.tag == .t_inline_html) {
                 self.nextToken();
                 continue;
             }
