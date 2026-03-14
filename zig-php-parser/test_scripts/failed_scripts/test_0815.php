@@ -1,6 +1,0 @@
-<?php
-// 数学函数log测试 33
-echo round(log(M_E), 2);
-echo "
-";
-?>
