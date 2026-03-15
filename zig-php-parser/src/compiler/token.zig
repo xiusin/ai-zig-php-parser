@@ -123,6 +123,10 @@ pub const Token = struct {
         k_mixed,
         k_never,
         k_void,
+        cast_int,
+        cast_float,
+        cast_string,
+        cast_bool,
         // Symbols
         l_paren,
         r_paren,
@@ -155,9 +159,9 @@ pub const Token = struct {
         slash_equal,
         percent_equal,
         caret_equal, // ^=
-        and_equal,   // &=
-        or_equal,    // |=
-        star_star,   // **
+        and_equal, // &=
+        or_equal, // |=
+        star_star, // **
         star_star_equal, // **=
         less_less, // <<
         less_less_equal, // <<=
@@ -185,7 +189,7 @@ pub const Token = struct {
         t_attribute_start, // #[
         // Safe navigation operators (null-safe)
         safe_arrow, // ?-> (PHP mode)
-        safe_dot,   // ?.  (Go mode)
+        safe_dot, // ?.  (Go mode)
         // Go mode specific tokens
         t_go_identifier, // Go mode identifier (variable without $ prefix)
     };

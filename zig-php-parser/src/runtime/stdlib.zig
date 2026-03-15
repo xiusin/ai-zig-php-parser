@@ -226,6 +226,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "strlen", .min_args = 1, .max_args = 1, .handler = strlenFn },
             &.{ .name = "substr", .min_args = 2, .max_args = 3, .handler = substrFn },
             &.{ .name = "str_replace", .min_args = 3, .max_args = 4, .handler = strReplaceFn },
+            &.{ .name = "str_ireplace", .min_args = 3, .max_args = 4, .handler = strIreplaceFn },
             &.{ .name = "strpos", .min_args = 2, .max_args = 3, .handler = strposFn },
             &.{ .name = "stripos", .min_args = 2, .max_args = 3, .handler = striposFn },
             &.{ .name = "strrpos", .min_args = 2, .max_args = 3, .handler = strrposFn },
@@ -1215,19 +1216,123 @@ fn substrFn(vm: *VM, args: []const Value) !Value {
     return createStringReturn(vm.allocator, result_str);
 }
 
-fn strReplaceFn(vm: *VM, args: []const Value) !Value {
+fn stringReplaceOnce(allocator: std.mem.Allocator, subject_data: []const u8, search_data: []const u8, replace_data: []const u8, ignore_case: bool) ![]u8 {
+    if (search_data.len == 0) return allocator.dupe(u8, subject_data);
+
+    var found_count: usize = 0;
+    var pos: usize = 0;
+    while (pos < subject_data.len) {
+        if (pos + search_data.len <= subject_data.len) {
+            const matched = if (ignore_case)
+                std.ascii.eqlIgnoreCase(subject_data[pos .. pos + search_data.len], search_data)
+            else
+                std.mem.eql(u8, subject_data[pos .. pos + search_data.len], search_data);
+            if (matched) {
+                found_count += 1;
+                pos += search_data.len;
+                continue;
+            }
+        }
+        pos += 1;
+    }
+
+    if (found_count == 0) return allocator.dupe(u8, subject_data);
+
+    const new_len = subject_data.len - (found_count * search_data.len) + (found_count * replace_data.len);
+    const buffer = try allocator.alloc(u8, new_len);
+    errdefer allocator.free(buffer);
+
+    var write_pos: usize = 0;
+    pos = 0;
+    while (pos < subject_data.len) {
+        if (pos + search_data.len <= subject_data.len) {
+            const matched = if (ignore_case)
+                std.ascii.eqlIgnoreCase(subject_data[pos .. pos + search_data.len], search_data)
+            else
+                std.mem.eql(u8, subject_data[pos .. pos + search_data.len], search_data);
+            if (matched) {
+                @memcpy(buffer[write_pos .. write_pos + replace_data.len], replace_data);
+                write_pos += replace_data.len;
+                pos += search_data.len;
+                continue;
+            }
+        }
+        buffer[write_pos] = subject_data[pos];
+        write_pos += 1;
+        pos += 1;
+    }
+
+    return buffer;
+}
+
+fn valueToOwnedStringSlice(vm: *VM, val: Value) ![]u8 {
+    if (val.getTag() == .string) return vm.allocator.dupe(u8, val.getAsString().data.data);
+    const str = try val.toString(vm.allocator);
+    defer str.release(vm.allocator);
+    return vm.allocator.dupe(u8, str.data);
+}
+
+fn strReplaceCommon(vm: *VM, args: []const Value, ignore_case: bool) !Value {
     const search = args[0];
     const replace = args[1];
     const subject = args[2];
 
-    if (search.getTag() != .string or replace.getTag() != .string or subject.getTag() != .string) {
-        const exception = try ExceptionFactory.createTypeError(vm.allocator, "str_replace() expects all parameters to be strings", "builtin", 0);
+    if (subject.getTag() != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, if (ignore_case) "str_ireplace() expects parameter 3 to be string" else "str_replace() expects parameter 3 to be string", "builtin", 0);
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
 
-    const result_str = try subject.getAsString().data.replace(search.getAsString().data, replace.getAsString().data, vm.allocator);
+    if (search.getTag() == .array) {
+        var current = try vm.allocator.dupe(u8, subject.getAsString().data.data);
+        defer vm.allocator.free(current);
+
+        const search_arr = search.getAsArray().data;
+        const replace_is_array = replace.getTag() == .array;
+        var i: usize = 0;
+        while (i < search_arr.getElements().count()) : (i += 1) {
+            const key = ArrayKey{ .integer = @intCast(i) };
+            const search_val = search_arr.getElements().get(key) orelse continue;
+            const search_slice = try valueToOwnedStringSlice(vm, search_val);
+            defer vm.allocator.free(search_slice);
+
+            const replace_slice = blk: {
+                if (replace_is_array) {
+                    const replace_arr = replace.getAsArray().data;
+                    if (replace_arr.getElements().get(key)) |replace_val| {
+                        break :blk try valueToOwnedStringSlice(vm, replace_val);
+                    }
+                    break :blk try vm.allocator.dupe(u8, "");
+                }
+                break :blk try valueToOwnedStringSlice(vm, replace);
+            };
+            defer vm.allocator.free(replace_slice);
+
+            const next = try stringReplaceOnce(vm.allocator, current, search_slice, replace_slice, ignore_case);
+            vm.allocator.free(current);
+            current = next;
+        }
+
+        const result_str = try PHPString.init(vm.allocator, current);
+        return createStringReturn(vm.allocator, result_str);
+    }
+
+    const search_slice = try valueToOwnedStringSlice(vm, search);
+    defer vm.allocator.free(search_slice);
+    const replace_slice = try valueToOwnedStringSlice(vm, replace);
+    defer vm.allocator.free(replace_slice);
+    const buffer = try stringReplaceOnce(vm.allocator, subject.getAsString().data.data, search_slice, replace_slice, ignore_case);
+    defer vm.allocator.free(buffer);
+    const result_str = try PHPString.init(vm.allocator, buffer);
     return createStringReturn(vm.allocator, result_str);
+}
+
+fn strReplaceFn(vm: *VM, args: []const Value) !Value {
+    return strReplaceCommon(vm, args, false);
+}
+
+fn strIreplaceFn(vm: *VM, args: []const Value) !Value {
+    return strReplaceCommon(vm, args, true);
 }
 
 fn strposFn(vm: *VM, args: []const Value) !Value {
@@ -1974,6 +2079,56 @@ fn compareValues(a: Value, b: Value) i8 {
         return 0;
     }
 }
+
+const ArraySortItem = struct {
+    key: ArrayKey,
+    value: Value,
+};
+
+fn compareArrayKeys(a: ArrayKey, b: ArrayKey) i8 {
+    return switch (a) {
+        .integer => |ai| switch (b) {
+            .integer => |bi| if (ai < bi) -1 else if (ai > bi) 1 else 0,
+            .string => -1,
+        },
+        .string => |as| switch (b) {
+            .integer => 1,
+            .string => |bs| switch (std.mem.order(u8, as.data, bs.data)) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            },
+        },
+    };
+}
+
+fn collectArraySortItems(vm: *VM, php_array: *types.PHPArray) !std.ArrayListUnmanaged(ArraySortItem) {
+    var items = std.ArrayListUnmanaged(ArraySortItem){};
+    errdefer items.deinit(vm.allocator);
+
+    var iterator = php_array.getElements().iterator();
+    while (iterator.next()) |entry| {
+        try items.append(vm.allocator, .{
+            .key = entry.key_ptr.*,
+            .value = entry.value_ptr.*,
+        });
+    }
+
+    return items;
+}
+
+fn rebuildArrayWithSortedItems(php_array: *types.PHPArray, items: []const ArraySortItem) void {
+    const elements = php_array.getElements();
+    elements.clearRetainingCapacity();
+    php_array.next_index = 0;
+
+    for (items) |item| {
+        elements.put(item.key, item.value) catch {};
+        if (item.key == .integer and item.key.integer >= php_array.next_index) {
+            php_array.next_index = item.key.integer + 1;
+        }
+    }
+}
 // File System Function Implementations
 fn fileGetContentsFn(vm: *VM, args: []const Value) !Value {
     const filename = args[0];
@@ -2251,17 +2406,17 @@ fn dateFn(vm: *VM, args: []const Value) !Value {
 
     const format_str = format.getAsString().data.data;
     const ts: i64 = timestamp.asInt();
-    
+
     // Convert timestamp to epoch seconds
     const epoch_seconds: u64 = @intCast(ts);
     const epoch_day = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
     const day_seconds = epoch_day.getDaySeconds();
     const year_day = epoch_day.getEpochDay().calculateYearDay();
     const month_day = year_day.calculateMonthDay();
-    
+
     var result = try std.ArrayList(u8).initCapacity(vm.allocator, format_str.len * 2);
     defer result.deinit(vm.allocator);
-    
+
     var i: usize = 0;
     while (i < format_str.len) : (i += 1) {
         const c = format_str[i];
@@ -2276,7 +2431,7 @@ fn dateFn(vm: *VM, args: []const Value) !Value {
             else => try result.append(vm.allocator, c),
         }
     }
-    
+
     return Value.initString(vm.allocator, result.items);
 }
 
@@ -2291,13 +2446,13 @@ fn strtotimeFn(vm: *VM, args: []const Value) !Value {
     }
 
     const time_string = time_str.getAsString().data.data;
-    
+
     // Parse relative time strings
     if (std.mem.startsWith(u8, time_string, "+")) {
         var parts = std.mem.splitScalar(u8, time_string[1..], ' ');
         const num_str = parts.next() orelse return Value.initBool(false);
         const unit = parts.next() orelse return Value.initBool(false);
-        
+
         const num = std.fmt.parseInt(i64, num_str, 10) catch return Value.initBool(false);
         const seconds: i64 = if (std.mem.eql(u8, unit, "day") or std.mem.eql(u8, unit, "days"))
             num * 86400
@@ -2309,13 +2464,13 @@ fn strtotimeFn(vm: *VM, args: []const Value) !Value {
             num * 604800
         else
             return Value.initBool(false);
-        
+
         return Value.initInt(now + seconds);
     } else if (std.mem.startsWith(u8, time_string, "-")) {
         var parts = std.mem.splitScalar(u8, time_string[1..], ' ');
         const num_str = parts.next() orelse return Value.initBool(false);
         const unit = parts.next() orelse return Value.initBool(false);
-        
+
         const num = std.fmt.parseInt(i64, num_str, 10) catch return Value.initBool(false);
         const seconds: i64 = if (std.mem.eql(u8, unit, "day") or std.mem.eql(u8, unit, "days"))
             num * 86400
@@ -2323,12 +2478,12 @@ fn strtotimeFn(vm: *VM, args: []const Value) !Value {
             num * 3600
         else
             return Value.initBool(false);
-        
+
         return Value.initInt(now - seconds);
     } else if (std.mem.eql(u8, time_string, "now")) {
         return Value.initInt(now);
     }
-    
+
     // Try to parse as timestamp
     const parsed = std.fmt.parseInt(i64, time_string, 10) catch return Value.initBool(false);
     return Value.initInt(parsed);
@@ -3578,10 +3733,10 @@ fn compactFn(vm: *VM, args: []const Value) !Value {
 fn sprintfFn(vm: *VM, args: []const Value) !Value {
     if (args.len == 0) return Value.initString(vm.allocator, "");
     const format = if (args[0].getTag() == .string) args[0].getAsString().data.data else "";
-    
+
     var result = try std.ArrayList(u8).initCapacity(vm.allocator, format.len);
     defer result.deinit(vm.allocator);
-    
+
     var arg_idx: usize = 1;
     var i: usize = 0;
     while (i < format.len) : (i += 1) {
@@ -3592,17 +3747,17 @@ fn sprintfFn(vm: *VM, args: []const Value) !Value {
                 i += 1;
                 continue;
             }
-            
+
             if (arg_idx >= args.len) {
                 try result.append(vm.allocator, '%');
                 try result.append(vm.allocator, spec);
                 i += 1;
                 continue;
             }
-            
+
             const arg = args[arg_idx];
             arg_idx += 1;
-            
+
             switch (spec) {
                 'd', 'i' => {
                     const val = if (arg.getTag() == .integer) arg.asInt() else 0;
@@ -3626,7 +3781,7 @@ fn sprintfFn(vm: *VM, args: []const Value) !Value {
             try result.append(vm.allocator, format[i]);
         }
     }
-    
+
     return Value.initString(vm.allocator, result.items);
 }
 
@@ -3720,7 +3875,7 @@ fn strPadFn(vm: *VM, args: []const Value) !Value {
         const right_pad = pad_len - left_pad;
         var i: usize = 0;
         while (i < left_pad) : (i += 1) result[i] = pad_str[i % pad_str.len];
-        @memcpy(result[left_pad..left_pad + input.len], input);
+        @memcpy(result[left_pad .. left_pad + input.len], input);
         i = 0;
         while (i < right_pad) : (i += 1) result[left_pad + input.len + i] = pad_str[i % pad_str.len];
     } else { // STR_PAD_RIGHT (default)
@@ -3859,20 +4014,20 @@ fn numberFormatFn(vm: *VM, args: []const Value) !Value {
     const decimals: u32 = if (args.len > 1 and args[1].getTag() == .integer) @intCast(@max(0, args[1].asInt())) else 0;
     const dec_point = if (args.len > 2 and args[2].getTag() == .string) args[2].getAsString().data.data else ".";
     const thousands_sep = if (args.len > 3 and args[3].getTag() == .string) args[3].getAsString().data.data else ",";
-    
+
     // Format with decimals
     const formatted = try std.fmt.allocPrint(vm.allocator, "{d:.2}", .{num});
     defer vm.allocator.free(formatted);
-    
+
     // Split into integer and decimal parts
     var parts = std.mem.splitScalar(u8, formatted, '.');
     const int_part = parts.next() orelse formatted;
     const dec_part = parts.next();
-    
+
     // Add thousands separator
     var result = try std.ArrayList(u8).initCapacity(vm.allocator, formatted.len + 10);
     defer result.deinit(vm.allocator);
-    
+
     const int_len = int_part.len;
     var i: usize = 0;
     while (i < int_len) : (i += 1) {
@@ -3881,7 +4036,7 @@ fn numberFormatFn(vm: *VM, args: []const Value) !Value {
         }
         try result.append(vm.allocator, int_part[i]);
     }
-    
+
     if (decimals > 0) {
         try result.appendSlice(vm.allocator, dec_point);
         if (dec_part) |dp| {
@@ -3896,7 +4051,7 @@ fn numberFormatFn(vm: *VM, args: []const Value) !Value {
             }
         }
     }
-    
+
     return Value.initString(vm.allocator, result.items);
 }
 
@@ -4101,11 +4256,11 @@ fn intvalFn(vm: *VM, args: []const Value) !Value {
         .string => blk: {
             const str = args[0].getAsString().data.data;
             if (str.len == 0) break :blk 0;
-            
+
             // 去除前后空白
             var s = std.mem.trim(u8, str, " \t\n\r");
             if (s.len == 0) break :blk 0;
-            
+
             // 处理符号
             var negative = false;
             if (s[0] == '-') {
@@ -4114,16 +4269,16 @@ fn intvalFn(vm: *VM, args: []const Value) !Value {
             } else if (s[0] == '+') {
                 s = s[1..];
             }
-            
+
             if (s.len == 0) break :blk 0;
-            
+
             // 如果包含小数点，先解析为浮点数
             if (std.mem.indexOf(u8, s, ".") != null) {
                 if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
                     break :blk @intFromFloat(float_val);
                 } else |_| {}
             }
-            
+
             // 尝试完整解析
             if (std.fmt.parseInt(i64, s, 10)) |int_val| {
                 break :blk if (negative) -int_val else int_val;
@@ -4747,9 +4902,17 @@ fn asortFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    // asort maintains key association, so we sort by value but keep keys
-    // For simplicity, we just return true (PHP modifies in place)
-    _ = array.getAsArray().data;
+    const php_array = array.getAsArray().data;
+    var items = try collectArraySortItems(vm, php_array);
+    defer items.deinit(vm.allocator);
+
+    std.mem.sort(ArraySortItem, items.items, {}, struct {
+        fn lessThan(_: void, a: ArraySortItem, b: ArraySortItem) bool {
+            return compareValues(a.value, b.value) < 0;
+        }
+    }.lessThan);
+
+    rebuildArrayWithSortedItems(php_array, items.items);
     return Value.initBool(true);
 }
 
@@ -4763,7 +4926,17 @@ fn arsortFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    _ = array.getAsArray().data;
+    const php_array = array.getAsArray().data;
+    var items = try collectArraySortItems(vm, php_array);
+    defer items.deinit(vm.allocator);
+
+    std.mem.sort(ArraySortItem, items.items, {}, struct {
+        fn lessThan(_: void, a: ArraySortItem, b: ArraySortItem) bool {
+            return compareValues(a.value, b.value) > 0;
+        }
+    }.lessThan);
+
+    rebuildArrayWithSortedItems(php_array, items.items);
     return Value.initBool(true);
 }
 
@@ -4777,7 +4950,17 @@ fn ksortFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    _ = array.getAsArray().data;
+    const php_array = array.getAsArray().data;
+    var items = try collectArraySortItems(vm, php_array);
+    defer items.deinit(vm.allocator);
+
+    std.mem.sort(ArraySortItem, items.items, {}, struct {
+        fn lessThan(_: void, a: ArraySortItem, b: ArraySortItem) bool {
+            return compareArrayKeys(a.key, b.key) < 0;
+        }
+    }.lessThan);
+
+    rebuildArrayWithSortedItems(php_array, items.items);
     return Value.initBool(true);
 }
 
@@ -4791,7 +4974,17 @@ fn krsortFn(vm: *VM, args: []const Value) !Value {
         return error.InvalidArgumentType;
     }
 
-    _ = array.getAsArray().data;
+    const php_array = array.getAsArray().data;
+    var items = try collectArraySortItems(vm, php_array);
+    defer items.deinit(vm.allocator);
+
+    std.mem.sort(ArraySortItem, items.items, {}, struct {
+        fn lessThan(_: void, a: ArraySortItem, b: ArraySortItem) bool {
+            return compareArrayKeys(a.key, b.key) > 0;
+        }
+    }.lessThan);
+
+    rebuildArrayWithSortedItems(php_array, items.items);
     return Value.initBool(true);
 }
 
@@ -5081,16 +5274,16 @@ fn arrayRandFn(vm: *VM, args: []const Value) !Value {
         _ = try vm.throwException(exception);
         return error.InvalidArgumentType;
     }
-    
+
     const arr = arr_val.getAsArray().data;
     const count = arr.count();
     if (count == 0) return Value.initNull();
-    
+
     const num = if (args.len > 1) @as(usize, @intCast(@max(1, args[1].asInt()))) else 1;
-    
+
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
     const random = prng.random();
-    
+
     if (num == 1) {
         // Return single key
         const idx = random.intRangeAtMost(usize, 0, count - 1);
@@ -5105,14 +5298,14 @@ fn arrayRandFn(vm: *VM, args: []const Value) !Value {
             }
         }
     }
-    
+
     // Return array of keys
     const result = try vm.allocator.create(PHPArray);
     result.* = PHPArray.init(vm.allocator);
-    
+
     var selected = try std.ArrayList(usize).initCapacity(vm.allocator, num);
     defer selected.deinit(vm.allocator);
-    
+
     while (selected.items.len < @min(num, count)) {
         const idx = random.intRangeAtMost(usize, 0, count - 1);
         var found = false;
@@ -5126,7 +5319,7 @@ fn arrayRandFn(vm: *VM, args: []const Value) !Value {
             try selected.append(vm.allocator, idx);
         }
     }
-    
+
     var iter = arr.getElements().iterator();
     var i: usize = 0;
     var result_idx: i64 = 0;
@@ -5143,7 +5336,7 @@ fn arrayRandFn(vm: *VM, args: []const Value) !Value {
             }
         }
     }
-    
+
     const box = try vm.allocator.create(types.gc.Box(*PHPArray));
     box.* = .{ .ref_count = 1, .gc_info = .{}, .data = result };
     return Value.fromBox(box, Value.TYPE_ARRAY);
@@ -5152,31 +5345,31 @@ fn arrayRandFn(vm: *VM, args: []const Value) !Value {
 fn endFn(_: *VM, args: []const Value) !Value {
     const arr_val = args[0];
     if (arr_val.getTag() != .array) return Value.initBool(false);
-    
+
     const arr = arr_val.getAsArray().data;
     if (arr.count() == 0) return Value.initBool(false);
-    
+
     var iter = arr.getElements().iterator();
     var last: ?Value = null;
     while (iter.next()) |entry| {
         last = entry.value_ptr.*;
     }
-    
+
     return if (last) |v| v else Value.initBool(false);
 }
 
 fn resetFn(_: *VM, args: []const Value) !Value {
     const arr_val = args[0];
     if (arr_val.getTag() != .array) return Value.initBool(false);
-    
+
     const arr = arr_val.getAsArray().data;
     if (arr.count() == 0) return Value.initBool(false);
-    
+
     var iter = arr.getElements().iterator();
     if (iter.next()) |entry| {
         return entry.value_ptr.*;
     }
-    
+
     return Value.initBool(false);
 }
 
@@ -5187,10 +5380,10 @@ fn currentFn(vm: *VM, args: []const Value) !Value {
 fn keyFn(vm: *VM, args: []const Value) !Value {
     const arr_val = args[0];
     if (arr_val.getTag() != .array) return Value.initNull();
-    
+
     const arr = arr_val.getAsArray().data;
     if (arr.count() == 0) return Value.initNull();
-    
+
     var iter = arr.getElements().iterator();
     if (iter.next()) |entry| {
         return switch (entry.key_ptr.*) {
@@ -5198,7 +5391,7 @@ fn keyFn(vm: *VM, args: []const Value) !Value {
             .string => |s| Value.initString(vm.allocator, s.data),
         };
     }
-    
+
     return Value.initNull();
 }
 
@@ -5667,14 +5860,14 @@ fn arrayCountValuesFn(vm: *VM, args: []const Value) !Value {
     var iter = arr.getElements().iterator();
     while (iter.next()) |entry| {
         const value = entry.value_ptr.*;
-        
+
         // Use value as key (integers and strings only)
         const key: ArrayKey = switch (value.getTag()) {
             .integer => .{ .integer = value.asInt() },
             .string => .{ .string = value.getAsString().data },
             else => continue,
         };
-        
+
         // Check if key already exists and increment count
         const existing = result.getElements().get(key);
         if (existing) |count_val| {

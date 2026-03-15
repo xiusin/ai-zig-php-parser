@@ -1058,13 +1058,13 @@ pub const Parser = struct {
         const token = try self.eat(.k_use);
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
-        
+
         // Extract last part for default alias
         var parts = std.mem.splitScalar(u8, self.lexer.buffer[name_tok.loc.start..name_tok.loc.end], '\\');
         var last_part: []const u8 = "";
         while (parts.next()) |part| last_part = part;
         const default_alias_id = try self.context.intern(last_part);
-        
+
         // Check for explicit alias: use App\Service as S;
         var alias_id: ?u32 = null;
         if (self.curr.tag == .k_as) {
@@ -1076,7 +1076,7 @@ pub const Parser = struct {
             // Use default alias (last part of namespace)
             try self.context.imports.put(self.allocator, default_alias_id, name_id);
         }
-        
+
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .use_stmt, .main_token = token, .data = .{ .use_stmt = .{ .namespace = name_id, .alias = alias_id, .use_type = 0 } } });
     }
@@ -2516,12 +2516,19 @@ pub const Parser = struct {
                         std.mem.eql(u8, type_name, "double") or std.mem.eql(u8, type_name, "real"))
                     {
                         const cast_token = self.curr;
+                        const cast_type: Token.Tag = if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer"))
+                            .cast_int
+                        else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double") or std.mem.eql(u8, type_name, "real"))
+                            .cast_float
+                        else if (std.mem.eql(u8, type_name, "string"))
+                            .cast_string
+                        else
+                            .cast_bool;
                         self.nextToken();
                         if (self.curr.tag == .r_paren) {
                             self.nextToken();
                             const cast_expr = try self.parseUnaryPostfix();
-                            // Use t_string as cast_type and store name for VM to handle
-                            return self.createNode(.{ .tag = .cast_expr, .main_token = cast_token, .data = .{ .cast_expr = .{ .cast_type = .t_string, .expr = cast_expr } } });
+                            return self.createNode(.{ .tag = .cast_expr, .main_token = cast_token, .data = .{ .cast_expr = .{ .cast_type = cast_type, .expr = cast_expr } } });
                         }
                     }
                 }

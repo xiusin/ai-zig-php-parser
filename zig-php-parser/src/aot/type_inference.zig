@@ -647,6 +647,7 @@ pub fn getBuiltinReturnType(name: []const u8) ?InferredType {
     if (std.mem.eql(u8, name, "strlen")) return .{ .concrete = .int };
     if (std.mem.eql(u8, name, "substr")) return .{ .concrete = .string };
     if (std.mem.eql(u8, name, "str_replace")) return .{ .concrete = .string };
+    if (std.mem.eql(u8, name, "str_ireplace")) return .{ .concrete = .string };
     if (std.mem.eql(u8, name, "strtolower")) return .{ .concrete = .string };
     if (std.mem.eql(u8, name, "strtoupper")) return .{ .concrete = .string };
     if (std.mem.eql(u8, name, "trim")) return .{ .concrete = .string };
