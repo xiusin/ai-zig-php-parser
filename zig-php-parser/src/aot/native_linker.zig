@@ -7668,15 +7668,25 @@ pub const NativeLinker = struct {
                 }
             },
             .array_set => |op| {
-                // 检测ArrayAccess对象
-                try writer.print(
-                    \\    if (runtime.Value_isObject(reg_{d})) {{
-                    \\        _ = try runtime.php_object_call(reg_{d}, "offsetSet", &[_]runtime.Value{{reg_{d}, reg_{d}}});
-                    \\    }} else {{
-                    \\        try reg_{d}.asArray().setByValue(runtime.runtime_allocator, reg_{d}, reg_{d});
-                    \\    }}
-                    \\
-                , .{ op.array.id, op.array.id, op.key.id, op.value.id, op.array.id, op.key.id, op.value.id });
+                try writer.writeAll("    if (runtime.Value_isObject(");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(")) {\n");
+                try writer.writeAll("        _ = try runtime.php_object_call(");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", \"offsetSet\", &[_]runtime.Value{");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.value.id);
+                try writer.writeAll("});\n");
+                try writer.writeAll("    } else {\n");
+                try writer.writeAll("        try ");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(".asArray().setByValue(runtime.runtime_allocator, ");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.value.id);
+                try writer.writeAll(");\n");
+                try writer.writeAll("    }\n");
             },
             .array_set_nested => |op| {
                 // 嵌套数组赋值，支持 auto-vivification
@@ -13851,11 +13861,13 @@ pub const NativeLinker = struct {
                 try writer.print("        {s} = try runtime.php_array_get({s}, {s}, runtime.runtime_allocator);\n", .{ result_reg.?, array, key });
             },
             .array_set => |op| {
-                var array_buf: [32]u8 = undefined;
-                const array = try std.fmt.bufPrint(&array_buf, "reg_{d}", .{op.array.id});
-
-                // 简化：所有寄存器都是 Value 类型，使用 setByValue
-                try writer.print("        try {s}.asArray().setByValue(runtime.runtime_allocator, reg_{d}, reg_{d});\n", .{ array, op.key.id, op.value.id });
+                try writer.writeAll("        try ");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(".asArray().setByValue(runtime.runtime_allocator, ");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.value.id);
+                try writer.writeAll(");\n");
             },
             .array_set_nested => |op| {
                 // 嵌套数组赋值，支持 auto-vivification
