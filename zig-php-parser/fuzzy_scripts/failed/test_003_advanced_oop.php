@@ -9,6 +9,7 @@ abstract class BaseEntity {
         $this->id = uniqid();
     }
     
+    
     abstract public function calculate(): float;
     
     public static function getCount(): int {
