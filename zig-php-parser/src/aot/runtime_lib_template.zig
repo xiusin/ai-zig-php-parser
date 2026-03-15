@@ -2202,6 +2202,7 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "strtoupper", wrapBuiltin_strtoupper },
     .{ "strtolower", wrapBuiltin_strtolower },
     .{ "str_ireplace", wrapBuiltin_str_ireplace },
+    .{ "str_getcsv", wrapBuiltin_str_getcsv },
     .{ "trim", wrapBuiltin_trim },
     .{ "count", wrapBuiltin_count },
     .{ "sqrt", wrapBuiltin_sqrt },
@@ -2331,6 +2332,16 @@ fn wrapBuiltin_str_ireplace(ctx: Value, args: []const Value, allocator: Allocato
     if (args.len < 3) return error.InvalidArgumentCount;
     const count_out = if (args.len >= 4) args[3] else Value.initNull();
     return php_str_ireplace(args[0], args[1], args[2], count_out, allocator);
+}
+
+fn wrapBuiltin_str_getcsv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    if (args.len < 4) emitDeprecatedStrGetcsvEscape();
+    const separator = if (args.len >= 2) args[1] else Value.initString(PHPString.initStatic(","));
+    const enclosure = if (args.len >= 3) args[2] else Value.initString(PHPString.initStatic("\""));
+    const escape = if (args.len >= 4) args[3] else Value.initString(PHPString.initStatic("\\"));
+    return php_str_getcsv(args[0], separator, enclosure, escape, allocator);
 }
 
 fn wrapBuiltin_trim(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -3040,6 +3051,26 @@ pub fn emitWarning(msg: []const u8) void {
         &ebuf,
         "PHP Warning:  {s} in {s} on line {d}\n",
         .{ msg, src_file, src_line },
+    ) catch "";
+    stderr.writeAll(emsg) catch {};
+}
+
+pub fn emitDeprecatedStrGetcsvEscape() void {
+    const stdout = std.fs.File{ .handle = 1 };
+    const stderr = std.fs.File{ .handle = 2 };
+    var buf: [1024]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(
+        &buf,
+        "\nDeprecated: str_getcsv(): the $escape parameter must be provided as its default value will change in {s} on line {d}\n",
+        .{ src_file, src_line },
+    ) catch "";
+    stdout.writeAll(wmsg) catch {};
+
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Deprecated:  str_getcsv(): the $escape parameter must be provided as its default value will change in {s} on line {d}\n",
+        .{ src_file, src_line },
     ) catch "";
     stderr.writeAll(emsg) catch {};
 }
@@ -6186,6 +6217,68 @@ pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
     const result = try PHPString.init(allocator, buffer);
     allocator.free(buffer);
     return Value.initString(result);
+}
+
+pub fn php_str_getcsv(input: Value, separator: Value, enclosure: Value, escape: Value, allocator: Allocator) !Value {
+    const input_str = try input.toString(allocator);
+    defer input_str.release(allocator);
+
+    const separator_str = try separator.toString(allocator);
+    defer separator_str.release(allocator);
+
+    const enclosure_str = try enclosure.toString(allocator);
+    defer enclosure_str.release(allocator);
+
+    const escape_str = try escape.toString(allocator);
+    defer escape_str.release(allocator);
+
+    const sep: u8 = if (separator_str.length > 0) separator_str.data[0] else ',';
+    const enc: u8 = if (enclosure_str.length > 0) enclosure_str.data[0] else '"';
+    const esc: u8 = if (escape_str.length > 0) escape_str.data[0] else '\\';
+
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var field = std.ArrayList(u8){};
+    defer field.deinit(allocator);
+
+    var in_quotes = false;
+    var i: usize = 0;
+    while (i < input_str.length) : (i += 1) {
+        const ch = input_str.data[i];
+
+        if (ch == esc and i + 1 < input_str.length) {
+            const next = input_str.data[i + 1];
+            if (next == enc or next == esc) {
+                try field.append(allocator, next);
+                i += 1;
+                continue;
+            }
+        }
+
+        if (ch == enc) {
+            if (in_quotes and i + 1 < input_str.length and input_str.data[i + 1] == enc) {
+                try field.append(allocator, enc);
+                i += 1;
+                continue;
+            }
+            in_quotes = !in_quotes;
+            continue;
+        }
+
+        if (!in_quotes and ch == sep) {
+            const field_str = try PHPString.init(allocator, field.items);
+            try result.push(allocator, Value.initString(field_str));
+            field.clearRetainingCapacity();
+            continue;
+        }
+
+        try field.append(allocator, ch);
+    }
+
+    const field_str = try PHPString.init(allocator, field.items);
+    try result.push(allocator, Value.initString(field_str));
+    return Value.initArray(result);
 }
 
 /// str_split - 将字符串分割为数组

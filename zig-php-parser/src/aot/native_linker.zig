@@ -1993,6 +1993,7 @@ pub const NativeLinker = struct {
         .{ "explode", bi(.{ .runtime_name = "php_explode", .needs_allocator = true }) },
         .{ "implode", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
         .{ "join", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
+        .{ "str_getcsv", bi(.{ .runtime_name = "php_str_getcsv", .needs_allocator = true }) },
         .{ "str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
         .{ "strcmp", bi(.{ .runtime_name = "php_strcmp", .needs_allocator = false }) },
         .{ "strcasecmp", bi(.{ .runtime_name = "php_strcasecmp", .needs_allocator = true }) },
@@ -4578,6 +4579,43 @@ pub const NativeLinker = struct {
         return self.writeValueArgsArrayWithRefs(writer, args, null, &[_]u32{});
     }
 
+    fn writeStrGetcsvArgs(
+        self: *Self,
+        writer: anytype,
+        args: []const IR.Register,
+    ) !void {
+        if (args.len > 0) {
+            const arg0 = args[0];
+            try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg0.type_), arg0.id);
+        } else {
+            try writer.writeAll("runtime.Value.initNull()");
+        }
+        try writer.writeAll(", ");
+
+        if (args.len > 1) {
+            const arg1 = args[1];
+            try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg1.type_), arg1.id);
+        } else {
+            try writer.writeAll("runtime.Value.initString(runtime.PHPString.initStatic(\",\"))");
+        }
+        try writer.writeAll(", ");
+
+        if (args.len > 2) {
+            const arg2 = args[2];
+            try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg2.type_), arg2.id);
+        } else {
+            try writer.writeAll("runtime.Value.initString(runtime.PHPString.initStatic(\"\\\"\"))");
+        }
+        try writer.writeAll(", ");
+
+        if (args.len > 3) {
+            const arg3 = args[3];
+            try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg3.type_), arg3.id);
+        } else {
+            try writer.writeAll("runtime.Value.initString(runtime.PHPString.initStatic(\"\\\\\"))");
+        }
+    }
+
     fn writeValueArgsArrayWithRefs(
         self: *Self,
         writer: anytype,
@@ -4631,57 +4669,15 @@ pub const NativeLinker = struct {
         var writer = code.writer(self.allocator);
         switch (term) {
             .ret => |ret_val| {
-                // 引用参数写回
-                if (func.ref_params.items.len > 0 and self.param_registers != null) {
-                    try code.appendSlice(self.allocator, "                // Write back reference parameters\n");
-                    const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
-                    for (func.ref_params.items) |ref_idx| {
-                        const param = func.params.items[ref_idx];
-                        const args_index = if (has_this) (if (ref_idx > 0) ref_idx - 1 else 0) else ref_idx;
-
-                        // 引用参数对应的是alloca寄存器（指针）
-                        // 需要找到对应的alloca并load其值
-                        // 参数名在IR中是"$name"格式
-                        const param_name_with_dollar = if (param.name.len > 0 and param.name[0] == '$')
-                            param.name
-                        else
-                            param.name;
-
-                        // 遍历所有指令找到param指令对应的alloca
-                        for (func.blocks.items[0].instructions.items) |inst| {
-                            if (inst.op == .param and inst.result != null) {
-                                if (std.mem.eql(u8, inst.op.param.name, param_name_with_dollar)) {
-                                    const param_reg_id = inst.result.?.id;
-                                    // 找到对应的store指令，获取alloca寄存器
-                                    for (func.blocks.items[0].instructions.items) |store_inst| {
-                                        if (store_inst.op == .store) {
-                                            const val_reg = store_inst.op.store.value;
-                                            if (val_reg.id == param_reg_id) {
-                                                const alloca_reg_id = store_inst.op.store.ptr.id;
-                                                try writer.print("                if (args.len > {d} and args[{d}].isRef()) {{\n", .{ args_index, args_index });
-                                                if (alloca_regs.contains(alloca_reg_id)) {
-                                                    try writer.print("                    args[{d}].asRef().* = reg_{d}.*;\n", .{ args_index, alloca_reg_id });
-                                                } else {
-                                                    try writer.print("                    args[{d}].asRef().* = reg_{d};\n", .{ args_index, alloca_reg_id });
-                                                }
-                                                try writer.print("                }}\n", .{});
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
                 if (cleanup_regs.len > 0) {
                     try code.appendSlice(self.allocator, "                // Cleanup (except return value)\n");
                     for (cleanup_regs) |reg_id| {
                         // 检查是否是返回值寄存器
                         const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
                         if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
+                            if (self.ref_param_alloca_map) |map| {
+                                if (map.get(reg_id)) |_| continue;
+                            }
                             // 只cleanup alloca寄存器（局部变量）
                             // 其他寄存器（临时值）可能被返回值引用，不安全释放
                             if (alloca_regs.contains(reg_id)) {
@@ -7267,6 +7263,13 @@ pub const NativeLinker = struct {
                                     try self.writeValueArgsArray(writer, op.args[1..]);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
+                                if (op.args.len < 4) {
+                                    try writer.writeAll("    runtime.emitDeprecatedStrGetcsvEscape();\n");
+                                }
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeStrGetcsvArgs(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact")) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgsArray(writer, op.args);
@@ -7512,6 +7515,13 @@ pub const NativeLinker = struct {
                                     try self.writeValueArgsArray(writer, op.args[1..]);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
+                                if (op.args.len < 4) {
+                                    try writer.writeAll("    runtime.emitDeprecatedStrGetcsvEscape();\n");
+                                }
+                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                try self.writeStrGetcsvArgs(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort")) {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgsArray(writer, op.args);
@@ -7587,15 +7597,44 @@ pub const NativeLinker = struct {
                     try std.fmt.allocPrint(self.allocator, "reg_{d}", .{op.func_ptr.id});
                 defer self.allocator.free(func_ptr_expr);
 
+                const in_try_block = self.current_exception_handler != null;
+
                 if (inst.result) |reg| {
-                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
+                    if (in_try_block) {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
+                    } else {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
+                    }
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (in_try_block) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
                 } else {
-                    try writer.print("    _ = try runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
+                    if (in_try_block) {
+                        try writer.print("    _ = runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
+                    } else {
+                        try writer.print("    _ = try runtime.php_invoke_callable({s}, ", .{func_ptr_expr});
+                    }
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (in_try_block) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
                 }
+
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .array_new => |op| {
                 _ = op;
@@ -13672,30 +13711,46 @@ pub const NativeLinker = struct {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
 
-                        if (in_try_block) {
-                            try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
-                        } else {
-                            try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
-                        }
-
-                        // 特殊处理：file_put_contents只接受2个参数+allocator，忽略可选的flags
-                        const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents"))
-                            @min(op.args.len, 2)
-                        else
-                            op.args.len;
-
-                        for (op.args[0..max_args], 0..) |arg, i| {
-                            if (i > 0) try writer.writeAll(", ");
-                            // 统一使用 writeRegRef 处理 alloca 解引用
-                            try self.writeRegRef(writer, arg.id);
-                        }
-                        if (needs_alloc) {
+                        if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
+                            if (op.args.len < 4) {
+                                try writer.writeAll("        runtime.emitDeprecatedStrGetcsvEscape();\n");
+                            }
+                            if (in_try_block) {
+                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                            } else {
+                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                            }
+                            try self.writeStrGetcsvArgs(writer, op.args);
                             try writer.writeAll(", runtime.runtime_allocator");
-                        }
-                        if (in_try_block) {
-                            try writer.writeAll(") catch runtime.Value.initNull();\n");
+                            if (in_try_block) {
+                                try writer.writeAll(") catch runtime.Value.initNull();\n");
+                            } else {
+                                try writer.writeAll(");\n");
+                            }
                         } else {
-                            try writer.writeAll(");\n");
+                            if (in_try_block) {
+                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                            } else {
+                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                            }
+
+                            const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents"))
+                                @min(op.args.len, 2)
+                            else
+                                op.args.len;
+
+                            for (op.args[0..max_args], 0..) |arg, i| {
+                                if (i > 0) try writer.writeAll(", ");
+                                try self.writeRegRef(writer, arg.id);
+                            }
+                            if (needs_alloc) {
+                                try writer.writeAll(", runtime.runtime_allocator");
+                            }
+                            if (in_try_block) {
+                                try writer.writeAll(") catch runtime.Value.initNull();\n");
+                            } else {
+                                try writer.writeAll(");\n");
+                            }
                         }
                     } else if (!self.isUserDefinedFunction(op.func_name)) {
                         // 函数未定义：生成运行时 Fatal error
@@ -13740,15 +13795,24 @@ pub const NativeLinker = struct {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = self.functionNeedsAllocator(op.func_name);
 
-                        try writer.print("        _ = try runtime.{s}(", .{runtime_name});
-                        for (op.args, 0..) |arg, i| {
-                            if (i > 0) try writer.writeAll(", ");
-                            try self.writeRegRef(writer, arg.id);
+                        if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
+                            if (op.args.len < 4) {
+                                try writer.writeAll("        runtime.emitDeprecatedStrGetcsvEscape();\n");
+                            }
+                            try writer.print("        _ = try runtime.{s}(", .{runtime_name});
+                            try self.writeStrGetcsvArgs(writer, op.args);
+                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                        } else {
+                            try writer.print("        _ = try runtime.{s}(", .{runtime_name});
+                            for (op.args, 0..) |arg, i| {
+                                if (i > 0) try writer.writeAll(", ");
+                                try self.writeRegRef(writer, arg.id);
+                            }
+                            if (needs_alloc) {
+                                try writer.writeAll(", runtime.runtime_allocator");
+                            }
+                            try writer.writeAll(");\n");
                         }
-                        if (needs_alloc) {
-                            try writer.writeAll(", runtime.runtime_allocator");
-                        }
-                        try writer.writeAll(");\n");
                     } else if (!self.isUserDefinedFunction(op.func_name)) {
                         // 函数未定义：生成运行时 Fatal error
                         if (inst.location.line > 0) {
@@ -14246,10 +14310,29 @@ pub const NativeLinker = struct {
 
         // 链接PCRE2库（正则表达式支持）
         try args.append(self.allocator, "-lpcre2-8");
-        // 添加库搜索路径（macOS Homebrew）
+        // 添加库搜索路径（仅在目录存在时）
         if (self.config.target.os == .macos) {
-            try args.append(self.allocator, "-L/opt/homebrew/lib");
-            try args.append(self.allocator, "-L/usr/local/lib");
+            const has_homebrew_lib = blk: {
+                std.fs.accessAbsolute("/opt/homebrew/lib", .{}) catch |err| switch (err) {
+                    error.FileNotFound => break :blk false,
+                    else => return err,
+                };
+                break :blk true;
+            };
+            if (has_homebrew_lib) {
+                try args.append(self.allocator, "-L/opt/homebrew/lib");
+            }
+
+            const has_usr_local_lib = blk: {
+                std.fs.accessAbsolute("/usr/local/lib", .{}) catch |err| switch (err) {
+                    error.FileNotFound => break :blk false,
+                    else => return err,
+                };
+                break :blk true;
+            };
+            if (has_usr_local_lib) {
+                try args.append(self.allocator, "-L/usr/local/lib");
+            }
         }
 
         // 静态链接（macOS 不支持）

@@ -2463,6 +2463,7 @@ pub const IRGenerator = struct {
         // 构建switch cases数组
         var ir_cases = std.ArrayListUnmanaged(Terminator.SwitchCase){};
         defer ir_cases.deinit(self.allocator);
+        var use_compare_chain = false;
 
         for (switch_data.cases, 0..) |case_idx, i| {
             const case_node = self.getNode(case_idx).?;
@@ -2471,6 +2472,10 @@ pub const IRGenerator = struct {
             // 计算case值（必须是常量）
             const case_value_node = self.getNode(case_data.condition).?;
             const case_const = self.getConstantValue(case_value_node);
+
+            if (case_const == null or case_const.?.string_val != null or case_const.?.is_null) {
+                use_compare_chain = true;
+            }
 
             const case_value: i64 = if (case_const) |c| blk: {
                 if (c.int_val) |val| {
@@ -2492,13 +2497,42 @@ pub const IRGenerator = struct {
             });
         }
 
-        // 生成switch终止指令
-        const cases_slice = try self.allocator.dupe(Terminator.SwitchCase, ir_cases.items);
-        self.setTerminator(.{ .switch_ = .{
-            .value = value_reg,
-            .cases = cases_slice,
-            .default = default_block,
-        } });
+        if (use_compare_chain) {
+            var check_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+            defer check_blocks.deinit(self.allocator);
+
+            for (switch_data.cases, 0..) |_, i| {
+                if (i == 0) {
+                    try check_blocks.append(self.allocator, self.current_block.?);
+                } else {
+                    const label = try std.fmt.allocPrint(self.allocator, "switch.check.{d}", .{i});
+                    defer self.allocator.free(label);
+                    const block = try self.createBlock(label);
+                    try check_blocks.append(self.allocator, block);
+                }
+            }
+
+            for (switch_data.cases, 0..) |case_idx, i| {
+                self.setCurrentBlock(check_blocks.items[i]);
+                const case_node = self.getNode(case_idx).?;
+                const case_data = case_node.data.case;
+                const case_reg = try self.generateExpression(case_data.condition);
+                const match_reg = try self.emitWithResult(.{ .eq = .{ .lhs = value_reg, .rhs = case_reg } }, .php_value);
+                const else_block = if (i + 1 < check_blocks.items.len) check_blocks.items[i + 1] else default_block;
+                self.setTerminator(.{ .cond_br = .{
+                    .cond = match_reg,
+                    .then_block = case_blocks.items[i],
+                    .else_block = else_block,
+                } });
+            }
+        } else {
+            const cases_slice = try self.allocator.dupe(Terminator.SwitchCase, ir_cases.items);
+            self.setTerminator(.{ .switch_ = .{
+                .value = value_reg,
+                .cases = cases_slice,
+                .default = default_block,
+            } });
+        }
 
         // Push loop context for break (switch可以使用break)
         try self.loop_stack.append(self.allocator, .{
@@ -2601,6 +2635,8 @@ pub const IRGenerator = struct {
                 self.setTerminator(.{ .br = exit_block });
             }
         }
+
+        _ = self.try_stack.pop();
 
         // Generate catch clauses — 每个 catch 子句一个独立块，dispatcher 链式类型匹配
         const target_after_catch = finally_block orelse exit_block;
@@ -2716,9 +2752,6 @@ pub const IRGenerator = struct {
                 self.setTerminator(.{ .br = exit_block });
             }
         }
-
-        // Pop try context
-        _ = self.try_stack.pop();
 
         // Continue in exit block
         self.setCurrentBlock(exit_block);
@@ -4739,9 +4772,8 @@ pub const IRGenerator = struct {
                         if (self.getVarRegister(var_name)) |var_reg| {
                             // 如果变量本身是引用参数，直接传递（不创建临时alloca）
                             if (self.reference_params.contains(var_name)) {
-                                // 直接传递引用参数（已经是指针）
-                                const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
-                                args[i] = ref_reg;
+                                // 直接透传引用参数对应的指针，避免二次 make_ref 嵌套引用
+                                args[i] = var_reg;
                                 // 不需要写回，因为修改会直接反映到原始引用
                                 continue;
                             }
