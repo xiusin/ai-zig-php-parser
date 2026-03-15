@@ -716,6 +716,12 @@ pub const NativeLinker = struct {
             \\    // 初始化全局变量表
             \\    global_vars = std.StringHashMap(runtime.Value).init(allocator);
             \\    global_vars_initialized = true;
+            \\    // 注意：cleanupAllClasses 必须在 global_vars 清理之后执行
+            \\    // 因为 global_vars 中的对象可能需要调用 __destruct，
+            \\    // 而 __destruct 依赖 class_registry（由 cleanupAllClasses 清除）
+            \\    // Zig defer 是 LIFO 顺序，所以先注册 cleanupAllClasses，
+            \\    // 再注册 global_vars cleanup，这样 global_vars cleanup 先执行
+            \\    defer runtime.cleanupAllClasses();
             \\    defer {
             \\        var it = global_vars.valueIterator();
             \\        while (it.next()) |val| {
@@ -816,7 +822,6 @@ pub const NativeLinker = struct {
             \\    registerAllClasses(allocator) catch {};
             \\    // 注册所有函数
             \\    registerAllFunctions() catch {};
-            \\    defer runtime.cleanupAllClasses();
             \\
         );
 
@@ -7250,6 +7255,14 @@ pub const NativeLinker = struct {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                             try self.writeValueArgsArray(writer, op.args);
                             try writer.writeAll(");\n");
+                        } else if (std.mem.eql(u8, runtime_name, "php_array_slice")) {
+                            // array_slice 的 length 参数是可选的，缺失时补 null
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            try self.writeValueArgs(writer, op.args);
+                            if (op.args.len < 3) {
+                                try writer.writeAll(", runtime.Value.initNull()");
+                            }
+                            try writer.writeAll(", runtime.runtime_allocator);\n");
                         } else if (self.functionNeedsAllocator(op.func_name)) {
                             if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
                                 if (op.args.len == 0) {
@@ -8219,6 +8232,9 @@ pub const NativeLinker = struct {
                         try writer.print("    try setGlobalVar(\"{s}\", reg_{d}.*);\n", .{ op.name, val.id });
                     } else {
                         try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ op.name, val.id });
+                        // setGlobalVar 会 retain 值，release 源寄存器以转移所有权
+                        // 防止 __main__ 中表达式寄存器的 refcount 泄漏
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{val.id});
                     }
                 }
             },

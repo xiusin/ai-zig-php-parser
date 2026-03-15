@@ -2186,6 +2186,11 @@ pub fn val_deref(val: *Value) *Value {
 }
 
 pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
+    // 如果变量已经是引用，直接复用同一引用单元（多闭包共享 use(&$var) 场景）
+    if (ptr.isRef()) {
+        _ = ptr.retain();
+        return ptr.*;
+    }
     const cell = try allocator.create(Value);
     cell.* = ptr.*;
     _ = cell.retain();
@@ -2265,6 +2270,18 @@ pub fn php_create_closure(name: Value, captures: Value, allocator: Allocator) !V
 
     const closure = try PHPClosure.init(allocator, func_ptr.?, cap_list.items);
     return Value.initFunction(closure);
+}
+
+pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
+    if (!Value_isObject(obj_val)) return Value.initBool(!obj_val.isNull());
+
+    const obj = Value_asObject(obj_val);
+    const prop_name = if (property_name_val.isString())
+        property_name_val.asString().data
+    else
+        return Value.initBool(false);
+
+    return Value.initBool(obj.hasProperty(prop_name));
 }
 
 pub fn php_object_unset(obj_val: Value, property_name_val: Value, allocator: Allocator) !Value {
@@ -8504,7 +8521,6 @@ pub const PHPObject = struct {
     /// 增加引用计数
     pub fn retain(self: *PHPObject) void {
         self.ref_count += 1;
-        // std.debug.print("PHPObject.retain: class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
     }
 
     /// 减少引用计数，必要时释放
@@ -9046,8 +9062,14 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         if (m.findMethodLookup("__construct")) |lookup| {
             const guard = ClassContext.init(m, lookup.owner);
             defer guard.deinit();
+            const prev_ref = obj.ref_count;
             _ = try lookup.method.func(obj_val, args, allocator);
-            // 注意：__construct不会额外retain对象，所以不需要release
+            // 补偿 __construct 中 store $this 产生的 retain
+            // 构造函数内部会将 ctx 存入 $this 本地寄存器（retain），
+            // 但清理代码可能未正确 release，需要在此处平衡
+            if (obj.ref_count > prev_ref) {
+                obj.ref_count = prev_ref;
+            }
         }
     }
 

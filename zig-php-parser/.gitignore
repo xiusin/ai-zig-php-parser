@@ -9,4 +9,4 @@ test/aot_diff/
 tests_*
 _debug*
 /.idea/*
-fuzzy_scripts/*
+fuzzy_scripts*

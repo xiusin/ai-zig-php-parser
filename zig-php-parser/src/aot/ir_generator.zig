@@ -3213,6 +3213,21 @@ pub const IRGenerator = struct {
                     .value = value_reg,
                 } }, null);
             },
+            .array_init => {
+                // 短语法解构: [$a, $b] = $arr 或嵌套 [[$a,$b],[$c,$d]] = $nested
+                const inner_elements = target_node.data.array_init.elements;
+                var inner_targets = std.ArrayListUnmanaged(Node.Index){};
+                defer inner_targets.deinit(self.allocator);
+                for (inner_elements) |elem_idx| {
+                    const elem_node = self.getNode(elem_idx) orelse continue;
+                    if (elem_node.tag == .array_pair) {
+                        try inner_targets.append(self.allocator, elem_node.data.array_pair.value);
+                    } else {
+                        try inner_targets.append(self.allocator, elem_idx);
+                    }
+                }
+                try self.generateListDestructure(inner_targets.items, value_reg);
+            },
             else => {},
         }
     }
@@ -3370,7 +3385,17 @@ pub const IRGenerator = struct {
         const array_reg = try self.generateExpression(list_data.value);
 
         // Generate assignment for each target
-        for (list_data.targets, 0..) |target_idx, i| {
+        try self.generateListDestructure(list_data.targets, array_reg);
+    }
+
+    /// 递归处理 list/短数组解构赋值
+    fn generateListDestructure(self: *Self, targets: []const Node.Index, array_reg: Register) !void {
+        for (targets, 0..) |target_idx, i| {
+            const target_node = self.getNode(target_idx) orelse continue;
+
+            // 跳过空位（list(,$b) 中的逗号）
+            if (target_node.tag == .list_empty) continue;
+
             // Extract element at index i
             const index_reg = try self.emitWithResult(.{ .const_int = @as(i64, @intCast(i)) }, .i64);
             const elem_reg = try self.emitWithResult(.{ .array_get = .{
@@ -3378,13 +3403,44 @@ pub const IRGenerator = struct {
                 .key = index_reg,
             } }, .php_value);
 
-            // Assign to variable if target is a variable
-            const target_node = self.getNode(target_idx) orelse continue;
             if (target_node.tag == .variable) {
                 const var_name = self.getString(target_node.data.variable.name);
                 const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
                 _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = elem_reg } }, null);
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
+            } else if (target_node.tag == .array_init) {
+                // 嵌套解构: [[$a, $b], [$c, $d]] = $nested
+                const inner_elements = target_node.data.array_init.elements;
+                // 收集内部目标索引
+                var inner_targets = std.ArrayListUnmanaged(Node.Index){};
+                defer inner_targets.deinit(self.allocator);
+                for (inner_elements) |elem_idx| {
+                    const elem_node = self.getNode(elem_idx) orelse continue;
+                    if (elem_node.tag == .array_pair) {
+                        try inner_targets.append(self.allocator, elem_node.data.array_pair.value);
+                    } else {
+                        try inner_targets.append(self.allocator, elem_idx);
+                    }
+                }
+                try self.generateListDestructure(inner_targets.items, elem_reg);
+            } else if (target_node.tag == .property_access) {
+                const obj_reg = try self.generateExpression(target_node.data.property_access.target);
+                const prop_name = self.getString(target_node.data.property_access.property_name);
+                _ = try self.emit(.{ .property_set = .{
+                    .object = obj_reg,
+                    .property_name = prop_name,
+                    .value = elem_reg,
+                } }, null);
+            } else if (target_node.tag == .array_access) {
+                const arr_reg = try self.generateExpression(target_node.data.array_access.target);
+                if (target_node.data.array_access.index) |key_idx| {
+                    const key_reg = try self.generateExpression(key_idx);
+                    _ = try self.emit(.{ .array_set = .{
+                        .array = arr_reg,
+                        .key = key_reg,
+                        .value = elem_reg,
+                    } }, null);
+                }
             }
         }
     }
@@ -4520,6 +4576,26 @@ pub const IRGenerator = struct {
             invoke_args[0] = callback_reg;
             invoke_args[1] = args_arr;
             return self.emitWithResult(.{ .call = .{ .func_name = "php_invoke_callable_args_array", .args = invoke_args, .return_type = .php_value } }, .php_value);
+        }
+
+        // isset($obj->prop)：需要调用 php_object_isset 以触发 __isset 魔法方法
+        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "isset")) {
+            if (call_data.args.len >= 1) {
+                const arg_idx = call_data.args[0];
+                const arg_node = self.getNode(arg_idx);
+                if (arg_node != null and arg_node.?.tag == .property_access) {
+                    const object_reg = try self.generateExpression(arg_node.?.data.property_access.target);
+                    const property_name_reg = try self.emitPropertyNameValue(self.getString(arg_node.?.data.property_access.property_name));
+                    const isset_args = try self.allocator.alloc(Register, 2);
+                    isset_args[0] = object_reg;
+                    isset_args[1] = property_name_reg;
+                    return self.emitWithResult(.{ .call = .{
+                        .func_name = "php_object_isset",
+                        .args = isset_args,
+                        .return_type = .php_value,
+                    } }, .php_value);
+                }
+            }
         }
 
         // unset($arr[$key])：这是语言结构而非真实函数，AOT 需要生成 array_unset 指令
