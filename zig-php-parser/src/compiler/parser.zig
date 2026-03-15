@@ -1034,7 +1034,7 @@ pub const Parser = struct {
         // Handle global namespace: namespace { ... }
         if (self.curr.tag == .l_brace) {
             // Global namespace block
-            self.context.current_namespace = 0; // Reset to global namespace
+            self.context.current_namespace = null;
             const body = try self.parseBlock();
             return body;
         }
@@ -1056,6 +1056,14 @@ pub const Parser = struct {
 
     fn parseUse(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_use);
+        var use_type: u8 = 0;
+        if (self.curr.tag == .k_function) {
+            use_type = 1;
+            self.nextToken();
+        } else if (self.curr.tag == .k_const) {
+            use_type = 2;
+            self.nextToken();
+        }
         const name_tok = try self.eat(.t_string);
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
 
@@ -1078,7 +1086,7 @@ pub const Parser = struct {
         }
 
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .use_stmt, .main_token = token, .data = .{ .use_stmt = .{ .namespace = name_id, .alias = alias_id, .use_type = 0 } } });
+        return self.createNode(.{ .tag = .use_stmt, .main_token = token, .data = .{ .use_stmt = .{ .namespace = name_id, .alias = alias_id, .use_type = use_type } } });
     }
 
     fn parseAttributes(self: *Parser) anyerror![]const ast.Node.Index {
@@ -1118,7 +1126,8 @@ pub const Parser = struct {
             try self.eat(.t_go_identifier)
         else
             try self.eat(.t_string);
-        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        const name_id = try self.context.resolveName(raw_name_id);
 
         // PHP enum backed type: enum Color: string { ... }
         var backed_type: ?ast.Node.Index = null;
@@ -1202,7 +1211,8 @@ pub const Parser = struct {
         } else false;
 
         const name_tok = try self.eat(.t_string);
-        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        const name_id = try self.context.resolveName(raw_name_id);
         _ = try self.eat(.l_paren);
         var params = std.ArrayListUnmanaged(ast.Node.Index){};
         while (self.curr.tag != .r_paren) {
@@ -1547,7 +1557,8 @@ pub const Parser = struct {
     fn parseConst(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_const);
         const name_tok = try self.eat(.t_string);
-        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        const name_id = try self.context.resolveName(raw_name_id);
         _ = try self.eat(.equal);
         const val = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
@@ -2794,8 +2805,21 @@ pub const Parser = struct {
             if (self.curr.tag == .l_paren) {
                 self.nextToken();
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                    // 使用优先级2跳过逗号运算符
-                    try args.append(self.allocator, try self.parseExpression(2));
+                    if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                        const name_tok = self.curr;
+                        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+                        self.nextToken();
+                        self.nextToken();
+                        const value_expr = try self.parseExpression(1);
+                        const named_arg_node = try self.createNode(.{
+                            .tag = .named_arg,
+                            .main_token = name_tok,
+                            .data = .{ .named_arg = .{ .name = name_id, .value = value_expr } },
+                        });
+                        try args.append(self.allocator, named_arg_node);
+                    } else {
+                        try args.append(self.allocator, try self.parseExpression(2));
+                    }
                     if (self.curr.tag == .comma) self.nextToken();
                 }
                 _ = try self.eat(.r_paren);
@@ -2852,8 +2876,21 @@ pub const Parser = struct {
         if (self.curr.tag == .l_paren) {
             self.nextToken();
             while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                // 使用优先级2，跳过逗号运算符（优先级1）
-                try args.append(self.allocator, try self.parseExpression(2));
+                if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                    const name_tok = self.curr;
+                    const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+                    self.nextToken();
+                    self.nextToken();
+                    const value_expr = try self.parseExpression(1);
+                    const named_arg_node = try self.createNode(.{
+                        .tag = .named_arg,
+                        .main_token = name_tok,
+                        .data = .{ .named_arg = .{ .name = name_id, .value = value_expr } },
+                    });
+                    try args.append(self.allocator, named_arg_node);
+                } else {
+                    try args.append(self.allocator, try self.parseExpression(2));
+                }
                 if (self.curr.tag == .comma) self.nextToken();
             }
             _ = try self.eat(.r_paren);

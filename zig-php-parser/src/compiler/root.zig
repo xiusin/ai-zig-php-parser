@@ -136,6 +136,12 @@ pub const PHPContext = struct {
     }
 
     pub fn resolveName(self: *PHPContext, name_id: u32) !u32 {
+        const name_str = self.string_pool.keys()[name_id];
+
+        if (name_str.len > 0 and name_str[0] == '\\') {
+            return try self.intern(name_str[1..]);
+        }
+
         // Simple name resolution logic
         // 1. Check imports
         if (self.imports.get(name_id)) |resolved| return resolved;
@@ -143,7 +149,6 @@ pub const PHPContext = struct {
         // 2. Append current namespace if exists
         if (self.current_namespace) |ns_id| {
             const ns_str = self.string_pool.keys()[ns_id];
-            const name_str = self.string_pool.keys()[name_id];
             var fqcn = std.ArrayListUnmanaged(u8){};
             defer fqcn.deinit(self.allocator);
             try fqcn.appendSlice(self.allocator, ns_str);

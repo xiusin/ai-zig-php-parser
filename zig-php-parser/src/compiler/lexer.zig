@@ -134,6 +134,7 @@ pub const Lexer = struct {
             ':' => if (self.match(':')) .{ .tag = .double_colon, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .colon, .loc = .{ .start = start, .end = self.pos } },
             '0'...'9' => self.lexNumber(start),
             'a'...'z', 'A'...'Z', '_' => self.lexIdentifier(start),
+            '\\' => if (self.pos < self.buffer.len and ((self.buffer[self.pos] >= 'a' and self.buffer[self.pos] <= 'z') or (self.buffer[self.pos] >= 'A' and self.buffer[self.pos] <= 'Z') or self.buffer[self.pos] == '_')) self.lexIdentifier(start) else .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } },
             '\'' => self.lexSingleQuoteString(start),
             '"' => self.lexDoubleQuoteString(start),
             '`' => self.lexBacktickString(start),
@@ -310,23 +311,23 @@ pub const Lexer = struct {
     fn lexVariableInInterpolation(self: *Lexer, start: usize) Token {
         // 在字符串插值中识别变量，支持 $var->prop 和 $var[key]
         if (self.buffer[self.pos] == '$') self.pos += 1;
-        
+
         // 识别变量名
         while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
             self.pos += 1;
         }
-        
+
         // 检查是否有 -> 属性访问
         if (self.pos + 1 < self.buffer.len and self.buffer[self.pos] == '-' and self.buffer[self.pos + 1] == '>') {
             self.pos += 2; // skip ->
-            
+
             // 识别属性名
             while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
                 self.pos += 1;
             }
         }
         // TODO: 支持 $var[key] 语法
-        
+
         return .{ .tag = .t_variable, .loc = .{ .start = start, .end = self.pos } };
     }
 

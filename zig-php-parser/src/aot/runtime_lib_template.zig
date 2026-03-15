@@ -334,6 +334,7 @@ pub fn initRuntime(allocator: Allocator) void {
     registerSplFixedArray(runtime_allocator) catch {};
     registerSplStack(runtime_allocator) catch {};
     registerSplQueue(runtime_allocator) catch {};
+    ClassMeta.registerDateTimeClasses(runtime_allocator) catch {};
     registerZigChannel(runtime_allocator) catch {};
     registerZigSelect(runtime_allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
@@ -2830,6 +2831,35 @@ pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, alloca
         }
     }
     return php_invoke_callable(callback, tmp_args[0..used], allocator);
+}
+
+pub fn php_object_call_safe_args_array(obj_val: Value, method_name_val: Value, args_array: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) {
+        return Value.initNull();
+    }
+    if (!method_name_val.isString()) {
+        return Value.initNull();
+    }
+    if (!args_array.isArray()) {
+        return throwException("Only arrays can be unpacked", allocator);
+    }
+
+    const arr = args_array.asArray();
+    const max_count: usize = @intCast(arr.next_index);
+    const tmp_args = try allocator.alloc(Value, max_count);
+    defer allocator.free(tmp_args);
+
+    var used: usize = 0;
+    var i: usize = 0;
+    while (i < max_count) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        if (arr.get(key)) |v| {
+            tmp_args[used] = v;
+            used += 1;
+        }
+    }
+
+    return php_object_call(obj_val, method_name_val.asString().data, tmp_args[0..used]);
 }
 
 // ============================================================================
@@ -7335,6 +7365,77 @@ pub const ClassMeta = struct {
             return parent.findMethod(name);
         }
         return null;
+    }
+
+    fn formatDateTimeYmd(timestamp: i64, allocator: Allocator) !Value {
+        const epoch_seconds: u64 = @intCast(@max(@as(i64, 0), timestamp));
+        const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
+        const year_day = epoch.getEpochDay().calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        const text = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{
+            year_day.year,
+            month_day.month.numeric(),
+            month_day.day_index + 1,
+        });
+        defer allocator.free(text);
+        return Value.initString(try PHPString.init(allocator, text));
+    }
+
+    fn registerDateTimeClasses(allocator: Allocator) !void {
+        const iface = try ClassMeta.init(allocator, "DateTimeInterface");
+        iface.is_abstract = true;
+        try registerClass(iface);
+
+        const meta = try ClassMeta.init(allocator, "DateTime");
+        try meta.addProperty(.{
+            .name = "timestamp",
+            .default_value = Value.initNull(),
+            .is_public = false,
+        });
+
+        try meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    const ts = if (args.len > 0 and !args[0].isNull())
+                        args[0].toInt()
+                    else
+                        std.time.timestamp();
+                    _ = runtime_alloc;
+                    try this.setProperty("timestamp", Value.initInt(ts));
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        try meta.addMethod(.{
+            .name = "format",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    const ts = if (this.getProperty("timestamp")) |ts_val|
+                        ts_val.toInt()
+                    else
+                        std.time.timestamp();
+
+                    if (args.len > 0 and args[0].isString()) {
+                        const fmt = args[0].asString().data;
+                        if (std.mem.eql(u8, fmt, "Y-m-d")) {
+                            return formatDateTimeYmd(ts, runtime_alloc);
+                        }
+                        return php_date(args[0], Value.initInt(ts), runtime_alloc);
+                    }
+
+                    return formatDateTimeYmd(ts, runtime_alloc);
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        meta.magic_construct = meta.methods.get("__construct").?.func;
+        try registerClass(meta);
     }
 
     /// 注册内置 Exception 类

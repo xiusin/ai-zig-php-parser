@@ -2190,6 +2190,7 @@ pub const NativeLinker = struct {
         .{ "php_object_unset", bi(.{ .runtime_name = "php_object_unset", .needs_allocator = true }) },
         .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
+        .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
         .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
@@ -5886,12 +5887,16 @@ pub const NativeLinker = struct {
 
                     if (use_undef_helper) {
                         if (lhs_name) |name| {
-                            try writer.print(", !globalVarIsDefined(\"{s}\"), \"{s}\"", .{ name, name });
+                            const escaped_name = try self.escapeString(name);
+                            defer self.allocator.free(escaped_name);
+                            try writer.print(", !globalVarIsDefined(\"{s}\"), \"{s}\"", .{ escaped_name, escaped_name });
                         } else {
                             try writer.writeAll(", false, \"\"");
                         }
                         if (rhs_name) |name| {
-                            try writer.print(", !globalVarIsDefined(\"{s}\"), \"{s}\"", .{ name, name });
+                            const escaped_name = try self.escapeString(name);
+                            defer self.allocator.free(escaped_name);
+                            try writer.print(", !globalVarIsDefined(\"{s}\"), \"{s}\"", .{ escaped_name, escaped_name });
                         } else {
                             try writer.writeAll(", false, \"\"");
                         }
@@ -6628,8 +6633,16 @@ pub const NativeLinker = struct {
             },
             .has_arg => |op| {
                 if (inst.result) |reg| {
-                    // 检查参数是否提供：args.len > index
-                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool((args.len > {d}) and !args[{d}].isMissing());\n", .{ op.index, op.index });
+                    const has_this = blk: {
+                        if (self.current_function_for_resolve) |func| {
+                            if (func.params.items.len > 0) {
+                                break :blk std.mem.eql(u8, func.params.items[0].name, "this");
+                            }
+                        }
+                        break :blk false;
+                    };
+                    const args_index = if (has_this) (if (op.index > 0) op.index - 1 else 0) else op.index;
+                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool((args.len > {d}) and !args[{d}].isMissing());\n", .{ args_index, args_index });
                 }
             },
             .eq => |op| {
@@ -7187,7 +7200,9 @@ pub const NativeLinker = struct {
                     const declared_name = op.func_name["__declare_function__::".len..];
                     if (self.ir_module) |module| {
                         if (module.findFunction(declared_name)) |func| {
-                            try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                            const escaped_declared_name = try self.escapeString(declared_name);
+                            defer self.allocator.free(escaped_declared_name);
+                            try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
                         }
                     }
                     if (inst.result) |reg| {
@@ -7447,12 +7462,14 @@ pub const NativeLinker = struct {
                         }
                     } else {
                         // 用户定义函数 - 先检查是否存在
+                        const escaped_func_name = try self.escapeString(op.func_name);
+                        defer self.allocator.free(escaped_func_name);
                         if (!self.isUserDefinedFunction(op.func_name)) {
                             // 函数未定义：生成运行时 Fatal error
                             if (inst.location.line > 0) {
                                 try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
                             }
-                            try writer.print("    runtime.php_call_undefined_function(\"{s}\");\n", .{op.func_name});
+                            try writer.print("    runtime.php_call_undefined_function(\"{s}\");\n", .{escaped_func_name});
                         } else {
                             const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
                             const in_try_block = self.current_exception_handler != null;
@@ -7464,22 +7481,22 @@ pub const NativeLinker = struct {
                             if (func_has_return_value) {
                                 if (in_try_block) {
                                     try self.writeRegAssignmentPrefix(writer, reg.id);
-                                    try writer.print("@\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try writer.print("@\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
                                     try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                     try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
                                 } else {
                                     try self.writeRegAssignmentPrefix(writer, reg.id);
-                                    try writer.print("try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try writer.print("try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
                                     try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 }
                             } else {
                                 if (in_try_block) {
-                                    try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
                                     try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                     try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
                                 } else {
-                                    try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                                    try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
                                     try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 }
@@ -7507,7 +7524,9 @@ pub const NativeLinker = struct {
                         const declared_name = op.func_name["__declare_function__::".len..];
                         if (self.ir_module) |module| {
                             if (module.findFunction(declared_name)) |func| {
-                                try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                                const escaped_declared_name = try self.escapeString(declared_name);
+                                defer self.allocator.free(escaped_declared_name);
+                                try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
                             }
                         }
                     } else if (is_builtin) {
@@ -8201,6 +8220,8 @@ pub const NativeLinker = struct {
             .global_get => |op| {
                 // 从全局表读取变量
                 if (inst.result) |reg| {
+                    const escaped_name = try self.escapeString(op.name);
+                    defer self.allocator.free(escaped_name);
                     const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
                     try writer.print("    reg_{d}", .{reg.id});
                     if (is_alloca) {
@@ -8212,26 +8233,28 @@ pub const NativeLinker = struct {
                     const is_concat_operand = if (self.current_concat_operand_regs) |cr| cr.contains(reg.id) else false;
                     if (is_switch_val) {
                         // switch 值：不在此处发 Warning，改为在每个 case 比较处发
-                        try writer.print("    const __sw_undef_{d} = !globalVarIsDefined(\"{s}\");\n", .{ reg.id, op.name });
+                        try writer.print("    const __sw_undef_{d} = !globalVarIsDefined(\"{s}\");\n", .{ reg.id, escaped_name });
                         try self.writeRegAssignmentPrefix(writer, reg.id);
-                        try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{op.name});
+                        try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
                     } else if (is_byref or is_concat_operand) {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
-                        try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{op.name});
+                        try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
                     } else {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
-                        try writer.print("getGlobalVar(\"{s}\");\n", .{op.name});
+                        try writer.print("getGlobalVar(\"{s}\");\n", .{escaped_name});
                     }
                 }
             },
             .global_set => |op| {
                 // 写入全局表
                 if (op.value) |val| {
+                    const escaped_name = try self.escapeString(op.name);
+                    defer self.allocator.free(escaped_name);
                     const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(val.id) else false;
                     if (is_alloca) {
-                        try writer.print("    try setGlobalVar(\"{s}\", reg_{d}.*);\n", .{ op.name, val.id });
+                        try writer.print("    try setGlobalVar(\"{s}\", reg_{d}.*);\n", .{ escaped_name, val.id });
                     } else {
-                        try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ op.name, val.id });
+                        try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ escaped_name, val.id });
                         // setGlobalVar 会 retain 值，release 源寄存器以转移所有权
                         // 防止 __main__ 中表达式寄存器的 refcount 泄漏
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{val.id});
@@ -13693,13 +13716,19 @@ pub const NativeLinker = struct {
 
                 if (use_undef_helper) {
                     if (lhs_name) |ln| {
+                        const escaped_ln = try self.escapeString(ln);
+                        defer self.allocator.free(escaped_ln);
                         if (rhs_name) |rn| {
-                            try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, !globalVarIsDefined(\"{s}\"), \"{s}\", !globalVarIsDefined(\"{s}\"), \"{s}\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, ln, ln, rn, rn });
+                            const escaped_rn = try self.escapeString(rn);
+                            defer self.allocator.free(escaped_rn);
+                            try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, !globalVarIsDefined(\"{s}\"), \"{s}\", !globalVarIsDefined(\"{s}\"), \"{s}\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, escaped_ln, escaped_ln, escaped_rn, escaped_rn });
                         } else {
-                            try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, !globalVarIsDefined(\"{s}\"), \"{s}\", false, \"\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, ln, ln });
+                            try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, !globalVarIsDefined(\"{s}\"), \"{s}\", false, \"\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, escaped_ln, escaped_ln });
                         }
                     } else if (rhs_name) |rn| {
-                        try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, false, \"\", !globalVarIsDefined(\"{s}\"), \"{s}\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, rn, rn });
+                        const escaped_rn = try self.escapeString(rn);
+                        defer self.allocator.free(escaped_rn);
+                        try writer.print("        {s} = try runtime.php_concat_with_undef({s}, {s}, false, \"\", !globalVarIsDefined(\"{s}\"), \"{s}\", runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs, escaped_rn, escaped_rn });
                     }
                 } else {
                     try writer.print("        {s} = try runtime.php_concat({s}, {s}, runtime.runtime_allocator);\n", .{ result_reg.?, lhs, rhs });
@@ -13780,23 +13809,27 @@ pub const NativeLinker = struct {
                         }
                     } else if (!self.isUserDefinedFunction(op.func_name)) {
                         // 函数未定义：生成运行时 Fatal error
+                        const escaped_func_name = try self.escapeString(op.func_name);
+                        defer self.allocator.free(escaped_func_name);
                         if (inst.location.line > 0) {
                             try writer.print("        runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
                         }
-                        try writer.print("        runtime.php_call_undefined_function(\"{s}\");\n", .{op.func_name});
+                        try writer.print("        runtime.php_call_undefined_function(\"{s}\");\n", .{escaped_func_name});
                     } else {
+                        const escaped_func_name = try self.escapeString(op.func_name);
+                        defer self.allocator.free(escaped_func_name);
                         // 用户定义函数 - 构建参数数组
                         if (op.args.len == 0) {
                             if (in_try_block) {
-                                try writer.print("        {s} = @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator) catch runtime.Value.initNull();\n", .{ r, op.func_name });
+                                try writer.print("        {s} = @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator) catch runtime.Value.initNull();\n", .{ r, escaped_func_name });
                             } else {
-                                try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{ r, op.func_name });
+                                try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{ r, escaped_func_name });
                             }
                         } else {
                             if (in_try_block) {
-                                try writer.print("        {s} = @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, op.func_name });
+                                try writer.print("        {s} = @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, escaped_func_name });
                             } else {
-                                try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, op.func_name });
+                                try writer.print("        {s} = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{ r, escaped_func_name });
                             }
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
@@ -13841,16 +13874,20 @@ pub const NativeLinker = struct {
                         }
                     } else if (!self.isUserDefinedFunction(op.func_name)) {
                         // 函数未定义：生成运行时 Fatal error
+                        const escaped_func_name = try self.escapeString(op.func_name);
+                        defer self.allocator.free(escaped_func_name);
                         if (inst.location.line > 0) {
                             try writer.print("        runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
                         }
-                        try writer.print("        runtime.php_call_undefined_function(\"{s}\");\n", .{op.func_name});
+                        try writer.print("        runtime.php_call_undefined_function(\"{s}\");\n", .{escaped_func_name});
                     } else {
+                        const escaped_func_name = try self.escapeString(op.func_name);
+                        defer self.allocator.free(escaped_func_name);
                         // 用户定义函数 - 构建参数数组
                         if (op.args.len == 0) {
-                            try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{op.func_name});
+                            try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{escaped_func_name});
                         } else {
-                            try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{op.func_name});
+                            try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{", .{escaped_func_name});
                             for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
                                 try self.writeRegRef(writer, arg.id);

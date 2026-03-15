@@ -3905,6 +3905,9 @@ pub const IRGenerator = struct {
     /// @param class_name 类的短名
     /// @return 完整的类名
     fn getFullClassName(self: *Self, class_name: []const u8) ![]const u8 {
+        if (std.mem.indexOfScalar(u8, class_name, '\\') != null) {
+            return class_name;
+        }
         if (self.current_namespace) |ns| {
             return try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ ns, class_name });
         }
@@ -4535,6 +4538,91 @@ pub const IRGenerator = struct {
                 return self.emitWithResult(.{ .const_string = sid }, .php_string);
             }
             return self.emitWithResult(.{ .const_null = {} }, .php_value);
+        }
+
+        if (name_node.tag == .safe_property_access) {
+            const access = name_node.data.safe_property_access;
+            const object_reg = try self.generateExpression(access.target);
+            const method_name_reg = try self.emitPropertyNameValue(self.getString(access.property_name));
+            const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                    const spread_args = try self.allocator.alloc(Register, 2);
+                    spread_args[0] = args_arr;
+                    spread_args[1] = spread_reg;
+                    _ = try self.emit(.{ .call = .{
+                        .func_name = "php_args_append_spread",
+                        .args = spread_args,
+                        .return_type = .php_value,
+                    } }, null);
+                    continue;
+                }
+
+                const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
+                const val_reg = try self.generateExpression(expr_idx);
+                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+            }
+
+            const safe_call_args = try self.allocator.alloc(Register, 3);
+            safe_call_args[0] = object_reg;
+            safe_call_args[1] = method_name_reg;
+            safe_call_args[2] = args_arr;
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_call_safe_args_array",
+                .args = safe_call_args,
+                .return_type = .php_value,
+            } }, .php_value);
+        }
+
+        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "compact")) {
+            var can_lower_compact = true;
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse {
+                    can_lower_compact = false;
+                    break;
+                };
+                if (arg_node.tag != .literal_string) {
+                    can_lower_compact = false;
+                    break;
+                }
+            }
+
+            if (can_lower_compact) {
+                const result_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+                const module = self.module orelse return result_arr;
+
+                for (call_data.args) |arg_idx| {
+                    const arg_node = self.getNode(arg_idx).?;
+                    const compact_name = self.getString(arg_node.data.literal_string.value);
+                    const key_id = try module.internString(compact_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_string);
+
+                    const lookup_name = if (compact_name.len > 0 and compact_name[0] == '$')
+                        compact_name
+                    else
+                        try std.fmt.allocPrint(self.allocator, "${s}", .{compact_name});
+                    defer if (lookup_name.ptr != compact_name.ptr) self.allocator.free(lookup_name);
+
+                    const value_reg = if (self.lookupVarRegister(lookup_name)) |ptr_reg| blk: {
+                        const ptr_type = ptr_reg.type_;
+                        const pointed_type = if (ptr_type == .ptr) ptr_type.ptr.* else .php_value;
+                        break :blk try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = pointed_type } }, pointed_type);
+                    } else blk: {
+                        break :blk try self.emitWithResult(.{ .global_get = .{ .name = lookup_name } }, .php_value);
+                    };
+
+                    _ = try self.emit(.{ .array_set = .{
+                        .array = result_arr,
+                        .key = key_reg,
+                        .value = value_reg,
+                    } }, null);
+                }
+
+                return result_arr;
+            }
         }
 
         var has_unpacking: bool = false;
@@ -5431,10 +5519,73 @@ pub const IRGenerator = struct {
             class_name = self.getString(class_node.data.variable.name);
         }
 
-        // Generate constructor arguments
-        const args = try self.allocator.alloc(Register, inst_data.args.len);
-        for (inst_data.args, 0..) |arg_idx, i| {
-            args[i] = try self.generateExpression(arg_idx);
+        var has_named: bool = false;
+        var positional_args = std.ArrayListUnmanaged(Node.Index){};
+        defer positional_args.deinit(self.allocator);
+        var named_args = std.StringHashMapUnmanaged(Node.Index){};
+        defer named_args.deinit(self.allocator);
+
+        for (inst_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .named_arg) {
+                has_named = true;
+                const arg_name = self.getString(arg_node.data.named_arg.name);
+                try named_args.put(self.allocator, arg_name, arg_node.data.named_arg.value);
+            } else {
+                try positional_args.append(self.allocator, arg_idx);
+            }
+        }
+
+        var args: []Register = &[_]Register{};
+        const ctor_name = if (class_name.len > 0)
+            try std.fmt.allocPrint(self.allocator, "{s}::__construct", .{class_name})
+        else
+            "";
+        defer if (ctor_name.len > 0) self.allocator.free(ctor_name);
+
+        const ctor_func = if (has_named and self.module != null and ctor_name.len > 0)
+            self.module.?.findFunction(ctor_name)
+        else
+            null;
+
+        if (has_named and ctor_func != null) {
+            var final_args = std.ArrayListUnmanaged(Register){};
+            defer final_args.deinit(self.allocator);
+            try final_args.ensureTotalCapacity(self.allocator, ctor_func.?.params.items.len + positional_args.items.len);
+
+            var pos_i: usize = 0;
+            for (ctor_func.?.params.items, 0..) |p, param_idx| {
+                if (param_idx == 0 and std.mem.eql(u8, p.name, "this")) continue;
+
+                var chosen: ?Node.Index = null;
+                const p_name = if (p.name.len > 0 and p.name[0] == '$') p.name[1..] else p.name;
+                if (named_args.get(p_name)) |named_idx| {
+                    chosen = named_idx;
+                } else if (pos_i < positional_args.items.len) {
+                    chosen = positional_args.items[pos_i];
+                    pos_i += 1;
+                }
+
+                if (chosen) |expr_idx| {
+                    const r = try self.generateExpression(expr_idx);
+                    try final_args.append(self.allocator, r);
+                } else {
+                    const r = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
+                    try final_args.append(self.allocator, r);
+                }
+            }
+
+            while (pos_i < positional_args.items.len) : (pos_i += 1) {
+                const r = try self.generateExpression(positional_args.items[pos_i]);
+                try final_args.append(self.allocator, r);
+            }
+
+            args = try final_args.toOwnedSlice(self.allocator);
+        } else {
+            args = try self.allocator.alloc(Register, inst_data.args.len);
+            for (inst_data.args, 0..) |arg_idx, i| {
+                args[i] = try self.generateExpression(arg_idx);
+            }
         }
 
         return self.emitWithResult(.{ .new_object = .{
