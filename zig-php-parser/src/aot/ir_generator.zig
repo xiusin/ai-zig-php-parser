@@ -5974,10 +5974,12 @@ pub const IRGenerator = struct {
         const prev_block = self.current_block;
         const prev_var_registers = self.var_registers;
         const prev_global_vars = self.global_vars;
+        const prev_has_this = self.current_has_this_param;
 
         self.current_function = func;
         self.var_registers = .{};
         self.global_vars = .{};
+        self.current_has_this_param = false;
 
         const entry = try func.createBlock("entry");
         self.setCurrentBlock(entry);
@@ -6002,6 +6004,7 @@ pub const IRGenerator = struct {
         self.global_vars = prev_global_vars;
         self.current_function = prev_function;
         self.current_block = prev_block;
+        self.current_has_this_param = prev_has_this;
 
         // Create array for captures
         const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);

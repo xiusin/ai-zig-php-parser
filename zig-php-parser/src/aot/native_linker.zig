@@ -1968,6 +1968,9 @@ pub const NativeLinker = struct {
         .{ "json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
         .{ "json_decode", bi(.{ .runtime_name = "php_json_decode", .needs_allocator = true }) },
         .{ "json_last_error_msg", bi(.{ .runtime_name = "php_json_last_error_msg", .needs_allocator = true, .may_raise = false }) },
+        .{ "func_get_args", bi(.{ .runtime_name = "php_func_get_args", .needs_allocator = true }) },
+        .{ "func_get_arg", bi(.{ .runtime_name = "php_func_get_arg", .needs_allocator = false }) },
+        .{ "func_num_args", bi(.{ .runtime_name = "php_func_num_args", .needs_allocator = false, .may_raise = false }) },
 
         .{ "strlen", bi(.{ .runtime_name = "php_strlen", .needs_allocator = false }) },
         .{ "substr", bi(.{ .runtime_name = "php_substr", .needs_allocator = true }) },
@@ -2143,6 +2146,7 @@ pub const NativeLinker = struct {
         .{ "is_float", .{ .runtime_name = "php_is_float", .needs_allocator = false } },
         .{ "is_string", .{ .runtime_name = "php_is_string", .needs_allocator = false } },
         .{ "is_array", .{ .runtime_name = "php_is_array", .needs_allocator = false } },
+        .{ "is_object", .{ .runtime_name = "php_is_object", .needs_allocator = false } },
         .{ "is_numeric", .{ .runtime_name = "php_is_numeric", .needs_allocator = false } },
         .{ "is_callable", .{ .runtime_name = "php_is_callable", .needs_allocator = false } },
         .{ "is_resource", .{ .runtime_name = "php_is_resource", .needs_allocator = false } },
@@ -2301,7 +2305,8 @@ pub const NativeLinker = struct {
         // 统一函数签名：(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value
         try code.appendSlice(self.allocator, "ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {\n");
         try code.appendSlice(self.allocator, "    _ = &ctx;\n");
-        try code.appendSlice(self.allocator, "    _ = &args;\n");
+        try code.appendSlice(self.allocator, "    const __prev_call_args = runtime.setCurrentCallArgs(args);\n");
+        try code.appendSlice(self.allocator, "    defer runtime.restoreCurrentCallArgs(__prev_call_args);\n");
         try code.appendSlice(self.allocator, "    _ = allocator;\n");
         try code.appendSlice(self.allocator, "    _ = runtime;\n");
 
@@ -7299,7 +7304,7 @@ pub const NativeLinker = struct {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeStrGetcsvArgs(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode")) {
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args")) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");

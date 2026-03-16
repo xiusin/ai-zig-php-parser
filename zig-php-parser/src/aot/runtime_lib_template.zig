@@ -231,6 +231,7 @@ const GC_ROOT_THRESHOLD: usize = 256;
 /// 当前异常（线程局部）
 threadlocal var current_exception: Value = undefined;
 threadlocal var has_exception: bool = false;
+threadlocal var current_call_args: ?[]const Value = null;
 
 /// 源码位置跟踪（用于 Deprecated 警告输出）
 threadlocal var src_file: []const u8 = "";
@@ -239,6 +240,16 @@ threadlocal var src_line: u32 = 0;
 pub fn setSourceLocation(file: []const u8, line: u32) void {
     src_file = file;
     src_line = line;
+}
+
+pub fn setCurrentCallArgs(args: []const Value) ?[]const Value {
+    const prev = current_call_args;
+    current_call_args = args;
+    return prev;
+}
+
+pub fn restoreCurrentCallArgs(prev: ?[]const Value) void {
+    current_call_args = prev;
 }
 
 fn allocPHPString(allocator: Allocator) !*PHPString {
@@ -330,6 +341,7 @@ pub fn initRuntime(allocator: Allocator) void {
     runtime_allocator = stats_allocator.allocator();
 
     initClassRegistry(runtime_allocator);
+    ClassMeta.registerStdClass(runtime_allocator) catch {};
     registerArrayIterator(runtime_allocator) catch {};
     registerSplFixedArray(runtime_allocator) catch {};
     registerSplStack(runtime_allocator) catch {};
@@ -2209,6 +2221,9 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "strtolower", wrapBuiltin_strtolower },
     .{ "str_ireplace", wrapBuiltin_str_ireplace },
     .{ "str_getcsv", wrapBuiltin_str_getcsv },
+    .{ "func_get_args", wrapBuiltin_func_get_args },
+    .{ "func_get_arg", wrapBuiltin_func_get_arg },
+    .{ "func_num_args", wrapBuiltin_func_num_args },
     .{ "json_decode", wrapBuiltin_json_decode },
     .{ "json_last_error_msg", wrapBuiltin_json_last_error_msg },
     .{ "trim", wrapBuiltin_trim },
@@ -2363,6 +2378,51 @@ fn wrapBuiltin_str_getcsv(ctx: Value, args: []const Value, allocator: Allocator)
     const enclosure = if (args.len >= 3) args[2] else Value.initString(PHPString.initStatic("\""));
     const escape = if (args.len >= 4) args[3] else Value.initString(PHPString.initStatic("\\"));
     return php_str_getcsv(args[0], separator, enclosure, escape, allocator);
+}
+
+fn wrapBuiltin_func_get_args(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_func_get_args(args, allocator);
+}
+
+fn wrapBuiltin_func_get_arg(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_func_get_arg(args[0]);
+}
+
+fn wrapBuiltin_func_num_args(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_func_num_args();
+}
+
+pub fn php_func_get_args(args: []const Value, allocator: Allocator) !Value {
+    if (args.len != 0) return error.InvalidArgumentCount;
+    const arr = try PHPArray.init(allocator);
+    if (current_call_args) |call_args| {
+        for (call_args, 0..) |arg, i| {
+            try arr.set(allocator, ArrayKey{ .integer = @intCast(i) }, arg);
+        }
+    }
+    return Value.initArray(arr);
+}
+
+pub fn php_func_get_arg(index_val: Value) !Value {
+    if (!index_val.isInt()) return error.InvalidArgument;
+    const call_args = current_call_args orelse return Value.initBool(false);
+    const index = index_val.asInt();
+    if (index < 0) return Value.initBool(false);
+    const idx: usize = @intCast(index);
+    if (idx >= call_args.len) return Value.initBool(false);
+    return call_args[idx];
+}
+
+pub fn php_func_num_args() !Value {
+    const call_args = current_call_args orelse return Value.initInt(0);
+    return Value.initInt(@intCast(call_args.len));
 }
 
 fn wrapBuiltin_trim(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -7374,18 +7434,42 @@ pub const ClassMeta = struct {
         return null;
     }
 
-    fn formatDateTimeYmd(timestamp: i64, allocator: Allocator) !Value {
+    fn formatDateTimeWithFormat(timestamp: i64, format_str: []const u8, allocator: Allocator) !Value {
         const epoch_seconds: u64 = @intCast(@max(@as(i64, 0), timestamp));
         const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
+        const day_seconds = epoch.getDaySeconds();
         const year_day = epoch.getEpochDay().calculateYearDay();
         const month_day = year_day.calculateMonthDay();
-        const text = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{
-            year_day.year,
-            month_day.month.numeric(),
-            month_day.day_index + 1,
-        });
-        defer allocator.free(text);
-        return Value.initString(try PHPString.init(allocator, text));
+
+        var result = try std.ArrayList(u8).initCapacity(allocator, format_str.len * 2);
+        defer result.deinit(allocator);
+
+        var i: usize = 0;
+        while (i < format_str.len) : (i += 1) {
+            const c = format_str[i];
+            switch (c) {
+                'Y' => try result.writer(allocator).print("{d:0>4}", .{year_day.year}),
+                'm' => try result.writer(allocator).print("{d:0>2}", .{month_day.month.numeric()}),
+                'd' => try result.writer(allocator).print("{d:0>2}", .{month_day.day_index + 1}),
+                'H' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getHoursIntoDay()}),
+                'i' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getMinutesIntoHour()}),
+                's' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getSecondsIntoMinute()}),
+                'U' => try result.writer(allocator).print("{d}", .{timestamp}),
+                else => try result.append(allocator, c),
+            }
+        }
+
+        return Value.initString(try PHPString.init(allocator, result.items));
+    }
+
+    fn formatDateTimeYmd(timestamp: i64, allocator: Allocator) !Value {
+        return formatDateTimeWithFormat(timestamp, "Y-m-d", allocator);
+    }
+
+    fn registerStdClass(allocator: Allocator) !void {
+        if (findClass("stdClass") != null) return;
+        const meta = try ClassMeta.init(allocator, "stdClass");
+        try registerClass(meta);
     }
 
     fn registerDateTimeClasses(allocator: Allocator) !void {
@@ -9824,6 +9908,34 @@ pub fn php_microtime(get_as_float: Value, allocator: Allocator) !Value {
     }
 }
 
+fn formatPhpDateValue(timestamp: i64, format_str: []const u8, allocator: Allocator) !Value {
+    const epoch_seconds: u64 = @intCast(@max(@as(i64, 0), timestamp));
+    const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
+    const day_seconds = epoch.getDaySeconds();
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+
+    var result = try std.ArrayList(u8).initCapacity(allocator, format_str.len * 2);
+    defer result.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < format_str.len) : (i += 1) {
+        const c = format_str[i];
+        switch (c) {
+            'Y' => try result.writer(allocator).print("{d:0>4}", .{year_day.year}),
+            'm' => try result.writer(allocator).print("{d:0>2}", .{month_day.month.numeric()}),
+            'd' => try result.writer(allocator).print("{d:0>2}", .{month_day.day_index + 1}),
+            'H' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getHoursIntoDay()}),
+            'i' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getMinutesIntoHour()}),
+            's' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getSecondsIntoMinute()}),
+            'U' => try result.writer(allocator).print("{d}", .{timestamp}),
+            else => try result.append(allocator, c),
+        }
+    }
+
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
 /// date - 格式化日期时间
 ///
 /// 注意：这是一个简化实现，仅支持基本格式
@@ -9848,28 +9960,7 @@ pub fn php_date(format: Value, timestamp: Value, allocator: Allocator) !Value {
     else
         std.time.timestamp();
 
-    // 简化实现：仅支持 Y-m-d H:i:s 格式
-    // 完整实现需要完整的日期格式化库
-    const epoch_seconds = @as(u64, @intCast(ts));
-    const days_since_epoch = epoch_seconds / 86400;
-    const seconds_today = epoch_seconds % 86400;
-
-    // 计算年月日（简化算法）
-    const year = 1970 + @as(i64, @intCast(days_since_epoch / 365));
-    const month: i64 = 1;
-    const day: i64 = 1;
-
-    // 计算时分秒
-    const hour = seconds_today / 3600;
-    const minute = (seconds_today % 3600) / 60;
-    const second = seconds_today % 60;
-
-    // 格式化输出（简化版）
-    const formatted = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ year, month, day, hour, minute, second });
-    defer allocator.free(formatted);
-
-    const result = try PHPString.init(allocator, formatted);
-    return Value.initString(result);
+    return formatPhpDateValue(ts, format.asString().data, allocator);
 }
 
 // ============================================================================
