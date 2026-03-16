@@ -828,6 +828,9 @@ pub const IRGenerator = struct {
             if (param_data.type) |type_idx| {
                 param_type = try self.resolveTypeNode(type_idx);
             }
+            if (param_data.is_variadic) {
+                param_type = .php_value;
+            }
 
             const param_index: u32 = @intCast(func.params.items.len);
 
@@ -3037,6 +3040,8 @@ pub const IRGenerator = struct {
 
         // Generate value
         const value_reg = try self.generateExpression(assign_data.value);
+        const value_node = self.getNode(assign_data.value);
+        const value_is_object_init = value_node != null and (value_node.?.tag == .object_instantiation or value_node.?.tag == .anonymous_class);
 
         // Generate target
         const target_node = self.getNode(assign_data.target) orelse return;
@@ -3196,6 +3201,9 @@ pub const IRGenerator = struct {
                     .property_name = prop_name,
                     .value = value_reg,
                 } }, null);
+                _ = try self.emit(.{ .release = .{ .operand = obj_reg } }, null);
+                _ = try self.emit(.{ .release = .{ .operand = value_reg } }, null);
+                return;
             },
             .variable_property_access => {
                 const obj_reg = try self.generateExpression(target_node.data.variable_property_access.target);
@@ -3209,6 +3217,9 @@ pub const IRGenerator = struct {
                     .args = args,
                     .return_type = .php_value,
                 } }, null);
+                _ = try self.emit(.{ .release = .{ .operand = obj_reg } }, null);
+                _ = try self.emit(.{ .release = .{ .operand = value_reg } }, null);
+                return;
             },
             .static_property_access => {
                 var class_name = self.getString(target_node.data.static_property_access.class_name);
@@ -3243,6 +3254,10 @@ pub const IRGenerator = struct {
                 try self.generateListDestructure(inner_targets.items, value_reg);
             },
             else => {},
+        }
+
+        if (value_is_object_init) {
+            _ = try self.emit(.{ .release = .{ .operand = value_reg } }, null);
         }
     }
 
@@ -4698,8 +4713,8 @@ pub const IRGenerator = struct {
         // unset($arr[$key])：这是语言结构而非真实函数，AOT 需要生成 array_unset 指令
         // 这里只做最小覆盖：单参数且为 array_access，并且带 index。
         if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "unset")) {
-            if (call_data.args.len == 1) {
-                const arg_idx = call_data.args[0];
+            var unset_handled = false;
+            for (call_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx);
                 if (arg_node != null) {
                     if (arg_node.?.tag == .array_access) {
@@ -4708,7 +4723,8 @@ pub const IRGenerator = struct {
                             const array_reg = try self.generateExpression(access.target);
                             const key_reg = try self.generateExpression(key_idx);
                             _ = try self.emit(.{ .array_unset = .{ .array = array_reg, .key = key_reg } }, null);
-                            return self.emitWithResult(.{ .const_null = {} }, .php_value);
+                            unset_handled = true;
+                            continue;
                         }
                     } else if (arg_node.?.tag == .property_access) {
                         const object_reg = try self.generateExpression(arg_node.?.data.property_access.target);
@@ -4721,7 +4737,8 @@ pub const IRGenerator = struct {
                             .args = unset_args,
                             .return_type = .php_value,
                         } }, null);
-                        return self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        unset_handled = true;
+                        continue;
                     } else if (arg_node.?.tag == .variable_property_access) {
                         const object_reg = try self.generateExpression(arg_node.?.data.variable_property_access.target);
                         const property_name_reg = try self.generateExpression(arg_node.?.data.variable_property_access.prop_variable);
@@ -4733,7 +4750,8 @@ pub const IRGenerator = struct {
                             .args = unset_args,
                             .return_type = .php_value,
                         } }, null);
-                        return self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        unset_handled = true;
+                        continue;
                     } else if (arg_node.?.tag == .variable) {
                         // unset($var)
                         const var_name = self.getString(arg_node.?.data.variable.name);
@@ -4764,9 +4782,13 @@ pub const IRGenerator = struct {
                             _ = try self.emit(.{ .global_unset = .{ .name = var_name_str } }, null);
                         }
 
-                        return try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        unset_handled = true;
+                        continue;
                     }
                 }
+            }
+            if (unset_handled) {
+                return try self.emitWithResult(.{ .const_null = {} }, .php_value);
             }
         }
 
@@ -5262,7 +5284,7 @@ pub const IRGenerator = struct {
                     padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "array_walk")) {
+            } else if (std.mem.eql(u8, func_name, "array_walk") or std.mem.eql(u8, func_name, "array_walk_recursive")) {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
@@ -5833,11 +5855,15 @@ pub const IRGenerator = struct {
                     try cap_names.append(self.allocator, var_name);
                     try cap_by_ref.append(self.allocator, true);
                 } else {
-                    // 变量尚不存在（如闭包自引用 use(&$factorial)），
-                    // 预创建 alloca + null，再 make_ref 创建共享引用槽
+                    // 局部作用域中变量尚不存在（如闭包自引用 use(&$factorial)）时，
+                    // 预创建 alloca + null；若该名字已在 __main__/global 集合中，
+                    // 则先从全局表读取当前值，确保 use(&$globalVar) 绑定到正确初值。
                     const pre_ptr = try self.getOrCreateVarRegister(var_name, .php_value);
-                    const null_reg = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    _ = try self.emit(.{ .store = .{ .ptr = pre_ptr, .value = null_reg } }, null);
+                    const init_reg = if (self.global_vars.contains(var_name))
+                        try self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value)
+                    else
+                        try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    _ = try self.emit(.{ .store = .{ .ptr = pre_ptr, .value = init_reg } }, null);
                     const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = pre_ptr } }, .php_value);
                     try captures.append(self.allocator, ref_reg);
                     try cap_names.append(self.allocator, var_name);

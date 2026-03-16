@@ -224,6 +224,7 @@ const GCInfo = packed struct { color: GCColor = .white, buffered: bool = false }
 const CycleRoot = union(enum) { array: *PHPArray, object: *PHPObject, closure: *PHPClosure };
 var cycle_roots: std.ArrayListUnmanaged(CycleRoot) = .{};
 var gc_in_progress: bool = false;
+var gc_enabled: bool = true;
 var gc_release_events: usize = 0;
 const GC_RELEASE_EVENT_THRESHOLD: usize = 4096;
 const GC_ROOT_THRESHOLD: usize = 256;
@@ -358,6 +359,7 @@ pub fn initRuntime(allocator: Allocator) void {
     static_string_entries = .{};
     cycle_roots = .{};
     gc_in_progress = false;
+    gc_enabled = true;
     gc_release_events = 0;
     current_exception = Value.initNull();
     has_exception = false;
@@ -702,16 +704,19 @@ fn gcBufferClosure(c: *PHPClosure) void {
 }
 
 fn gcMaybeCollect() void {
-    if (gc_in_progress) return;
+    if (gc_in_progress or !gc_enabled) return;
     gc_release_events += 1;
     if (cycle_roots.items.len >= GC_ROOT_THRESHOLD or gc_release_events >= GC_RELEASE_EVENT_THRESHOLD) {
-        gcCollectCycles(false);
+        _ = gcCollectCycles(false);
     }
 }
 
-fn gcCollectCycles(force: bool) void {
-    if (gc_in_progress) return;
-    if (!force and cycle_roots.items.len < GC_ROOT_THRESHOLD and gc_release_events < GC_RELEASE_EVENT_THRESHOLD) return;
+fn gcCollectCycles(force: bool) usize {
+    if (gc_in_progress) return 0;
+    if (!force) {
+        if (!gc_enabled) return 0;
+        if (cycle_roots.items.len < GC_ROOT_THRESHOLD and gc_release_events < GC_RELEASE_EVENT_THRESHOLD) return 0;
+    }
 
     const items = cycle_roots.items;
     for (items) |r| {
@@ -728,13 +733,42 @@ fn gcCollectCycles(force: bool) void {
 
     for (items) |r| gcMarkGray(r);
     for (items) |r| gcScan(r);
-    for (items) |r| gcCollectWhite(r);
+
+    var white_items: std.ArrayListUnmanaged(CycleRoot) = .{};
+    defer white_items.deinit(runtime_allocator);
+    var seen_arrays = std.AutoHashMap(*PHPArray, void).init(runtime_allocator);
+    defer seen_arrays.deinit();
+    var seen_objects = std.AutoHashMap(*PHPObject, void).init(runtime_allocator);
+    defer seen_objects.deinit();
+    var seen_closures = std.AutoHashMap(*PHPClosure, void).init(runtime_allocator);
+    defer seen_closures.deinit();
+
+    for (items) |r| {
+        gcGatherWhite(
+            r,
+            &white_items,
+            &seen_arrays,
+            &seen_objects,
+            &seen_closures,
+        );
+    }
+
+    const collected = white_items.items.len;
+    for (white_items.items) |r| {
+        gcCollectWhiteKnown(
+            r,
+            &seen_arrays,
+            &seen_objects,
+            &seen_closures,
+        );
+    }
 
     cycle_roots.clearRetainingCapacity();
+    return collected;
 }
 
-pub fn php_collect_cycles() void {
-    gcCollectCycles(true);
+pub fn php_collect_cycles() usize {
+    return gcCollectCycles(true);
 }
 
 fn gcMarkGray(root: CycleRoot) void {
@@ -915,6 +949,103 @@ fn gcCollectWhite(root: CycleRoot) void {
     }
 }
 
+fn gcGatherWhite(
+    root: CycleRoot,
+    white_items: *std.ArrayListUnmanaged(CycleRoot),
+    seen_arrays: *std.AutoHashMap(*PHPArray, void),
+    seen_objects: *std.AutoHashMap(*PHPObject, void),
+    seen_closures: *std.AutoHashMap(*PHPClosure, void),
+) void {
+    switch (root) {
+        .array => |a| {
+            if (a.gc_info.color != .white) return;
+            if (seen_arrays.contains(a)) return;
+            seen_arrays.put(a, {}) catch return;
+            white_items.append(runtime_allocator, .{ .array = a }) catch return;
+            var it = a.elements.iterator();
+            while (it.next()) |entry| {
+                gcGatherWhiteValue(entry.value_ptr.*, white_items, seen_arrays, seen_objects, seen_closures);
+            }
+        },
+        .object => |o| {
+            if (o.gc_info.color != .white) return;
+            if (seen_objects.contains(o)) return;
+            seen_objects.put(o, {}) catch return;
+            white_items.append(runtime_allocator, .{ .object = o }) catch return;
+            var it = o.properties.iterator();
+            while (it.next()) |entry| {
+                gcGatherWhiteValue(entry.value_ptr.*, white_items, seen_arrays, seen_objects, seen_closures);
+            }
+        },
+        .closure => |c| {
+            if (c.gc_info.color != .white) return;
+            if (seen_closures.contains(c)) return;
+            seen_closures.put(c, {}) catch return;
+            white_items.append(runtime_allocator, .{ .closure = c }) catch return;
+            for (c.captures) |cap| {
+                gcGatherWhiteValue(cap, white_items, seen_arrays, seen_objects, seen_closures);
+            }
+        },
+    }
+}
+
+fn gcGatherWhiteValue(
+    v: Value,
+    white_items: *std.ArrayListUnmanaged(CycleRoot),
+    seen_arrays: *std.AutoHashMap(*PHPArray, void),
+    seen_objects: *std.AutoHashMap(*PHPObject, void),
+    seen_closures: *std.AutoHashMap(*PHPClosure, void),
+) void {
+    if (v.isArray()) {
+        gcGatherWhite(.{ .array = v.asArray() }, white_items, seen_arrays, seen_objects, seen_closures);
+    } else if (Value_isObject(v)) {
+        gcGatherWhite(.{ .object = Value_asObject(v) }, white_items, seen_arrays, seen_objects, seen_closures);
+    } else if (v.isFunction()) {
+        gcGatherWhite(.{ .closure = v.asFunction() }, white_items, seen_arrays, seen_objects, seen_closures);
+    }
+}
+
+fn gcCollectWhiteKnown(
+    root: CycleRoot,
+    seen_arrays: *std.AutoHashMap(*PHPArray, void),
+    seen_objects: *std.AutoHashMap(*PHPObject, void),
+    seen_closures: *std.AutoHashMap(*PHPClosure, void),
+) void {
+    switch (root) {
+        .array => |a| gcCollectWhiteArrayKnown(a, seen_arrays, seen_objects, seen_closures),
+        .object => |o| gcCollectWhiteObjectKnown(o, seen_arrays, seen_objects, seen_closures),
+        .closure => |c| gcCollectWhiteClosureKnown(c, seen_arrays, seen_objects, seen_closures),
+    }
+}
+
+fn gcReleaseUnlessWhiteKnown(
+    v: Value,
+    allocator: Allocator,
+    seen_arrays: *std.AutoHashMap(*PHPArray, void),
+    seen_objects: *std.AutoHashMap(*PHPObject, void),
+    seen_closures: *std.AutoHashMap(*PHPClosure, void),
+) void {
+    if (v.isArray()) {
+        const a = v.asArray();
+        if (seen_arrays.contains(a)) return;
+        a.release(allocator);
+        return;
+    }
+    if (Value_isObject(v)) {
+        const o = Value_asObject(v);
+        if (seen_objects.contains(o)) return;
+        o.release();
+        return;
+    }
+    if (v.isFunction()) {
+        const c = v.asFunction();
+        if (seen_closures.contains(c)) return;
+        c.release(allocator);
+        return;
+    }
+    v.release(allocator);
+}
+
 fn gcCollectWhiteValue(v: Value) void {
     if (v.isArray()) {
         gcCollectWhiteArray(v.asArray());
@@ -928,32 +1059,41 @@ fn gcCollectWhiteValue(v: Value) void {
 fn gcReleaseOrCollectValue(v: Value, allocator: Allocator) void {
     if (v.isArray()) {
         const a = v.asArray();
-        if (a.gc_info.color == .white) {
-            gcCollectWhiteArray(a);
-        } else {
+        if (a.gc_info.color != .white) {
             a.release(allocator);
         }
         return;
     }
     if (Value_isObject(v)) {
         const o = Value_asObject(v);
-        if (o.gc_info.color == .white) {
-            gcCollectWhiteObject(o);
-        } else {
+        if (o.gc_info.color != .white) {
             o.release();
         }
         return;
     }
     if (v.isFunction()) {
         const c = v.asFunction();
-        if (c.gc_info.color == .white) {
-            gcCollectWhiteClosure(c);
-        } else {
+        if (c.gc_info.color != .white) {
             c.release(allocator);
         }
         return;
     }
     v.release(allocator);
+}
+
+fn gcCollectWhiteArrayKnown(
+    a: *PHPArray,
+    seen_arrays: *std.AutoHashMap(*PHPArray, void),
+    seen_objects: *std.AutoHashMap(*PHPObject, void),
+    seen_closures: *std.AutoHashMap(*PHPClosure, void),
+) void {
+    if (a.gc_info.color != .white) return;
+    a.gc_info.color = .black;
+    var it = a.elements.iterator();
+    while (it.next()) |entry| {
+        gcReleaseUnlessWhiteKnown(entry.value_ptr.*, runtime_allocator, seen_arrays, seen_objects, seen_closures);
+    }
+    gcDestroyArray(a);
 }
 
 fn gcCollectWhiteArray(a: *PHPArray) void {
@@ -964,6 +1104,29 @@ fn gcCollectWhiteArray(a: *PHPArray) void {
         gcReleaseOrCollectValue(entry.value_ptr.*, runtime_allocator);
     }
     gcDestroyArray(a);
+}
+
+fn gcCollectWhiteObjectKnown(
+    o: *PHPObject,
+    seen_arrays: *std.AutoHashMap(*PHPArray, void),
+    seen_objects: *std.AutoHashMap(*PHPObject, void),
+    seen_closures: *std.AutoHashMap(*PHPClosure, void),
+) void {
+    if (o.gc_info.color != .white) return;
+    o.gc_info.color = .black;
+    if (o.class_meta) |meta| {
+        if (meta.findMethodLookup("__destruct")) |lookup| {
+            const this_val = Value_initObject(o);
+            const guard = ClassContext.init(meta, lookup.owner);
+            defer guard.deinit();
+            _ = lookup.method.func(this_val, &.{}, o.allocator) catch {};
+        }
+    }
+    var it = o.properties.iterator();
+    while (it.next()) |entry| {
+        gcReleaseUnlessWhiteKnown(entry.value_ptr.*, o.allocator, seen_arrays, seen_objects, seen_closures);
+    }
+    gcDestroyObject(o);
 }
 
 fn gcCollectWhiteObject(o: *PHPObject) void {
@@ -982,6 +1145,20 @@ fn gcCollectWhiteObject(o: *PHPObject) void {
         gcReleaseOrCollectValue(entry.value_ptr.*, o.allocator);
     }
     gcDestroyObject(o);
+}
+
+fn gcCollectWhiteClosureKnown(
+    c: *PHPClosure,
+    seen_arrays: *std.AutoHashMap(*PHPArray, void),
+    seen_objects: *std.AutoHashMap(*PHPObject, void),
+    seen_closures: *std.AutoHashMap(*PHPClosure, void),
+) void {
+    if (c.gc_info.color != .white) return;
+    c.gc_info.color = .black;
+    for (c.captures) |cap| {
+        gcReleaseUnlessWhiteKnown(cap, runtime_allocator, seen_arrays, seen_objects, seen_closures);
+    }
+    gcDestroyClosure(c);
 }
 
 fn gcCollectWhiteClosure(c: *PHPClosure) void {
@@ -1332,6 +1509,40 @@ pub const ArrayKey = union(enum) {
     }
 };
 
+fn parsePhpArrayIntKey(str: []const u8) ?i64 {
+    if (str.len == 0) return null;
+    if (str[0] == '+') return null;
+
+    var start: usize = 0;
+    var negative = false;
+    if (str[0] == '-') {
+        negative = true;
+        start = 1;
+        if (str.len == 1) return null;
+    }
+
+    const digits = str[start..];
+    if (digits.len == 0) return null;
+    if (digits[0] == '0' and digits.len > 1) return null;
+
+    for (digits) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+    }
+
+    const parsed = std.fmt.parseInt(i64, digits, 10) catch return null;
+    return if (negative) -parsed else parsed;
+}
+
+fn normalizeArrayKeyFromValue(key: Value) ArrayKey {
+    if (key.isString()) {
+        if (parsePhpArrayIntKey(key.asString().data)) |i| {
+            return ArrayKey{ .integer = i };
+        }
+        return ArrayKey{ .string = key.asString() };
+    }
+    return ArrayKey{ .integer = key.toInt() };
+}
+
 /// PHP数组类型
 /// 支持整数键和字符串键的混合数组
 pub const PHPArray = struct {
@@ -1587,20 +1798,12 @@ pub const PHPArray = struct {
 
     /// 获取元素（通过Value键）
     pub fn getByValue(self: *PHPArray, key: Value) ?Value {
-        if (key.isString()) {
-            return self.get(ArrayKey{ .string = key.asString() });
-        } else {
-            return self.get(ArrayKey{ .integer = key.asInt() });
-        }
+        return self.get(normalizeArrayKeyFromValue(key));
     }
 
     /// 设置元素（通过Value键）
     pub fn setByValue(self: *PHPArray, allocator: Allocator, key: Value, value: Value) !void {
-        if (key.isString()) {
-            try self.set(allocator, ArrayKey{ .string = key.asString() }, value);
-        } else {
-            try self.set(allocator, ArrayKey{ .integer = key.toInt() }, value);
-        }
+        try self.set(allocator, normalizeArrayKeyFromValue(key), value);
     }
 
     /// 设置元素
@@ -1656,10 +1859,7 @@ pub const PHPArray = struct {
 
     /// 删除元素（通过 Value 键，兼容 int/string）
     pub fn unsetByValue(self: *PHPArray, allocator: Allocator, key: Value) bool {
-        if (key.isString()) {
-            return self.unset(allocator, ArrayKey{ .string = key.asString() });
-        }
-        return self.unset(allocator, ArrayKey{ .integer = key.toInt() });
+        return self.unset(allocator, normalizeArrayKeyFromValue(key));
     }
 };
 
@@ -2224,6 +2424,13 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "func_get_args", wrapBuiltin_func_get_args },
     .{ "func_get_arg", wrapBuiltin_func_get_arg },
     .{ "func_num_args", wrapBuiltin_func_num_args },
+    .{ "memory_get_usage", wrapBuiltin_memory_get_usage },
+    .{ "memory_get_peak_usage", wrapBuiltin_memory_get_peak_usage },
+    .{ "function_exists", wrapBuiltin_function_exists },
+    .{ "gc_enable", wrapBuiltin_gc_enable },
+    .{ "gc_collect_cycles", wrapBuiltin_gc_collect_cycles },
+    .{ "ini_get", wrapBuiltin_ini_get },
+    .{ "getrusage", wrapBuiltin_getrusage },
     .{ "json_decode", wrapBuiltin_json_decode },
     .{ "json_last_error_msg", wrapBuiltin_json_last_error_msg },
     .{ "trim", wrapBuiltin_trim },
@@ -2234,6 +2441,7 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "array_filter", wrapBuiltin_array_filter },
     .{ "array_reduce", wrapBuiltin_array_reduce },
     .{ "array_walk", wrapBuiltin_array_walk },
+    .{ "array_walk_recursive", wrapBuiltin_array_walk_recursive },
     .{ "array_merge", wrapBuiltin_array_merge },
     .{ "array_sum", wrapBuiltin_array_sum },
     .{ "round", wrapBuiltin_round },
@@ -2399,6 +2607,41 @@ fn wrapBuiltin_func_num_args(ctx: Value, args: []const Value, allocator: Allocat
     return php_func_num_args();
 }
 
+fn wrapBuiltin_memory_get_usage(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_memory_get_usage(args, allocator);
+}
+
+fn wrapBuiltin_memory_get_peak_usage(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_memory_get_peak_usage(args, allocator);
+}
+
+fn wrapBuiltin_function_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_function_exists(args, allocator);
+}
+
+fn wrapBuiltin_gc_enable(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_gc_enable(args, allocator);
+}
+
+fn wrapBuiltin_gc_collect_cycles(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_gc_collect_cycles(args, allocator);
+}
+
+fn wrapBuiltin_ini_get(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_ini_get(args, allocator);
+}
+
+fn wrapBuiltin_getrusage(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_getrusage(args, allocator);
+}
+
 pub fn php_func_get_args(args: []const Value, allocator: Allocator) !Value {
     if (args.len != 0) return error.InvalidArgumentCount;
     const arr = try PHPArray.init(allocator);
@@ -2423,6 +2666,72 @@ pub fn php_func_get_arg(index_val: Value) !Value {
 pub fn php_func_num_args() !Value {
     const call_args = current_call_args orelse return Value.initInt(0);
     return Value.initInt(@intCast(call_args.len));
+}
+
+pub fn php_memory_get_usage(args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len > 1) return error.InvalidArgumentCount;
+    return Value.initInt(@intCast(alloc_counters.live_bytes));
+}
+
+pub fn php_memory_get_peak_usage(args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len > 1) return error.InvalidArgumentCount;
+    return Value.initInt(@intCast(alloc_counters.peak_live_bytes));
+}
+
+pub fn php_function_exists(args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len != 1) return error.InvalidArgumentCount;
+    if (!args[0].isString()) return Value.initBool(false);
+    return Value.initBool(lookupBuiltinFunction(args[0].asString().data) != null);
+}
+
+pub fn php_gc_enable(args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    gc_enabled = true;
+    return Value.initNull();
+}
+
+pub fn php_gc_collect_cycles(args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return Value.initInt(@intCast(php_collect_cycles()));
+}
+
+pub fn php_ini_get(args: []const Value, allocator: Allocator) !Value {
+    if (args.len != 1) return error.InvalidArgumentCount;
+    if (!args[0].isString()) return Value.initBool(false);
+
+    const option = args[0].asString().data;
+    const value: ?[]const u8 = if (std.mem.eql(u8, option, "display_errors"))
+        "1"
+    else if (std.mem.eql(u8, option, "error_reporting"))
+        "32767"
+    else if (std.mem.eql(u8, option, "max_execution_time"))
+        "0"
+    else if (std.mem.eql(u8, option, "memory_limit"))
+        "128M"
+    else if (std.mem.eql(u8, option, "post_max_size"))
+        "8M"
+    else if (std.mem.eql(u8, option, "upload_max_filesize"))
+        "2M"
+    else
+        null;
+
+    if (value) |s| return Value.initString(try PHPString.init(allocator, s));
+    return Value.initBool(false);
+}
+
+pub fn php_getrusage(args: []const Value, allocator: Allocator) !Value {
+    if (args.len > 1) return error.InvalidArgumentCount;
+
+    const arr = try PHPArray.init(allocator);
+    const key = try PHPString.init(allocator, "ru_utime.tv_sec");
+    defer key.release(allocator);
+    try arr.set(allocator, ArrayKey{ .string = key }, Value.initInt(0));
+    return Value.initArray(arr);
 }
 
 fn wrapBuiltin_trim(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -2488,6 +2797,13 @@ fn wrapBuiltin_array_walk(ctx: Value, args: []const Value, allocator: Allocator)
     if (args.len < 2) return error.InvalidArgumentCount;
     const userdata = if (args.len >= 3) args[2] else Value.initNull();
     return php_array_walk(args[0], args[1], userdata, allocator);
+}
+
+fn wrapBuiltin_array_walk_recursive(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const userdata = if (args.len >= 3) args[2] else Value.initNull();
+    return php_array_walk_recursive(args[0], args[1], userdata, allocator);
 }
 
 fn wrapBuiltin_select(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -2666,12 +2982,7 @@ pub fn php_array_get_ref(arr_val: Value, key_val: Value, allocator: Allocator) !
     if (!arr_val.isArray()) return error.InvalidArgument;
     const arr = arr_val.asArray();
 
-    const key = if (key_val.isInt())
-        ArrayKey{ .integer = key_val.toInt() }
-    else if (key_val.isString())
-        ArrayKey{ .string = key_val.asString() }
-    else
-        return error.InvalidKey;
+    const key = normalizeArrayKeyFromValue(key_val);
 
     // 获取或创建数组元素
     const entry_ptr = arr.data.getPtr(key) orelse blk: {
@@ -2874,19 +3185,21 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
 }
 
 pub fn php_args_append_spread(dest: Value, src: Value, allocator: Allocator) !Value {
-    if (!dest.isArray() or !src.isArray()) {
+    if (!dest.isArray()) {
         return throwException("Only arrays can be unpacked", allocator);
     }
 
     const dest_arr = dest.asArray();
-    const src_arr = src.asArray();
-    const n: usize = @intCast(src_arr.next_index);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const key = ArrayKey{ .integer = @intCast(i) };
-        if (src_arr.get(key)) |v| {
-            try dest_arr.push(allocator, v);
-        }
+    const iter_val = try php_array_iter_init(src, allocator);
+    defer _ = php_array_iter_free(iter_val, allocator) catch {};
+
+    while ((try php_array_iter_valid(iter_val)).toBool()) {
+        const value = try php_array_iter_value(iter_val);
+        defer value.release(allocator);
+        try dest_arr.push(allocator, value);
+
+        const next_iter = try php_array_iter_next(iter_val);
+        next_iter.release(allocator);
     }
     return dest;
 }
@@ -3446,6 +3759,38 @@ pub fn php_ne(lhs: Value, rhs: Value) !Value {
 }
 
 /// 全等运算（PHP语义：类型和值都相等）
+fn php_array_key_identical(lhs: ArrayKey, rhs: ArrayKey) bool {
+    return switch (lhs) {
+        .integer => |li| switch (rhs) {
+            .integer => |ri| li == ri,
+            else => false,
+        },
+        .string => |ls| switch (rhs) {
+            .string => |rs| std.mem.eql(u8, ls.data, rs.data),
+            else => false,
+        },
+    };
+}
+
+fn php_array_identical(lhs: *PHPArray, rhs: *PHPArray) anyerror!bool {
+    if (lhs.elements.count() != rhs.elements.count()) return false;
+
+    var lhs_iter = lhs.elements.iterator();
+    var rhs_iter = rhs.elements.iterator();
+    while (true) {
+        const lhs_entry = lhs_iter.next();
+        const rhs_entry = rhs_iter.next();
+        if (lhs_entry == null or rhs_entry == null) {
+            return lhs_entry == null and rhs_entry == null;
+        }
+
+        const l = lhs_entry.?;
+        const r = rhs_entry.?;
+        if (!php_array_key_identical(l.key_ptr.*, r.key_ptr.*)) return false;
+        if (!(try php_identical(l.value_ptr.*, r.value_ptr.*)).toBool()) return false;
+    }
+}
+
 pub fn php_identical(lhs: Value, rhs: Value) !Value {
     // 类型不同
     if (lhs.isNull() != rhs.isNull()) return Value.initBool(false);
@@ -3466,8 +3811,7 @@ pub fn php_identical(lhs: Value, rhs: Value) !Value {
         return Value.initBool(std.mem.eql(u8, a.data, b.data));
     }
     if (lhs.isArray()) {
-        // 数组比较：指针相同
-        return Value.initBool(lhs.asArray() == rhs.asArray());
+        return Value.initBool(try php_array_identical(lhs.asArray(), rhs.asArray()));
     }
 
     return Value.initBool(false);
@@ -4237,6 +4581,19 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
                 // 返回对象本身
                 _ = array_val.retain();
                 return array_val;
+            }
+
+            if (meta.findMethod("getIterator") != null) {
+                const iter_val = try php_object_call(array_val, "getIterator", &[_]Value{});
+                if (Value_isObject(iter_val) and php_is_iterator(iter_val)) {
+                    _ = try php_object_call(iter_val, "rewind", &[_]Value{});
+                    return iter_val;
+                }
+                if (iter_val.isArray()) {
+                    defer iter_val.release(allocator);
+                    return php_array_iter_init(iter_val, allocator);
+                }
+                iter_val.release(allocator);
             }
         }
     }
@@ -6695,35 +7052,26 @@ pub fn php_array_merge(arrays: []const Value, allocator: Allocator) !Value {
 /// PHP 8.1+: string keys are preserved, integer keys are renumbered
 pub fn php_array_merge_into(target: Value, source: Value, allocator: Allocator) !Value {
     if (!target.isArray()) return target;
-    if (!source.isArray()) return target;
 
     const target_arr = target.asArray();
-    const source_arr = source.asArray();
 
-    // 安全检查：确保source_arr有效
-    if (source_arr.elements.mixed) |*m| {
-        if (m.count() > 1000000) {
-            return target;
-        }
-    }
+    const iter_val = try php_array_iter_init(source, allocator);
+    defer _ = php_array_iter_free(iter_val, allocator) catch {};
 
-    // 遍历源数组的所有元素
-    var iter = source_arr.elements.iterator();
-    while (iter.next()) |entry| {
-        const value = entry.value_ptr.*.retain();
-        switch (entry.key_ptr.*) {
-            .string => |s| {
-                // String keys: preserve original key
-                const key_copy = try PHPString.init(allocator, s.data);
-                try target_arr.elements.put(ArrayKey{ .string = key_copy }, value);
-            },
-            .integer => {
-                // Integer keys: renumber sequentially
-                const new_key = ArrayKey{ .integer = target_arr.next_index };
-                try target_arr.elements.put(new_key, value);
-                target_arr.next_index += 1;
-            },
+    while ((try php_array_iter_valid(iter_val)).toBool()) {
+        const key_val = try php_array_iter_key(iter_val, allocator);
+        defer key_val.release(allocator);
+        const value = try php_array_iter_value(iter_val);
+        defer value.release(allocator);
+
+        if (key_val.isString()) {
+            try target_arr.set(allocator, ArrayKey{ .string = key_val.asString() }, value);
+        } else {
+            try target_arr.push(allocator, value);
         }
+
+        const next_iter = try php_array_iter_next(iter_val);
+        next_iter.release(allocator);
     }
 
     return target;
@@ -7131,9 +7479,11 @@ pub fn php_is_callable(val: Value) !Value {
 }
 
 /// unset - 删除变量（立即释放引用）
-pub fn php_unset(val: Value) !Value {
-    // 调用release减少引用计数，如果为0则触发析构
-    val.release(runtime_allocator);
+pub fn php_unset(args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    for (args) |val| {
+        val.release(runtime_allocator);
+    }
     return Value.initNull();
 }
 
@@ -10356,14 +10706,7 @@ pub fn php_array_key_exists(key: Value, arr: Value) !Value {
     if (!arr.isArray()) return Value.initBool(false);
 
     const php_arr = arr.asArray();
-
-    if (key.isInt()) {
-        return Value.initBool(php_arr.get(.{ .integer = key.asInt() }) != null);
-    } else if (key.isString()) {
-        return Value.initBool(php_arr.get(.{ .string = key.asString() }) != null);
-    }
-
-    return Value.initBool(false);
+    return Value.initBool(php_arr.get(normalizeArrayKeyFromValue(key)) != null);
 }
 
 /// array_key_first - 获取数组的第一个键
@@ -12759,6 +13102,40 @@ pub fn php_array_map(args: []const Value, allocator: Allocator) !Value {
     }
 
     const result_arr = try PHPArray.init(allocator);
+
+    if (callback.isNull()) {
+        if (arrays.len == 1) {
+            const src = arrays[0].asArray();
+            var src_iter = src.elements.iterator();
+            while (src_iter.next()) |entry| {
+                try result_arr.set(allocator, entry.key_ptr.*, entry.value_ptr.*);
+            }
+            return Value.initArray(result_arr);
+        }
+
+        var max_count: i64 = 0;
+        for (arrays) |arr| {
+            const cur = arr.asArray();
+            if (cur.next_index > max_count) max_count = cur.next_index;
+        }
+
+        var idx: i64 = 0;
+        while (idx < max_count) : (idx += 1) {
+            const tuple_arr = try PHPArray.init(allocator);
+            const key = ArrayKey{ .integer = idx };
+
+            for (arrays) |arr| {
+                const cur = arr.asArray();
+                const val = cur.get(key) orelse Value.initNull();
+                try tuple_arr.push(allocator, val);
+            }
+
+            try result_arr.push(allocator, Value.initArray(tuple_arr));
+        }
+
+        return Value.initArray(result_arr);
+    }
+
     const primary = arrays[0].asArray();
 
     var iter = primary.elements.iterator();
@@ -12950,6 +13327,39 @@ pub fn php_array_walk(arr: Value, callback: Value, userdata: Value, allocator: A
         result.release(allocator);
     }
 
+    return Value.initBool(true);
+}
+
+fn php_array_walk_recursive_inner(arr: *PHPArray, callback: Value, userdata: Value, allocator: Allocator) !void {
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const value = entry.value_ptr.*;
+        if (value.isArray()) {
+            try php_array_walk_recursive_inner(value.asArray(), callback, userdata, allocator);
+            continue;
+        }
+
+        const key_val = switch (entry.key_ptr.*) {
+            .integer => |k| Value.initInt(k),
+            .string => |k| Value.initString(k),
+        };
+
+        var args_buf: [3]Value = undefined;
+        args_buf[0] = value;
+        args_buf[1] = key_val;
+        const arg_count: usize = if (userdata.isNull()) 2 else blk: {
+            args_buf[2] = userdata;
+            break :blk 3;
+        };
+
+        const result = try php_invoke_callable(callback, args_buf[0..arg_count], allocator);
+        result.release(allocator);
+    }
+}
+
+pub fn php_array_walk_recursive(arr: Value, callback: Value, userdata: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return error.InvalidArgument;
+    try php_array_walk_recursive_inner(arr.asArray(), callback, userdata, allocator);
     return Value.initBool(true);
 }
 
