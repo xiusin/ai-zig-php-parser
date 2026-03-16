@@ -137,7 +137,10 @@ pub const Parser = struct {
                     '\\' => try out.append(self.allocator, '\\'),
                     '"' => try out.append(self.allocator, '"'),
                     '$' => try out.append(self.allocator, '$'),
-                    else => try out.append(self.allocator, n),
+                    else => {
+                        try out.append(self.allocator, '\\');
+                        try out.append(self.allocator, n);
+                    },
                 }
                 i += 1;
                 continue;

@@ -3125,6 +3125,7 @@ pub const IRGenerator = struct {
                 // 递归收集所有嵌套的键
                 var keys: std.ArrayList(Register) = .empty;
                 defer keys.deinit(self.allocator);
+                var is_push_assignment = false;
 
                 var current = target_node;
                 while (current.tag == .array_access) {
@@ -3132,10 +3133,7 @@ pub const IRGenerator = struct {
                         const key_reg = try self.generateExpression(idx);
                         try keys.insert(self.allocator, 0, key_reg); // 插入到开头，保持顺序
                     } else {
-                        // $arr[] = value - push to array
-                        const array_reg = try self.generateExpression(current.data.array_access.target);
-                        _ = try self.emit(.{ .array_push = .{ .array = array_reg, .value = value_reg } }, null);
-                        return;
+                        is_push_assignment = true;
                     }
 
                     const target_expr = self.getNode(current.data.array_access.target);
@@ -3145,6 +3143,22 @@ pub const IRGenerator = struct {
 
                 // 生成基础数组
                 const base_array = try self.generateExpression(current.data.array_access.target);
+
+                if (is_push_assignment) {
+                    var current_array = base_array;
+                    var i: usize = 0;
+                    while (i < keys.items.len) : (i += 1) {
+                        current_array = try self.emitWithResult(.{ .array_ensure = .{
+                            .array = current_array,
+                            .key = keys.items[i],
+                        } }, .php_value);
+                    }
+                    _ = try self.emit(.{ .array_push = .{
+                        .array = current_array,
+                        .value = value_reg,
+                    } }, null);
+                    return;
+                }
 
                 if (keys.items.len == 1) {
                     // 单层：$arr[$key] = value
@@ -3997,13 +4011,8 @@ pub const IRGenerator = struct {
         // Generate operands
         var lhs_reg: Register = undefined;
         var rhs_reg: Register = undefined;
-        if (bin_data.op == .dot) {
-            rhs_reg = try self.generateExpression(bin_data.rhs);
-            lhs_reg = try self.generateExpression(bin_data.lhs);
-        } else {
-            lhs_reg = try self.generateExpression(bin_data.lhs);
-            rhs_reg = try self.generateExpression(bin_data.rhs);
-        }
+        lhs_reg = try self.generateExpression(bin_data.lhs);
+        rhs_reg = try self.generateExpression(bin_data.rhs);
 
         // 推断算术运算的结果类型
         // 如果任一操作数是php_value，结果就是php_value
@@ -5244,6 +5253,21 @@ pub const IRGenerator = struct {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = sid_empty }, .php_value);
                     padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "json_decode")) {
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+                    args = padded;
+                }
+            } else if (std.mem.eql(u8, func_name, "array_walk")) {
+                if (args.len == 2) {
+                    const padded = try self.allocator.alloc(Register, 3);
+                    padded[0] = args[0];
+                    padded[1] = args[1];
+                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "array_splice")) {

@@ -1967,6 +1967,7 @@ pub const NativeLinker = struct {
         .{ "unserialize", bi(.{ .runtime_name = "php_unserialize", .needs_allocator = true }) },
         .{ "json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
         .{ "json_decode", bi(.{ .runtime_name = "php_json_decode", .needs_allocator = true }) },
+        .{ "json_last_error_msg", bi(.{ .runtime_name = "php_json_last_error_msg", .needs_allocator = true, .may_raise = false }) },
 
         .{ "strlen", bi(.{ .runtime_name = "php_strlen", .needs_allocator = false }) },
         .{ "substr", bi(.{ .runtime_name = "php_substr", .needs_allocator = true }) },
@@ -7298,7 +7299,7 @@ pub const NativeLinker = struct {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeStrGetcsvArgs(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact")) {
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode")) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -7554,7 +7555,7 @@ pub const NativeLinker = struct {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                 try self.writeStrGetcsvArgs(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort")) {
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode")) {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -13675,7 +13676,16 @@ pub const NativeLinker = struct {
             },
             .not => |op| {
                 var operand_buf: [32]u8 = undefined;
-                const operand = try std.fmt.bufPrint(&operand_buf, "reg_{d}", .{op.operand.id});
+                const operand_type = op.operand.type_;
+                const operand_tag = @as(std.meta.Tag(IR.Type), operand_type);
+                const operand = if (operand_tag == .i64)
+                    try std.fmt.bufPrint(&operand_buf, "runtime.Value.initInt(reg_{d}.asInt())", .{op.operand.id})
+                else if (operand_tag == .f64)
+                    try std.fmt.bufPrint(&operand_buf, "runtime.Value.initFloat(reg_{d}.asFloat())", .{op.operand.id})
+                else if (operand_tag == .bool)
+                    try std.fmt.bufPrint(&operand_buf, "runtime.Value.initBool(reg_{d}.toBool())", .{op.operand.id})
+                else
+                    try std.fmt.bufPrint(&operand_buf, "reg_{d}", .{op.operand.id});
                 try writer.print("        {s} = try runtime.php_not({s});\n", .{ result_reg.?, operand });
             },
 

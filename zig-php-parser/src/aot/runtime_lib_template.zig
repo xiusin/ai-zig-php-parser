@@ -2209,6 +2209,8 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "strtolower", wrapBuiltin_strtolower },
     .{ "str_ireplace", wrapBuiltin_str_ireplace },
     .{ "str_getcsv", wrapBuiltin_str_getcsv },
+    .{ "json_decode", wrapBuiltin_json_decode },
+    .{ "json_last_error_msg", wrapBuiltin_json_last_error_msg },
     .{ "trim", wrapBuiltin_trim },
     .{ "count", wrapBuiltin_count },
     .{ "sqrt", wrapBuiltin_sqrt },
@@ -2216,6 +2218,7 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "array_map", wrapBuiltin_array_map },
     .{ "array_filter", wrapBuiltin_array_filter },
     .{ "array_reduce", wrapBuiltin_array_reduce },
+    .{ "array_walk", wrapBuiltin_array_walk },
     .{ "array_merge", wrapBuiltin_array_merge },
     .{ "array_sum", wrapBuiltin_array_sum },
     .{ "round", wrapBuiltin_round },
@@ -2392,8 +2395,7 @@ fn wrapBuiltin_strval(ctx: Value, args: []const Value, allocator: Allocator) !Va
 
 fn wrapBuiltin_array_map(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
-    if (args.len < 2) return error.InvalidArgumentCount;
-    return php_array_map(args[0], args[1], allocator);
+    return php_array_map(args, allocator);
 }
 
 fn wrapBuiltin_array_filter(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -2408,6 +2410,24 @@ fn wrapBuiltin_array_reduce(ctx: Value, args: []const Value, allocator: Allocato
     if (args.len < 2) return error.InvalidArgumentCount;
     const initial = if (args.len >= 3) args[2] else Value.initNull();
     return php_array_reduce(args[0], args[1], initial, allocator);
+}
+
+fn wrapBuiltin_json_decode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_json_decode(args, allocator);
+}
+
+fn wrapBuiltin_json_last_error_msg(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_json_last_error_msg(allocator);
+}
+
+fn wrapBuiltin_array_walk(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const userdata = if (args.len >= 3) args[2] else Value.initNull();
+    return php_array_walk(args[0], args[1], userdata, allocator);
 }
 
 fn wrapBuiltin_select(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -3895,9 +3915,7 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
         try writer.writeAll("(\n");
 
         // 遍历元素
-        const count = arr.elements.count();
         var iter = arr.elements.iterator();
-        var idx: usize = 0;
         while (iter.next()) |entry| {
             const elem_indent = if (is_nested) indent + 2 else indent + 1;
             try writeIndent(writer, elem_indent);
@@ -3911,16 +3929,11 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
 
             if (is_complex) {
                 try printValue(writer, val, elem_indent, true);
-                // 如果不是最后一个元素，添加空行
-                if (idx < count - 1) {
-                    try writer.writeByte('\n');
-                }
+                try writer.writeByte('\n');
             } else {
                 try printValue(writer, val, elem_indent, false);
                 try writer.writeByte('\n');
             }
-
-            idx += 1;
         }
 
         if (is_nested) {
@@ -3944,9 +3957,7 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
         try writer.writeAll("(\n");
 
         // 遍历属性
-        const count = obj.properties.count();
         var it = obj.properties.iterator();
-        var idx: usize = 0;
         while (it.next()) |entry| {
             const elem_indent = if (is_nested) indent + 2 else indent + 1;
             try writeIndent(writer, elem_indent);
@@ -3960,15 +3971,11 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
 
             if (is_complex) {
                 try printValue(writer, val, elem_indent, true);
-                if (idx < count - 1) {
-                    try writer.writeByte('\n');
-                }
+                try writer.writeByte('\n');
             } else {
                 try printValue(writer, val, elem_indent, false);
                 try writer.writeByte('\n');
             }
-
-            idx += 1;
         }
 
         if (is_nested) {
@@ -11965,15 +11972,61 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
     }
 }
 
-/// json_decode - 解析JSON字符串为PHP值
-pub fn php_json_decode(json: Value, assoc: Value, allocator: Allocator) !Value {
-    if (!json.isString()) return Value.initNull();
+const json_error_none: i32 = 0;
+const json_error_depth: i32 = 1;
+const json_error_syntax: i32 = 4;
 
+threadlocal var last_json_error_code: i32 = json_error_none;
+
+pub fn php_json_last_error_msg(allocator: Allocator) !Value {
+    const msg = switch (last_json_error_code) {
+        json_error_none => "No error",
+        json_error_depth => "Maximum stack depth exceeded",
+        json_error_syntax => "Syntax error",
+        else => "Unknown error",
+    };
+    return Value.initString(try PHPString.init(allocator, msg));
+}
+
+/// json_decode - 解析JSON字符串为PHP值
+pub fn php_json_decode(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return error.InvalidArgumentCount;
+
+    const json = args[0];
+    if (!json.isString()) {
+        last_json_error_code = json_error_syntax;
+        return Value.initNull();
+    }
+
+    const assoc = if (args.len >= 2) args[1] else Value.initBool(false);
+    const depth_val = if (args.len >= 3) args[2] else Value.initInt(512);
     const is_assoc = if (assoc.isBool()) assoc.asBool() else assoc.toBool();
     const json_str = json.asString().data;
     var pos: usize = 0;
+    const depth_i64 = @max(depth_val.toInt(), 1);
+    const depth: usize = @intCast(depth_i64);
 
-    return jsonDecodeValue(json_str, &pos, is_assoc, allocator) catch Value.initNull();
+    const result = jsonDecodeValue(json_str, &pos, is_assoc, depth, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.MaxDepthExceeded => {
+            last_json_error_code = json_error_depth;
+            return Value.initNull();
+        },
+        else => {
+            last_json_error_code = json_error_syntax;
+            return Value.initNull();
+        },
+    };
+
+    skipWhitespace(json_str, &pos);
+    if (pos != json_str.len) {
+        result.release(allocator);
+        last_json_error_code = json_error_syntax;
+        return Value.initNull();
+    }
+
+    last_json_error_code = json_error_none;
+    return result;
 }
 
 const JsonError = error{
@@ -11981,9 +12034,10 @@ const JsonError = error{
     UnexpectedEnd,
     OutOfMemory,
     StringTooLarge,
+    MaxDepthExceeded,
 };
 
-fn jsonDecodeValue(json: []const u8, pos: *usize, assoc: bool, allocator: Allocator) JsonError!Value {
+fn jsonDecodeValue(json: []const u8, pos: *usize, assoc: bool, depth: usize, allocator: Allocator) JsonError!Value {
     skipWhitespace(json, pos);
 
     if (pos.* >= json.len) return error.UnexpectedEnd;
@@ -12010,11 +12064,13 @@ fn jsonDecodeValue(json: []const u8, pos: *usize, assoc: bool, allocator: Alloca
     }
 
     if (c == '[') {
-        return jsonDecodeArray(json, pos, assoc, allocator);
+        if (depth == 0) return error.MaxDepthExceeded;
+        return jsonDecodeArray(json, pos, assoc, depth - 1, allocator);
     }
 
     if (c == '{') {
-        return jsonDecodeObject(json, pos, assoc, allocator);
+        if (depth == 0) return error.MaxDepthExceeded;
+        return jsonDecodeObject(json, pos, assoc, depth - 1, allocator);
     }
 
     if (c == '-' or (c >= '0' and c <= '9')) {
@@ -12084,7 +12140,7 @@ fn jsonDecodeNumber(json: []const u8, pos: *usize) JsonError!Value {
     }
 }
 
-fn jsonDecodeArray(json: []const u8, pos: *usize, assoc: bool, allocator: Allocator) JsonError!Value {
+fn jsonDecodeArray(json: []const u8, pos: *usize, assoc: bool, depth: usize, allocator: Allocator) JsonError!Value {
     pos.* += 1; // 跳过 '['
 
     const arr = try PHPArray.init(allocator);
@@ -12097,7 +12153,7 @@ fn jsonDecodeArray(json: []const u8, pos: *usize, assoc: bool, allocator: Alloca
     }
 
     while (pos.* < json.len) {
-        const value = try jsonDecodeValue(json, pos, assoc, allocator);
+        const value = try jsonDecodeValue(json, pos, assoc, depth, allocator);
         try arr.push(allocator, value);
         value.release(allocator);
 
@@ -12116,7 +12172,7 @@ fn jsonDecodeArray(json: []const u8, pos: *usize, assoc: bool, allocator: Alloca
     return Value.initArray(arr);
 }
 
-fn jsonDecodeObject(json: []const u8, pos: *usize, assoc: bool, allocator: Allocator) !Value {
+fn jsonDecodeObject(json: []const u8, pos: *usize, assoc: bool, depth: usize, allocator: Allocator) JsonError!Value {
     pos.* += 1; // 跳过 '{'
 
     const arr = try PHPArray.init(allocator);
@@ -12141,7 +12197,7 @@ fn jsonDecodeObject(json: []const u8, pos: *usize, assoc: bool, allocator: Alloc
         pos.* += 1;
 
         // 解析值
-        const value = try jsonDecodeValue(json, pos, assoc, allocator);
+        const value = try jsonDecodeValue(json, pos, assoc, depth, allocator);
 
         // 添加到数组
         if (key.isString()) {
@@ -12163,10 +12219,25 @@ fn jsonDecodeObject(json: []const u8, pos: *usize, assoc: bool, allocator: Alloc
 
     if (pos.* < json.len and json[pos.*] == '}') pos.* += 1;
 
-    // 如果 assoc 为 false，应该返回对象，但目前我们统一返回数组（简化实现）
-    // TODO: 实现 stdClass 对象
+    if (assoc) {
+        return Value.initArray(arr);
+    }
 
-    return Value.initArray(arr);
+    const obj_val = php_object_new("stdClass", allocator) catch return error.OutOfMemory;
+    const obj = Value_asObject(obj_val);
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| {
+        switch (entry.key_ptr.*) {
+            .string => |k| obj.setProperty(k.data, entry.value_ptr.*) catch return error.OutOfMemory,
+            .integer => |k| {
+                var key_buf: [32]u8 = undefined;
+                const key_str = std.fmt.bufPrint(&key_buf, "{d}", .{k}) catch return error.OutOfMemory;
+                obj.setProperty(key_str, entry.value_ptr.*) catch return error.OutOfMemory;
+            },
+        }
+    }
+
+    return obj_val;
 }
 
 fn skipWhitespace(json: []const u8, pos: *usize) void {
@@ -12586,17 +12657,33 @@ pub fn php_socket_close(fd_val: Value) !Value {
 // 高阶数组函数
 // ============================================================================
 
-/// array_map - 对数组的每个元素应用回调函数
-pub fn php_array_map(callback: Value, arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return error.InvalidArgument;
+/// array_map - 对一个或多个数组的每个元素应用回调函数
+pub fn php_array_map(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return error.InvalidArgumentCount;
 
-    const php_arr = arr.asArray();
+    const callback = args[0];
+    const arrays = args[1..];
+    for (arrays) |arr| {
+        if (!arr.isArray()) return error.InvalidArgument;
+    }
+
     const result_arr = try PHPArray.init(allocator);
+    const primary = arrays[0].asArray();
 
-    var iter = php_arr.elements.iterator();
+    var iter = primary.elements.iterator();
     while (iter.next()) |entry| {
-        const args = [_]Value{entry.value_ptr.*};
-        const result_value = try php_invoke_callable(callback, &args, allocator);
+        var callback_args = try allocator.alloc(Value, arrays.len);
+        defer allocator.free(callback_args);
+
+        callback_args[0] = entry.value_ptr.*;
+
+        var i: usize = 1;
+        while (i < arrays.len) : (i += 1) {
+            const cur = arrays[i].asArray();
+            callback_args[i] = cur.elements.get(entry.key_ptr.*) orelse Value.initNull();
+        }
+
+        const result_value = try php_invoke_callable(callback, callback_args, allocator);
         try result_arr.set(allocator, entry.key_ptr.*, result_value);
         result_value.release(allocator);
     }
@@ -12760,12 +12847,15 @@ pub fn php_array_walk(arr: Value, callback: Value, userdata: Value, allocator: A
             .string => |k| Value.initString(k),
         };
 
-        const args = if (userdata.isNull())
-            [_]Value{ entry.value_ptr.*, key_val }
-        else
-            [_]Value{ entry.value_ptr.*, key_val, userdata };
+        var args_buf: [3]Value = undefined;
+        args_buf[0] = entry.value_ptr.*;
+        args_buf[1] = key_val;
+        const arg_count: usize = if (userdata.isNull()) 2 else blk: {
+            args_buf[2] = userdata;
+            break :blk 3;
+        };
 
-        const result = try php_invoke_callable(callback, args[0..], allocator);
+        const result = try php_invoke_callable(callback, args_buf[0..arg_count], allocator);
         result.release(allocator);
     }
 
