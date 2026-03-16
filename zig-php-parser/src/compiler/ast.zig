@@ -140,6 +140,8 @@ pub const Node = struct {
         static_expr, // self, parent, static 关键字
         cast_expr, // 类型转换 (int), (object), etc.
         expr_list, // 表达式列表（for 循环 init/loop）
+        goto_stmt, // goto label;
+        goto_label, // label:
     };
 
     pub const Modifier = packed struct {
@@ -242,6 +244,8 @@ pub const Node = struct {
         cast_expr: struct { cast_type: Token.Tag, expr: Index },
         enum_case: struct { name: StringId, value: ?Index },
         expr_list: struct { exprs: []const Index },
+        goto_stmt: struct { label: StringId },
+        goto_label: struct { label: StringId },
         none: void,
     };
 };

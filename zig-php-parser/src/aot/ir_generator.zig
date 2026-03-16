@@ -3313,6 +3313,7 @@ pub const IRGenerator = struct {
             .or_equal => try self.emitWithResult(.{ .bit_or = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
             .less_less_equal => try self.emitWithResult(.{ .shl = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
             .greater_greater_equal => try self.emitWithResult(.{ .shr = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
+            .double_question_equal => try self.generateNullCoalesce(current_value, rhs_value),
             else => return error.UnsupportedCompoundOperator,
         };
 
@@ -3712,6 +3713,7 @@ pub const IRGenerator = struct {
                     .slash_equal => try self.emitWithResult(.{ .div = .{ .lhs = current_value, .rhs = rhs_value } }, current_value.type_),
                     .percent_equal => try self.emitWithResult(.{ .mod = .{ .lhs = current_value, .rhs = rhs_value } }, .i64),
                     .dot_equal => try self.emitWithResult(.{ .concat = .{ .lhs = current_value, .rhs = rhs_value } }, .php_string),
+                    .double_question_equal => try self.generateNullCoalesce(current_value, rhs_value),
                     else => try self.emitWithResult(.const_null, .php_value),
                 };
 

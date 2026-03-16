@@ -383,6 +383,7 @@ pub const Parser = struct {
             .k_const => self.parseConst(),
             .k_go => self.parseGo(),
             .k_lock => self.parseLock(),
+            // .k_goto => self.parseGoto(), // TODO: implement goto support
             .k_return => self.parseReturn(),
             .k_break => self.parseBreak(),
             .k_continue => self.parseContinue(),
@@ -415,6 +416,13 @@ pub const Parser = struct {
                 }
             },
             .l_brace => self.parseBlock(),
+            .t_string => {
+                // Check for goto label: identifier followed by colon at statement level
+                // if (self.peek.tag == .colon) {
+                //     return self.parseGotoLabel(); // TODO: implement goto label support
+                // }
+                return self.parseExpressionStatement();
+            },
             .t_variable => {
                 if (self.peek.tag == .equal) return self.parseAssignment();
                 return self.parseExpressionStatement();
@@ -680,15 +688,16 @@ pub const Parser = struct {
         if (self.curr.tag == .k_function or self.curr.tag == .k_fn) {
             const is_arrow = self.curr.tag == .k_fn;
             const token = try self.eat(if (is_arrow) .k_fn else .k_function);
-            // Method name can be t_string, t_go_identifier, or reserved words like set/get
+            // Support return-by-reference: function &methodName()
+            if (self.curr.tag == .ampersand) self.nextToken();
+            // Method name: t_string, t_go_identifier, or any PHP keyword (context-sensitive)
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
-            else if (self.curr.tag == .k_set or self.curr.tag == .k_get) blk: {
-                // Allow 'set' and 'get' as method names
-                const tok = self.curr;
-                self.nextToken();
-                break :blk tok;
-            } else try self.eat(.t_string);
+            else if (self.curr.tag == .t_string)
+                try self.eat(.t_string)
+            else if (self.eatKeywordAsIdentifier()) |tok|
+                tok
+            else try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -858,15 +867,16 @@ pub const Parser = struct {
         if (self.curr.tag == .k_function or self.curr.tag == .k_fn) {
             const is_arrow = self.curr.tag == .k_fn;
             const token = try self.eat(if (is_arrow) .k_fn else .k_function);
-            // Method name can be t_string, t_go_identifier, or reserved words like set/get
+            // Support return-by-reference: function &methodName()
+            if (self.curr.tag == .ampersand) self.nextToken();
+            // Method name: t_string, t_go_identifier, or any PHP keyword (context-sensitive)
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
-            else if (self.curr.tag == .k_set or self.curr.tag == .k_get) blk: {
-                // Allow 'set' and 'get' as method names
-                const tok = self.curr;
-                self.nextToken();
-                break :blk tok;
-            } else try self.eat(.t_string);
+            else if (self.curr.tag == .t_string)
+                try self.eat(.t_string)
+            else if (self.eatKeywordAsIdentifier()) |tok|
+                tok
+            else try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -1105,8 +1115,7 @@ pub const Parser = struct {
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        // 使用优先级2跳过逗号运算符
-                        try args.append(self.allocator, try self.parseExpression(2));
+                        try args.append(self.allocator, try self.parseCallArg());
                         if (self.curr.tag == .comma) self.nextToken();
                     }
                     _ = try self.eat(.r_paren);
@@ -1897,21 +1906,9 @@ pub const Parser = struct {
                     try self.eat(.t_string)
                 else if (self.curr.tag == .t_go_identifier)
                     try self.eat(.t_go_identifier)
-                else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
-                    self.curr.tag == .k_unset or self.curr.tag == .k_clone or
-                    self.curr.tag == .k_list or self.curr.tag == .k_print or
-                    self.curr.tag == .k_lock or self.curr.tag == .k_try or
-                    self.curr.tag == .k_catch or self.curr.tag == .k_finally or
-                    self.curr.tag == .k_throw or self.curr.tag == .k_match or
-                    self.curr.tag == .k_default or self.curr.tag == .k_static or
-                    self.curr.tag == .k_class or self.curr.tag == .k_function or
-                    self.curr.tag == .k_array or self.curr.tag == .k_new or
-                    self.curr.tag == .k_fn)
-                blk: {
-                    const tok = self.curr;
-                    self.nextToken();
-                    break :blk tok;
-                } else if (self.curr.tag == .t_variable) {
+                else if (self.eatKeywordAsIdentifier()) |tok|
+                    tok
+                else if (self.curr.tag == .t_variable) {
                     // 可变属性: $obj->$varName
                     const var_node = try self.parseUnary();
                     left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = var_node } } });
@@ -1922,8 +1919,7 @@ pub const Parser = struct {
                     self.nextToken();
                     var args = std.ArrayListUnmanaged(ast.Node.Index){};
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        // 使用优先级2跳过逗号运算符（逗号优先级是1）
-                        try args.append(self.allocator, try self.parseExpression(2));
+                        try args.append(self.allocator, try self.parseCallArg());
                         if (self.curr.tag == .comma) self.nextToken();
                     }
                     _ = try self.eat(.r_paren);
@@ -1932,27 +1928,13 @@ pub const Parser = struct {
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
                 }
             } else if (tag == .safe_arrow or tag == .safe_dot) {
-                // 安全导航操作符 ?-> (PHP) 或 ?. (Go)
-                // 方法名可以是标识符，也可以是某些关键字
                 const member_name_tok = if (self.curr.tag == .t_string)
                     try self.eat(.t_string)
                 else if (self.curr.tag == .t_go_identifier)
                     try self.eat(.t_go_identifier)
-                else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
-                    self.curr.tag == .k_unset or self.curr.tag == .k_clone or
-                    self.curr.tag == .k_list or self.curr.tag == .k_print or
-                    self.curr.tag == .k_lock or self.curr.tag == .k_try or
-                    self.curr.tag == .k_catch or self.curr.tag == .k_finally or
-                    self.curr.tag == .k_throw or self.curr.tag == .k_match or
-                    self.curr.tag == .k_default or self.curr.tag == .k_static or
-                    self.curr.tag == .k_class or self.curr.tag == .k_function or
-                    self.curr.tag == .k_array or self.curr.tag == .k_new or
-                    self.curr.tag == .k_fn)
-                blk: {
-                    const tok = self.curr;
-                    self.nextToken();
-                    break :blk tok;
-                } else try self.eat(.t_string);
+                else if (self.eatKeywordAsIdentifier()) |tok|
+                    tok
+                else try self.eat(.t_string);
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                 // 安全导航操作符目前只支持属性访问，不支持方法调用
                 left = try self.createNode(.{ .tag = .safe_property_access, .main_token = op, .data = .{ .safe_property_access = .{ .target = left, .property_name = member_id } } });
@@ -1983,19 +1965,49 @@ pub const Parser = struct {
                     left = try self.createNode(.{ .tag = .static_property_access, .main_token = op, .data = .{ .static_property_access = .{ .class_name = class_name_id, .property_name = prop_id } } });
                 } else {
                     // Allow keywords as valid member names after ::
-                    const member_name_tok = if (self.curr.tag == .k_get or self.curr.tag == .k_set)
-                        try self.eat(if (self.curr.tag == .k_get) .k_get else .k_set)
-                    else if (self.curr.tag == .k_class)
-                        try self.eat(.k_class)
+                    const member_name_tok = if (self.curr.tag == .t_string)
+                        try self.eat(.t_string)
+                    else if (self.eatKeywordAsIdentifier()) |tok|
+                        tok
                     else
                         try self.eat(.t_string);
                     const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                     if (self.curr.tag == .l_paren) {
                         self.nextToken();
+                        // Check for first-class callable: Class::method(...)
+                        if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
+                            self.nextToken(); // consume ...
+                            _ = try self.eat(.r_paren);
+                            // Build "ClassName::methodName" string for Closure::fromCallable
+                            const class_str = self.context.string_pool.keys()[class_name_id];
+                            const method_str = self.context.string_pool.keys()[member_id];
+                            var buf: [512]u8 = undefined;
+                            const callable_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_str, method_str }) catch "unknown";
+                            const callable_id = try self.context.intern(callable_name);
+                            const callable_node = try self.createNode(.{
+                                .tag = .literal_string,
+                                .main_token = op,
+                                .data = .{ .literal_string = .{ .value = callable_id } },
+                            });
+                            const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                            callable_args[0] = callable_node;
+                            left = try self.createNode(.{
+                                .tag = .function_call,
+                                .main_token = op,
+                                .data = .{ .function_call = .{
+                                    .name = try self.createNode(.{
+                                        .tag = .variable,
+                                        .main_token = op,
+                                        .data = .{ .variable = .{ .name = try self.context.intern("Closure::fromCallable") } },
+                                    }),
+                                    .args = callable_args,
+                                } },
+                            });
+                            continue;
+                        }
                         var args = std.ArrayListUnmanaged(ast.Node.Index){};
                         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                            // 使用优先级2跳过逗号运算符（逗号优先级是1）
-                            try args.append(self.allocator, try self.parseExpression(2));
+                            try args.append(self.allocator, try self.parseCallArg());
                             if (self.curr.tag == .comma) self.nextToken();
                         }
                         _ = try self.eat(.r_paren);
@@ -2063,7 +2075,7 @@ pub const Parser = struct {
             } else if (tag == .equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
-            } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal or tag == .star_star_equal or tag == .less_less_equal or tag == .greater_greater_equal or tag == .and_equal or tag == .or_equal or tag == .caret_equal) {
+            } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal or tag == .star_star_equal or tag == .less_less_equal or tag == .greater_greater_equal or tag == .and_equal or tag == .or_equal or tag == .caret_equal or tag == .double_question_equal) {
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .compound_assignment, .main_token = op, .data = .{ .compound_assignment = .{ .target = left, .op = tag, .value = right } } });
             } else if (tag == .question) {
@@ -2125,6 +2137,11 @@ pub const Parser = struct {
                 // Use parseUnary to handle cases like !!$x or !$obj->method()
                 const expr = try self.parseUnary();
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
+            },
+            .at_sign => {
+                // @ error suppression: parse as transparent wrapper (AOT ignores suppression)
+                self.nextToken();
+                return self.parseUnary();
             },
             .t_variable, .t_go_identifier => {
                 return self.parseUnaryPostfix();
@@ -2226,21 +2243,9 @@ pub const Parser = struct {
                     try self.eat(.t_string)
                 else if (self.curr.tag == .t_go_identifier)
                     try self.eat(.t_go_identifier)
-                else if (self.curr.tag == .k_set or self.curr.tag == .k_get or
-                    self.curr.tag == .k_unset or self.curr.tag == .k_clone or
-                    self.curr.tag == .k_list or self.curr.tag == .k_print or
-                    self.curr.tag == .k_lock or self.curr.tag == .k_try or
-                    self.curr.tag == .k_catch or self.curr.tag == .k_finally or
-                    self.curr.tag == .k_throw or self.curr.tag == .k_match or
-                    self.curr.tag == .k_default or self.curr.tag == .k_static or
-                    self.curr.tag == .k_class or self.curr.tag == .k_function or
-                    self.curr.tag == .k_array or self.curr.tag == .k_new or
-                    self.curr.tag == .k_fn)
-                blk: {
-                    const tok = self.curr;
-                    self.nextToken();
-                    break :blk tok;
-                } else if (self.curr.tag == .t_variable) {
+                else if (self.eatKeywordAsIdentifier()) |tok|
+                    tok
+                else if (self.curr.tag == .t_variable) {
                     // 可变属性: $obj->$varName
                     const var_node = try self.parseUnaryPostfix();
                     left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = var_node } } });
@@ -2254,8 +2259,7 @@ pub const Parser = struct {
                     self.nextToken();
                     var args = std.ArrayListUnmanaged(ast.Node.Index){};
                     while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        // 使用优先级2跳过逗号运算符
-                        try args.append(self.allocator, try self.parseExpression(2));
+                        try args.append(self.allocator, try self.parseCallArg());
                         if (self.curr.tag == .comma) self.nextToken();
                     }
                     _ = try self.eat(.r_paren);
@@ -2377,7 +2381,13 @@ pub const Parser = struct {
             },
             .t_lnumber => {
                 const t = try self.eat(.t_lnumber);
-                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = try std.fmt.parseInt(i64, self.lexer.buffer[t.loc.start..t.loc.end], 10) } } });
+                const raw = self.lexer.buffer[t.loc.start..t.loc.end];
+                // base 0: auto-detect prefix (0b=binary, 0x=hex, 0o=octal, else=decimal)
+                const value = std.fmt.parseInt(i64, raw, 0) catch |err| switch (err) {
+                    error.Overflow => std.math.maxInt(i64),
+                    else => return err,
+                };
+                return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = value } } });
             },
             .t_dnumber => {
                 const t = try self.eat(.t_dnumber);
@@ -2695,12 +2705,20 @@ pub const Parser = struct {
                 const body = try self.parseExpression(1); // 使用 1 避免解析逗号
                 default_arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{}, .body = body } } });
             } else {
-                const cond = try self.parseExpression(1); // 使用 1 避免解析逗号
+                // Parse comma-separated conditions: expr1, expr2, ... => body
+                var conds = std.ArrayListUnmanaged(ast.Node.Index){};
+                const first_cond = try self.parseExpression(1);
+                try conds.append(self.allocator, first_cond);
+                while (self.curr.tag == .comma) {
+                    self.nextToken();
+                    // Stop if next is fat_arrow (shouldn't happen) or default/rbrace
+                    if (self.curr.tag == .fat_arrow or self.curr.tag == .r_brace or self.curr.tag == .eof) break;
+                    try conds.append(self.allocator, try self.parseExpression(1));
+                }
                 _ = try self.eat(.fat_arrow);
-                const body = try self.parseExpression(1); // 使用 1 避免解析逗号
-                // Use arena to allocate conditions array to avoid dangling pointer
-                const conditions = try arena.alloc(ast.Node.Index, 1);
-                conditions[0] = cond;
+                const body = try self.parseExpression(1);
+                const conditions = try arena.dupe(ast.Node.Index, conds.items);
+                conds.deinit(self.allocator);
                 const arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = conditions, .body = body } } });
                 try arms.append(self.allocator, arm);
             }
@@ -2966,10 +2984,66 @@ pub const Parser = struct {
             .double_pipe => 10, // Logical OR
             .double_question => 8, // Null coalescing
             .question => 7, // Ternary
-            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal, .star_star_equal, .less_less_equal, .greater_greater_equal => 5,
+            .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal, .star_star_equal, .less_less_equal, .greater_greater_equal, .and_equal, .or_equal, .caret_equal, .double_question_equal => 5,
             .comma => 1, // Comma operator (lowest precedence)
             else => 0,
         };
+    }
+
+    /// PHP context-sensitive keywords: any keyword that can be used as method/property name after -> or ::
+    fn isKeywordUsableAsIdentifier(self: *Parser) bool {
+        _ = self;
+        return false;
+    }
+
+    fn isKeywordIdentifierTag(tag: Token.Tag) bool {
+        return switch (tag) {
+            .k_set, .k_get, .k_unset, .k_clone, .k_list, .k_print,
+            .k_lock, .k_try, .k_catch, .k_finally, .k_throw, .k_match,
+            .k_default, .k_static, .k_class, .k_function, .k_array,
+            .k_new, .k_fn, .k_parent, .k_self, .k_public, .k_private,
+            .k_protected, .k_abstract, .k_final, .k_readonly,
+            .k_foreach, .k_for, .k_while, .k_do, .k_if, .k_else,
+            .k_elseif, .k_switch, .k_case, .k_break, .k_continue,
+            .k_return, .k_from, .k_enum, .k_interface, .k_trait,
+            .k_extends, .k_implements, .k_use, .k_namespace,
+            .k_echo, .k_global, .k_const, .k_var, .k_as,
+            .k_yield, .k_goto, .k_declare, .k_instanceof,
+            .k_include, .k_include_once, .k_require, .k_require_once,
+            .k_and, .k_or, .k_xor, .k_with, .k_go,
+            .k_callable, .k_iterable, .k_object, .k_mixed,
+            .k_never, .k_void, .k_true, .k_false, .k_null,
+            => true,
+            else => false,
+        };
+    }
+
+    /// Try to eat the current token as a keyword-used-as-identifier, returning it as if it were t_string
+    fn eatKeywordAsIdentifier(self: *Parser) ?Token {
+        if (isKeywordIdentifierTag(self.curr.tag)) {
+            const tok = self.curr;
+            self.nextToken();
+            return tok;
+        }
+        return null;
+    }
+
+    /// Parse a single call argument, supporting named args (name: value) and keyword-as-name (type: value)
+    fn parseCallArg(self: *Parser) anyerror!ast.Node.Index {
+        // Check for named parameter: name: value or keyword: value (e.g. type: 'int')
+        if ((self.curr.tag == .t_string or isKeywordIdentifierTag(self.curr.tag)) and self.peek.tag == .colon) {
+            const name_tok = self.curr;
+            const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+            self.nextToken(); // skip name
+            self.nextToken(); // skip colon
+            const value_expr = try self.parseExpression(1);
+            return self.createNode(.{
+                .tag = .named_arg,
+                .main_token = name_tok,
+                .data = .{ .named_arg = .{ .name = name_id, .value = value_expr } },
+            });
+        }
+        return self.parseExpression(2);
     }
 
     fn createNode(self: *Parser, node: ast.Node) anyerror!ast.Node.Index {

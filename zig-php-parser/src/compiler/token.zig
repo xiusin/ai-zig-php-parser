@@ -178,6 +178,7 @@ pub const Token = struct {
         greater_equal,
         spaceship,
         double_question,
+        double_question_equal, // ??=
         double_ampersand,
         double_pipe,
         ampersand,
@@ -188,6 +189,7 @@ pub const Token = struct {
         k_with, // with keyword for clone with
         t_attribute_start, // #[
         // Safe navigation operators (null-safe)
+        at_sign, // @ (error suppression)
         safe_arrow, // ?-> (PHP mode)
         safe_dot, // ?.  (Go mode)
         // Go mode specific tokens

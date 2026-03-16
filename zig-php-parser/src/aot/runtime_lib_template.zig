@@ -371,6 +371,22 @@ pub fn initRuntime(allocator: Allocator) void {
 }
 
 fn initPredefinedConstants() !void {
+    // PHP核心常量
+    const php_keys = [_][]const u8{ "PHP_INT_MAX", "PHP_INT_MIN", "PHP_INT_SIZE" };
+    const php_vals = [_]i64{ std.math.maxInt(i64), std.math.minInt(i64), 8 };
+    for (php_keys, php_vals) |key, val| {
+        const key_copy = try runtime_allocator.dupe(u8, key);
+        try constants.put(key_copy, Value.initInt(val));
+    }
+    
+    // 排序常量
+    const sort_keys = [_][]const u8{ "SORT_ASC", "SORT_DESC", "SORT_REGULAR", "SORT_NUMERIC", "SORT_STRING" };
+    const sort_vals = [_]i64{ 1, 2, 0, 1, 2 };
+    for (sort_keys, sort_vals) |key, val| {
+        const key_copy = try runtime_allocator.dupe(u8, key);
+        try constants.put(key_copy, Value.initInt(val));
+    }
+    
     const keys = [_][]const u8{ "STR_PAD_LEFT", "STR_PAD_RIGHT", "STR_PAD_BOTH" };
     const values = [_]i64{ 0, 1, 2 };
     for (keys, values) |key, val| {
@@ -2678,6 +2694,253 @@ pub fn php_memory_get_peak_usage(args: []const Value, allocator: Allocator) !Val
     _ = allocator;
     if (args.len > 1) return error.InvalidArgumentCount;
     return Value.initInt(@intCast(alloc_counters.peak_live_bytes));
+}
+
+/// shell_exec - 执行shell命令并返回完整输出
+pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return Value.initNull();
+    
+    const cmd_val = args[0];
+    if (!cmd_val.isString()) return Value.initNull();
+    
+    const cmd_str = cmd_val.asString().data;
+    
+    // 执行命令
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
+        .max_output_bytes = 1024 * 1024,
+    }) catch return Value.initNull();
+    
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    
+    const output = try PHPString.init(allocator, result.stdout);
+    return Value.initString(output);
+}
+
+/// exec - 执行命令并返回输出数组
+pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return Value.initNull();
+    
+    const cmd_val = args[0];
+    if (!cmd_val.isString()) return Value.initNull();
+    
+    const cmd_str = cmd_val.asString().data;
+    
+    // 执行命令
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
+        .max_output_bytes = 1024 * 1024,
+    }) catch return Value.initNull();
+    
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    
+    // 将输出按行分割成数组
+    const arr = try PHPArray.init(allocator);
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    var idx: i64 = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.peek() == null) break; // 跳过最后的空行
+        const line_str = try PHPString.init(allocator, line);
+        try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(line_str));
+        idx += 1;
+    }
+    
+    // 如果有第二个参数（output数组引用），填充它
+    if (args.len >= 2 and args[1].isArray()) {
+        // 简化：直接返回数组，不处理引用
+    }
+    
+    // 如果有第三个参数（return_code引用），设置返回码
+    if (args.len >= 3) {
+        // 简化：忽略return_code参数
+    }
+    
+    return Value.initArray(arr);
+}
+
+/// system - 执行命令，输出到stdout，返回最后一行
+pub fn php_system(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return Value.initNull();
+    
+    const cmd_val = args[0];
+    if (!cmd_val.isString()) return Value.initNull();
+    
+    const cmd_str = cmd_val.asString().data;
+    
+    // 执行命令
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
+        .max_output_bytes = 1024 * 1024,
+    }) catch return Value.initNull();
+    
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    
+    // 输出到stdout（模拟PHP的system行为）
+    // 注意：在AOT编译的程序中，直接输出可能不可见
+    // 这里简化处理，只返回最后一行
+    
+    // 返回最后一行
+    if (result.stdout.len == 0) return Value.initNull();
+    
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    var last_line: []const u8 = "";
+    while (lines.next()) |line| {
+        if (line.len > 0) last_line = line;
+    }
+    
+    const last_str = try PHPString.init(allocator, last_line);
+    return Value.initString(last_str);
+}
+
+/// substr_replace - 替换字符串的子串
+pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    
+    const str_val = args[0];
+    if (!str_val.isString()) return Value.initNull();
+    const str = str_val.asString().data;
+    
+    const replacement_val = args[1];
+    if (!replacement_val.isString()) return Value.initNull();
+    const replacement = replacement_val.asString().data;
+    
+    const start = if (args.len >= 3) args[2].toInt() else 0;
+    const length = if (args.len >= 4) args[3].toInt() else @as(i64, @intCast(str.len));
+    
+    // 处理负数索引
+    const actual_start = if (start < 0) 
+        @max(0, @as(i64, @intCast(str.len)) + start) 
+    else 
+        @min(start, @as(i64, @intCast(str.len)));
+    
+    const actual_length = if (length < 0)
+        @max(0, @as(i64, @intCast(str.len)) - actual_start + length)
+    else
+        @min(length, @as(i64, @intCast(str.len)) - actual_start);
+    
+    const start_idx = @as(usize, @intCast(actual_start));
+    const end_idx = @as(usize, @intCast(actual_start + actual_length));
+    
+    // 构建结果字符串
+    var result = try std.ArrayList(u8).initCapacity(allocator, str.len + replacement.len);
+    errdefer result.deinit();
+    
+    try result.appendSlice(str[0..start_idx]);
+    try result.appendSlice(replacement);
+    if (end_idx < str.len) {
+        try result.appendSlice(str[end_idx..]);
+    }
+    
+    const output = try PHPString.init(allocator, try result.toOwnedSlice());
+    return Value.initString(output);
+}
+
+// ============================================================================
+// 文件I/O函数
+// ============================================================================
+
+pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator) !Value {
+    const fname_str = try filename.toString(allocator);
+    defer fname_str.release(allocator);
+    
+    const content_str = try data.toString(allocator);
+    defer content_str.release(allocator);
+    
+    const file = std.fs.cwd().createFile(fname_str.data, .{}) catch return Value.initBool(false);
+    defer file.close();
+    
+    file.writeAll(content_str.data) catch return Value.initBool(false);
+    return Value.initInt(@intCast(content_str.data.len));
+}
+
+pub fn php_file_get_contents(filename: Value, allocator: Allocator) !Value {
+    const fname_str = try filename.toString(allocator);
+    defer fname_str.release(allocator);
+    
+    const file = std.fs.cwd().openFile(fname_str.data, .{}) catch return Value.initBool(false);
+    defer file.close();
+    
+    const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
+    const output = try PHPString.init(allocator, content);
+    return Value.initString(output);
+}
+
+pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
+    const fname_str = try filename.toString(allocator);
+    defer fname_str.release(allocator);
+    
+    const mode_str = try mode.toString(allocator);
+    defer mode_str.release(allocator);
+    
+    const file = if (std.mem.eql(u8, mode_str.data, "r"))
+        std.fs.cwd().openFile(fname_str.data, .{}) catch return Value.initBool(false)
+    else if (std.mem.eql(u8, mode_str.data, "w"))
+        std.fs.cwd().createFile(fname_str.data, .{}) catch return Value.initBool(false)
+    else if (std.mem.eql(u8, mode_str.data, "a"))
+        std.fs.cwd().createFile(fname_str.data, .{ .truncate = false }) catch return Value.initBool(false)
+    else
+        return Value.initBool(false);
+    
+    const handle = try allocator.create(std.fs.File);
+    handle.* = file;
+    return Value.initInt(@intFromPtr(handle));
+}
+
+pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
+    const handle_ptr = handle.asInt();
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    
+    const content_str = try data.toString(allocator);
+    defer content_str.release(allocator);
+    
+    file_handle.writeAll(content_str.data) catch return Value.initBool(false);
+    return Value.initInt(@intCast(content_str.data.len));
+}
+
+pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
+    const handle_ptr = handle.asInt();
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    
+    const len = length.asInt();
+    
+    const buffer = try allocator.alloc(u8, @intCast(len));
+    const bytes_read = file_handle.read(buffer) catch {
+        allocator.free(buffer);
+        return Value.initBool(false);
+    };
+    
+    const content = try allocator.realloc(buffer, bytes_read);
+    const output = try PHPString.init(allocator, content);
+    return Value.initString(output);
+}
+
+pub fn php_fclose(handle: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    const handle_ptr = handle.asInt();
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    
+    file_handle.close();
+    return Value.initBool(true);
+}
+
+pub fn php_is_resource(val: Value) !Value {
+    if (val.isInt()) {
+        const i = val.asInt();
+        return Value.initBool(i > 0);
+    }
+    return Value.initBool(false);
 }
 
 pub fn php_function_exists(args: []const Value, allocator: Allocator) !Value {
@@ -7524,63 +7787,6 @@ pub fn php_clone(val: Value, allocator: Allocator) !Value {
 }
 
 // ============================================================================
-// 文件I/O函数
-// ============================================================================
-
-/// fopen - 打开文件
-pub fn php_fopen(filename: Value, mode: Value) !Value {
-    const fname = filename.asString();
-    const fmode = mode.asString();
-
-    // 特殊处理 php://memory 和 php://temp
-    if (std.mem.startsWith(u8, fname.data, "php://")) {
-        return Value.initInt(1); // 虚拟句柄
-    }
-
-    // 尝试打开文件验证存在性
-    _ = std.fs.cwd().openFile(fname.data, .{
-        .mode = if (std.mem.indexOf(u8, fmode.data, "r") != null) .read_only else .read_write,
-    }) catch {
-        return Value.initBool(false);
-    };
-
-    // 简化：返回虚拟句柄
-    return Value.initInt(1);
-}
-
-/// fclose - 关闭文件
-pub fn php_fclose(handle: Value) !Value {
-    _ = handle;
-    // 简化：总是返回成功
-    return Value.initBool(true);
-}
-
-/// fread - 读取文件
-pub fn php_fread(handle: Value, length: Value) !Value {
-    _ = handle;
-    _ = length;
-    // 简化：返回空字符串
-    return Value.initString("");
-}
-
-/// fwrite - 写入文件
-pub fn php_fwrite(handle: Value, data: Value) !Value {
-    _ = handle;
-    const str = data.asString();
-    return Value.initInt(@intCast(str.data.len));
-}
-
-/// is_resource - 检查是否为资源
-pub fn php_is_resource(val: Value) !Value {
-    // 简化：检查是否为正整数（文件句柄）
-    if (val.isInt()) {
-        const i = val.asInt();
-        return Value.initBool(i > 0);
-    }
-    return Value.initBool(false);
-}
-
-// ============================================================================
 // 字符串插值函数
 // ============================================================================
 
@@ -12115,45 +12321,6 @@ pub fn php_gettype(val: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// file_get_contents - 读取文件内容
-pub fn php_file_get_contents(filename: Value, allocator: Allocator) !Value {
-    if (!filename.isString()) return Value.initBool(false);
-
-    const path = filename.asString().data;
-
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        return Value.initBool(false);
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
-        return Value.initBool(false);
-    };
-    defer allocator.free(content);
-
-    const result = try PHPString.init(allocator, content);
-    return Value.initString(result);
-}
-
-/// file_put_contents - 将数据写入文件
-pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator) !Value {
-    if (!filename.isString()) return Value.initBool(false);
-
-    const path = filename.asString().data;
-    const content = try data.toString(allocator);
-    defer content.release(allocator);
-
-    const file = std.fs.cwd().createFile(path, .{}) catch {
-        return Value.initBool(false);
-    };
-    defer file.close();
-
-    file.writeAll(content.data) catch {
-        return Value.initBool(false);
-    };
-
-    return Value.initInt(@intCast(content.length));
-}
-
 /// file_exists - 检查文件是否存在
 pub fn php_file_exists(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
