@@ -13800,6 +13800,162 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
     return Value.initString(php_str);
 }
 
+pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
+    if (!str.isString() or !format.isString()) return Value.initBool(false);
+    
+    const input = str.asString().data;
+    const fmt = format.asString().data;
+    
+    var arr = try PHPArray.init(allocator);
+    var input_pos: usize = 0;
+    var fmt_pos: usize = 0;
+    
+    while (fmt_pos < fmt.len and input_pos < input.len) {
+        if (fmt[fmt_pos] == '%' and fmt_pos + 1 < fmt.len) {
+            fmt_pos += 1;
+            const spec = fmt[fmt_pos];
+            fmt_pos += 1;
+            
+            // 跳过空白
+            while (input_pos < input.len and input[input_pos] == ' ') input_pos += 1;
+            
+            if (spec == 'd') {
+                // 解析整数
+                var num: i64 = 0;
+                var neg = false;
+                if (input_pos < input.len and input[input_pos] == '-') {
+                    neg = true;
+                    input_pos += 1;
+                }
+                while (input_pos < input.len and input[input_pos] >= '0' and input[input_pos] <= '9') {
+                    num = num * 10 + (input[input_pos] - '0');
+                    input_pos += 1;
+                }
+                if (neg) num = -num;
+                try arr.push(allocator, Value.initInt(num));
+            } else if (spec == 's') {
+                // 解析字符串（到空白）
+                const start = input_pos;
+                while (input_pos < input.len and input[input_pos] != ' ') input_pos += 1;
+                const s = try allocator.dupe(u8, input[start..input_pos]);
+                const php_str = try PHPString.init(allocator, s);
+                try arr.push(allocator, Value.initString(php_str));
+            }
+        } else {
+            // 匹配字面字符
+            if (input_pos < input.len and input[input_pos] == fmt[fmt_pos]) {
+                input_pos += 1;
+            }
+            fmt_pos += 1;
+        }
+    }
+    
+    return Value.initArray(arr);
+}
+
+pub fn php_preg_match(pattern: Value, subject: Value, matches: Value, allocator: Allocator) !Value {
+    _ = matches;
+    _ = allocator;
+    if (!pattern.isString() or !subject.isString()) return Value.initInt(0);
+    
+    // 简化实现：只支持基本模式
+    const pat = pattern.asString().data;
+    const subj = subject.asString().data;
+    
+    // 移除正则分隔符
+    if (pat.len < 3) return Value.initInt(0);
+    const actual_pat = pat[1..pat.len-1];
+    
+    // 简单字符串匹配
+    if (std.mem.indexOf(u8, subj, actual_pat)) |_| {
+        return Value.initInt(1);
+    }
+    return Value.initInt(0);
+}
+
+pub fn php_preg_match_all(pattern: Value, subject: Value, matches: Value, allocator: Allocator) !Value {
+    _ = matches;
+    _ = allocator;
+    if (!pattern.isString() or !subject.isString()) return Value.initInt(0);
+    
+    // 简化实现：返回匹配次数
+    const pat = pattern.asString().data;
+    const subj = subject.asString().data;
+    
+    if (pat.len < 3) return Value.initInt(0);
+    const actual_pat = pat[1..pat.len-1];
+    
+    var count: i64 = 0;
+    var pos: usize = 0;
+    while (pos < subj.len) {
+        if (std.mem.indexOf(u8, subj[pos..], actual_pat)) |idx| {
+            count += 1;
+            pos += idx + actual_pat.len;
+        } else break;
+    }
+    return Value.initInt(count);
+}
+
+pub fn php_preg_replace(pattern: Value, replacement: Value, subject: Value, allocator: Allocator) !Value {
+    if (!pattern.isString() or !replacement.isString() or !subject.isString()) 
+        return Value.initBool(false);
+    
+    const pat = pattern.asString().data;
+    const repl = replacement.asString().data;
+    const subj = subject.asString().data;
+    
+    if (pat.len < 3) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subj)));
+    const actual_pat = pat[1..pat.len-1];
+    
+    // 简单替换
+    var result = try std.ArrayList(u8).initCapacity(allocator, subj.len);
+    defer result.deinit(allocator);
+    
+    var pos: usize = 0;
+    while (pos < subj.len) {
+        if (std.mem.indexOf(u8, subj[pos..], actual_pat)) |idx| {
+            try result.appendSlice(allocator, subj[pos..pos+idx]);
+            try result.appendSlice(allocator, repl);
+            pos += idx + actual_pat.len;
+        } else {
+            try result.appendSlice(allocator, subj[pos..]);
+            break;
+        }
+    }
+    
+    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
+    return Value.initString(output);
+}
+
+pub fn php_preg_split(pattern: Value, subject: Value, allocator: Allocator) !Value {
+    if (!pattern.isString() or !subject.isString()) return Value.initBool(false);
+    
+    const pat = pattern.asString().data;
+    const subj = subject.asString().data;
+    
+    if (pat.len < 3) return Value.initBool(false);
+    const actual_pat = pat[1..pat.len-1];
+    
+    var arr = try PHPArray.init(allocator);
+    var pos: usize = 0;
+    
+    while (pos < subj.len) {
+        if (std.mem.indexOf(u8, subj[pos..], actual_pat)) |idx| {
+            const part = try allocator.dupe(u8, subj[pos..pos+idx]);
+            const php_str = try PHPString.init(allocator, part);
+            try arr.push(allocator, Value.initString(php_str));
+            pos += idx + actual_pat.len;
+        } else {
+            const part = try allocator.dupe(u8, subj[pos..]);
+            const php_str = try PHPString.init(allocator, part);
+            try arr.push(allocator, Value.initString(php_str));
+            break;
+        }
+    }
+    
+    return Value.initArray(arr);
+}
+
 /// htmlspecialchars - 将特殊字符转换为HTML实体
 pub fn php_htmlspecialchars(str: Value, flags: Value, encoding: Value, double_encode: Value, allocator: Allocator) !Value {
     _ = flags;
