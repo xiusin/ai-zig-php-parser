@@ -369,22 +369,6 @@ pub fn initRuntime(allocator: Allocator) void {
     php_closure_pool = std.heap.MemoryPool(PHPClosure).init(runtime_allocator);
     resetAllocStats();
     initPredefinedConstants() catch {};
-    initSuperglobals() catch {};
-}
-
-fn initSuperglobals() !void {
-    // 初始化超全局变量为空数组
-    const superglobal_names = [_][]const u8{ "_GET", "_POST", "_REQUEST", "_COOKIE", "_SESSION", "_SERVER", "_ENV", "_FILES" };
-    for (superglobal_names) |name| {
-        const key = try runtime_allocator.dupe(u8, name);
-        const arr = try PHPArray.init(runtime_allocator);
-        try constants.put(key, Value.initArray(arr));
-    }
-    
-    // 初始化$GLOBALS为空数组
-    const globals_key = try runtime_allocator.dupe(u8, "GLOBALS");
-    const globals_arr = try PHPArray.init(runtime_allocator);
-    try constants.put(globals_key, Value.initArray(globals_arr));
 }
 
 fn initPredefinedConstants() !void {

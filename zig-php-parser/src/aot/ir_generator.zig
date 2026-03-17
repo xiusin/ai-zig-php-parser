@@ -296,6 +296,12 @@ pub const IRGenerator = struct {
         self.string_table = string_table;
         self.source_buffer = source_buffer;
 
+        // 预注册超全局变量，避免undefined warning
+        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_SESSION", "$_SERVER", "$_ENV", "$_FILES", "$GLOBALS" };
+        for (superglobal_names) |name| {
+            try self.global_vars.put(self.allocator, name, {});
+        }
+
         // Create module
         const module = try self.allocator.create(Module);
         module.* = Module.init(self.allocator, module_name, source_file);

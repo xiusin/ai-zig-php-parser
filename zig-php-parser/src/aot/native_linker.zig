@@ -611,6 +611,19 @@ pub const NativeLinker = struct {
             \\var global_vars_initialized: bool = false;
             \\
             \\pub fn getGlobalVar(name: []const u8) runtime.Value {
+            \\    // 超全局变量直接从global_vars读取
+            \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
+            \\    if (std.mem.eql(u8, name, "$GLOBALS") and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
             \\    // 先查找常量表
             \\    if (runtime.constants.get(name)) |const_val| {
             \\        _ = const_val.retain();
@@ -634,6 +647,18 @@ pub const NativeLinker = struct {
             \\}
             \\
             \\pub fn getGlobalVarNoWarn(name: []const u8) runtime.Value {
+            \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
+            \\    if (std.mem.eql(u8, name, "$GLOBALS") and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
             \\    if (runtime.constants.get(name)) |const_val| {
             \\        _ = const_val.retain();
             \\        return const_val;
@@ -716,6 +741,17 @@ pub const NativeLinker = struct {
             \\    // 初始化全局变量表
             \\    global_vars = std.StringHashMap(runtime.Value).init(allocator);
             \\    global_vars_initialized = true;
+            \\
+            \\    // 初始化超全局变量
+            \\    {
+            \\        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_SESSION", "$_SERVER", "$_ENV", "$_FILES", "$GLOBALS" };
+            \\        for (superglobal_names) |name| {
+            \\            const key = try allocator.dupe(u8, name);
+            \\            const arr = try runtime.PHPArray.init(allocator);
+            \\            try global_vars.put(key, runtime.Value.initArray(arr));
+            \\        }
+            \\    }
+            \\
             \\    // 注意：cleanupAllClasses 必须在 global_vars 清理之后执行
             \\    // 因为 global_vars 中的对象可能需要调用 __destruct，
             \\    // 而 __destruct 依赖 class_registry（由 cleanupAllClasses 清除）
