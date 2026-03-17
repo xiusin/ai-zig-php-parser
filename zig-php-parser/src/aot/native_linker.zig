@@ -744,12 +744,33 @@ pub const NativeLinker = struct {
             \\
             \\    // 初始化超全局变量
             \\    {
-            \\        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_SESSION", "$_SERVER", "$_ENV", "$_FILES", "$GLOBALS" };
+            \\        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_SESSION", "$_ENV", "$_FILES", "$GLOBALS" };
             \\        for (superglobal_names) |name| {
             \\            const key = try allocator.dupe(u8, name);
             \\            const arr = try runtime.PHPArray.init(allocator);
             \\            try global_vars.put(key, runtime.Value.initArray(arr));
             \\        }
+            \\        // $_SERVER with basic info
+            \\        const server_key = try allocator.dupe(u8, "$_SERVER");
+            \\        const server_arr = try runtime.PHPArray.init(allocator);
+            \\        const argv_arr = try runtime.PHPArray.init(allocator);
+            \\        for (std.os.argv, 0..) |arg_ptr, i| {
+            \\            const arg = std.mem.span(arg_ptr);
+            \\            const arg_str = try runtime.PHPString.init(allocator, arg);
+            \\            try argv_arr.push(allocator, runtime.Value.initString(arg_str));
+            \\            if (i == 0) {
+            \\                const script_str = try runtime.PHPString.init(allocator, "SCRIPT_FILENAME");
+            \\                try server_arr.setByValue(allocator, runtime.Value.initString(script_str), runtime.Value.initString(arg_str));
+            \\            }
+            \\        }
+            \\        const argc_str = try runtime.PHPString.init(allocator, "argc");
+            \\        try server_arr.setByValue(allocator, runtime.Value.initString(argc_str), runtime.Value.initInt(@intCast(std.os.argv.len)));
+            \\        const argv_str = try runtime.PHPString.init(allocator, "argv");
+            \\        try server_arr.setByValue(allocator, runtime.Value.initString(argv_str), runtime.Value.initArray(argv_arr));
+            \\        const sapi_str = try runtime.PHPString.init(allocator, "PHP_SAPI");
+            \\        const sapi_val = try runtime.PHPString.init(allocator, "cli");
+            \\        try server_arr.setByValue(allocator, runtime.Value.initString(sapi_str), runtime.Value.initString(sapi_val));
+            \\        try global_vars.put(server_key, runtime.Value.initArray(server_arr));
             \\    }
             \\
             \\    // 注意：cleanupAllClasses 必须在 global_vars 清理之后执行
