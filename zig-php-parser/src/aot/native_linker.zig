@@ -1963,6 +1963,7 @@ pub const NativeLinker = struct {
         .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
         .{ "property_exists", bi(.{ .runtime_name = "php_property_exists", .needs_allocator = false }) },
         .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
+        .{ "get_parent_class", .{ .runtime_name = "php_get_parent_class", .needs_allocator = true } },
         .{ "serialize", bi(.{ .runtime_name = "php_serialize", .needs_allocator = true }) },
         .{ "unserialize", bi(.{ .runtime_name = "php_unserialize", .needs_allocator = true }) },
         .{ "json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
@@ -1982,8 +1983,23 @@ pub const NativeLinker = struct {
         .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = true } },
         .{ "fwrite", .{ .runtime_name = "php_fwrite", .needs_allocator = true } },
         .{ "fread", .{ .runtime_name = "php_fread", .needs_allocator = true } },
-        .{ "fclose", .{ .runtime_name = "php_fclose", .needs_allocator = true } },
+        .{ "fclose", .{ .runtime_name = "php_fclose", .needs_allocator = false } },
         .{ "is_resource", .{ .runtime_name = "php_is_resource", .needs_allocator = false } },
+        .{ "getcwd", .{ .runtime_name = "php_getcwd", .needs_allocator = true } },
+        .{ "php_sapi_name", .{ .runtime_name = "php_sapi_name", .needs_allocator = true } },
+        .{ "php_uname", .{ .runtime_name = "php_uname", .needs_allocator = true } },
+        .{ "unlink", .{ .runtime_name = "php_unlink", .needs_allocator = false } },
+        .{ "filesize", .{ .runtime_name = "php_filesize", .needs_allocator = false } },
+        .{ "is_file", .{ .runtime_name = "php_is_file", .needs_allocator = false } },
+        .{ "is_dir", .{ .runtime_name = "php_is_dir", .needs_allocator = false } },
+        .{ "is_readable", .{ .runtime_name = "php_is_readable", .needs_allocator = false } },
+        .{ "is_writable", .{ .runtime_name = "php_is_writable", .needs_allocator = false } },
+        .{ "sys_get_temp_dir", .{ .runtime_name = "php_sys_get_temp_dir", .needs_allocator = true } },
+        .{ "file", .{ .runtime_name = "php_file", .needs_allocator = true } },
+        .{ "file_exists", .{ .runtime_name = "php_file_exists", .needs_allocator = false } },
+        .{ "fgets", .{ .runtime_name = "php_fgets", .needs_allocator = false } },
+        .{ "fseek", .{ .runtime_name = "php_fseek", .needs_allocator = false } },
+        .{ "scandir", .{ .runtime_name = "php_scandir", .needs_allocator = true } },
         .{ "function_exists", bi(.{ .runtime_name = "php_function_exists", .needs_allocator = true, .may_raise = false }) },
         .{ "gc_enable", bi(.{ .runtime_name = "php_gc_enable", .needs_allocator = true, .may_raise = false }) },
         .{ "gc_collect_cycles", bi(.{ .runtime_name = "php_gc_collect_cycles", .needs_allocator = true, .may_raise = false }) },
@@ -2144,6 +2160,7 @@ pub const NativeLinker = struct {
         .{ "mt_rand", .{ .runtime_name = "php_mt_rand", .needs_allocator = false } },
 
         .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
+        .{ "mktime", .{ .runtime_name = "php_mktime", .needs_allocator = false } },
         .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
         .{ "date", bi(.{ .runtime_name = "php_date", .needs_allocator = true }) },
         .{ "strtotime", bi(.{ .runtime_name = "php_strtotime", .needs_allocator = true }) },
@@ -6423,7 +6440,7 @@ pub const NativeLinker = struct {
             },
             .shl => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() << @as(u6, @intCast(@min(63, @max(0, reg_{d}.toInt())))));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    try writer.print("    reg_{d} = runtime.Value.initInt(@truncate(@as(i128, reg_{d}.toInt()) << @as(u7, @intCast(@min(63, @max(0, reg_{d}.toInt()))))));\n", .{ reg.id, op.lhs.id, op.rhs.id });
                 }
             },
             .shr => |op| {

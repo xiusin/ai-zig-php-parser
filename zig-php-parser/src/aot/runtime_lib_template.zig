@@ -14,6 +14,7 @@
 //! @memory-model Reference Counting with Cycle Detection
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const concurrency = @import("concurrency_runtime.zig");
 const array_ops_shared = @import("array_ops_shared.zig");
@@ -371,18 +372,26 @@ pub fn initRuntime(allocator: Allocator) void {
 }
 
 fn initPredefinedConstants() !void {
-    // PHP核心常量
+    // PHP核心常量 - 使用48位范围内的值
     const php_keys = [_][]const u8{ "PHP_INT_MAX", "PHP_INT_MIN", "PHP_INT_SIZE" };
-    const php_vals = [_]i64{ std.math.maxInt(i64), std.math.minInt(i64), 8 };
+    const php_vals = [_]i64{ Value.INT48_MAX, Value.INT48_MIN, 8 };
     for (php_keys, php_vals) |key, val| {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
     
     // 排序常量
-    const sort_keys = [_][]const u8{ "SORT_ASC", "SORT_DESC", "SORT_REGULAR", "SORT_NUMERIC", "SORT_STRING" };
-    const sort_vals = [_]i64{ 1, 2, 0, 1, 2 };
+    const sort_keys = [_][]const u8{ "SORT_ASC", "SORT_DESC", "SORT_REGULAR", "SORT_NUMERIC", "SORT_STRING", "SORT_NATURAL", "SORT_FLAG_CASE" };
+    const sort_vals = [_]i64{ 1, 2, 0, 1, 2, 6, 8 };
     for (sort_keys, sort_vals) |key, val| {
+        const key_copy = try runtime_allocator.dupe(u8, key);
+        try constants.put(key_copy, Value.initInt(val));
+    }
+    
+    // 数组常量
+    const array_keys = [_][]const u8{ "CASE_LOWER", "CASE_UPPER", "COUNT_NORMAL", "COUNT_RECURSIVE", "EXTR_OVERWRITE", "EXTR_SKIP", "EXTR_PREFIX_SAME", "EXTR_PREFIX_ALL" };
+    const array_vals = [_]i64{ 0, 1, 0, 1, 0, 1, 3, 4 };
+    for (array_keys, array_vals) |key, val| {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
@@ -2178,12 +2187,11 @@ pub const Value = struct {
         if (self.isInt()) return self.asInt();
         if (self.isFloat()) {
             const f = self.asFloat();
-            if (f >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
-                f <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
-            {
-                return @intFromFloat(f);
-            }
-            return 0;
+            // 使用saturating转换避免panic
+            if (std.math.isNan(f)) return 0;
+            if (f >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) return std.math.maxInt(i64);
+            if (f <= @as(f64, @floatFromInt(std.math.minInt(i64)))) return std.math.minInt(i64);
+            return @intFromFloat(f);
         }
         if (self.isBool()) return if (self.asBool()) 1 else 0;
         if (self.isNull()) return 0;
@@ -2835,15 +2843,15 @@ pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
     
     // 构建结果字符串
     var result = try std.ArrayList(u8).initCapacity(allocator, str.len + replacement.len);
-    errdefer result.deinit();
+    errdefer result.deinit(allocator);
     
-    try result.appendSlice(str[0..start_idx]);
-    try result.appendSlice(replacement);
+    try result.appendSlice(allocator, str[0..start_idx]);
+    try result.appendSlice(allocator, replacement);
     if (end_idx < str.len) {
-        try result.appendSlice(str[end_idx..]);
+        try result.appendSlice(allocator, str[end_idx..]);
     }
     
-    const output = try PHPString.init(allocator, try result.toOwnedSlice());
+    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
     return Value.initString(output);
 }
 
@@ -2852,85 +2860,100 @@ pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
 // ============================================================================
 
 pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator) !Value {
-    const fname_str = try filename.toString(allocator);
-    defer fname_str.release(allocator);
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
     
-    const content_str = try data.toString(allocator);
-    defer content_str.release(allocator);
+    const content_str = if (data.isString()) 
+        data.asString().data 
+    else blk: {
+        const temp = try data.toString(allocator);
+        defer temp.release(allocator);
+        break :blk temp.data;
+    };
     
-    const file = std.fs.cwd().createFile(fname_str.data, .{}) catch return Value.initBool(false);
+    const file = std.fs.cwd().createFile(fname, .{}) catch return Value.initBool(false);
     defer file.close();
-    
-    file.writeAll(content_str.data) catch return Value.initBool(false);
-    return Value.initInt(@intCast(content_str.data.len));
+    file.writeAll(content_str) catch return Value.initBool(false);
+    return Value.initInt(@intCast(content_str.len));
 }
 
 pub fn php_file_get_contents(filename: Value, allocator: Allocator) !Value {
-    const fname_str = try filename.toString(allocator);
-    defer fname_str.release(allocator);
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
     
-    const file = std.fs.cwd().openFile(fname_str.data, .{}) catch return Value.initBool(false);
-    defer file.close();
-    
-    const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
+    const content = std.fs.cwd().readFileAlloc(allocator, fname, 10 * 1024 * 1024) catch return Value.initBool(false);
     const output = try PHPString.init(allocator, content);
     return Value.initString(output);
 }
 
 pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
-    const fname_str = try filename.toString(allocator);
-    defer fname_str.release(allocator);
+    if (!filename.isString() or !mode.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    const fmode = mode.asString().data;
     
-    const mode_str = try mode.toString(allocator);
-    defer mode_str.release(allocator);
+    // 特殊处理php://流
+    if (std.mem.startsWith(u8, fname, "php://")) {
+        return Value.initInt(1);
+    }
     
-    const file = if (std.mem.eql(u8, mode_str.data, "r"))
-        std.fs.cwd().openFile(fname_str.data, .{}) catch return Value.initBool(false)
-    else if (std.mem.eql(u8, mode_str.data, "w"))
-        std.fs.cwd().createFile(fname_str.data, .{}) catch return Value.initBool(false)
-    else if (std.mem.eql(u8, mode_str.data, "a"))
-        std.fs.cwd().createFile(fname_str.data, .{ .truncate = false }) catch return Value.initBool(false)
+    const file = if (std.mem.eql(u8, fmode, "r"))
+        std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false)
+    else if (std.mem.eql(u8, fmode, "w"))
+        std.fs.cwd().createFile(fname, .{}) catch return Value.initBool(false)
+    else if (std.mem.eql(u8, fmode, "a"))
+        std.fs.cwd().createFile(fname, .{ .truncate = false }) catch return Value.initBool(false)
     else
         return Value.initBool(false);
     
-    const handle = try allocator.create(std.fs.File);
+    const handle = allocator.create(std.fs.File) catch return Value.initBool(false);
     handle.* = file;
-    return Value.initInt(@intFromPtr(handle));
+    return Value.initInt(@intCast(@intFromPtr(handle)));
 }
 
 pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
+    if (!handle.isInt()) return Value.initBool(false);
     const handle_ptr = handle.asInt();
+    if (handle_ptr <= 1) return Value.initInt(0); // 虚拟句柄
+    
     const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    const content = if (data.isString()) data.asString().data else blk: {
+        const temp = try data.toString(allocator);
+        defer temp.release(allocator);
+        break :blk temp.data;
+    };
     
-    const content_str = try data.toString(allocator);
-    defer content_str.release(allocator);
-    
-    file_handle.writeAll(content_str.data) catch return Value.initBool(false);
-    return Value.initInt(@intCast(content_str.data.len));
+    file_handle.writeAll(content) catch return Value.initBool(false);
+    return Value.initInt(@intCast(content.len));
 }
 
 pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
+    if (!handle.isInt() or !length.isInt()) return Value.initBool(false);
     const handle_ptr = handle.asInt();
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    if (handle_ptr <= 1) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, ""))); // 虚拟句柄
     
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     const len = length.asInt();
     
-    const buffer = try allocator.alloc(u8, @intCast(len));
+    const buffer = allocator.alloc(u8, @intCast(len)) catch return Value.initBool(false);
     const bytes_read = file_handle.read(buffer) catch {
         allocator.free(buffer);
         return Value.initBool(false);
     };
     
-    const content = try allocator.realloc(buffer, bytes_read);
+    const content = allocator.realloc(buffer, bytes_read) catch {
+        allocator.free(buffer);
+        return Value.initBool(false);
+    };
     const output = try PHPString.init(allocator, content);
     return Value.initString(output);
 }
 
-pub fn php_fclose(handle: Value, allocator: Allocator) !Value {
-    _ = allocator;
+pub fn php_fclose(handle: Value) !Value {
+    if (!handle.isInt()) return Value.initBool(false);
     const handle_ptr = handle.asInt();
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    if (handle_ptr <= 1) return Value.initBool(true); // 虚拟句柄
     
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     file_handle.close();
     return Value.initBool(true);
 }
@@ -2941,6 +2964,160 @@ pub fn php_is_resource(val: Value) !Value {
         return Value.initBool(i > 0);
     }
     return Value.initBool(false);
+}
+
+pub fn php_fgets(handle: Value) !Value {
+    if (!handle.isInt()) return Value.initBool(false);
+    const handle_ptr = handle.asInt();
+    if (handle_ptr <= 1) return Value.initBool(false);
+    
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    
+    while (pos < buf.len) {
+        const n = file_handle.read(buf[pos..pos+1]) catch break;
+        if (n == 0) break;
+        pos += 1;
+        if (buf[pos-1] == '\n') break;
+    }
+    
+    if (pos == 0) return Value.initBool(false);
+    
+    // 需要allocator但函数签名没有，使用全局allocator
+    const global_alloc = std.heap.page_allocator;
+    const output = try PHPString.init(global_alloc, try global_alloc.dupe(u8, buf[0..pos]));
+    return Value.initString(output);
+}
+
+pub fn php_fseek(handle: Value, offset: Value) !Value {
+    if (!handle.isInt() or !offset.isInt()) return Value.initInt(-1);
+    const handle_ptr = handle.asInt();
+    if (handle_ptr <= 1) return Value.initInt(-1);
+    
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    const off = offset.asInt();
+    file_handle.seekTo(@intCast(off)) catch return Value.initInt(-1);
+    return Value.initInt(0);
+}
+
+pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
+    if (!dir.isString()) return Value.initBool(false);
+    const dirname = dir.asString().data;
+    
+    var dir_handle = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch return Value.initBool(false);
+    defer dir_handle.close();
+    
+    var arr = try PHPArray.init(allocator);
+    var iter = dir_handle.iterate();
+    while (iter.next() catch null) |entry| {
+        const name = try allocator.dupe(u8, entry.name);
+        const str = try PHPString.init(allocator, name);
+        try arr.push(allocator, Value.initString(str));
+    }
+    return Value.initArray(arr);
+}
+
+// ============================================================================
+// 系统信息函数
+// ============================================================================
+
+pub fn php_getcwd(allocator: Allocator) !Value {
+    const cwd = std.fs.cwd().realpathAlloc(allocator, ".") catch return Value.initBool(false);
+    const output = try PHPString.init(allocator, cwd);
+    return Value.initString(output);
+}
+
+pub fn php_sapi_name(allocator: Allocator) !Value {
+    const output = try PHPString.init(allocator, try allocator.dupe(u8, "cli"));
+    return Value.initString(output);
+}
+
+pub fn php_uname(allocator: Allocator) !Value {
+    const uname_info = if (builtin.os.tag == .macos)
+        "Darwin"
+    else if (builtin.os.tag == .linux)
+        "Linux"
+    else if (builtin.os.tag == .windows)
+        "Windows"
+    else
+        "Unknown";
+    
+    const output = try PHPString.init(allocator, try allocator.dupe(u8, uname_info));
+    return Value.initString(output);
+}
+
+pub fn php_unlink(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    std.fs.cwd().deleteFile(fname) catch return Value.initBool(false);
+    return Value.initBool(true);
+}
+
+pub fn php_filesize(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
+    defer file.close();
+    const stat = file.stat() catch return Value.initBool(false);
+    return Value.initInt(@intCast(stat.size));
+}
+
+pub fn php_is_file(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    const stat = std.fs.cwd().statFile(fname) catch return Value.initBool(false);
+    return Value.initBool(stat.kind == .file);
+}
+
+pub fn php_is_dir(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    var dir = std.fs.cwd().openDir(fname, .{}) catch return Value.initBool(false);
+    dir.close();
+    return Value.initBool(true);
+}
+
+pub fn php_is_readable(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
+    file.close();
+    return Value.initBool(true);
+}
+
+pub fn php_is_writable(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    const file = std.fs.cwd().createFile(fname, .{ .truncate = false }) catch return Value.initBool(false);
+    file.close();
+    return Value.initBool(true);
+}
+
+pub fn php_sys_get_temp_dir(allocator: Allocator) !Value {
+    const tmp_dir = if (builtin.os.tag == .windows) "C:\\Windows\\Temp" else "/tmp";
+    const output = try PHPString.init(allocator, try allocator.dupe(u8, tmp_dir));
+    return Value.initString(output);
+}
+
+pub fn php_file(filename: Value, allocator: Allocator) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const fname = filename.asString().data;
+    
+    const content = std.fs.cwd().readFileAlloc(allocator, fname, 10 * 1024 * 1024) catch return Value.initBool(false);
+    defer allocator.free(content);
+    
+    const arr = try PHPArray.init(allocator);
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var idx: i64 = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.rest().len == 0) break; // 最后的空行
+        const line_with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{line});
+        const line_str = try PHPString.init(allocator, line_with_newline);
+        try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(line_str));
+        idx += 1;
+    }
+    return Value.initArray(arr);
 }
 
 pub fn php_function_exists(args: []const Value, allocator: Allocator) !Value {
@@ -4406,7 +4583,7 @@ pub fn php_echo(value: Value) !void {
         }
         // false不输出任何内容
     } else if (value.isInt()) {
-        var buf: [32]u8 = undefined;
+        var buf: [64]u8 = undefined;
         const str = try std.fmt.bufPrint(&buf, "{d}", .{value.asInt()});
         try stdout_file.writeAll(str);
     } else if (value.isFloat()) {
@@ -10433,6 +10610,46 @@ pub fn php_time() !Value {
     return Value.initInt(timestamp);
 }
 
+pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: Value, year: Value) !Value {
+    const h = hour.asInt();
+    const m = minute.asInt();
+    const s = second.asInt();
+    const mon = month.asInt();
+    const d = day.asInt();
+    const y = year.asInt();
+    
+    // 简化实现：使用epoch计算
+    // 1970-01-01 00:00:00 UTC
+    const days_per_month = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    
+    var total_days: i64 = 0;
+    
+    // 计算年份的天数
+    var year_iter: i64 = 1970;
+    while (year_iter < y) : (year_iter += 1) {
+        const is_leap = (@rem(year_iter, 4) == 0 and @rem(year_iter, 100) != 0) or (@rem(year_iter, 400) == 0);
+        total_days += if (is_leap) 366 else 365;
+    }
+    
+    // 计算月份的天数
+    var month_iter: i64 = 1;
+    while (month_iter < mon) : (month_iter += 1) {
+        const idx = @as(usize, @intCast(month_iter - 1));
+        total_days += days_per_month[idx];
+        if (month_iter == 2) {
+            const is_leap = (@rem(y, 4) == 0 and @rem(y, 100) != 0) or (@rem(y, 400) == 0);
+            if (is_leap) total_days += 1;
+        }
+    }
+    
+    // 加上日期
+    total_days += d - 1;
+    
+    // 转换为秒
+    const timestamp = total_days * 86400 + h * 3600 + m * 60 + s;
+    return Value.initInt(timestamp);
+}
+
 /// microtime - 返回当前时间（带微秒）
 ///
 /// @param get_as_float 是否返回浮点数格式
@@ -12334,30 +12551,6 @@ pub fn php_file_exists(filename: Value) !Value {
 }
 
 /// is_file - 检查是否是普通文件
-pub fn php_is_file(filename: Value) !Value {
-    if (!filename.isString()) return Value.initBool(false);
-
-    const path = filename.asString().data;
-    const stat = std.fs.cwd().statFile(path) catch {
-        return Value.initBool(false);
-    };
-
-    return Value.initBool(stat.kind == .file);
-}
-
-/// is_dir - 检查是否是目录
-pub fn php_is_dir(dirname: Value) !Value {
-    if (!dirname.isString()) return Value.initBool(false);
-
-    const path = dirname.asString().data;
-    var dir = std.fs.cwd().openDir(path, .{}) catch {
-        return Value.initBool(false);
-    };
-    dir.close();
-
-    return Value.initBool(true);
-}
-
 /// mkdir - 创建目录
 pub fn php_mkdir(dirname: Value) !Value {
     if (!dirname.isString()) return Value.initBool(false);
@@ -12376,18 +12569,6 @@ pub fn php_rmdir(dirname: Value) !Value {
 
     const path = dirname.asString().data;
     std.fs.cwd().deleteDir(path) catch {
-        return Value.initBool(false);
-    };
-
-    return Value.initBool(true);
-}
-
-/// unlink - 删除文件
-pub fn php_unlink(filename: Value) !Value {
-    if (!filename.isString()) return Value.initBool(false);
-
-    const path = filename.asString().data;
-    std.fs.cwd().deleteFile(path) catch {
         return Value.initBool(false);
     };
 
@@ -12420,23 +12601,6 @@ pub fn php_copy(source: Value, dest: Value) !Value {
     };
 
     return Value.initBool(true);
-}
-
-/// filesize - 获取文件大小
-pub fn php_filesize(filename: Value) !Value {
-    if (!filename.isString()) return Value.initBool(false);
-
-    const path = filename.asString().data;
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        return Value.initBool(false);
-    };
-    defer file.close();
-
-    const stat = file.stat() catch {
-        return Value.initBool(false);
-    };
-
-    return Value.initInt(@intCast(stat.size));
 }
 
 /// basename - 返回路径中的文件名部分
