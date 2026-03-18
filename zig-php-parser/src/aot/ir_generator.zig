@@ -3955,6 +3955,17 @@ pub const IRGenerator = struct {
                 break :blk result_reg;
             },
 
+            // PHP 8.0: throw as expression (e.g., $a ?: throw new Ex())
+            .throw_stmt => blk: {
+                const throw_data = node.data.throw_stmt;
+                const exception_reg = try self.generateExpression(throw_data.expression);
+                self.setTerminator(.{ .throw = exception_reg });
+                // 创建不可达块，让后续代码生成继续（运行时永远不会执行到这里）
+                const unreachable_block = try self.createBlock("throw_unreachable");
+                self.setCurrentBlock(unreachable_block);
+                break :blk try self.emitWithResult(.const_null, .php_value);
+            },
+
             else => self.emitWithResult(.const_null, .php_value),
         };
     }
