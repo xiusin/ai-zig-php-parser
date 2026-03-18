@@ -7350,15 +7350,21 @@ pub fn php_array_pop(arr: Value, allocator: Allocator) !Value {
 }
 
 /// in_array - 检查值是否在数组中
-pub fn php_in_array(needle: Value, haystack: Value) !Value {
+pub fn php_in_array(needle: Value, haystack: Value, strict: Value) !Value {
     if (!haystack.isArray()) return Value.initBool(false);
 
+    const use_strict = strict.toBool();
     const arr = haystack.asArray();
     var iter = arr.elements.iterator();
 
     while (iter.next()) |entry| {
-        const eq = try php_eq(needle, entry.value_ptr.*);
-        if (eq.asBool()) return Value.initBool(true);
+        if (use_strict) {
+            const eq = try php_identical(needle, entry.value_ptr.*);
+            if (eq.asBool()) return Value.initBool(true);
+        } else {
+            const eq = try php_eq(needle, entry.value_ptr.*);
+            if (eq.asBool()) return Value.initBool(true);
+        }
     }
 
     return Value.initBool(false);

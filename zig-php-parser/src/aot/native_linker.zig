@@ -186,6 +186,7 @@ pub const NativeLinker = struct {
     current_inferred_types: ?*const std.AutoHashMap(usize, IR.Type) = null, // 类型推断结果
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
     ir_module: ?*const IR.Module = null, // 当前IR模块（用于查找函数）
+    current_ref_ptr_regs: ?*const std.AutoHashMap(usize, void) = null, // 非alloca的指针寄存器（PHI/select合并引用参数）
     param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
     current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
 
@@ -2999,6 +3000,27 @@ pub const NativeLinker = struct {
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
+        // 收集PHI/select指令产生的指针寄存器（合并引用参数产生的指针类型）
+        var ref_ptr_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer ref_ptr_regs.deinit();
+        for (func.blocks.items) |blk_scan| {
+            for (blk_scan.instructions.items) |inst_scan| {
+                if (inst_scan.result) |res| {
+                    const rtag = @as(std.meta.Tag(IR.Type), res.type_);
+                    if (rtag == .ptr and !alloca_registers.contains(res.id)) {
+                        switch (inst_scan.op) {
+                            .phi, .select => {
+                                try ref_ptr_regs.put(res.id, {});
+                            },
+                            else => {},
+                        }
+                    }
+                }
+            }
+        }
+        self.current_ref_ptr_regs = &ref_ptr_regs;
+        defer self.current_ref_ptr_regs = null;
+
         // 生成寄存器声明 - 使用简单的方式
         // std.debug.print("About to generate register declarations: count={d}\n", .{all_registers.count()});
         if (all_registers.count() > 0) {
@@ -3075,8 +3097,8 @@ pub const NativeLinker = struct {
                         break :blk false;
                     };
 
-                    if (is_ref_param_reg) {
-                        // 引用参数寄存器：声明为指针类型
+                    if (is_ref_param_reg or ref_ptr_regs.contains(reg_id)) {
+                        // 引用参数寄存器或PHI/select合并的指针寄存器：声明为指针类型
                         try code.appendSlice(self.allocator, "    var reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
                         try code.appendSlice(self.allocator, ": *runtime.Value = undefined;\n");
@@ -3368,6 +3390,9 @@ pub const NativeLinker = struct {
                                     // 跳过引用参数的alloca（它们是undefined）
                                     if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
+                                    // 跳过指针寄存器（PHI/select合并引用参数，不拥有值）
+                                    if (ref_ptr_regs.contains(reg_id)) continue;
+
                                     // 检查是否是alloca寄存器
                                     const is_ptr = alloca_registers.contains(reg_id);
 
@@ -3445,6 +3470,9 @@ pub const NativeLinker = struct {
                                 // 跳过引用参数的alloca（它们是undefined）
                                 if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
+                                // 跳过指针寄存器（PHI/select合并引用参数，不拥有值）
+                                if (ref_ptr_regs.contains(reg_id)) continue;
+
                                 // 检查是否是alloca寄存器
                                 const is_ptr = alloca_registers.contains(reg_id);
 
@@ -3484,6 +3512,9 @@ pub const NativeLinker = struct {
 
                         // 跳过引用参数的alloca（它们是undefined）
                         if (ref_param_alloca_map.get(reg_id)) |_| continue;
+
+                        // 跳过指针寄存器（PHI/select合并引用参数，不拥有值）
+                        if (ref_ptr_regs.contains(reg_id)) continue;
 
                         // 跳过已unset的寄存器（避免访问已释放内存）
                         if (unset_registers.contains(reg_id)) continue;
@@ -4840,6 +4871,9 @@ pub const NativeLinker = struct {
                             if (self.ref_param_alloca_map) |map| {
                                 if (map.get(reg_id)) |_| continue;
                             }
+                            if (self.current_ref_ptr_regs) |rpr| {
+                                if (rpr.contains(reg_id)) continue;
+                            }
                             // 只cleanup alloca寄存器（局部变量）
                             // 其他寄存器（临时值）可能被返回值引用，不安全释放
                             if (alloca_regs.contains(reg_id)) {
@@ -5654,6 +5688,19 @@ pub const NativeLinker = struct {
                     }
                 }
                 if (is_ref_param_init) return;
+
+                // 检查value是否是指针寄存器（PHI/select合并引用参数），target是alloca
+                // 此时应重新指向而不是值赋值：reg_alloca = reg_ptr
+                if (self.current_ref_ptr_regs) |rpr| {
+                    if (rpr.contains(op.value.id)) {
+                        const is_target_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                        if (is_target_alloca) {
+                            // 指针重新绑定：让alloca指向PHI/select选择的位置
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                            return;
+                        }
+                    }
+                }
 
                 // 检查ptr是否是引用参数的alloca（使用映射表重定向到param）
                 if (self.ref_param_alloca_map) |map| {
@@ -6749,27 +6796,41 @@ pub const NativeLinker = struct {
             },
             .select => |op| {
                 if (inst.result) |reg| {
-                    // 总是使用完整if语句，避免类型不匹配
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                    if (type_tag != .php_value) {
-                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    // 检查结果是否是指针类型（引用参数合并）
+                    const is_result_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(reg.id) else false;
+
+                    if (is_result_ptr) {
+                        // 指针类型select：直接赋值指针，不做release/retain
+                        try writer.writeAll("    if (");
+                        try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
+                        try writer.writeAll(") {\n");
+                        // 直接使用reg_X（不deref alloca），因为我们要保留指针
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.then_value.id });
+                        try writer.writeAll("    } else {\n");
+                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.else_value.id });
+                        try writer.writeAll("    }\n");
+                    } else {
+                        // 普通select：值类型
+                        const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                        if (type_tag != .php_value) {
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        }
+                        try writer.writeAll("    if (");
+                        try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
+                        try writer.writeAll(") {\n");
+
+                        var then_buf: [32]u8 = undefined;
+                        const then_ref = try self.getOperandRef(&then_buf, op.then_value.id);
+                        try writer.print("        reg_{d} = {s};\n", .{ reg.id, then_ref });
+                        try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
+                        try writer.writeAll("    } else {\n");
+
+                        var else_buf: [32]u8 = undefined;
+                        const else_ref = try self.getOperandRef(&else_buf, op.else_value.id);
+                        try writer.print("        reg_{d} = {s};\n", .{ reg.id, else_ref });
+                        try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
+                        try writer.writeAll("    }\n");
                     }
-                    try writer.writeAll("    if (");
-                    // 使用 writeConditionExpr 处理条件
-                    try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
-                    try writer.writeAll(") {\n");
-
-                    var then_buf: [32]u8 = undefined;
-                    const then_ref = try self.getOperandRef(&then_buf, op.then_value.id);
-                    try writer.print("        reg_{d} = {s};\n", .{ reg.id, then_ref });
-                    try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
-                    try writer.writeAll("    } else {\n");
-
-                    var else_buf: [32]u8 = undefined;
-                    const else_ref = try self.getOperandRef(&else_buf, op.else_value.id);
-                    try writer.print("        reg_{d} = {s};\n", .{ reg.id, else_ref });
-                    try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
-                    try writer.writeAll("    }\n");
                 }
             },
             .const_null => {
@@ -7423,6 +7484,14 @@ pub const NativeLinker = struct {
                         } else if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                             try self.writeValueArgsArray(writer, op.args);
+                            try writer.writeAll(");\n");
+                        } else if (std.mem.eql(u8, runtime_name, "php_in_array")) {
+                            // in_array(needle, haystack, strict = false)
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            try self.writeValueArgs(writer, op.args);
+                            if (op.args.len < 3) {
+                                try writer.writeAll(", runtime.Value.initBool(false)");
+                            }
                             try writer.writeAll(");\n");
                         } else if (std.mem.eql(u8, runtime_name, "php_array_slice")) {
                             // array_slice 的 length 参数是可选的，缺失时补 null
@@ -13949,6 +14018,25 @@ pub const NativeLinker = struct {
                             }
                             try self.writeStrGetcsvArgs(writer, op.args);
                             try writer.writeAll(", runtime.runtime_allocator");
+                            if (in_try_block) {
+                                try writer.writeAll(") catch runtime.Value.initNull();\n");
+                            } else {
+                                try writer.writeAll(");\n");
+                            }
+                        } else if (std.mem.eql(u8, runtime_name, "php_in_array")) {
+                            // in_array(needle, haystack, strict = false)
+                            if (in_try_block) {
+                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                            } else {
+                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                            }
+                            for (op.args, 0..) |arg, i| {
+                                if (i > 0) try writer.writeAll(", ");
+                                try self.writeRegRef(writer, arg.id);
+                            }
+                            if (op.args.len < 3) {
+                                try writer.writeAll(", runtime.Value.initBool(false)");
+                            }
                             if (in_try_block) {
                                 try writer.writeAll(") catch runtime.Value.initNull();\n");
                             } else {
