@@ -3992,13 +3992,7 @@ fn checkArithmeticOperand(v: Value) bool {
 pub fn emitWarning(msg: []const u8) void {
     const stdout = std.fs.File{ .handle = 1 };
     const stderr = std.fs.File{ .handle = 2 };
-    var buf: [1024]u8 = undefined;
-    const wmsg = std.fmt.bufPrint(
-        &buf,
-        "\nWarning: {s} in {s} on line {d}\n",
-        .{ msg, src_file, src_line },
-    ) catch "";
-    stdout.writeAll(wmsg) catch {};
+    // PHP 输出顺序：先 stderr（PHP Warning:），再 stdout（Warning:）
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
         &ebuf,
@@ -4006,6 +4000,13 @@ pub fn emitWarning(msg: []const u8) void {
         .{ msg, src_file, src_line },
     ) catch "";
     stderr.writeAll(emsg) catch {};
+    var buf: [1024]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(
+        &buf,
+        "\nWarning: {s} in {s} on line {d}\n",
+        .{ msg, src_file, src_line },
+    ) catch "";
+    stdout.writeAll(wmsg) catch {};
 }
 
 pub fn emitDeprecatedStrGetcsvEscape() void {
