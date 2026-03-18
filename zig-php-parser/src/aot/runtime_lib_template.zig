@@ -611,15 +611,7 @@ pub fn php_handle_uncaught_exception() void {
 
         const stdout = std.fs.File{ .handle = 1 };
         const stderr = std.fs.File{ .handle = 2 };
-        var buf: [1024]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &buf,
-            "\nFatal error: Uncaught {s}: {s} in {s}:{d}\n" ++
-                "Stack trace:\n#0 {{main}}\n" ++
-                "  thrown in {s} on line {d}\n",
-            .{ class_name, message, src_file, src_line, src_file, src_line },
-        ) catch "";
-        stdout.writeAll(msg) catch {};
+        // PHP 输出顺序：先 stderr，再 stdout
         var ebuf: [1024]u8 = undefined;
         const emsg = std.fmt.bufPrint(
             &ebuf,
@@ -629,6 +621,15 @@ pub fn php_handle_uncaught_exception() void {
             .{ class_name, message, src_file, src_line, src_file, src_line },
         ) catch "";
         stderr.writeAll(emsg) catch {};
+        var buf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: Uncaught {s}: {s} in {s}:{d}\n" ++
+                "Stack trace:\n#0 {{main}}\n" ++
+                "  thrown in {s} on line {d}\n",
+            .{ class_name, message, src_file, src_line, src_file, src_line },
+        ) catch "";
+        stdout.writeAll(msg) catch {};
         std.process.exit(255);
     }
 }
@@ -708,13 +709,7 @@ pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: 
             }
             const stdout = std.fs.File{ .handle = 1 };
             const stderr = std.fs.File{ .handle = 2 };
-            var buf: [1024]u8 = undefined;
-            const msg = std.fmt.bufPrint(
-                &buf,
-                "\nFatal error: Cannot redeclare function {s}() (previously declared in {s}:{d}) in {s} on line {d}\n",
-                .{ name, prev_file, prev_line, file, line },
-            ) catch "";
-            stdout.writeAll(msg) catch {};
+            // PHP 输出顺序：先 stderr，再 stdout
             var ebuf: [1024]u8 = undefined;
             const emsg = std.fmt.bufPrint(
                 &ebuf,
@@ -722,6 +717,13 @@ pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: 
                 .{ name, prev_file, prev_line, file, line },
             ) catch "";
             stderr.writeAll(emsg) catch {};
+            var buf: [1024]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "\nFatal error: Cannot redeclare function {s}() (previously declared in {s}:{d}) in {s} on line {d}\n",
+                .{ name, prev_file, prev_line, file, line },
+            ) catch "";
+            stdout.writeAll(msg) catch {};
             std.process.exit(255);
         }
         try registry.put(name, func);
@@ -4012,14 +4014,7 @@ pub fn emitWarning(msg: []const u8) void {
 pub fn emitDeprecatedStrGetcsvEscape() void {
     const stdout = std.fs.File{ .handle = 1 };
     const stderr = std.fs.File{ .handle = 2 };
-    var buf: [1024]u8 = undefined;
-    const wmsg = std.fmt.bufPrint(
-        &buf,
-        "\nDeprecated: str_getcsv(): the $escape parameter must be provided as its default value will change in {s} on line {d}\n",
-        .{ src_file, src_line },
-    ) catch "";
-    stdout.writeAll(wmsg) catch {};
-
+    // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
         &ebuf,
@@ -4027,18 +4022,19 @@ pub fn emitDeprecatedStrGetcsvEscape() void {
         .{ src_file, src_line },
     ) catch "";
     stderr.writeAll(emsg) catch {};
+    var buf: [1024]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(
+        &buf,
+        "\nDeprecated: str_getcsv(): the $escape parameter must be provided as its default value will change in {s} on line {d}\n",
+        .{ src_file, src_line },
+    ) catch "";
+    stdout.writeAll(wmsg) catch {};
 }
 
 pub fn emitUndefinedVariableWarning(name: []const u8) void {
     const stdout = std.fs.File{ .handle = 1 };
     const stderr = std.fs.File{ .handle = 2 };
-    var buf: [1024]u8 = undefined;
-    const wmsg = std.fmt.bufPrint(
-        &buf,
-        "\nWarning: Undefined variable {s} in {s} on line {d}\n",
-        .{ name, src_file, src_line },
-    ) catch "";
-    stdout.writeAll(wmsg) catch {};
+    // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
         &ebuf,
@@ -4046,6 +4042,13 @@ pub fn emitUndefinedVariableWarning(name: []const u8) void {
         .{ name, src_file, src_line },
     ) catch "";
     stderr.writeAll(emsg) catch {};
+    var buf: [1024]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(
+        &buf,
+        "\nWarning: Undefined variable {s} in {s} on line {d}\n",
+        .{ name, src_file, src_line },
+    ) catch "";
+    stdout.writeAll(wmsg) catch {};
 }
 
 /// 输出 Unsupported operand types TypeError 并终止
@@ -4058,6 +4061,23 @@ fn emitUnsupportedOperandError(
     const stderr = std.fs.File{ .handle = 2 };
     const ltype = valueTypeName(lhs);
     const rtype = valueTypeName(rhs);
+    // PHP 输出顺序：先 stderr，再 stdout
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  Uncaught TypeError: Unsupported" ++
+            " operand types: {s} {s} {s} in {s}:{d}\n" ++
+            "Stack trace:\n#0 {{main}}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{
+            ltype,    op,       rtype,
+            src_file, src_line, src_file,
+            src_line,
+        },
+    ) catch {
+        std.process.exit(255);
+    };
+    stderr.writeAll(emsg) catch {};
     var buf: [1024]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,
@@ -4075,22 +4095,6 @@ fn emitUnsupportedOperandError(
         std.process.exit(255);
     };
     stdout.writeAll(msg) catch {};
-    var ebuf: [1024]u8 = undefined;
-    const emsg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Fatal error:  Uncaught TypeError: Unsupported" ++
-            " operand types: {s} {s} {s} in {s}:{d}\n" ++
-            "Stack trace:\n#0 {{main}}\n" ++
-            "  thrown in {s} on line {d}\n",
-        .{
-            ltype,    op,       rtype,
-            src_file, src_line, src_file,
-            src_line,
-        },
-    ) catch {
-        std.process.exit(255);
-    };
-    stderr.writeAll(emsg) catch {};
     std.process.exit(255);
 }
 
@@ -4110,6 +4114,22 @@ fn valueTypeName(v: Value) []const u8 {
 fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8, got: []const u8) noreturn {
     const stdout = std.fs.File{ .handle = 1 };
     const stderr = std.fs.File{ .handle = 2 };
+    // PHP 输出顺序：先 stderr，再 stdout
+    var ebuf: [1024]u8 = undefined;
+    const stderr_msg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  Uncaught TypeError: {s}(): Argument" ++
+            " #{d} ($array) must be of type {s}, {s} given" ++
+            " in {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{
+            func_name, arg_num,  expected, got,
+            src_file,  src_line, src_file, src_line,
+        },
+    ) catch {
+        std.process.exit(255);
+    };
+    stderr.writeAll(stderr_msg) catch {};
     var buf: [1024]u8 = undefined;
     const stdout_msg = std.fmt.bufPrint(
         &buf,
@@ -4126,21 +4146,6 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
         std.process.exit(255);
     };
     stdout.writeAll(stdout_msg) catch {};
-    var ebuf: [1024]u8 = undefined;
-    const stderr_msg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Fatal error:  Uncaught TypeError: {s}(): Argument" ++
-            " #{d} ($array) must be of type {s}, {s} given" ++
-            " in {s}:{d}\nStack trace:\n#0 {{main}}\n" ++
-            "  thrown in {s} on line {d}\n",
-        .{
-            func_name, arg_num,  expected, got,
-            src_file,  src_line, src_file, src_line,
-        },
-    ) catch {
-        std.process.exit(255);
-    };
-    stderr.writeAll(stderr_msg) catch {};
     std.process.exit(255);
 }
 
@@ -4148,6 +4153,18 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
 pub fn php_call_undefined_function(name: []const u8) noreturn {
     const stdout = std.fs.File{ .handle = 1 };
     const stderr = std.fs.File{ .handle = 2 };
+    // PHP 输出顺序：先 stderr，再 stdout
+    var ebuf: [1024]u8 = undefined;
+    const stderr_msg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  Uncaught Error: Call to undefined" ++
+            " function {s}() in {s}:{d}\nStack trace:\n" ++
+            "#0 {{main}}\n  thrown in {s} on line {d}\n",
+        .{ name, src_file, src_line, src_file, src_line },
+    ) catch {
+        std.process.exit(255);
+    };
+    stderr.writeAll(stderr_msg) catch {};
     var buf: [1024]u8 = undefined;
     const stdout_msg = std.fmt.bufPrint(
         &buf,
@@ -4160,17 +4177,6 @@ pub fn php_call_undefined_function(name: []const u8) noreturn {
         std.process.exit(255);
     };
     stdout.writeAll(stdout_msg) catch {};
-    var ebuf: [1024]u8 = undefined;
-    const stderr_msg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Fatal error:  Uncaught Error: Call to undefined" ++
-            " function {s}() in {s}:{d}\nStack trace:\n" ++
-            "#0 {{main}}\n  thrown in {s} on line {d}\n",
-        .{ name, src_file, src_line, src_file, src_line },
-    ) catch {
-        std.process.exit(255);
-    };
-    stderr.writeAll(stderr_msg) catch {};
     std.process.exit(255);
 }
 
@@ -4181,17 +4187,7 @@ fn emitDeprecatedFloatToInt(f: f64) void {
     // 警告信息中使用完整精度（PHP serialize_precision），不是 echo 的 precision=14
     var fbuf: [64]u8 = undefined;
     const fstr = std.fmt.bufPrint(&fbuf, "{d}", .{f}) catch "?";
-    // stdout: PHP display_errors 输出
-    var msg_buf: [512]u8 = undefined;
-    const stdout_msg = std.fmt.bufPrint(
-        &msg_buf,
-        "\nDeprecated: Implicit conversion from float" ++
-            " {s} to int loses precision in {s} on line" ++
-            " {d}\n",
-        .{ fstr, src_file, src_line },
-    ) catch return;
-    stdout.writeAll(stdout_msg) catch {};
-    // stderr: PHP CLI 标准错误输出
+    // PHP 输出顺序：先 stderr，再 stdout
     var err_buf: [512]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
         &err_buf,
@@ -4201,6 +4197,15 @@ fn emitDeprecatedFloatToInt(f: f64) void {
         .{ fstr, src_file, src_line },
     ) catch return;
     stderr.writeAll(stderr_msg) catch {};
+    var msg_buf: [512]u8 = undefined;
+    const stdout_msg = std.fmt.bufPrint(
+        &msg_buf,
+        "\nDeprecated: Implicit conversion from float" ++
+            " {s} to int loses precision in {s} on line" ++
+            " {d}\n",
+        .{ fstr, src_file, src_line },
+    ) catch return;
+    stdout.writeAll(stdout_msg) catch {};
 }
 
 /// 幂运算（PHP语义）
@@ -10105,6 +10110,18 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         // PHP Fatal error: Class "X" not found
         const stdout = std.fs.File{ .handle = 1 };
         const stderr = std.fs.File{ .handle = 2 };
+        // PHP 输出顺序：先 stderr，再 stdout
+        var ebuf: [1024]u8 = undefined;
+        const stderr_msg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  Uncaught Error: Class \"{s}\"" ++
+                " not found in {s}:{d}\nStack trace:\n" ++
+                "#0 {{main}}\n  thrown in {s} on line {d}\n",
+            .{ resolved, src_file, src_line, src_file, src_line },
+        ) catch {
+            std.process.exit(255);
+        };
+        stderr.writeAll(stderr_msg) catch {};
         var buf: [1024]u8 = undefined;
         const stdout_msg = std.fmt.bufPrint(
             &buf,
@@ -10117,17 +10134,6 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
             std.process.exit(255);
         };
         stdout.writeAll(stdout_msg) catch {};
-        var ebuf: [1024]u8 = undefined;
-        const stderr_msg = std.fmt.bufPrint(
-            &ebuf,
-            "PHP Fatal error:  Uncaught Error: Class \"{s}\"" ++
-                " not found in {s}:{d}\nStack trace:\n" ++
-                "#0 {{main}}\n  thrown in {s} on line {d}\n",
-            .{ resolved, src_file, src_line, src_file, src_line },
-        ) catch {
-            std.process.exit(255);
-        };
-        stderr.writeAll(stderr_msg) catch {};
         std.process.exit(255);
     }
 
