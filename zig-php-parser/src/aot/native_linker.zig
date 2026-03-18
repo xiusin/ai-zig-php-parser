@@ -176,6 +176,7 @@ pub const NativeLinker = struct {
     current_switch_value_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_global_get_names: ?*const std.AutoHashMap(usize, []const u8) = null,
     current_concat_operand_regs: ?*const std.AutoHashMap(usize, void) = null,
+    current_coalesce_nowarn_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_unset_regs: ?*std.AutoHashMap(usize, void) = null,
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
@@ -3285,17 +3286,86 @@ pub const NativeLinker = struct {
         // 预扫描：记录 global_get 指令的结果寄存器 → 变量名映射
         var global_get_names = std.AutoHashMap(usize, []const u8).init(self.allocator);
         var concat_operand_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        var coalesce_nowarn_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer global_get_names.deinit();
         defer concat_operand_regs.deinit();
+        defer coalesce_nowarn_regs.deinit();
+        // 第一遍：收集 global_get 和 const_null 寄存器
+        var global_get_reg_set = std.AutoHashMap(usize, void).init(self.allocator);
+        defer global_get_reg_set.deinit();
+        var null_const_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer null_const_regs.deinit();
         for (func.blocks.items) |blk_scan| {
             for (blk_scan.instructions.items) |inst_scan| {
                 if (inst_scan.op == .global_get) {
                     if (inst_scan.result) |reg| {
                         try global_get_names.put(reg.id, inst_scan.op.global_get.name);
+                        try global_get_reg_set.put(reg.id, {});
                     }
                 } else if (inst_scan.op == .concat) {
                     try concat_operand_regs.put(inst_scan.op.concat.lhs.id, {});
                     try concat_operand_regs.put(inst_scan.op.concat.rhs.id, {});
+                } else if (inst_scan.op == .const_null) {
+                    if (inst_scan.result) |reg| {
+                        try null_const_regs.put(reg.id, {});
+                    }
+                }
+            }
+        }
+        // 收集 array_get 的 result → base_reg 映射（用于回溯）
+        var array_get_base = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer array_get_base.deinit();
+        for (func.blocks.items) |blk_scan2| {
+            for (blk_scan2.instructions.items) |inst_scan| {
+                if (inst_scan.op == .array_get) {
+                    if (inst_scan.result) |reg| {
+                        try array_get_base.put(reg.id, inst_scan.op.array_get.array.id);
+                    }
+                }
+            }
+        }
+        // 第二遍：找 coalesce 模式
+        for (func.blocks.items) |blk_scan| {
+            // 方法1：identical(reg, null_const) 模式检测
+            for (blk_scan.instructions.items) |inst_scan| {
+                if (inst_scan.op == .identical) {
+                    const id_op = inst_scan.op.identical;
+                    // 找出哪个操作数是 null const
+                    const coalesce_reg_id: ?usize = if (null_const_regs.contains(id_op.rhs.id))
+                        id_op.lhs.id
+                    else if (null_const_regs.contains(id_op.lhs.id))
+                        id_op.rhs.id
+                    else
+                        null;
+                    if (coalesce_reg_id) |cid| {
+                        // 直接是 global_get 结果
+                        if (global_get_reg_set.contains(cid)) {
+                            try coalesce_nowarn_regs.put(cid, {});
+                        }
+                        // 通过 array_get 间接连接的 global_get
+                        var trace_id = cid;
+                        var depth: usize = 0;
+                        while (depth < 5) : (depth += 1) {
+                            if (array_get_base.get(trace_id)) |base_id| {
+                                try coalesce_nowarn_regs.put(trace_id, {});
+                                if (global_get_reg_set.contains(base_id)) {
+                                    try coalesce_nowarn_regs.put(base_id, {});
+                                    break;
+                                }
+                                trace_id = base_id;
+                            } else break;
+                        }
+                    }
+                }
+            }
+            // 方法2：coalesce_rhs 块中的 global_get 和 array_get 也需要 NoWarn
+            if (std.mem.startsWith(u8, blk_scan.label, "coalesce_rhs")) {
+                for (blk_scan.instructions.items) |inst_scan| {
+                    if (inst_scan.op == .global_get or inst_scan.op == .array_get) {
+                        if (inst_scan.result) |reg| {
+                            try coalesce_nowarn_regs.put(reg.id, {});
+                        }
+                    }
                 }
             }
         }
@@ -3303,6 +3373,8 @@ pub const NativeLinker = struct {
         defer self.current_global_get_names = null;
         self.current_concat_operand_regs = &concat_operand_regs;
         defer self.current_concat_operand_regs = null;
+        self.current_coalesce_nowarn_regs = &coalesce_nowarn_regs;
+        defer self.current_coalesce_nowarn_regs = null;
 
         self.current_unset_regs = &unset_registers;
         defer self.current_unset_regs = null;
@@ -7927,8 +7999,17 @@ pub const NativeLinker = struct {
                     if (self.shouldReleaseReg(reg.id)) {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
-
-                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_array_get(reg_{d}, reg_{d}, runtime.runtime_allocator);\n", .{ op.array.id, op.key.id });
+                    // coalesce 上下文: 基值为 null 时直接返回 null，不触发警告
+                    const is_coalesce_ag = if (self.current_coalesce_nowarn_regs) |cr| cr.contains(reg.id) else false;
+                    if (is_coalesce_ag) {
+                        try writer.print("    if (reg_{d}.isNull()) {{\n", .{op.array.id});
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initNull();\n", .{});
+                        try writer.print("    }} else {{\n", .{});
+                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_array_get(reg_{d}, reg_{d}, runtime.runtime_allocator);\n", .{ op.array.id, op.key.id });
+                        try writer.print("    }}\n", .{});
+                    } else {
+                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_array_get(reg_{d}, reg_{d}, runtime.runtime_allocator);\n", .{ op.array.id, op.key.id });
+                    }
                 }
             },
             .array_set => |op| {
@@ -8463,12 +8544,13 @@ pub const NativeLinker = struct {
                     const is_byref = if (self.current_byref_regs) |br| br.contains(reg.id) else false;
                     const is_switch_val = if (self.current_switch_value_regs) |sv| sv.contains(reg.id) else false;
                     const is_concat_operand = if (self.current_concat_operand_regs) |cr| cr.contains(reg.id) else false;
+                    const is_coalesce = if (self.current_coalesce_nowarn_regs) |cr| cr.contains(reg.id) else false;
                     if (is_switch_val) {
                         // switch 值：不在此处发 Warning，改为在每个 case 比较处发
                         try writer.print("    const __sw_undef_{d} = !globalVarIsDefined(\"{s}\");\n", .{ reg.id, escaped_name });
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
-                    } else if (is_byref or is_concat_operand) {
+                    } else if (is_byref or is_concat_operand or is_coalesce) {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
                     } else {
