@@ -13900,6 +13900,25 @@ pub fn php_array_walk_recursive(arr: Value, callback: Value, userdata: Value, al
 // 字符串高级函数
 // ============================================================================
 
+/// 格式化浮点数到指定精度（用于 sprintf %f）
+fn formatFloatPrecision(buf: []u8, val: f64, precision: usize) []const u8 {
+    // 使用 comptime 格式字符串处理常见精度值
+    return switch (precision) {
+        0 => std.fmt.bufPrint(buf, "{d:.0}", .{val}) catch "0",
+        1 => std.fmt.bufPrint(buf, "{d:.1}", .{val}) catch "0",
+        2 => std.fmt.bufPrint(buf, "{d:.2}", .{val}) catch "0",
+        3 => std.fmt.bufPrint(buf, "{d:.3}", .{val}) catch "0",
+        4 => std.fmt.bufPrint(buf, "{d:.4}", .{val}) catch "0",
+        5 => std.fmt.bufPrint(buf, "{d:.5}", .{val}) catch "0",
+        6 => std.fmt.bufPrint(buf, "{d:.6}", .{val}) catch "0",
+        7 => std.fmt.bufPrint(buf, "{d:.7}", .{val}) catch "0",
+        8 => std.fmt.bufPrint(buf, "{d:.8}", .{val}) catch "0",
+        9 => std.fmt.bufPrint(buf, "{d:.9}", .{val}) catch "0",
+        10 => std.fmt.bufPrint(buf, "{d:.10}", .{val}) catch "0",
+        else => std.fmt.bufPrint(buf, "{d:.6}", .{val}) catch "0",
+    };
+}
+
 /// sprintf - 格式化字符串
 pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Value {
     if (!format.isString()) return error.InvalidArgument;
@@ -13930,12 +13949,16 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 i += 1;
             }
 
-            // 跳过精度
+            // 解析精度
+            var precision: ?usize = null;
             if (i < fmt.len and fmt[i] == '.') {
                 i += 1;
+                var prec_val: usize = 0;
                 while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
+                    prec_val = prec_val * 10 + (fmt[i] - '0');
                     i += 1;
                 }
+                precision = prec_val;
             }
 
             if (i >= fmt.len) break;
@@ -13965,9 +13988,11 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 },
                 'f' => {
                     const val = arg.toFloat();
-                    const str = try std.fmt.allocPrint(allocator, "{d:.6}", .{val});
-                    defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    const prec = precision orelse 6;
+                    // 使用自定义精度格式化
+                    var fbuf: [128]u8 = undefined;
+                    const fstr = formatFloatPrecision(&fbuf, val, prec);
+                    try result.appendSlice(allocator, fstr);
                 },
                 'x' => {
                     const val = arg.toInt();
