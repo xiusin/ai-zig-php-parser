@@ -41,6 +41,8 @@ var EMPTY_STRING: PHPString = .{
 
 /// 用户定义函数注册表
 pub var user_function_registry: ?std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) = null;
+/// AOT hook：用于变量函数调用时查找AOT注册的函数
+pub var aot_callable_hook: ?*const fn (name: []const u8, args: []const Value, allocator: Allocator) anyerror!Value = null;
 const FunctionDeclLocation = struct {
     file: []const u8,
     line: u32,
@@ -372,12 +374,40 @@ pub fn initRuntime(allocator: Allocator) void {
 }
 
 fn initPredefinedConstants() !void {
-    // PHP核心常量 - 使用48位范围内的值
+    // PHP核心常量 - 使用真正的64位整数范围
     const php_keys = [_][]const u8{ "PHP_INT_MAX", "PHP_INT_MIN", "PHP_INT_SIZE" };
-    const php_vals = [_]i64{ Value.INT48_MAX, Value.INT48_MIN, 8 };
+    const php_vals = [_]i64{ std.math.maxInt(i64), std.math.minInt(i64), 8 };
     for (php_keys, php_vals) |key, val| {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
+    }
+
+    // PHP版本和浮点常量
+    {
+        const ver_key = try runtime_allocator.dupe(u8, "PHP_VERSION");
+        const ver_str = try PHPString.init(runtime_allocator, "8.4.0");
+        try constants.put(ver_key, Value.initString(ver_str));
+
+        const major_key = try runtime_allocator.dupe(u8, "PHP_MAJOR_VERSION");
+        try constants.put(major_key, Value.initInt(8));
+        const minor_key = try runtime_allocator.dupe(u8, "PHP_MINOR_VERSION");
+        try constants.put(minor_key, Value.initInt(4));
+
+        const fmax_key = try runtime_allocator.dupe(u8, "PHP_FLOAT_MAX");
+        try constants.put(fmax_key, Value.initFloat(std.math.floatMax(f64)));
+        const fmin_key = try runtime_allocator.dupe(u8, "PHP_FLOAT_MIN");
+        try constants.put(fmin_key, Value.initFloat(std.math.floatMin(f64)));
+        const feps_key = try runtime_allocator.dupe(u8, "PHP_FLOAT_EPSILON");
+        try constants.put(feps_key, Value.initFloat(std.math.floatEps(f64)));
+        const fdig_key = try runtime_allocator.dupe(u8, "PHP_FLOAT_DIG");
+        try constants.put(fdig_key, Value.initInt(15));
+
+        const eol_key = try runtime_allocator.dupe(u8, "PHP_EOL");
+        const eol_str = try PHPString.init(runtime_allocator, "\n");
+        try constants.put(eol_key, Value.initString(eol_str));
+
+        const maxpath_key = try runtime_allocator.dupe(u8, "PHP_MAXPATHLEN");
+        try constants.put(maxpath_key, Value.initInt(4096));
     }
     
     // 排序常量
@@ -3596,6 +3626,10 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
             if (registry.get(func_name)) |func| {
                 return func(Value.initNull(), args, allocator);
             }
+        }
+        // AOT hook：尝试调用AOT注册的函数
+        if (aot_callable_hook) |hook| {
+            return hook(func_name, args, allocator);
         }
         return error.UnknownFunction;
     }
@@ -7906,8 +7940,25 @@ pub fn php_is_numeric(val: Value) !Value {
 /// is_callable - 检查是否可调用（简化实现）
 pub fn php_is_callable(val: Value) !Value {
     const actual_val = if (val.isRef()) val.asRef().* else val;
-    if (actual_val.isString() or actual_val.isArray() or actual_val.isFunction()) {
-        return Value.initBool(true);
+    if (actual_val.isFunction()) return Value.initBool(true);
+    if (actual_val.isString()) {
+        // 字符串只有是已知函数名时才callable
+        const name = actual_val.asString().data;
+        if (lookupBuiltinFunction(name) != null) return Value.initBool(true);
+        if (user_function_registry) |reg| {
+            if (reg.contains(name)) return Value.initBool(true);
+        }
+        if (aot_callable_hook) |hook| {
+            _ = hook(name, &[_]Value{}, std.heap.page_allocator) catch return Value.initBool(false);
+            return Value.initBool(true);
+        }
+        return Value.initBool(false);
+    }
+    if (actual_val.isArray()) {
+        // [obj/class, method] 形式
+        const arr = actual_val.asArray();
+        if (arr.elements.count() == 2) return Value.initBool(true);
+        return Value.initBool(false);
     }
     if (Value_isObject(actual_val)) {
         const obj = Value_asObject(actual_val);
@@ -9450,19 +9501,15 @@ pub const PHPObject = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
-        // 检测内存破坏
         if (self.ref_count > 1000000) {
-            std.debug.print("ERROR: PHPObject corrupted! class={s} ref_count={d} (0x{x})\n", .{ self.class_name, self.ref_count, self.ref_count });
+            std.debug.print("ERROR: PHPObject corrupted! class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
             return;
         }
-
         if (self.ref_count == 0) {
-            std.debug.print("WARNING: PHPObject double free detected! class={s}\n", .{self.class_name});
+            std.debug.print("WARNING: PHPObject double free! class={s}\n", .{self.class_name});
             return;
         }
-
         self.ref_count -= 1;
-
         if (self.ref_count == 0) {
             self.deinit();
         } else if (!gc_in_progress) {
@@ -9990,8 +10037,8 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
             const prev_ref = obj.ref_count;
             _ = try lookup.method.func(obj_val, args, allocator);
             // 补偿 __construct 中 store $this 产生的 retain
-            // 构造函数内部会将 ctx 存入 $this 本地寄存器（retain），
-            // 但清理代码可能未正确 release，需要在此处平衡
+            // 每个构造函数（包括父类）都会 store $this，产生 retain
+            // 但函数结束时只 release 一次，导致引用计数累积
             if (obj.ref_count > prev_ref) {
                 obj.ref_count = prev_ref;
             }
@@ -11967,8 +12014,15 @@ fn quickSortIndicesByValues(indices: []usize, values: []Value, allocator: Alloca
 pub fn php_array_multisort(arrays: []const Value, allocator: Allocator) !Value {
     if (arrays.len == 0 or !arrays[0].isArray()) return Value.initBool(false);
 
+    // 解析参数：找到第一个数组（排序键）和排序方向
     const first_arr = arrays[0].asArray();
     const n = first_arr.count();
+    var descending = false;
+    // 检查SORT_DESC(2)
+    for (arrays[1..]) |arg| {
+        if (arg.isInt() and arg.asInt() == 2) { descending = true; break; }
+    }
+
     var first_vals = try allocator.alloc(Value, n);
     defer allocator.free(first_vals);
     var it0 = first_arr.elements.iterator();
@@ -11979,10 +12033,11 @@ pub fn php_array_multisort(arrays: []const Value, allocator: Allocator) !Value {
     defer allocator.free(indices);
     for (0..n) |i| indices[i] = i;
 
-    try quickSortIndicesByValues(indices, first_vals, allocator, false);
+    try quickSortIndicesByValues(indices, first_vals, allocator, descending);
 
+    // 对所有数组参数（跳过非数组的排序标志）重排
     for (arrays) |arr_val| {
-        if (!arr_val.isArray()) return Value.initBool(false);
+        if (!arr_val.isArray()) continue; // 跳过SORT_ASC/SORT_DESC等
         const a = arr_val.asArray();
         if (a.count() != n) return Value.initBool(false);
 
@@ -13018,23 +13073,56 @@ fn skipWhitespace(json: []const u8, pos: *usize) void {
 /// strtotime - 将字符串转换为时间戳
 pub fn php_strtotime(time_str: Value, now: Value, allocator: Allocator) !Value {
     _ = allocator;
-    _ = now;
 
-    if (!time_str.isString()) {
-        return Value.initBool(false);
-    }
-
-    // 简化实现：仅支持基本格式
-    // 完整实现需要完整的日期解析库
+    if (!time_str.isString()) return Value.initBool(false);
     const str = time_str.asString().data;
+    const base_ts: i64 = if (now.isInt()) now.asInt() else std.time.timestamp();
 
-    // 尝试解析 "YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM:SS"
-    if (str.len >= 10) {
-        // 简化：返回当前时间戳
-        return Value.initInt(std.time.timestamp());
+    // 相对时间："+N unit" 或 "-N unit" 或 "next X"
+    if (str.len > 0 and (str[0] == '+' or str[0] == '-')) {
+        const sign: i64 = if (str[0] == '+') 1 else -1;
+        var i: usize = 1;
+        while (i < str.len and str[i] == ' ') i += 1;
+        var num: i64 = 0;
+        while (i < str.len and str[i] >= '0' and str[i] <= '9') : (i += 1) {
+            num = num * 10 + (str[i] - '0');
+        }
+        while (i < str.len and str[i] == ' ') i += 1;
+        const unit = str[i..];
+        const secs: i64 = if (std.mem.startsWith(u8, unit, "second")) num
+            else if (std.mem.startsWith(u8, unit, "minute")) num * 60
+            else if (std.mem.startsWith(u8, unit, "hour")) num * 3600
+            else if (std.mem.startsWith(u8, unit, "day")) num * 86400
+            else if (std.mem.startsWith(u8, unit, "week")) num * 604800
+            else if (std.mem.startsWith(u8, unit, "month")) num * 2592000
+            else if (std.mem.startsWith(u8, unit, "year")) num * 31536000
+            else 0;
+        return Value.initInt(base_ts + sign * secs);
     }
 
-    return Value.initBool(false);
+    // 尝试解析 "YYYY-MM-DD HH:MM:SS" 或 "YYYY-MM-DD"
+    if (str.len >= 10 and str[4] == '-' and str[7] == '-') {
+        const year = std.fmt.parseInt(i64, str[0..4], 10) catch return Value.initBool(false);
+        const month = std.fmt.parseInt(i64, str[5..7], 10) catch return Value.initBool(false);
+        const day = std.fmt.parseInt(i64, str[8..10], 10) catch return Value.initBool(false);
+        var hour: i64 = 0;
+        var min: i64 = 0;
+        var sec: i64 = 0;
+        if (str.len >= 19 and str[10] == ' ') {
+            hour = std.fmt.parseInt(i64, str[11..13], 10) catch 0;
+            min = std.fmt.parseInt(i64, str[14..16], 10) catch 0;
+            sec = std.fmt.parseInt(i64, str[17..19], 10) catch 0;
+        }
+        // 简单计算时间戳（Zeller公式近似）
+        const y = if (month <= 2) year - 1 else year;
+        const m = if (month <= 2) month + 12 else month;
+        const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
+        const ts: i64 = jd * 86400 + hour * 3600 + min * 60 + sec;
+        return Value.initInt(ts);
+    }
+
+    // 返回当前时间戳作为fallback
+    return Value.initInt(base_ts);
 }
 
 extern "c" fn sleep(seconds: c_uint) c_uint;
@@ -13521,12 +13609,14 @@ pub fn php_array_reduce(arr: Value, callback: Value, initial: Value, allocator: 
     if (!arr.isArray()) return error.InvalidArgument;
 
     const php_arr = arr.asArray();
-    var carry = initial;
+    var carry = initial.retain();
 
     var iter = php_arr.elements.iterator();
     while (iter.next()) |entry| {
         const args = [_]Value{ carry, entry.value_ptr.* };
-        carry = try php_invoke_callable(callback, &args, allocator);
+        const new_carry = try php_invoke_callable(callback, &args, allocator);
+        carry.release(allocator);
+        carry = new_carry;
     }
 
     return carry;
@@ -15654,9 +15744,54 @@ pub fn php_array_fill_keys(keys: Value, value: Value, allocator: Allocator) !Val
 
 /// natsort() - 用自然排序算法对数组排序
 pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
-    _ = allocator;
     if (!arr.isArray()) return error.InvalidArgument;
-    // 简化实现：不排序，直接返回true
+    const php_arr = arr.asArray();
+
+    const Entry = struct { key: ArrayKey, val: Value };
+    var entries = std.ArrayListUnmanaged(Entry){};
+    defer entries.deinit(allocator);
+    var it = php_arr.elements.iterator();
+    while (it.next()) |entry| {
+        try entries.append(allocator, .{ .key = entry.key_ptr.*, .val = entry.value_ptr.* });
+    }
+
+    const Ctx = struct {
+        fn natcmp(a: []const u8, b: []const u8) bool {
+            var i: usize = 0;
+            var j: usize = 0;
+            while (i < a.len and j < b.len) {
+                const ac = a[i];
+                const bc = b[j];
+                if (std.ascii.isDigit(ac) and std.ascii.isDigit(bc)) {
+                    var an: u64 = 0;
+                    var bn: u64 = 0;
+                    while (i < a.len and std.ascii.isDigit(a[i])) : (i += 1) an = an * 10 + (a[i] - '0');
+                    while (j < b.len and std.ascii.isDigit(b[j])) : (j += 1) bn = bn * 10 + (b[j] - '0');
+                    if (an != bn) return an < bn;
+                } else {
+                    if (ac != bc) return ac < bc;
+                    i += 1;
+                    j += 1;
+                }
+            }
+            return a.len < b.len;
+        }
+        fn lessThan(_: void, a: Entry, b: Entry) bool {
+            const as = if (a.val.isString()) a.val.asString().data else "";
+            const bs = if (b.val.isString()) b.val.asString().data else "";
+            return natcmp(as, bs);
+        }
+    };
+    std.sort.pdq(Entry, entries.items, {}, Ctx.lessThan);
+
+    // 强制转为mixed map并重排
+    try php_arr.elements.convertToMixed();
+    if (php_arr.elements.mixed) |*m| {
+        m.clearRetainingCapacity();
+        for (entries.items) |entry| {
+            try m.put(entry.key, entry.val);
+        }
+    }
     return Value.initBool(true);
 }
 

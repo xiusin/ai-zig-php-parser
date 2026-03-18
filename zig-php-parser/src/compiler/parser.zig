@@ -649,7 +649,7 @@ pub const Parser = struct {
         if (self.curr.tag == .k_implements) {
             self.nextToken();
             while (true) {
-                try implements.append(self.allocator, try self.parseExpression(0));
+                try implements.append(self.allocator, try self.parseExpression(2));
                 if (self.curr.tag != .comma) break;
                 self.nextToken();
             }
@@ -1162,7 +1162,7 @@ pub const Parser = struct {
         if (self.curr.tag == .k_implements) {
             self.nextToken();
             while (true) {
-                try implements.append(self.allocator, try self.parseExpression(0));
+                try implements.append(self.allocator, try self.parseExpression(2));
                 if (self.curr.tag != .comma) break;
                 self.nextToken();
             }

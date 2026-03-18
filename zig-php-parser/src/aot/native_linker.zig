@@ -601,6 +601,38 @@ pub const NativeLinker = struct {
         // 生成函数注册函数
         try self.generateFunctionRegistration(writer, ir_module);
 
+        // 生成AOT function_exists（覆盖runtime版本）
+        try writer.writeAll(
+            \\
+            \\// AOT已注册函数名列表（用于function_exists）
+            \\const aot_registered_functions = std.StaticStringMap(void).initComptime(.{
+            \\
+        );
+        // 遍历builtin_map生成函数名列表
+        for (builtin_map.keys()) |key| {
+            try writer.print("    .{{ \"{s}\", {{}} }},\n", .{key});
+        }
+        try writer.writeAll(
+            \\});
+            \\
+            \\pub fn aot_function_exists(name: []const u8) runtime.Value {
+            \\    if (aot_registered_functions.has(name)) return runtime.Value.initBool(true);
+            \\    if (runtime.user_function_registry) |reg| {
+            \\        if (reg.contains(name)) return runtime.Value.initBool(true);
+            \\    }
+            \\    return runtime.Value.initBool(false);
+            \\}
+            \\
+            \\// AOT变量函数调用：覆盖runtime的invoke_callable，支持AOT注册函数
+            \\pub fn aot_call_named_function(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+            \\    _ = allocator;
+            \\    _ = args;
+            \\    _ = name;
+            \\    return error.UnknownFunction;
+            \\}
+            \\
+        );
+
         // 生成主入口
         const has_strings = ir_module.string_table.items.len > 0;
 
@@ -956,6 +988,28 @@ pub const NativeLinker = struct {
         }
 
         try writer.writeAll(
+            \\    // 注册AOT callable hook
+            \\    runtime.aot_callable_hook = &aot_dispatch_callable;
+            \\}
+            \\
+            \\// AOT变量函数dispatch：支持所有AOT注册的builtin函数
+            \\fn aot_dispatch_callable(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+            \\
+        );
+
+        // 生成每个builtin函数的dispatch分支
+        for (builtin_map.keys(), builtin_map.values()) |key, info| {
+            // 只处理is_*类型检查函数（单参数，无allocator）
+            if (!std.mem.startsWith(u8, key, "is_")) continue;
+            if (info.needs_allocator) continue;
+            try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{key});
+            try writer.print("        if (args.len > 0) return try runtime.{s}(args[0]);\n", .{info.runtime_name});
+            try writer.print("        return runtime.Value.initNull();\n    }}\n", .{});
+        }
+
+        try writer.writeAll(
+            \\    _ = allocator;
+            \\    return error.UnknownFunction;
             \\}
             \\
         );
@@ -2057,7 +2111,7 @@ pub const NativeLinker = struct {
         .{ "fgets", .{ .runtime_name = "php_fgets", .needs_allocator = false } },
         .{ "fseek", .{ .runtime_name = "php_fseek", .needs_allocator = false } },
         .{ "scandir", .{ .runtime_name = "php_scandir", .needs_allocator = true } },
-        .{ "function_exists", bi(.{ .runtime_name = "php_function_exists", .needs_allocator = true, .may_raise = false }) },
+        .{ "function_exists", bi(.{ .runtime_name = "aot_function_exists", .needs_allocator = false, .may_raise = false }) },
         .{ "gc_enable", bi(.{ .runtime_name = "php_gc_enable", .needs_allocator = true, .may_raise = false }) },
         .{ "gc_collect_cycles", bi(.{ .runtime_name = "php_gc_collect_cycles", .needs_allocator = true, .may_raise = false }) },
         .{ "ini_get", bi(.{ .runtime_name = "php_ini_get", .needs_allocator = true, .may_raise = false }) },
@@ -2251,10 +2305,6 @@ pub const NativeLinker = struct {
         .{ "isset", .{ .runtime_name = "php_isset", .needs_allocator = false } },
         .{ "empty", .{ .runtime_name = "php_empty", .needs_allocator = false } },
         .{ "unset", .{ .runtime_name = "php_unset", .needs_allocator = true, .may_raise = false } },
-        .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = false } },
-        .{ "fclose", .{ .runtime_name = "php_fclose", .needs_allocator = false } },
-        .{ "fread", .{ .runtime_name = "php_fread", .needs_allocator = false } },
-        .{ "fwrite", .{ .runtime_name = "php_fwrite", .needs_allocator = false } },
 
         .{ "intval", .{ .runtime_name = "php_intval", .needs_allocator = false } },
         .{ "floatval", .{ .runtime_name = "php_floatval", .needs_allocator = false } },
@@ -2500,6 +2550,8 @@ pub const NativeLinker = struct {
                             else => .php_value,
                         };
                         try all_registers.put(reg.id, inner_type);
+                        // mem2reg提升的alloca也需要在函数结束时清理
+                        try cleanup_registers_set.put(reg.id, {});
                         // std.debug.print("mem2reg promoted reg_{d}, type=ptr -> {s}\n", .{
                         //     reg.id,
                         //     @tagName(@as(std.meta.Tag(IR.Type), inner_type))
@@ -7330,16 +7382,15 @@ pub const NativeLinker = struct {
                                 // 前2个参数正常传递
                                 try self.writeValueArgs(writer, op.args[0..2]);
                                 try writer.writeAll(", ");
-                                // 第3个参数：如果是make_ref的结果，找到原始alloca并直接传递（不加&）
+                                // 第3个参数：如果是指针类型（alloca），直接传递
                                 const matches_arg = op.args[2];
-                                const matches_reg_id = matches_arg.id;
-
-                                if (self.findMakeRefSource(matches_reg_id)) |alloca_id| {
+                                const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
+                                if (matches_type == .ptr) {
                                     // alloca本身就是指针，直接传递
-                                    try writer.print("reg_{d}", .{alloca_id});
+                                    try writer.print("reg_{d}", .{matches_arg.id});
                                 } else {
-                                    // fallback：传递地址
-                                    try writer.print("&reg_{d}", .{matches_reg_id});
+                                    // 非指针类型，传递地址
+                                    try writer.print("&reg_{d}", .{matches_arg.id});
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else {
@@ -7355,14 +7406,13 @@ pub const NativeLinker = struct {
                                 // 前2个参数正常传递
                                 try self.writeValueArgs(writer, op.args[0..2]);
                                 try writer.writeAll(", ");
-                                // 第3个参数：引用
+                                // 第3个参数：如果是指针类型（alloca），直接传递
                                 const matches_arg = op.args[2];
-                                const matches_reg_id = matches_arg.id;
-
-                                if (self.findMakeRefSource(matches_reg_id)) |alloca_id| {
-                                    try writer.print("reg_{d}", .{alloca_id});
+                                const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
+                                if (matches_type == .ptr) {
+                                    try writer.print("reg_{d}", .{matches_arg.id});
                                 } else {
-                                    try writer.print("&reg_{d}", .{matches_reg_id});
+                                    try writer.print("&reg_{d}", .{matches_arg.id});
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else {
@@ -7556,6 +7606,15 @@ pub const NativeLinker = struct {
                                     }
                                 } else {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "aot_function_exists")) {
+                                // 直接调用，不带runtime.前缀
+                                try self.writeRegAssignmentFmt(writer, reg.id, "aot_function_exists(", .{});
+                                if (op.args.len > 0) {
+                                    const arg = op.args[0];
+                                    try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                    try writer.writeAll(".asString().data");
                                 }
                                 try writer.writeAll(");\n");
                             } else {
