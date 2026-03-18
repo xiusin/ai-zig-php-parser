@@ -3526,7 +3526,8 @@ pub const NativeLinker = struct {
                             }
                         }
 
-                        try code.appendSlice(self.allocator, "    return error.RuntimeError;\n");
+                        // 返回 null 而非 error，让调用方的 hasException() 检查路由到 catch 块
+                        try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
                     },
                     else => {
                         // 其他terminator不应该出现在单基本块中
@@ -5136,7 +5137,8 @@ pub const NativeLinker = struct {
                 if (self.current_exception_handler) |handler_idx| {
                     try writer.print("                current_block = {d};\n", .{handler_idx});
                 } else {
-                    try code.appendSlice(self.allocator, "                return error.RuntimeError;\n");
+                    // 返回 null 而非 error，让调用方的 hasException() 检查路由到 catch 块
+                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
                 }
             },
             else => {
