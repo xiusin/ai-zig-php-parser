@@ -13224,7 +13224,8 @@ pub const NativeLinker = struct {
                 }
             },
             .throw => |exception_reg| {
-                try writer.print("                return error.PHPException; // Exception: reg_{d}\n", .{exception_reg.id});
+                // 返回 null 而非 error，让调用方的 hasException() 检查路由到 catch 块
+                try writer.print("                return runtime.Value.initNull(); // Exception: reg_{d}\n", .{exception_reg.id});
             },
             .unreachable_ => {
                 try writer.writeAll("                unreachable;\n");
