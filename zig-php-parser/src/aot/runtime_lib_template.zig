@@ -1953,6 +1953,13 @@ pub const Value = struct {
     pub const TYPE_OBJECT: u64 = nanbox_abi.TYPE_OBJECT;
     pub const TYPE_FUNCTION: u64 = nanbox_abi.TYPE_FUNCTION;
     pub const TYPE_REF: u64 = nanbox_abi.TYPE_REF;
+    pub const TYPE_BIGINT: u64 = nanbox_abi.TYPE_BIGINT;
+
+    // 堆装箱大整数（超出48位范围）
+    pub const BoxedInt = struct {
+        ref_count: u32,
+        value: i64,
+    };
 
     // 48位整数常量
     pub const INT48_MASK: u64 = nanbox_abi.INT48_MASK;
@@ -1985,8 +1992,14 @@ pub const Value = struct {
             const encoded: u64 = @as(u64, @bitCast(i)) & INT48_MASK;
             return .{ .val = TAG_INT_MARKER | encoded };
         }
-        // 超出范围：使用浮点数存储
-        return .{ .val = @bitCast(@as(f64, @floatFromInt(i))) };
+        // 超出48位范围：堆装箱存储，保留完整i64精度
+        const boxed = runtime_allocator.create(BoxedInt) catch {
+            // 分配失败：降级为浮点数（有精度损失）
+            return .{ .val = @bitCast(@as(f64, @floatFromInt(i))) };
+        };
+        boxed.* = .{ .ref_count = 1, .value = i };
+        const addr = @intFromPtr(boxed);
+        return .{ .val = nanbox_abi.encodePtr(addr, TYPE_BIGINT) };
     }
 
     /// 创建浮点数值
@@ -2041,11 +2054,21 @@ pub const Value = struct {
     }
 
     pub fn isInt(self: Value) bool {
-        return (self.val & (SIGN_BIT | QNAN)) == TAG_INT_MARKER;
+        if ((self.val & (SIGN_BIT | QNAN)) == TAG_INT_MARKER) return true;
+        // 检查堆装箱大整数
+        if ((self.val & (SIGN_BIT | QNAN)) == QNAN) {
+            return (self.val & TYPE_MASK) == TYPE_BIGINT;
+        }
+        return false;
+    }
+
+    pub fn isBigInt(self: Value) bool {
+        return (self.val & (SIGN_BIT | QNAN)) == QNAN and (self.val & TYPE_MASK) == TYPE_BIGINT;
     }
 
     pub fn isFloat(self: Value) bool {
-        return (self.val & QNAN) != QNAN;
+        if ((self.val & QNAN) != QNAN) return true;
+        return false;
     }
 
     pub fn isString(self: Value) bool {
@@ -2093,7 +2116,12 @@ pub const Value = struct {
             }
             return @bitCast(raw);
         }
-        // 可能是浮点数存储的大整数
+        // 堆装箱大整数
+        if (self.isBigInt()) {
+            const boxed: *BoxedInt = @ptrFromInt(nanbox_abi.decodePtr(self.val));
+            return boxed.value;
+        }
+        // 可能是浮点数存储的大整数（降级路径）
         if ((self.val & QNAN) != QNAN) {
             const f: f64 = @bitCast(self.val);
             if (f >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
@@ -2171,6 +2199,9 @@ pub const Value = struct {
             Value_asObject(self).retain();
         } else if (self.isFunction()) {
             self.asFunction().retain();
+        } else if (self.isBigInt()) {
+            const boxed: *BoxedInt = @ptrFromInt(nanbox_abi.decodePtr(self.val));
+            boxed.ref_count += 1;
         }
         return self;
     }
@@ -2194,6 +2225,14 @@ pub const Value = struct {
             Value_asObject(self).release();
         } else if (self.isFunction()) {
             self.asFunction().release(allocator);
+        } else if (self.isBigInt()) {
+            const boxed: *BoxedInt = @ptrFromInt(nanbox_abi.decodePtr(self.val));
+            if (boxed.ref_count > 0) {
+                boxed.ref_count -= 1;
+                if (boxed.ref_count == 0) {
+                    allocator.destroy(boxed);
+                }
+            }
         }
     }
 
@@ -4525,6 +4564,66 @@ pub fn phpFormatFloat(buf: []u8, f: f64) []const u8 {
         return "0";
     }
 
+    // 计算指数（log10），决定是否使用科学计数法（模拟 PHP 的 %G 行为）
+    const abs_f = @abs(f);
+    const exp10: i32 = if (abs_f >= 1.0) @intFromFloat(@floor(@log10(abs_f))) else blk: {
+        // 对于小于1的数，log10为负数
+        const l = @log10(abs_f);
+        break :blk @as(i32, @intFromFloat(@floor(l)));
+    };
+
+    // PHP %.*G 规则：当指数 >= precision 或 < -4 时使用科学计数法
+    if (exp10 >= @as(i32, @intCast(PHP_PRECISION)) or exp10 < -4) {
+        // 科学计数法：如 9.2233720368548E+18
+        const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp10));
+        // 格式化尾数部分（precision-1 位小数）
+        var work: [64]u8 = undefined;
+        const dec_digits = PHP_PRECISION - 1;
+        const mant_str = std.fmt.bufPrint(&work, "{d:.13}", .{mantissa}) catch return "0";
+        // 手动截断到 dec_digits 位小数并去尾零
+        var out_len: usize = 0;
+        const sign_len: usize = if (mant_str[0] == '-') 1 else 0;
+        // 复制符号
+        if (sign_len > 0) {
+            buf[0] = '-';
+            out_len = 1;
+        }
+        // 找到小数点位置
+        var dot_pos: usize = 0;
+        for (mant_str[sign_len..], 0..) |c, idx| {
+            if (c == '.') {
+                dot_pos = sign_len + idx;
+                break;
+            }
+        }
+        if (dot_pos == 0) dot_pos = mant_str.len;
+        // 复制整数部分
+        const int_part = mant_str[sign_len..dot_pos];
+        @memcpy(buf[out_len .. out_len + int_part.len], int_part);
+        out_len += int_part.len;
+        // 复制小数部分（最多 dec_digits 位）
+        if (dot_pos < mant_str.len) {
+            buf[out_len] = '.';
+            out_len += 1;
+            const frac_start = dot_pos + 1;
+            const frac_avail = mant_str.len - frac_start;
+            const frac_copy = @min(frac_avail, dec_digits);
+            @memcpy(buf[out_len .. out_len + frac_copy], mant_str[frac_start .. frac_start + frac_copy]);
+            out_len += frac_copy;
+            // 去尾零
+            while (out_len > 0 and buf[out_len - 1] == '0') : (out_len -= 1) {}
+            if (out_len > 0 and buf[out_len - 1] == '.') out_len -= 1;
+        }
+        // 追加 E±XX 部分（PHP 用大写 E）
+        const e_str = if (exp10 >= 0)
+            std.fmt.bufPrint(buf[out_len..], "E+{d}", .{exp10}) catch return "0"
+        else
+            std.fmt.bufPrint(buf[out_len..], "E{d}", .{exp10}) catch return "0";
+        out_len += e_str.len;
+        return buf[0..out_len];
+    }
+
+    // 非科学计数法路径
     var work: [64]u8 = undefined;
     const full = std.fmt.bufPrint(&work, "{d}", .{f}) catch
         return "0";
