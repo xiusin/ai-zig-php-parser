@@ -4065,6 +4065,26 @@ pub const IRGenerator = struct {
         // 1. 空类名
         if (class_name.len == 0) return class_name;
 
+        // 1.5 特殊关键字：self/static/parent → 解析为实际类名
+        if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+            if (self.current_class) |cls| return cls;
+            return class_name;
+        }
+        if (std.mem.eql(u8, class_name, "parent")) {
+            // parent 需要查找父类名，暂时回退到运行时
+            if (self.current_class) |cls| {
+                // 尝试从 module 类型定义中查找父类
+                if (self.module) |mod| {
+                    for (mod.types.items) |td| {
+                        if (std.mem.eql(u8, td.name, cls)) {
+                            if (td.parent) |parent| return parent;
+                        }
+                    }
+                }
+            }
+            return class_name;
+        }
+
         // 2. 完全限定名（以 \ 开头）
         if (class_name[0] == '\\') {
             return class_name[1..]; // 去掉前导 \
