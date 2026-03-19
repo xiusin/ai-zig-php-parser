@@ -2507,9 +2507,10 @@ pub const Parser = struct {
             .k_array => self.parseArrayConstruct(),
             .l_brace => self.parseJsonObjectLiteral(),
             // PHP 8.0+ throw expression support (throw can be used as expression, not just statement)
+            // 使用 precedence 1 避免消费 match arm 分隔逗号
             .k_throw => {
                 const token = try self.eat(.k_throw);
-                const expression = try self.parseExpression(0);
+                const expression = try self.parseExpression(1);
                 return self.createNode(.{ .tag = .throw_stmt, .main_token = token, .data = .{ .throw_stmt = .{ .expression = expression } } });
             },
             // 允许 range 作为函数调用（PHP内置函数）
