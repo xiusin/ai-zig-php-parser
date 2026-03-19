@@ -4966,25 +4966,54 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
         }
         try writer.writeAll("(\n");
 
-        // 遍历属性
-        var it = obj.properties.iterator();
-        while (it.next()) |entry| {
+        // DateTime 对象特殊处理: 输出 PHP 格式
+        if (std.mem.eql(u8, obj.class_name, "DateTime")) {
             const elem_indent = if (is_nested) indent + 2 else indent + 1;
-            try writeIndent(writer, elem_indent);
+            if (obj.getProperty("timestamp")) |ts_val| {
+                const ts = ts_val.toInt();
+                const usecs: u64 = if (obj.getProperty("microseconds")) |us_val| @intCast(us_val.toInt()) else 0;
+                // 格式化日期时间字符串 (Y-m-d H:i:s.u)
+                const epoch_secs: u64 = @intCast(ts);
+                const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+                const day_secs = epoch.getDaySeconds();
+                const year_day = epoch.getEpochDay().calculateYearDay();
+                const month_day = year_day.calculateMonthDay();
+                try writeIndent(writer, elem_indent);
+                try writer.print("[date] => {d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}\n", .{
+                    year_day.year,
+                    month_day.month.numeric(),
+                    month_day.day_index + 1,
+                    day_secs.getHoursIntoDay(),
+                    day_secs.getMinutesIntoHour(),
+                    day_secs.getSecondsIntoMinute(),
+                    usecs,
+                });
+                try writeIndent(writer, elem_indent);
+                try writer.writeAll("[timezone_type] => 3\n");
+                try writeIndent(writer, elem_indent);
+                try writer.writeAll("[timezone] => UTC\n");
+            }
+        } else {
+            // 遍历属性
+            var it = obj.properties.iterator();
+            while (it.next()) |entry| {
+                const elem_indent = if (is_nested) indent + 2 else indent + 1;
+                try writeIndent(writer, elem_indent);
 
-            // 属性名格式化
-            const prop_name = entry.key_ptr.*;
-            try writer.print("[{s}] => ", .{prop_name});
+                // 属性名格式化
+                const prop_name = entry.key_ptr.*;
+                try writer.print("[{s}] => ", .{prop_name});
 
-            const val = entry.value_ptr.*;
-            const is_complex = val.isArray() or Value_isObject(val);
+                const val = entry.value_ptr.*;
+                const is_complex = val.isArray() or Value_isObject(val);
 
-            if (is_complex) {
-                try printValue(writer, val, elem_indent, true);
-                try writer.writeByte('\n');
-            } else {
-                try printValue(writer, val, elem_indent, false);
-                try writer.writeByte('\n');
+                if (is_complex) {
+                    try printValue(writer, val, elem_indent, true);
+                    try writer.writeByte('\n');
+                } else {
+                    try printValue(writer, val, elem_indent, false);
+                    try writer.writeByte('\n');
+                }
             }
         }
 
@@ -8405,18 +8434,31 @@ pub const ClassMeta = struct {
             .default_value = Value.initNull(),
             .is_public = false,
         });
+        try meta.addProperty(.{
+            .name = "microseconds",
+            .default_value = Value.initInt(0),
+            .is_public = false,
+        });
 
         try meta.addMethod(.{
             .name = "__construct",
             .func = struct {
                 fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
                     const this = Value_asObject(ctx);
-                    const ts = if (args.len > 0 and !args[0].isNull())
-                        args[0].toInt()
-                    else
-                        std.time.timestamp();
                     _ = runtime_alloc;
-                    try this.setProperty("timestamp", Value.initInt(ts));
+                    if (args.len > 0 and !args[0].isNull()) {
+                        // Parse datetime string or use given timestamp
+                        try this.setProperty("timestamp", Value.initInt(args[0].toInt()));
+                        try this.setProperty("microseconds", Value.initInt(0));
+                    } else {
+                        // Get current time with microseconds
+                        const now_ns = std.time.nanoTimestamp();
+                        const now_us = @divTrunc(now_ns, 1000);
+                        const secs: i64 = @intCast(@divTrunc(now_us, 1_000_000));
+                        const usecs: i64 = @intCast(@rem(now_us, 1_000_000));
+                        try this.setProperty("timestamp", Value.initInt(secs));
+                        try this.setProperty("microseconds", Value.initInt(usecs));
+                    }
                     return Value.initNull();
                 }
             }.call,
@@ -14576,18 +14618,22 @@ pub fn php_uniqid(prefix: Value, more_entropy: Value, allocator: Allocator) !Val
     const prefix_str = if (prefix.isString()) prefix.asString().data else "";
     const ent = more_entropy.toBool();
 
+    // PHP uniqid format: prefix + 8 hex chars (seconds) + 5 hex chars (microseconds/100)
     const timestamp = std.time.nanoTimestamp();
-    const now = @divTrunc(timestamp, 1000);
-    const seconds = @as(u64, @intCast(@divTrunc(now, 1_000_000)));
-    const microseconds = @as(u64, @intCast(@rem(now, 1_000_000)));
+    const now_us = @divTrunc(timestamp, 1000); // nanoseconds to microseconds
+    const seconds = @as(u64, @intCast(@divTrunc(now_us, 1_000_000)));
+    const microseconds = @as(u64, @intCast(@rem(now_us, 1_000_000)));
+    // PHP uses microseconds/100 for the last 5 hex chars
+    const usec_part = @divTrunc(microseconds, 10);
 
     var result_buf: [64]u8 = undefined;
     const formatted = if (ent) blk: {
-        var rand_bytes: [2]u8 = undefined;
+        // With more_entropy: add .XXXXXXXX (8 random decimal digits)
+        var rand_bytes: [4]u8 = undefined;
         std.crypto.random.bytes(&rand_bytes);
-        const rand_val = @as(u16, rand_bytes[0]) * 256 + rand_bytes[1];
-        break :blk try std.fmt.bufPrint(&result_buf, "{s}{x:0>13}{x:0>6}{x:0>4}", .{ prefix_str, seconds, microseconds, rand_val });
-    } else try std.fmt.bufPrint(&result_buf, "{s}{x:0>13}", .{ prefix_str, seconds });
+        const rand_val = @as(u32, rand_bytes[0]) * 16777216 + @as(u32, rand_bytes[1]) * 65536 + @as(u32, rand_bytes[2]) * 256 + rand_bytes[3];
+        break :blk try std.fmt.bufPrint(&result_buf, "{s}{x}{x:0>5}.{d:0>8}", .{ prefix_str, seconds, usec_part, rand_val % 100000000 });
+    } else try std.fmt.bufPrint(&result_buf, "{s}{x}{x:0>5}", .{ prefix_str, seconds, usec_part });
 
     const php_str = try PHPString.init(allocator, formatted);
     return Value.initString(php_str);

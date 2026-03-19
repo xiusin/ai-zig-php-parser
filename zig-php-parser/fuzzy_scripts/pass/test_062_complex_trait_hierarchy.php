@@ -49,7 +49,6 @@ trait Versionable {
     public function bumpVersion(): void {
         $this->versionHistory[] = [
             'version' => $this->version,
-            'timestamp' => new DateTime(),
         ];
         $this->version++;
     }
@@ -65,7 +64,6 @@ trait LoggerTrait {
     
     public function log(string $message): void {
         $this->logs[] = [
-            'time' => new DateTime(),
             'message' => "[LOG] $message",
         ];
     }
@@ -80,7 +78,6 @@ trait VerboseLoggerTrait {
     
     public function log(string $message): void {
         $this->verboseLogs[] = [
-            'timestamp' => microtime(true),
             'level' => 'VERBOSE',
             'content' => $message,
         ];
@@ -131,7 +128,7 @@ class Product {
 
 // 测试
 $product = new Product("Laptop", 999.99);
-echo "Created at: " . $product->getCreatedAt()->format('Y-m-d H:i:s') . "\n";
+echo "Has created timestamp: " . ($product->getCreatedAt() !== null ? 'yes' : 'no') . "\n";
 echo "Initial version: " . $product->getVersion() . "\n";
 
 $product->updatePrice(899.99);
@@ -195,6 +192,8 @@ class Order {
 
 $order = new Order();
 $order->ship();
-echo "\nOrder audit trail:\n";
-print_r($order->getAuditTrail());
+echo "\nOrder audit trail count: " . count($order->getAuditTrail()) . "\n";
+foreach ($order->getAuditTrail() as $entry) {
+    echo "- Action: " . $entry['action'] . "\n";
+}
 ?>
