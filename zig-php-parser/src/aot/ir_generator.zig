@@ -1477,12 +1477,12 @@ pub const IRGenerator = struct {
 
         for (builtin_interfaces) |builtin| {
             if (std.mem.eql(u8, iface_name, builtin)) {
-                self.diagnostics.reportError(
+                self.diagnostics.reportWarning(
                     self.current_location,
-                    "Cannot redeclare built-in interface '{s}'",
+                    "Skipping redeclaration of built-in interface '{s}'",
                     .{iface_name},
                 );
-                return error.BuiltinInterfaceConflict;
+                return;
             }
         }
 
