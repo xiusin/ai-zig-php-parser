@@ -57,12 +57,12 @@
 
 ### 后续开发建议（按优先级排序）
 
-1. **late static binding (`static::`)** — test_019: `static::method()` 返回父类而非子类
+1. **late static binding (`static::`)** — test_019: `static::class` 需要运行时传递调用类名（架构变更：ctx参数携带调用类信息）
+2. **match(true) 复杂条件** — test_056: `match(true) { $x > 0 && $x < 100 => 'A' }` 解析器不支持
 3. **引用赋值 (`&`)** — test_010: `$b = &$a` 引用共享不工作
-4. **Trait 方法调用** — test_0450/0451: trait 方法在组合类中返回空值
-5. **Enum 完整支持** — test_034: backed enum from()/tryFrom() + cases()
-6. **match 表达式 + throw** — test_067: match 内 throw expression
-7. **SPL 迭代器** — test_060/066: LimitIterator, CachingIterator 等
-8. **WeakMap/WeakRef** — test_069: 弱引用支持
-9. **Fiber 调度器** — test_055/058: 完整 Fiber 协程支持
-10. **Reflection 完善** — test_040/065: ReflectionClass 属性/方法反射
+4. **named variadic args** — test_051: `func(...$context)` 中 `context: [...]` 需要关联数组
+5. **Enum 完整支持** — test_034/061: backed enum from()/tryFrom()/cases()
+6. **SPL 迭代器** — test_060/066: LimitIterator, CachingIterator 等
+7. **WeakMap/WeakRef** — test_069: 弱引用支持
+8. **Reflection 完善** — test_040/065: ReflectionClass 属性/方法反射
+9. **load/return 类型推断安全性** — 当前已禁用类型特化 load/return，可考虑精确化推断后重新启用以提升性能
