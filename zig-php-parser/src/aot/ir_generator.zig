@@ -4980,16 +4980,48 @@ pub const IRGenerator = struct {
         defer ref_writebacks.deinit(self.allocator);
 
         const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
-        if (has_named and indirect_callee == null and func_symbol != null and func_symbol.?.metadata == .function) {
-            const params = func_symbol.?.metadata.function.params;
+        // 命名参数重排序：优先使用 symbol_table，回退到 IR module 中的函数参数信息
+        const module_func_params: ?[]const IR.Parameter = blk: {
+            if (func_symbol != null and func_symbol.?.metadata == .function) break :blk null; // symbol_table 已有
+            if (self.module) |mod| {
+                for (mod.functions.items) |f| {
+                    if (std.mem.eql(u8, f.name, func_name)) {
+                        break :blk f.params.items;
+                    }
+                }
+            }
+            break :blk null;
+        };
+        if (has_named and indirect_callee == null and
+            ((func_symbol != null and func_symbol.?.metadata == .function) or module_func_params != null))
+        {
+            // 使用 symbol_table 或 module 中的参数信息
+            const use_symbol = func_symbol != null and func_symbol.?.metadata == .function;
+            const param_count = if (use_symbol) func_symbol.?.metadata.function.params.len else module_func_params.?.len;
             var final_args = std.ArrayListUnmanaged(Register){};
             defer final_args.deinit(self.allocator);
-            try final_args.ensureTotalCapacity(self.allocator, params.len + positional_args.items.len);
+            try final_args.ensureTotalCapacity(self.allocator, param_count + positional_args.items.len);
 
             var pos_i: usize = 0;
-            for (params) |p| {
+            for (0..param_count) |pi| {
+                // 从 symbol_table 或 module 获取参数名和引用标志
+                const raw_name: []const u8 = if (use_symbol) func_symbol.?.metadata.function.params[pi].name else module_func_params.?[pi].name;
+                const p_is_ref: bool = if (use_symbol) func_symbol.?.metadata.function.params[pi].is_reference else blk: {
+                    if (self.module) |mod| {
+                        for (mod.functions.items) |f| {
+                            if (std.mem.eql(u8, f.name, func_name)) {
+                                for (f.ref_params.items) |rp| {
+                                    if (rp == pi) break :blk true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    break :blk false;
+                };
+
                 var chosen: ?Node.Index = null;
-                const p_name = if (p.name.len > 0 and p.name[0] == '$') p.name[1..] else p.name;
+                const p_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
                 if (named_args.get(p_name)) |named_idx| {
                     chosen = named_idx;
                 } else if (pos_i < positional_args.items.len) {
@@ -4998,7 +5030,7 @@ pub const IRGenerator = struct {
                 }
 
                 if (chosen) |expr_idx| {
-                    if (p.is_reference) {
+                    if (p_is_ref) {
                         const chosen_node = self.getNode(expr_idx);
                         if (chosen_node != null and chosen_node.?.tag == .variable) {
                             const var_name = self.getString(chosen_node.?.data.variable.name);
