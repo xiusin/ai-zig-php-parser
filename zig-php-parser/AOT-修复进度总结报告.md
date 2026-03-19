@@ -2,7 +2,7 @@
 
 ## 本轮修复成果
 
-### 已完成修复 (15项)
+### 已完成修复 (17项)
 
 | # | 修复内容 | 影响测试 | 文件 |
 |---|---------|---------|------|
@@ -21,6 +21,8 @@
 | 13 | **instanceof Stringable** (magic_toString检查) | test_059 | runtime_lib_template.zig |
 | 14 | **throw-expression parser precedence** (避免match arm逗号消费) | test_056 | parser.zig |
 | 15 | **&&短路求值用const_bool=false** (而非const_int=0) | test_030 | ir_generator.zig |
+| 16 | **assignment-as-expression返回Register** (避免方法双调用) | test_027 | ir_generator.zig |
+| 17 | **match(true)+throw+&&条件组合修复** | test_056 | parser.zig+ir_generator.zig |
 
 ### 关键架构修复说明
 
@@ -30,8 +32,8 @@
 
 ### 测试通过率
 
-- **pass 目录**: 33/39 通过 (84.6%)
-- **从 failed 移入 pass**: 10 个测试
+- **pass 目录**: 36/42 通过 (85.7%)
+- **从 failed 移入 pass**: 14 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
   - test_053_intersection_types
@@ -42,6 +44,10 @@
   - test_0450_Trait组合
   - test_0451_Trait组合
   - test_059_stringable_interface
+  - test_027_thread_safety
+  - test_056_pattern_matching
+  - test_052_union_types
+  - test_052_first_class_callable
 
 ### pass 目录剩余 FAIL 分析
 
