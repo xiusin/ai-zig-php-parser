@@ -654,20 +654,22 @@ pub const NativeLinker = struct {
             \\        global_ref_bindings = std.StringHashMap([]const u8).init(runtime.runtime_allocator);
             \\        global_ref_bindings_initialized = true;
             \\    }
-            \\    // 复制 target 和 source 字符串
+            \\    // 解析 source 的引用链，找到真正的源变量
+            \\    const resolved_source = resolveRefSource(source);
+            \\    // 复制 target 和 resolved_source 字符串
             \\    const target_copy = try runtime.runtime_allocator.dupe(u8, target);
-            \\    const source_copy = try runtime.runtime_allocator.dupe(u8, source);
-            \\    // 如果已存在旧绑定，释放旧的 source 字符串
-            \\    if (global_ref_bindings.fetchPut(target_copy, source_copy)) |old| {
+            \\    const source_copy = try runtime.runtime_allocator.dupe(u8, resolved_source);
+            \\    // 如果已存在旧绑定，释放旧的字符串
+            \\    if (try global_ref_bindings.fetchPut(target_copy, source_copy)) |old| {
             \\        runtime.runtime_allocator.free(old.key);
             \\        runtime.runtime_allocator.free(old.value);
             \\    }
-            \\    // 同步当前值: $target 应该和 $source 指向相同的值
+            \\    // 同步当前值: $target 应该和 resolved_source 指向相同的值
             \\    if (global_vars_initialized) {
-            \\        if (global_vars.get(source)) |src_val| {
+            \\        if (global_vars.get(resolved_source)) |src_val| {
             \\            const gop = try global_vars.getOrPut(target);
             \\            if (!gop.found_existing) {
-            \\                gop.key_ptr.* = target_copy;
+            \\                gop.key_ptr.* = try runtime.runtime_allocator.dupe(u8, target);
             \\            }
             \\            if (gop.found_existing) {
             \\                gop.value_ptr.release(runtime.runtime_allocator);
