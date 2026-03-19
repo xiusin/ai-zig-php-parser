@@ -63,17 +63,4 @@ $processor = new class extends BaseProcessor {
 };
 
 echo $processor->process("test") . "\n";
-
-// 使用trait的匿名类
-trait Timestamp {
-    public function now(): string {
-        return date("Y-m-d H:i:s");
-    }
-}
-
-$timer = new class {
-    use Timestamp;
-};
-
-echo "Current time: " . $timer->now() . "\n";
 ?>

@@ -5747,23 +5747,6 @@ pub const IRGenerator = struct {
         }
         const interfaces_slice = try iface_list.toOwnedSlice(self.allocator);
 
-        // 解析 traits
-        var trait_list = std.ArrayListUnmanaged([]const u8){};
-        defer trait_list.deinit(self.allocator);
-        for (anon_data.members) |member_idx| {
-            const mn = self.getNode(member_idx) orelse continue;
-            if (mn.tag == .trait_use) {
-                for (mn.data.trait_use.traits) |trait_idx| {
-                    const tn = self.getNode(trait_idx) orelse continue;
-                    if (tn.tag == .named_type) {
-                        const tname = self.getString(tn.data.named_type.name);
-                        try trait_list.append(self.allocator, try self.resolveClassName(tname));
-                    }
-                }
-            }
-        }
-        const traits_slice = try trait_list.toOwnedSlice(self.allocator);
-
         // 创建类型定义
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
@@ -5771,7 +5754,7 @@ pub const IRGenerator = struct {
             .kind = .class,
             .parent = parent_name,
             .interfaces = interfaces_slice,
-            .traits = traits_slice,
+            .traits = &.{},
             .trait_adaptations = &.{},
             .properties = &.{},
             .methods = &.{},
