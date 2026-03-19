@@ -2,7 +2,7 @@
 
 ## 本轮修复成果
 
-### 已完成修复 (13项)
+### 已完成修复 (14项)
 
 | # | 修复内容 | 影响测试 | 文件 |
 |---|---------|---------|------|
@@ -18,7 +18,8 @@
 | 10 | **load指令类型转换bug** (bool→asInt()=0) | test_0450/0451, 全局 | native_linker.zig |
 | 11 | **return语句类型转换bug** (同load) | test_0450/0451 trait | native_linker.zig |
 | 12 | **self::class/parent::class解析** | 通用 | ir_generator.zig |
-| 13 | **instanceof Stringable** (vtable __toString检查) | test_059 | runtime_lib_template.zig |
+| 13 | **instanceof Stringable** (magic_toString检查) | test_059 | runtime_lib_template.zig |
+| 14 | **throw-expression parser precedence** (避免match arm逗号消费) | test_056 | parser.zig |
 
 ### 关键架构修复说明
 
@@ -28,7 +29,7 @@
 
 ### 测试通过率
 
-- **pass 目录**: 32/39 通过 (82.1%)
+- **pass 目录**: 33/39 通过 (84.6%，含timestamp race约 82.1%)
 - **从 failed 移入 pass**: 10 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
