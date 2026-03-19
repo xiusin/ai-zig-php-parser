@@ -405,7 +405,7 @@ pub const Parser = struct {
                 // Look ahead to check if this looks like destructuring
                 const peek_tag = self.peek.tag;
                 const looks_like_destructure = switch (peek_tag) {
-                    .t_variable, .k_list, .comma => true,
+                    .t_variable, .k_list, .comma, .t_constant_encapsed_string, .t_string, .l_bracket => true,
                     else => false,
                 };
 
@@ -1668,7 +1668,7 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val, .is_reference = is_reference } } });
     }
 
-    /// Parse array destructuring assignment: [$a, $b] = $arr
+    /// Parse array destructuring assignment: [$a, $b] = $arr or ['key' => $var] = $arr
     fn parseArrayDestructuring(self: *Parser) anyerror!ast.Node.Index {
         const bracket_token = self.curr;
         _ = try self.eat(.l_bracket);
@@ -1684,35 +1684,39 @@ pub const Parser = struct {
                 continue;
             }
 
-            if (self.curr.tag == .k_list) {
+            // Check for keyed destructuring: 'key' => $var or 'key' => [...]
+            if (self.curr.tag == .t_constant_encapsed_string or self.curr.tag == .t_string) {
+                const key_token = self.curr;
+                const key_text = self.lexer.buffer[key_token.loc.start..key_token.loc.end];
+                self.nextToken();
+                
+                if (self.curr.tag == .fat_arrow) {
+                    // Keyed destructuring: 'key' => target
+                    self.nextToken(); // consume =>
+                    
+                    // Parse key as string literal (strip quotes if present)
+                    var key_content = key_text;
+                    if (key_content.len >= 2 and (key_content[0] == '\'' or key_content[0] == '"')) {
+                        key_content = key_content[1 .. key_content.len - 1];
+                    }
+                    const key_id = try self.context.internLiteral(key_content);
+                    const key_node = try self.createNode(.{ .tag = .literal_string, .main_token = key_token, .data = .{ .literal_string = .{ .value = key_id } } });
+                    
+                    // Parse the target (variable or nested array)
+                    const target_node = try self.parseDestructuringTarget();
+                    
+                    // Create array_pair node
+                    const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = key_token, .data = .{ .array_pair = .{ .key = key_node, .value = target_node } } });
+                    try targets.append(self.allocator, pair_node);
+                } else {
+                    // Not keyed, treat as error or skip
+                    continue;
+                }
+            } else if (self.curr.tag == .k_list) {
                 const nested_list = try self.parseListExpression();
                 try targets.append(self.allocator, nested_list);
             } else if (self.curr.tag == .l_bracket) {
-                _ = try self.eat(.l_bracket);
-                var nested_targets = std.ArrayListUnmanaged(ast.Node.Index){};
-                while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
-                    if (self.curr.tag == .comma) {
-                        const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
-                        const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
-                        try nested_targets.append(self.allocator, empty_node);
-                        self.nextToken();
-                        continue;
-                    }
-                    if (self.curr.tag == .t_variable) {
-                        const var_name = self.curr;
-                        const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                        try nested_targets.append(self.allocator, var_node);
-                        self.nextToken();
-                    }
-                    if (self.curr.tag == .comma) {
-                        self.nextToken();
-                        if (self.curr.tag == .r_bracket) break;
-                    }
-                }
-                _ = try self.eat(.r_bracket);
-                const arena = self.context.arena.allocator();
-                const nested_node = try self.createNode(.{ .tag = .list_assignment, .main_token = self.curr, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, nested_targets.items), .value = 0 } } });
+                const nested_node = try self.parseNestedDestructuringArray();
                 try targets.append(self.allocator, nested_node);
             } else if (self.curr.tag == .t_variable) {
                 const var_name = self.curr;
@@ -1738,6 +1742,82 @@ pub const Parser = struct {
 
         const arena = self.context.arena.allocator();
         return self.createNode(.{ .tag = .list_assignment, .main_token = bracket_token, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, targets.items), .value = val } } });
+    }
+
+    /// Parse a nested [...] in destructuring context
+    fn parseNestedDestructuringArray(self: *Parser) anyerror!ast.Node.Index {
+        const bracket_token = self.curr;
+        _ = try self.eat(.l_bracket);
+        var nested_targets = std.ArrayListUnmanaged(ast.Node.Index){};
+        
+        while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
+            if (self.curr.tag == .comma) {
+                const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
+                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
+                try nested_targets.append(self.allocator, empty_node);
+                self.nextToken();
+                continue;
+            }
+            
+            // Check for keyed destructuring in nested array
+            if (self.curr.tag == .t_constant_encapsed_string or self.curr.tag == .t_string) {
+                const key_token = self.curr;
+                const key_text = self.lexer.buffer[key_token.loc.start..key_token.loc.end];
+                self.nextToken();
+                
+                if (self.curr.tag == .fat_arrow) {
+                    self.nextToken(); // consume =>
+                    var key_content = key_text;
+                    if (key_content.len >= 2 and (key_content[0] == '\'' or key_content[0] == '"')) {
+                        key_content = key_content[1 .. key_content.len - 1];
+                    }
+                    const key_id = try self.context.internLiteral(key_content);
+                    const key_node = try self.createNode(.{ .tag = .literal_string, .main_token = key_token, .data = .{ .literal_string = .{ .value = key_id } } });
+                    const target_node = try self.parseDestructuringTarget();
+                    const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = key_token, .data = .{ .array_pair = .{ .key = key_node, .value = target_node } } });
+                    try nested_targets.append(self.allocator, pair_node);
+                } else {
+                    continue;
+                }
+            } else if (self.curr.tag == .t_variable) {
+                const var_name = self.curr;
+                const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                try nested_targets.append(self.allocator, var_node);
+                self.nextToken();
+            } else if (self.curr.tag == .l_bracket) {
+                const inner_nested = try self.parseNestedDestructuringArray();
+                try nested_targets.append(self.allocator, inner_nested);
+            } else {
+                self.nextToken();
+                continue;
+            }
+            
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+                if (self.curr.tag == .r_bracket) break;
+            }
+        }
+        _ = try self.eat(.r_bracket);
+        const arena = self.context.arena.allocator();
+        return self.createNode(.{ .tag = .list_assignment, .main_token = bracket_token, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, nested_targets.items), .value = 0 } } });
+    }
+
+    /// Parse a destructuring target (variable or nested array)
+    fn parseDestructuringTarget(self: *Parser) anyerror!ast.Node.Index {
+        if (self.curr.tag == .t_variable) {
+            const var_name = self.curr;
+            const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+            self.nextToken();
+            return self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+        } else if (self.curr.tag == .l_bracket) {
+            return self.parseNestedDestructuringArray();
+        } else if (self.curr.tag == .k_list) {
+            return self.parseListExpression();
+        }
+        // Return a dummy empty node for invalid targets
+        const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
+        return self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
     }
 
     fn parseListAssignment(self: *Parser) anyerror!ast.Node.Index {

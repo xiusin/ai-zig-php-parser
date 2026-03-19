@@ -3353,7 +3353,7 @@ pub const IRGenerator = struct {
         return value_reg;
     }
 
-    /// foreach list destructuring: foreach ($arr as [$x, $y])
+    /// foreach list destructuring: foreach ($arr as [$x, $y]) or foreach ($arr as ['key' => $x])
     fn generateForeachListDestructure(self: *Self, arr_reg: Register, node_idx: u32) !void {
         const node = self.getNode(node_idx) orelse return;
         const elements = switch (node.tag) {
@@ -3363,16 +3363,36 @@ pub const IRGenerator = struct {
         };
         for (elements, 0..) |elem_idx, i| {
             const elem_node = self.getNode(elem_idx) orelse continue;
-            // 处理array_pair（有key的情况）或直接variable
-            const var_node = if (elem_node.tag == .array_pair) self.getNode(elem_node.data.array_pair.value) else elem_node;
+            
+            // Check if this is keyed destructuring (array_pair with key)
+            var use_key = false;
+            var key_node_idx: Node.Index = 0;
+            var var_node: ?*const Node = null;
+            
+            if (elem_node.tag == .array_pair) {
+                key_node_idx = elem_node.data.array_pair.key;
+                if (self.getNode(key_node_idx) != null) {
+                    use_key = true;
+                }
+                var_node = self.getNode(elem_node.data.array_pair.value);
+            } else {
+                var_node = elem_node;
+            }
+            
             if (var_node == null or var_node.?.tag != .variable) continue;
             const var_name = self.getString(var_node.?.data.variable.name);
-            // arr_reg[i]
-            const key_reg = try self.emitWithResult(.{ .const_int = @intCast(i) }, .i64);
-            const get_args = try self.allocator.alloc(Register, 2);
-            get_args[0] = arr_reg;
-            get_args[1] = key_reg;
-            const elem_val = try self.emitWithResult(.{ .array_get = .{ .array = arr_reg, .key = key_reg } }, .php_value);
+            
+            // Extract element using key or index
+            const elem_val = blk: {
+                if (use_key) {
+                    const key_reg = try self.generateExpression(key_node_idx);
+                    break :blk try self.emitWithResult(.{ .array_get = .{ .array = arr_reg, .key = key_reg } }, .php_value);
+                } else {
+                    const key_reg = try self.emitWithResult(.{ .const_int = @intCast(i) }, .i64);
+                    break :blk try self.emitWithResult(.{ .array_get = .{ .array = arr_reg, .key = key_reg } }, .php_value);
+                }
+            };
+            
             const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
             _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = elem_val } }, null);
         }
@@ -3578,44 +3598,63 @@ pub const IRGenerator = struct {
             // 跳过空位（list(,$b) 中的逗号）
             if (target_node.tag == .list_empty) continue;
 
-            // Extract element at index i
-            const index_reg = try self.emitWithResult(.{ .const_int = @as(i64, @intCast(i)) }, .i64);
-            const elem_reg = try self.emitWithResult(.{ .array_get = .{
-                .array = array_reg,
-                .key = index_reg,
-            } }, .php_value);
+            // 检查是否是 array_pair（带键的解构）
+            var actual_target_node = target_node;
+            var use_key: bool = false;
+            var key_node_idx: Node.Index = 0;
 
-            if (target_node.tag == .variable) {
-                const var_name = self.getString(target_node.data.variable.name);
+            if (target_node.tag == .array_pair) {
+                // 带键解构: ['id' => $userId]
+                key_node_idx = target_node.data.array_pair.key;
+                if (self.getNode(key_node_idx) != null) {
+                    use_key = true;
+                }
+                // 获取实际的目标节点
+                const value_node = self.getNode(target_node.data.array_pair.value) orelse continue;
+                actual_target_node = value_node;
+            }
+
+            // Extract element: 使用键或索引
+            const elem_reg = blk: {
+                if (use_key) {
+                    const key_reg = try self.generateExpression(key_node_idx);
+                    break :blk try self.emitWithResult(.{ .array_get = .{
+                        .array = array_reg,
+                        .key = key_reg,
+                    } }, .php_value);
+                } else {
+                    const index_reg = try self.emitWithResult(.{ .const_int = @as(i64, @intCast(i)) }, .i64);
+                    break :blk try self.emitWithResult(.{ .array_get = .{
+                        .array = array_reg,
+                        .key = index_reg,
+                    } }, .php_value);
+                }
+            };
+
+            if (actual_target_node.tag == .variable) {
+                const var_name = self.getString(actual_target_node.data.variable.name);
                 const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
                 _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = elem_reg } }, null);
                 try self.symbol_table.defineVariable(var_name, .dynamic, self.current_location);
-            } else if (target_node.tag == .array_init) {
+            } else if (actual_target_node.tag == .array_init) {
                 // 嵌套解构: [[$a, $b], [$c, $d]] = $nested
-                const inner_elements = target_node.data.array_init.elements;
-                // 收集内部目标索引
-                var inner_targets = std.ArrayListUnmanaged(Node.Index){};
-                defer inner_targets.deinit(self.allocator);
-                for (inner_elements) |elem_idx| {
-                    const elem_node = self.getNode(elem_idx) orelse continue;
-                    if (elem_node.tag == .array_pair) {
-                        try inner_targets.append(self.allocator, elem_node.data.array_pair.value);
-                    } else {
-                        try inner_targets.append(self.allocator, elem_idx);
-                    }
-                }
-                try self.generateListDestructure(inner_targets.items, elem_reg);
-            } else if (target_node.tag == .property_access) {
-                const obj_reg = try self.generateExpression(target_node.data.property_access.target);
-                const prop_name = self.getString(target_node.data.property_access.property_name);
+                const inner_elements = actual_target_node.data.array_init.elements;
+                try self.generateListDestructure(inner_elements, elem_reg);
+            } else if (actual_target_node.tag == .list_assignment) {
+                // 嵌套 list() 解构: list($x, list($a, $b)) = $arr
+                const inner_targets = actual_target_node.data.list_assignment.targets;
+                try self.generateListDestructure(inner_targets, elem_reg);
+            } else if (actual_target_node.tag == .property_access) {
+                const obj_reg = try self.generateExpression(actual_target_node.data.property_access.target);
+                const prop_name = self.getString(actual_target_node.data.property_access.property_name);
                 _ = try self.emit(.{ .property_set = .{
                     .object = obj_reg,
                     .property_name = prop_name,
                     .value = elem_reg,
                 } }, null);
-            } else if (target_node.tag == .array_access) {
-                const arr_reg = try self.generateExpression(target_node.data.array_access.target);
-                if (target_node.data.array_access.index) |key_idx| {
+            } else if (actual_target_node.tag == .array_access) {
+                const arr_reg = try self.generateExpression(actual_target_node.data.array_access.target);
+                if (actual_target_node.data.array_access.index) |key_idx| {
                     const key_reg = try self.generateExpression(key_idx);
                     _ = try self.emit(.{ .array_set = .{
                         .array = arr_reg,
