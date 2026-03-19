@@ -2139,9 +2139,11 @@ pub const Parser = struct {
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
             },
             .at_sign => {
-                // @ error suppression: parse as transparent wrapper (AOT ignores suppression)
+                // @ error suppression: 生成 unary_expr 节点，IR generator 包装为错误抑制
+                const token = self.curr;
                 self.nextToken();
-                return self.parseUnary();
+                const expr = try self.parseUnary();
+                return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = .at_sign, .expr = expr } } });
             },
             .t_variable, .t_go_identifier => {
                 return self.parseUnaryPostfix();

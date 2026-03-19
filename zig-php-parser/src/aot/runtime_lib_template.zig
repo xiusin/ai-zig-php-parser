@@ -9445,6 +9445,22 @@ fn php_weak_is_alive(addr: usize) bool {
     return true;
 }
 
+/// @ 错误抑制运算符支持
+/// 使用嵌套计数器支持 @@expr 等场景
+threadlocal var error_suppress_depth: u32 = 0;
+
+pub fn php_error_suppress_push() void {
+    error_suppress_depth += 1;
+}
+
+pub fn php_error_suppress_pop() void {
+    if (error_suppress_depth > 0) error_suppress_depth -= 1;
+}
+
+pub fn isErrorSuppressed() bool {
+    return error_suppress_depth > 0;
+}
+
 pub fn getCurrentCalledClass() ?*const ClassMeta {
     const ptr = concurrency.getExecutionContext().called_class orelse return null;
     return @ptrFromInt(ptr);
@@ -9920,6 +9936,7 @@ pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
 /// @return 属性值，如果不存在返回null
 pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
+        if (isErrorSuppressed()) return Value.initNull();
         return error.NotAnObject;
     }
 
@@ -9929,6 +9946,7 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
 
 pub fn php_object_get_direct(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
+        if (isErrorSuppressed()) return Value.initNull();
         return error.NotAnObject;
     }
 
@@ -9949,6 +9967,7 @@ pub fn php_object_get_safe_value(obj_val: Value, prop_name_val: Value) !Value {
 
 pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
     if (!Value_isObject(obj_val)) {
+        if (isErrorSuppressed()) return Value.initNull();
         return error.NotAnObject;
     }
     if (!prop_name_val.isString()) {

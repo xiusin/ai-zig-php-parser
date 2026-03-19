@@ -4460,12 +4460,20 @@ pub const IRGenerator = struct {
             return new_value;
         }
 
-        // @ 错误抑制运算符：包装为 try-catch，运行时错误返回 null
+        // @ 错误抑制运算符：设置运行时标志，表达式求值后清除
+        // 当标志置位时，php_object_get 等函数返回 null 而非抛错
         if (unary_data.op == .at_sign) {
-            // 生成 try 块 + catch 返回 null 的结构
-            // 使用 call_indirect 包装，让 native_linker 生成 catch 逻辑
+            _ = try self.emit(.{ .call = .{
+                .func_name = "php_error_suppress_push",
+                .args = &.{},
+                .return_type = .void,
+            } }, null);
             const inner_reg = try self.generateExpression(unary_data.expr);
-            // 标记该寄存器为错误抑制结果（native_linker 会生成 catch 逻辑）
+            _ = try self.emit(.{ .call = .{
+                .func_name = "php_error_suppress_pop",
+                .args = &.{},
+                .return_type = .void,
+            } }, null);
             return inner_reg;
         }
 

@@ -7471,6 +7471,13 @@ pub const NativeLinker = struct {
                 }
             },
             .call => |op| {
+                // @ 错误抑制运算符：直接调用运行时函数
+                if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
+                    try writer.writeAll("    runtime.php_error_suppress_push();\n");
+                } else if (std.mem.eql(u8, op.func_name, "php_error_suppress_pop")) {
+                    try writer.writeAll("    runtime.php_error_suppress_pop();\n");
+                } else {
+
                 // 生成函数调用
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
@@ -7911,6 +7918,7 @@ pub const NativeLinker = struct {
                         try writer.writeAll("    }\n");
                     }
                 }
+                } // end else (not error_suppress)
             },
             .call_indirect => |op| {
                 // 检查func_ptr是否是alloca寄存器，需要解引用
@@ -14080,6 +14088,13 @@ pub const NativeLinker = struct {
             //   使用 try 传播错误到调用者
             // ========================================================================
             .call => |op| {
+                // @ 错误抑制运算符：直接调用运行时函数
+                if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
+                    try writer.writeAll("    runtime.php_error_suppress_push();\n");
+                } else if (std.mem.eql(u8, op.func_name, "php_error_suppress_pop")) {
+                    try writer.writeAll("    runtime.php_error_suppress_pop();\n");
+                } else {
+
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
                 const is_runtime_declare = std.mem.startsWith(u8, op.func_name, "__declare_function__::");
@@ -14250,6 +14265,7 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                } // end else (not error_suppress)
             },
 
             // ========================================================================
