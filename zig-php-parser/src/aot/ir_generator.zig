@@ -4568,11 +4568,14 @@ pub const IRGenerator = struct {
         // Generate left operand
         const lhs_reg = try self.generateExpression(lhs_idx);
 
+        const is_and = (op == .k_and or op == .double_ampersand);
+
+        // &&: 需要在分支前创建 false 常量，确保 phi 节点的值在 lhs_end_block 可用
+        const false_val = if (is_and) try self.emitWithResult(.{ .const_int = 0 }, .php_value) else undefined;
+
         // Create blocks
         const rhs_block = try self.createBlock("logical_rhs");
         const merge_block = try self.createBlock("logical_merge");
-
-        const is_and = (op == .k_and or op == .double_ampersand);
 
         // For &&: if lhs is false, skip rhs and return false
         // For ||: if lhs is true, skip rhs and return true
@@ -4606,12 +4609,10 @@ pub const IRGenerator = struct {
         const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
         if (is_and) {
             // &&: [false from lhs_end, rhs from rhs_end]
-            const false_val = try self.emitWithResult(.{ .const_int = 0 }, .php_value);
             incoming[0] = .{ .value = false_val, .block = lhs_end_block };
             incoming[1] = .{ .value = rhs_reg, .block = rhs_end_block };
         } else {
             // ||: [lhs from lhs_end, rhs from rhs_end]
-            // 注意：lhs 为 true 时短路，所以 phi 的第一个值应该是 lhs_reg
             incoming[0] = .{ .value = lhs_reg, .block = lhs_end_block };
             incoming[1] = .{ .value = rhs_reg, .block = rhs_end_block };
         }

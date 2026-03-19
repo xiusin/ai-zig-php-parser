@@ -6079,14 +6079,10 @@ pub const NativeLinker = struct {
 
                     const ptr_prefix = if (is_ptr or ptr_is_ref_param) "" else "&";
 
-                    if (type_tag == .i64) {
-                        // 普通寄存器都是Value类型，需要包装
-                        try writer.print("    reg_{d}{s} = runtime.Value.initInt(runtime.val_deref({s}reg_{d}).*.asInt());\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else if (type_tag == .f64) {
-                        try writer.print("    reg_{d}{s} = runtime.Value.initFloat(runtime.val_deref({s}reg_{d}).*.asFloat());\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d}{s} = runtime.Value.initBool(runtime.val_deref({s}reg_{d}).*.asBool());\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else {
+                    // 始终使用通用加载路径，保留实际运行时类型
+                    // 类型推断可能不准确（如函数参数推断为i64但实际是bool），
+                    // 用 asInt()/asFloat()/asBool() 转换会丢失实际类型信息
+                    {
                         try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
                         if (self.regMayHeap(reg.id)) {
                             if (result_is_alloca) {
