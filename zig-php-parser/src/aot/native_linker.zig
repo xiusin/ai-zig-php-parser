@@ -644,6 +644,72 @@ pub const NativeLinker = struct {
             \\var global_vars: std.StringHashMap(runtime.Value) = undefined;
             \\var global_vars_initialized: bool = false;
             \\
+            \\// 全局变量引用绑定表: target -> source (e.g., $b = &$a means $b -> $a)
+            \\var global_ref_bindings: std.StringHashMap([]const u8) = undefined;
+            \\var global_ref_bindings_initialized: bool = false;
+            \\
+            \\// 创建全局变量引用绑定: $target = &$source
+            \\pub fn bindGlobalRef(target: []const u8, source: []const u8) !void {
+            \\    if (!global_ref_bindings_initialized) {
+            \\        global_ref_bindings = std.StringHashMap([]const u8).init(runtime.runtime_allocator);
+            \\        global_ref_bindings_initialized = true;
+            \\    }
+            \\    // 复制 target 和 source 字符串
+            \\    const target_copy = try runtime.runtime_allocator.dupe(u8, target);
+            \\    const source_copy = try runtime.runtime_allocator.dupe(u8, source);
+            \\    // 如果已存在旧绑定，释放旧的 source 字符串
+            \\    if (global_ref_bindings.fetchPut(target_copy, source_copy)) |old| {
+            \\        runtime.runtime_allocator.free(old.key);
+            \\        runtime.runtime_allocator.free(old.value);
+            \\    }
+            \\    // 同步当前值: $target 应该和 $source 指向相同的值
+            \\    if (global_vars_initialized) {
+            \\        if (global_vars.get(source)) |src_val| {
+            \\            const gop = try global_vars.getOrPut(target);
+            \\            if (!gop.found_existing) {
+            \\                gop.key_ptr.* = target_copy;
+            \\            }
+            \\            if (gop.found_existing) {
+            \\                gop.value_ptr.release(runtime.runtime_allocator);
+            \\            }
+            \\            _ = src_val.retain();
+            \\            gop.value_ptr.* = src_val;
+            \\        }
+            \\    }
+            \\}
+            \\
+            \\// 获取变量的引用源（如果是引用则返回源变量名，否则返回自身）
+            \\fn resolveRefSource(name: []const u8) []const u8 {
+            \\    if (!global_ref_bindings_initialized) return name;
+            \\    // 循环解析引用链
+            \\    var current = name;
+            \\    var depth: usize = 0;
+            \\    while (depth < 10) : (depth += 1) {
+            \\        if (global_ref_bindings.get(current)) |source| {
+            \\            current = source;
+            \\        } else {
+            \\            break;
+            \\        }
+            \\    }
+            \\    return current;
+            \\}
+            \\
+            \\// 查找所有引用同一源的变量
+            \\fn findAllRefsToSource(source: []const u8, out_buf: *[32][]const u8) usize {
+            \\    if (!global_ref_bindings_initialized) return 0;
+            \\    var count: usize = 0;
+            \\    var it = global_ref_bindings.iterator();
+            \\    while (it.next()) |entry| {
+            \\        if (count >= 32) break;
+            \\        const resolved = resolveRefSource(entry.key_ptr.*);
+            \\        if (std.mem.eql(u8, resolved, source)) {
+            \\            out_buf[count] = entry.key_ptr.*;
+            \\            count += 1;
+            \\        }
+            \\    }
+            \\    return count;
+            \\}
+            \\
             \\pub fn getGlobalVar(name: []const u8) runtime.Value {
             \\    // 超全局变量直接从global_vars读取
             \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
@@ -713,17 +779,38 @@ pub const NativeLinker = struct {
             \\
             \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
             \\    if (!global_vars_initialized) return;
-            \\    // Check if key already exists
+            \\    
+            \\    // 解析引用链：找到真正的源变量
+            \\    const source = resolveRefSource(name);
+            \\    
+            \\    // 设置源变量的值
+            \\    try setGlobalVarDirect(source, value);
+            \\    
+            \\    // 如果设置的是引用变量，也同步更新源变量
+            \\    if (!std.mem.eql(u8, name, source)) {
+            \\        try setGlobalVarDirect(name, value);
+            \\    }
+            \\    
+            \\    // 查找所有引用同一源的其他变量并同步更新
+            \\    var refs_buf: [32][]const u8 = undefined;
+            \\    const ref_count = findAllRefsToSource(source, &refs_buf);
+            \\    for (refs_buf[0..ref_count]) |ref_name| {
+            \\        if (!std.mem.eql(u8, ref_name, name)) {
+            \\            try setGlobalVarDirect(ref_name, value);
+            \\        }
+            \\    }
+            \\}
+            \\
+            \\// 直接设置全局变量值，不处理引用传播
+            \\fn setGlobalVarDirect(name: []const u8, value: runtime.Value) !void {
+            \\    if (!global_vars_initialized) return;
             \\    const gop = try global_vars.getOrPut(name);
             \\    if (!gop.found_existing) {
-            \\        // Need to duplicate the key for new entries
             \\        const key_copy = try runtime.runtime_allocator.dupe(u8, name);
             \\        gop.key_ptr.* = key_copy;
-            \\        // Retain the new value
             \\        _ = value.retain();
             \\        gop.value_ptr.* = value;
             \\    } else {
-            \\        // Release old value and retain new value
             \\        gop.value_ptr.release(runtime.runtime_allocator);
             \\        _ = value.retain();
             \\        gop.value_ptr.* = value;
@@ -8686,6 +8773,14 @@ pub const NativeLinker = struct {
                 } else {
                     try writer.print("reg_{d});\n", .{op.value.id});
                 }
+            },
+            .global_ref_bind => |op| {
+                // 全局变量引用绑定: $target = &$source
+                const escaped_target = try self.escapeString(op.target);
+                defer self.allocator.free(escaped_target);
+                const escaped_source = try self.escapeString(op.source);
+                defer self.allocator.free(escaped_source);
+                try writer.print("    try bindGlobalRef(\"{s}\", \"{s}\");\n", .{ escaped_target, escaped_source });
             },
             .global_unset => |op| {
                 // 从全局变量表中删除

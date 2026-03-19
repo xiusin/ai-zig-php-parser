@@ -3420,9 +3420,8 @@ pub const IRGenerator = struct {
         const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
 
         if (is_main or self.global_vars.contains(src_name)) {
-            // 全局变量：退化为值拷贝（TODO: 真引用需要更复杂实现）
-            const src_val = try self.emitWithResult(.{ .global_get = .{ .name = src_name } }, .php_value);
-            _ = try self.emit(.{ .global_set = .{ .name = tgt_name, .value = src_val } }, null);
+            // 全局变量：创建引用绑定
+            _ = try self.emit(.{ .global_ref_bind = .{ .target = tgt_name, .source = src_name } }, null);
         } else {
             // 局部变量：真引用
             const src_reg = try self.getOrCreateVarRegister(src_name, .php_value);

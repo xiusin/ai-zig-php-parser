@@ -807,6 +807,8 @@ pub const Instruction = struct {
         global_get_dynamic: struct { name_reg: Register },
         /// Set global variable dynamically (variable variable)
         global_set_dynamic: struct { name_reg: Register, value: Register },
+        /// Bind global variable reference: $target = &$source
+        global_ref_bind: struct { target: []const u8, source: []const u8 },
 
         // ============ PHP Array Operations ============
         /// Create new array
@@ -1520,6 +1522,7 @@ pub const IRPrinter = struct {
             },
             .global_get_dynamic => |op| try self.print("global.get_dynamic {any}", .{op.name_reg}),
             .global_set_dynamic => |op| try self.print("global.set_dynamic {any} = {any}", .{ op.name_reg, op.value }),
+            .global_ref_bind => |op| try self.print("global.ref_bind {s} = &{s}", .{ op.target, op.source }),
             .global_unset => |op| try self.print("global.unset {any}", .{op.name}),
 
             // Array operations
