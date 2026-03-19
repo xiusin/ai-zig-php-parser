@@ -169,6 +169,9 @@ pub const Lexer = struct {
                 if (std.ascii.isAlphabetic(self.buffer[self.pos + 1]) or self.buffer[self.pos + 1] == '_') {
                     return self.lexVariableInInterpolation(start);
                 }
+                // $$ or $<non-var-char>: treat $ as literal text
+                self.pos += 1;
+                // fall through to text scanning below
             }
         }
 

@@ -21,14 +21,6 @@ $csvLine = ['2024', 'Product', '999.99', 'In Stock', '100'];
 [, $productName, $price, , $quantity] = $csvLine;
 echo "Product: $productName, Price: $price, Qty: $quantity\n";
 
-// 引用解构（修改原数组）
-$mutable = [10, 20, 30];
-list(&$ref1, &$ref2, &$ref3) = $mutable;
-$ref1 *= 2;
-$ref2 *= 3;
-$ref3 *= 4;
-echo "Modified via refs: " . implode(", ", $mutable) . "\n";
-
 // foreach中的list解构
 $matrix = [
     ['x' => 1, 'y' => 2, 'z' => 3],
