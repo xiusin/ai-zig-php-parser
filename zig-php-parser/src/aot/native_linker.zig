@@ -8229,16 +8229,29 @@ pub const NativeLinker = struct {
                     const escaped_class = try self.escapeString(op.class_name);
                     defer self.allocator.free(escaped_class);
 
+                    const new_in_try = self.current_exception_handler != null;
                     if (is_alloca) {
                         try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
-                        try writer.print("    reg_{d}.* = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        if (new_in_try) {
+                            try writer.print("    reg_{d}.* = runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        } else {
+                            try writer.print("    reg_{d}.* = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        }
                     } else {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                        try writer.print("    reg_{d} = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        if (new_in_try) {
+                            try writer.print("    reg_{d} = runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        }
                     }
 
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (new_in_try) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
 
                     // 检查异常
                     try writer.writeAll("    if (runtime.hasException()) {\n");
@@ -8350,19 +8363,36 @@ pub const NativeLinker = struct {
                 const escaped_method = try self.escapeString(op.method_name);
                 defer self.allocator.free(escaped_method);
 
+                const method_in_try = self.current_exception_handler != null;
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = try runtime.php_object_call(", .{reg.id});
+                    if (method_in_try) {
+                        try writer.print("    reg_{d} = runtime.php_object_call(", .{reg.id});
+                    } else {
+                        try writer.print("    reg_{d} = try runtime.php_object_call(", .{reg.id});
+                    }
                     try self.writeRegRef(writer, op.object.id);
                     try writer.print(", \"{s}\", ", .{escaped_method});
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(");\n");
+                    if (method_in_try) {
+                        try writer.writeAll(") catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(");\n");
+                    }
                 } else {
-                    try writer.writeAll("    _ = try runtime.php_object_call(");
+                    if (method_in_try) {
+                        try writer.writeAll("    _ = runtime.php_object_call(");
+                    } else {
+                        try writer.writeAll("    _ = try runtime.php_object_call(");
+                    }
                     try self.writeRegRef(writer, op.object.id);
                     try writer.print(", \"{s}\", ", .{escaped_method});
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(");\n");
+                    if (method_in_try) {
+                        try writer.writeAll(") catch {};\n");
+                    } else {
+                        try writer.writeAll(");\n");
+                    }
                 }
 
                 try writer.writeAll("    if (runtime.hasException()) {\n");
@@ -8431,23 +8461,48 @@ pub const NativeLinker = struct {
                 // 检测是否是 parent:: 调用，需要传递 ctx
                 const is_parent_call = std.mem.eql(u8, op.class_name, "parent");
 
+                const in_try = self.current_exception_handler != null;
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     if (is_parent_call) {
-                        try writer.print("    reg_{d} = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    reg_{d} = runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        }
                     } else {
-                        try writer.print("    reg_{d} = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    reg_{d} = runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        }
                     }
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (in_try) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
                 } else {
                     if (is_parent_call) {
-                        try writer.print("    _ = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    _ = runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    _ = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        }
                     } else {
-                        try writer.print("    _ = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    _ = runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    _ = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        }
                     }
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (in_try) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
                 }
 
                 try writer.writeAll("    if (runtime.hasException()) {\n");

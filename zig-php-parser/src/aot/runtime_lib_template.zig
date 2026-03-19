@@ -2408,7 +2408,7 @@ pub const Value = struct {
         if (self.isFunction()) {
             // 函数转字符串也应该抛出异常（PHP 8+）
             _ = try throwException("Object of class Closure could not be converted to string", allocator);
-            return error.TypeError;
+            return PHPString.init(allocator, "");
         }
         if (Value_isObject(self)) {
             // 对象转字符串：尝试调用__toString()
@@ -10347,7 +10347,7 @@ fn enumFrom(meta: *const ClassMeta, needle: Value, allocator: Allocator) !Value 
     const msg = try std.fmt.allocPrint(allocator, "{s} is not a valid backing value for enum {s}", .{ needle_str.data, meta.name });
     defer allocator.free(msg);
     _ = try throwThrowable("ValueError", msg, allocator);
-    return error.RuntimeError;
+    return Value.initNull();
 }
 
 /// Enum::tryFrom(value) - 根据 backing value 查找 case，找不到返回 null
