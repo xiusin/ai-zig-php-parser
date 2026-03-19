@@ -4578,7 +4578,8 @@ pub const IRGenerator = struct {
         const is_and = (op == .k_and or op == .double_ampersand);
 
         // &&: 需要在分支前创建 false 常量，确保 phi 节点的值在 lhs_end_block 可用
-        const false_val = if (is_and) try self.emitWithResult(.{ .const_int = 0 }, .php_value) else undefined;
+        // 使用 const_bool=false 而非 const_int=0，保证 (string)false === "" 而非 "0"
+        const false_val = if (is_and) try self.emitWithResult(.{ .const_bool = false }, .php_value) else undefined;
 
         // Create blocks
         const rhs_block = try self.createBlock("logical_rhs");
