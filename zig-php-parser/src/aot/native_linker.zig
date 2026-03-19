@@ -6807,14 +6807,20 @@ pub const NativeLinker = struct {
 
                             if (is_variadic) {
                                 // 可变参数：收集从 args_index 开始的所有参数到数组
+                                // 特殊处理：如果恰好一个参数且是关联数组（命名 variadic 参数），直接使用
                                 try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                                 try writer.print("    {{\n", .{});
-                                try writer.print("        var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
-                                try writer.print("        var i: usize = {d};\n", .{args_index});
-                                try writer.print("        while (i < args.len) : (i += 1) {{\n", .{});
-                                try writer.print("            try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                                try writer.print("        const __va_start: usize = {d};\n", .{args_index});
+                                try writer.print("        if (args.len == __va_start + 1 and args[__va_start].isArray() and args[__va_start].asArray().hasStringKeys()) {{\n", .{});
+                                try writer.print("            reg_{d} = args[__va_start];\n", .{reg.id});
+                                try writer.print("        }} else {{\n", .{});
+                                try writer.print("            var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
+                                try writer.print("            var i: usize = __va_start;\n", .{});
+                                try writer.print("            while (i < args.len) : (i += 1) {{\n", .{});
+                                try writer.print("                try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                                try writer.print("            }}\n", .{});
+                                try writer.print("            reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
                                 try writer.print("        }}\n", .{});
-                                try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
                                 try writer.print("    }}\n", .{});
                             } else {
                                 // 普通参数 - 现在所有寄存器都是 Value 类型

@@ -1662,6 +1662,16 @@ pub const PHPArray = struct {
             return self.packed_values.items.len;
         }
 
+        /// 检查是否包含字符串键（关联数组）
+        pub fn hasStringKeys(self: *const Elements) bool {
+            const m = self.mixed orelse return false;
+            const keys = m.unmanaged.entries.items(.key);
+            for (keys) |k| {
+                if (k == .string) return true;
+            }
+            return false;
+        }
+
         pub fn iterator(self: *const Elements) Iterator {
             if (self.mixed) |*m| {
                 // 安全检查：直接检查unmanaged的entries
@@ -1893,6 +1903,11 @@ pub const PHPArray = struct {
         try self.elements.put(key, value);
         self.next_index += 1;
         _ = allocator; // 避免未使用警告
+    }
+
+    /// 检查是否包含字符串键（关联数组）
+    pub fn hasStringKeys(self: *PHPArray) bool {
+        return self.elements.hasStringKeys();
     }
 
     /// 获取元素数量

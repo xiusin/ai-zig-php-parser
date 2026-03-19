@@ -5037,6 +5037,21 @@ pub const IRGenerator = struct {
                     break :blk false;
                 };
 
+                // 检查是否是 variadic 参数（symbol_table 不跟踪 is_variadic，需要从 module 获取）
+                const p_is_variadic: bool = blk: {
+                    if (module_func_params) |mfp| {
+                        if (pi < mfp.len) break :blk mfp[pi].is_variadic;
+                    }
+                    if (self.module) |mod| {
+                        for (mod.functions.items) |f| {
+                            if (std.mem.eql(u8, f.name, func_name) and pi < f.params.items.len) {
+                                break :blk f.params.items[pi].is_variadic;
+                            }
+                        }
+                    }
+                    break :blk false;
+                };
+
                 var chosen: ?Node.Index = null;
                 const p_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
                 if (named_args.get(p_name)) |named_idx| {
@@ -5044,6 +5059,32 @@ pub const IRGenerator = struct {
                 } else if (pos_i < positional_args.items.len) {
                     chosen = positional_args.items[pos_i];
                     pos_i += 1;
+                }
+
+                // 对 variadic 参数的命名参数：构建完整的关联数组作为 variadic 数组
+                // PHP: func(context: val) + ...$context → $context = ['context' => val]
+                // 遍历所有未消耗的 named_args，用 string key 收集到一个数组
+                if (chosen != null and p_is_variadic) {
+                    const arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(named_args.count()) } }, .php_value);
+                    // 先添加匹配到的参数
+                    const val_reg = try self.generateExpression(chosen.?);
+                    const key_id = try self.module.?.internString(p_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    _ = try self.emit(.{ .array_set = .{ .array = arr_reg, .key = key_reg, .value = val_reg } }, null);
+                    // 添加其余未消耗的 named_args
+                    var named_it = named_args.iterator();
+                    while (named_it.next()) |entry| {
+                        if (std.mem.eql(u8, entry.key_ptr.*, p_name)) continue; // 已添加
+                        const other_val = try self.generateExpression(entry.value_ptr.*);
+                        const other_key_id = try self.module.?.internString(entry.key_ptr.*);
+                        const other_key_reg = try self.emitWithResult(.{ .const_string = other_key_id }, .php_value);
+                        _ = try self.emit(.{ .array_set = .{ .array = arr_reg, .key = other_key_reg, .value = other_val } }, null);
+                    }
+                    // 传入预构建的关联数组作为 variadic 参数的值
+                    // 使用 store 直接写入 variadic 参数的 alloca（跳过收集器）
+                    try final_args.append(self.allocator, arr_reg);
+                    // 标记此函数调用有命名 variadic 参数
+                    break; // variadic 是最后一个参数，终止循环
                 }
 
                 if (chosen) |expr_idx| {
