@@ -10194,9 +10194,8 @@ pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
     // PHP 8.0+: 实现了 __toString() 的类自动实现 Stringable 接口
     if (std.mem.eql(u8, name, "Stringable")) {
         if (obj.class_meta) |meta| {
-            for (meta.vtable) |entry| {
-                if (std.mem.eql(u8, entry.name, "__toString")) return Value.initBool(true);
-            }
+            if (meta.magic_toString != null) return Value.initBool(true);
+            if (meta.methods.get("__toString") != null) return Value.initBool(true);
         }
     }
 
