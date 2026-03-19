@@ -2,7 +2,7 @@
 
 ## 本轮修复成果
 
-### 已完成修复 (9项)
+### 已完成修复 (10项)
 
 | # | 修复内容 | 影响测试 | 文件 |
 |---|---------|---------|------|
@@ -15,6 +15,7 @@
 | 7 | **PHP 8.0 throw-as-expression** (三元/coalesce) | test_050_throw_expressions | ir_generator.zig |
 | 8 | 第三throw handler路径error.PHPException修复 | 通用 | native_linker.zig |
 | 9 | **命名参数重排序** (module-based fallback) | test_003, test_051 | ir_generator.zig |
+| 10 | **load指令类型转换bug** (bool→asInt()=0) | test_0450/0451, 全局 | native_linker.zig |
 
 ### 关键架构修复说明
 
@@ -24,7 +25,7 @@
 
 ### 测试通过率
 
-- **pass 目录**: 29/36 通过 (80.6%，排除 timestamp race 约 31/36 = 86%)
+- **pass 目录**: 30/36 通过 (83.3%)
 - **从 failed 移入 pass**: 7 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
