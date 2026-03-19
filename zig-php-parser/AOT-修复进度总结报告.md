@@ -28,8 +28,8 @@
 
 ### 测试通过率
 
-- **pass 目录**: 30/38 通过 (78.9%，排除 timestamp race 约 32/38 = 84.2%)
-- **从 failed 移入 pass**: 9 个测试
+- **pass 目录**: 32/39 通过 (82.1%)
+- **从 failed 移入 pass**: 10 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
   - test_053_intersection_types
@@ -39,6 +39,7 @@
   - test_058_object_graph
   - test_0450_Trait组合
   - test_0451_Trait组合
+  - test_059_stringable_interface
 
 ### pass 目录剩余 FAIL 分析
 
