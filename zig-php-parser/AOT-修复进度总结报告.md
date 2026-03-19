@@ -32,8 +32,8 @@
 
 ### 测试通过率
 
-- **pass 目录**: 36/42 通过 (85.7%)
-- **从 failed 移入 pass**: 14 个测试
+- **pass 目录**: 37/43 通过 (86.0%)
+- **从 failed 移入 pass**: 15 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
   - test_053_intersection_types
@@ -48,6 +48,7 @@
   - test_056_pattern_matching
   - test_052_union_types
   - test_052_first_class_callable
+  - test_048_nullsafe_operator
 
 ### pass 目录剩余 FAIL 分析
 
