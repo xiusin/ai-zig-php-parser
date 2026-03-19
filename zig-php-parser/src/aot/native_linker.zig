@@ -3490,21 +3490,13 @@ pub const NativeLinker = struct {
                         }
 
                         if (ret_val) |reg| {
-                            const type_tag = @as(std.meta.Tag(IR.Type), all_registers.get(reg.id) orelse reg.type_);
-                            if (type_tag == .i64) {
-                                try code.writer(self.allocator).print("    return runtime.Value.initInt(reg_{d}.asInt());\n", .{reg.id});
-                            } else if (type_tag == .f64) {
-                                try code.writer(self.allocator).print("    return runtime.Value.initFloat(reg_{d}.asFloat());\n", .{reg.id});
-                            } else if (type_tag == .bool) {
-                                try code.writer(self.allocator).print("    return runtime.Value.initBool(reg_{d}.asBool());\n", .{reg.id});
+                            // 始终返回原始 Value，不做类型转换
+                            // 类型推断可能不准确（如 && 结果推断为 i64 但实际是 bool）
+                            const is_alloca = alloca_registers.contains(reg.id);
+                            if (is_alloca) {
+                                try code.writer(self.allocator).print("    return reg_{d}.*;\n", .{reg.id});
                             } else {
-                                // 检查是否是 alloca 寄存器
-                                const is_alloca = alloca_registers.contains(reg.id);
-                                if (is_alloca) {
-                                    try code.writer(self.allocator).print("    return reg_{d}.*;\n", .{reg.id});
-                                } else {
-                                    try code.writer(self.allocator).print("    return reg_{d};\n", .{reg.id});
-                                }
+                                try code.writer(self.allocator).print("    return reg_{d};\n", .{reg.id});
                             }
                         } else {
                             try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
@@ -4956,22 +4948,12 @@ pub const NativeLinker = struct {
                     }
                 }
                 if (ret_val) |reg| {
-                    const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
-                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                    if (reg_type_tag == .i64) {
-                        try writer.print("                return runtime.Value.initInt(reg_{d}.asInt());\n", .{reg.id});
-                    } else if (reg_type_tag == .f64) {
-                        try writer.print("                return runtime.Value.initFloat(reg_{d}.asFloat());\n", .{reg.id});
-                    } else if (reg_type_tag == .bool) {
-                        try writer.print("                return runtime.Value.initBool(reg_{d}.asBool());\n", .{reg.id});
+                    // 始终返回原始 Value，不做类型转换
+                    const is_alloca = alloca_regs.contains(reg.id);
+                    if (is_alloca) {
+                        try writer.print("                return reg_{d}.*;\n", .{reg.id});
                     } else {
-                        // 检查是否是 alloca 寄存器
-                        const is_alloca = alloca_regs.contains(reg.id);
-                        if (is_alloca) {
-                            try writer.print("                return reg_{d}.*;\n", .{reg.id});
-                        } else {
-                            try writer.print("                return reg_{d};\n", .{reg.id});
-                        }
+                        try writer.print("                return reg_{d};\n", .{reg.id});
                     }
                 } else {
                     try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
