@@ -4355,6 +4355,11 @@ pub fn php_identical(lhs: Value, rhs: Value) !Value {
         return Value.initBool(try php_array_identical(lhs.asArray(), rhs.asArray()));
     }
 
+    // Object: 同一引用才 identical（指针比较）
+    if (Value_isObject(lhs) and Value_isObject(rhs)) {
+        return Value.initBool(Value_asObject(lhs) == Value_asObject(rhs));
+    }
+
     return Value.initBool(false);
 }
 
@@ -10297,6 +10302,73 @@ pub fn property_exists(ctx: Value, args: []const Value, allocator: Allocator) an
     return php_property_exists(args[0], args[1]);
 }
 
+/// Enum::cases() - 返回所有 case 的数组（保持声明顺序）
+fn enumCases(meta: *const ClassMeta, allocator: Allocator) !Value {
+    const arr = try PHPArray.init(allocator);
+    // 使用 __enum_cases 有序列表
+    if (meta.static_properties.get("__enum_cases")) |cases_val| {
+        if (cases_val.isArray()) {
+            const cases_arr = cases_val.asArray();
+            var it = cases_arr.elements.iterator();
+            while (it.next()) |entry| {
+                const name_val = entry.value_ptr.*;
+                if (name_val.isString()) {
+                    const name = name_val.asString().data;
+                    if (meta.static_properties.get(name)) |case_val| {
+                        _ = case_val.retain();
+                        try arr.push(allocator, case_val);
+                    }
+                }
+            }
+        }
+    }
+    return Value.initArray(arr);
+}
+
+/// Enum::from(value) - 根据 backing value 查找 case，找不到抛 ValueError
+fn enumFrom(meta: *const ClassMeta, needle: Value, allocator: Allocator) !Value {
+    var it = meta.static_properties.iterator();
+    while (it.next()) |entry| {
+        const val = entry.value_ptr.*;
+        if (Value_isObject(val)) {
+            const obj = Value_asObject(val);
+            if (obj.getPropertyDirect("value")) |backing| {
+                const eq = try php_eq(backing, needle);
+                if (eq.asBool()) {
+                    _ = val.retain();
+                    return val;
+                }
+            }
+        }
+    }
+    // 抛出 ValueError
+    const needle_str = try needle.toString(allocator);
+    defer needle_str.release(allocator);
+    const msg = try std.fmt.allocPrint(allocator, "{s} is not a valid backing value for enum {s}", .{ needle_str.data, meta.name });
+    defer allocator.free(msg);
+    _ = try throwThrowable("ValueError", msg, allocator);
+    return error.RuntimeError;
+}
+
+/// Enum::tryFrom(value) - 根据 backing value 查找 case，找不到返回 null
+fn enumTryFrom(meta: *const ClassMeta, needle: Value) !Value {
+    var it = meta.static_properties.iterator();
+    while (it.next()) |entry| {
+        const val = entry.value_ptr.*;
+        if (Value_isObject(val)) {
+            const obj = Value_asObject(val);
+            if (obj.getPropertyDirect("value")) |backing| {
+                const eq = try php_eq(backing, needle);
+                if (eq.asBool()) {
+                    _ = val.retain();
+                    return val;
+                }
+            }
+        }
+    }
+    return Value.initNull();
+}
+
 /// 调用静态方法
 pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     return php_call_static_with_ctx(Value.initNull(), class_name, method_name, args, allocator);
@@ -10335,6 +10407,19 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
         const guard = ClassContext.init(called_meta, lookup.owner);
         defer guard.deinit();
         return lookup.method.func(ctx, args, allocator);
+    }
+
+    // Enum 内置静态方法: cases(), from(), tryFrom()
+    if (std.mem.eql(u8, method_name, "cases")) {
+        return enumCases(lookup_meta, allocator);
+    }
+    if (std.mem.eql(u8, method_name, "from")) {
+        if (args.len == 0) return error.InvalidArgumentCount;
+        return enumFrom(lookup_meta, args[0], allocator);
+    }
+    if (std.mem.eql(u8, method_name, "tryFrom")) {
+        if (args.len == 0) return error.InvalidArgumentCount;
+        return enumTryFrom(lookup_meta, args[0]);
     }
 
     // 调用 __callStatic 魔法函数

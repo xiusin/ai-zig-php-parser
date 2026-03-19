@@ -1723,38 +1723,6 @@ pub const NativeLinker = struct {
                 }
             }
 
-            // Register enum cases as static properties
-            if (type_def_idx[ci]) |tdi2| {
-                const td2 = ir_module.types.items[tdi2].*;
-                if (td2.kind == .@"enum") {
-                    for (td2.enum_cases) |ec| {
-                        const escaped_case = try self.escapeString(ec.name);
-                        defer self.allocator.free(escaped_case);
-                        const escaped_enum = try escapeBackslashes(self.allocator, td2.name);
-                        defer self.allocator.free(escaped_enum);
-                        try writer.writeAll("    {\n");
-                        try writer.print("        const enum_val = try runtime.php_object_new(\"{s}\", allocator);\n", .{escaped_enum});
-                        try writer.print("        const enum_obj = runtime.Value_asObject(enum_val);\n", .{});
-                        try writer.print("        try enum_obj.setProperty(\"name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_case});
-                        if (ec.value) |cv| {
-                            switch (cv) {
-                                .int => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initInt({d}));\n", .{v}),
-                                .float => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initFloat({d}));\n", .{v}),
-                                .string => |s| {
-                                    const escaped_val = try self.escapeString(s);
-                                    defer self.allocator.free(escaped_val);
-                                    try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_val});
-                                },
-                                .bool => |b| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initBool({s}));\n", .{if (b) "true" else "false"}),
-                                .null => try writer.writeAll("        try enum_obj.setProperty(\"value\", runtime.Value.initNull());\n"),
-                            }
-                        }
-                        try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", enum_val);\n", .{ short_cname, escaped_case });
-                        try writer.writeAll("    }\n");
-                    }
-                }
-            }
-
             // 注册类上的 PHP attributes (#[...])
             if (type_def_idx[ci]) |tdi3| {
                 const td3 = ir_module.types.items[tdi3].*;
@@ -1787,7 +1755,50 @@ pub const NativeLinker = struct {
             // 设置魔术方法指针
             try writer.print("    if ({s}_meta.methods.get(\"__toString\")) |m| {s}_meta.magic_toString = m.func;\n", .{ short_cname, short_cname });
 
+            // 先注册类，使 enum case 的 php_object_new 能找到 ClassMeta
             try writer.print("    try runtime.registerClass({s}_meta);\n", .{short_cname});
+
+            // Register enum cases as static properties（必须在 registerClass 之后）
+            if (type_def_idx[ci]) |tdi2| {
+                const td2 = ir_module.types.items[tdi2].*;
+                if (td2.kind == .@"enum") {
+                    for (td2.enum_cases) |ec| {
+                        const escaped_case = try self.escapeString(ec.name);
+                        defer self.allocator.free(escaped_case);
+                        const escaped_enum = try escapeBackslashes(self.allocator, td2.name);
+                        defer self.allocator.free(escaped_enum);
+                        try writer.writeAll("    {\n");
+                        try writer.print("        const enum_val = try runtime.php_object_new(\"{s}\", allocator);\n", .{escaped_enum});
+                        try writer.print("        const enum_obj = runtime.Value_asObject(enum_val);\n", .{});
+                        try writer.print("        try enum_obj.setProperty(\"name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_case});
+                        if (ec.value) |cv| {
+                            switch (cv) {
+                                .int => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initInt({d}));\n", .{v}),
+                                .float => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initFloat({d}));\n", .{v}),
+                                .string => |s| {
+                                    const escaped_val = try self.escapeString(s);
+                                    defer self.allocator.free(escaped_val);
+                                    try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_val});
+                                },
+                                .bool => |b| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initBool({s}));\n", .{if (b) "true" else "false"}),
+                                .null => try writer.writeAll("        try enum_obj.setProperty(\"value\", runtime.Value.initNull());\n"),
+                            }
+                        }
+                        try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", enum_val);\n", .{ short_cname, escaped_case });
+                        try writer.writeAll("    }\n");
+                    }
+                    // 存储有序的 case 名称列表
+                    try writer.writeAll("    {\n");
+                    try writer.print("        const case_arr = try runtime.PHPArray.init(allocator);\n", .{});
+                    for (td2.enum_cases) |ec| {
+                        const escaped_cn = try self.escapeString(ec.name);
+                        defer self.allocator.free(escaped_cn);
+                        try writer.print("        try case_arr.push(allocator, runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_cn});
+                    }
+                    try writer.print("        try {s}_meta.setStaticProperty(\"__enum_cases\", runtime.Value.initArray(case_arr));\n", .{short_cname});
+                    try writer.writeAll("    }\n");
+                }
+            }
         }
 
         // 注册含静态属性的 trait（使 self::$prop 在 trait 方法中可用）

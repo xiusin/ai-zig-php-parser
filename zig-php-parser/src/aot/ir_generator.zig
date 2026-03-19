@@ -5724,20 +5724,54 @@ pub const IRGenerator = struct {
         var methods = std.ArrayListUnmanaged(TypeDef.Method){};
         var properties = std.ArrayListUnmanaged(TypeDef.Property){};
 
+        // 解析父类名称
+        const parent_name: ?[]const u8 = if (anon_data.extends) |ext_idx| blk: {
+            const ext_node = self.getNode(ext_idx) orelse break :blk null;
+            const parent_short = switch (ext_node.tag) {
+                .named_type => self.getString(ext_node.data.named_type.name),
+                .variable => self.getString(ext_node.data.variable.name),
+                else => break :blk null,
+            };
+            break :blk try self.resolveClassName(parent_short);
+        } else null;
+
+        // 解析接口名称
+        var iface_list = std.ArrayListUnmanaged([]const u8){};
+        defer iface_list.deinit(self.allocator);
+        for (anon_data.implements) |impl_idx| {
+            const impl_node = self.getNode(impl_idx) orelse continue;
+            if (impl_node.tag == .named_type) {
+                const iname = self.getString(impl_node.data.named_type.name);
+                try iface_list.append(self.allocator, try self.resolveClassName(iname));
+            }
+        }
+        const interfaces_slice = try iface_list.toOwnedSlice(self.allocator);
+
+        // 解析 traits
+        var trait_list = std.ArrayListUnmanaged([]const u8){};
+        defer trait_list.deinit(self.allocator);
+        for (anon_data.members) |member_idx| {
+            const mn = self.getNode(member_idx) orelse continue;
+            if (mn.tag == .trait_use) {
+                for (mn.data.trait_use.traits) |trait_idx| {
+                    const tn = self.getNode(trait_idx) orelse continue;
+                    if (tn.tag == .named_type) {
+                        const tname = self.getString(tn.data.named_type.name);
+                        try trait_list.append(self.allocator, try self.resolveClassName(tname));
+                    }
+                }
+            }
+        }
+        const traits_slice = try trait_list.toOwnedSlice(self.allocator);
+
         // 创建类型定义
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
             .name = anon_class_name,
             .kind = .class,
-            .parent = if (anon_data.extends) |ext_idx| blk: {
-                const ext_node = self.getNode(ext_idx) orelse break :blk null;
-                switch (ext_node.tag) {
-                    .named_type => break :blk self.getString(ext_node.data.named_type.name),
-                    else => break :blk null,
-                }
-            } else null,
-            .interfaces = &.{},
-            .traits = &.{},
+            .parent = parent_name,
+            .interfaces = interfaces_slice,
+            .traits = traits_slice,
             .trait_adaptations = &.{},
             .properties = &.{},
             .methods = &.{},
@@ -5749,11 +5783,16 @@ pub const IRGenerator = struct {
         if (self.module) |module| {
             try module.addTypeDef(type_def);
         }
-        try self.symbol_table.defineClass(anon_class_name, type_def.parent, &.{}, self.current_location);
+        try self.symbol_table.defineClass(anon_class_name, type_def.parent, interfaces_slice, self.current_location);
 
-        // 进入类作用域
+        // 进入类作用域，设置 current_class 使 parent:: 可用
+        const prev_class = self.current_class;
+        self.current_class = anon_class_name;
         _ = try self.symbol_table.enterScope(.class, anon_class_name);
-        defer self.symbol_table.leaveScope();
+        defer {
+            self.symbol_table.leaveScope();
+            self.current_class = prev_class;
+        }
 
         // 处理成员：收集元数据并生成IR
         for (anon_data.members) |member_idx| {
