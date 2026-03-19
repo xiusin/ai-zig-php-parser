@@ -596,10 +596,27 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
                 // 关键字前必须是行首、空白、分号或PHP标签
                 if (idx > 0) {
                     const prev = source[idx - 1];
-                    if (std.ascii.isAlphanumeric(prev) or prev == '_' or prev == '$' or prev == '\'' or prev == '"') {
+                    if (std.ascii.isAlphanumeric(prev) or prev == '_' or prev == '$' or prev == '\'' or prev == '"' or prev == '/' or prev == '*') {
                         pos = idx + kw.len;
                         continue;
                     }
+                }
+                // 检查是否在 // 注释中
+                var in_comment = false;
+                if (idx >= 2) {
+                    var scan = idx - 1;
+                    while (scan > 0) : (scan -= 1) {
+                        if (source[scan] == '\n') break;
+                        if (scan + 1 < source.len and source[scan] == '/' and source[scan + 1] == '/') {
+                            in_comment = true;
+                            break;
+                        }
+                        if (scan == 0) break;
+                    }
+                }
+                if (in_comment) {
+                    pos = idx + kw.len;
+                    continue;
                 }
                 break :blk true;
             }
