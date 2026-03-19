@@ -2,7 +2,7 @@
 
 ## 本轮修复成果
 
-### 已完成修复 (14项)
+### 已完成修复 (15项)
 
 | # | 修复内容 | 影响测试 | 文件 |
 |---|---------|---------|------|
@@ -20,6 +20,7 @@
 | 12 | **self::class/parent::class解析** | 通用 | ir_generator.zig |
 | 13 | **instanceof Stringable** (magic_toString检查) | test_059 | runtime_lib_template.zig |
 | 14 | **throw-expression parser precedence** (避免match arm逗号消费) | test_056 | parser.zig |
+| 15 | **&&短路求值用const_bool=false** (而非const_int=0) | test_030 | ir_generator.zig |
 
 ### 关键架构修复说明
 
@@ -29,7 +30,7 @@
 
 ### 测试通过率
 
-- **pass 目录**: 33/39 通过 (84.6%，含timestamp race约 82.1%)
+- **pass 目录**: 33/39 通过 (84.6%)
 - **从 failed 移入 pass**: 10 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
