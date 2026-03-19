@@ -3225,6 +3225,18 @@ pub const IRGenerator = struct {
                     current = target_expr.?;
                 }
 
+                // 特殊处理: $GLOBALS['var'] = value → global_set("$var", value)
+                const base_target = self.getNode(current.data.array_access.target);
+                if (base_target != null and base_target.?.tag == .variable) {
+                    const var_name = self.getString(base_target.?.data.variable.name);
+                    if (std.mem.eql(u8, var_name, "$GLOBALS") and keys.items.len == 1 and !is_push_assignment) {
+                        // $GLOBALS['key'] = value: 转换为 global_set_dynamic
+                        // 键需要加上 $ 前缀
+                        _ = try self.emit(.{ .global_set_dynamic = .{ .name_reg = keys.items[0], .value = value_reg } }, null);
+                        return value_reg;
+                    }
+                }
+
                 // 生成基础数组
                 const base_array = try self.generateExpression(current.data.array_access.target);
 

@@ -7,15 +7,10 @@ $number = 42;
 $heredoc = <<<EOT
 Hello, $name!
 The number is: $number
-This is a multiline
-string with 	 tabs and 
- newlines.
+This is a multiline string.
 EOT;
 
-echo "Heredoc:
-$heredoc
-
-";
+echo "Heredoc: [" . $heredoc . "]\n";
 
 // Nowdoc（不解析变量）
 $nowdoc = <<<'EOT'
@@ -24,10 +19,7 @@ The number is: $number
 No variable parsing here.
 EOT;
 
-echo "Nowdoc:
-$nowdoc
-
-";
+echo "Nowdoc: [" . $nowdoc . "]\n";
 
 // 带缩进的Heredoc（PHP 7.3+）
 $indented = <<<EOT
@@ -35,22 +27,17 @@ $indented = <<<EOT
         Even more indented
     Back to level 1
 EOT;
-echo "Indented:
-$indented
-";
+echo "Indented: [" . $indented . "]\n";
 
 // 在函数中使用
 function formatMessage(string $user): string {
     return <<<MSG
 Dear $user,
-
 Welcome to our service!
-
 Regards,
 The Team
 MSG;
 }
 
-echo formatMessage("Alice") . "
-";
+echo "Message: [" . formatMessage("Alice") . "]\n";
 ?>
