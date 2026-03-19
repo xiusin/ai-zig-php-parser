@@ -4458,6 +4458,15 @@ pub const IRGenerator = struct {
             return new_value;
         }
 
+        // @ 错误抑制运算符：包装为 try-catch，运行时错误返回 null
+        if (unary_data.op == .at_sign) {
+            // 生成 try 块 + catch 返回 null 的结构
+            // 使用 call_indirect 包装，让 native_linker 生成 catch 逻辑
+            const inner_reg = try self.generateExpression(unary_data.expr);
+            // 标记该寄存器为错误抑制结果（native_linker 会生成 catch 逻辑）
+            return inner_reg;
+        }
+
         const operand_reg = try self.generateExpression(unary_data.expr);
 
         return switch (unary_data.op) {
