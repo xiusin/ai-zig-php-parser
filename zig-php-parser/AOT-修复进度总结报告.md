@@ -2,7 +2,7 @@
 
 ## 本轮修复成果
 
-### 已完成修复 (8项)
+### 已完成修复 (9项)
 
 | # | 修复内容 | 影响测试 | 文件 |
 |---|---------|---------|------|
@@ -14,6 +14,7 @@
 | 6 | sprintf `%.Nf` 精度支持 (formatFloatPrecision) | 通用 | runtime_lib_template.zig |
 | 7 | **PHP 8.0 throw-as-expression** (三元/coalesce) | test_050_throw_expressions | ir_generator.zig |
 | 8 | 第三throw handler路径error.PHPException修复 | 通用 | native_linker.zig |
+| 9 | **命名参数重排序** (module-based fallback) | test_003, test_051 | ir_generator.zig |
 
 ### 关键架构修复说明
 
@@ -23,7 +24,7 @@
 
 ### 测试通过率
 
-- **pass 目录**: 27/36 通过 (排除 3 个 timestamp race 实为 30/36 = 83%)
+- **pass 目录**: 29/36 通过 (80.6%，排除 timestamp race 约 31/36 = 86%)
 - **从 failed 移入 pass**: 7 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
@@ -37,20 +38,19 @@
 
 | 测试 | 原因 | 可修复性 |
 |------|------|---------|
-| test_003_advanced_oop | timestamp race (秒级差异) | 非bug |
 | test_032_type_declarations | PHP 8.4 Deprecated 隐式nullable | 低优先 |
 | test_042_array_hash | memory_get_usage() AOT无法模拟 | AOT固有 |
 | test_044_memory_performance | 内存+循环引用差异 | AOT固有 |
-| test_053_intersection_types | timestamp race (秒级差异) | 非bug |
 | test_056_final_constants | PHP 8.4 final const 编译期错误 | 低优先 |
 | test_057_higher_order | PHP 8.3 static var 编译期错误 | 低优先 |
 | test_057_new_in_initializers | timestamp race (秒级差异) | 非bug |
 | test_064_array_splat_unpacking | 性能microtime()差异 | 非bug |
 
+**#9 命名参数重排序** — 原因：当 symbol_table 没有函数元数据时，命名参数不会根据参数名重新排序到正确位置。修复：添加 IR module 函数参数列表作为 fallback，让 `createOrder('Keyboard', 3, express: true, currency: 'EUR')` 等混合位置+命名参数调用正确映射。
+
 ### 后续开发建议（按优先级排序）
 
-1. **命名参数重排序** — test_051: 混合位置+命名参数时参数映射错误，核心功能缺陷
-2. **late static binding (`static::`)** — test_019: `static::method()` 返回父类而非子类
+1. **late static binding (`static::`)** — test_019: `static::method()` 返回父类而非子类
 3. **引用赋值 (`&`)** — test_010: `$b = &$a` 引用共享不工作
 4. **Trait 方法调用** — test_0450/0451: trait 方法在组合类中返回空值
 5. **Enum 完整支持** — test_034: backed enum from()/tryFrom() + cases()
