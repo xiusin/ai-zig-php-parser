@@ -3349,6 +3349,13 @@ fn wrapBuiltin_get_called_class(ctx: Value, args: []const Value, allocator: Allo
     return Value.initString(s);
 }
 
+/// static::class → 运行时获取调用类名（LSB）
+pub fn php_get_called_class_name() !Value {
+    const called = getCurrentCalledClass() orelse return error.ClassNotFound;
+    const s = try PHPString.init(runtime_allocator, called.name);
+    return Value.initString(s);
+}
+
 fn php_forward_static_call(callback: Value, args: []const Value, allocator: Allocator) !Value {
     if (!callback.isString()) return error.InvalidCallback;
     const cb = callback.asString().data;
@@ -9423,21 +9430,21 @@ fn php_weak_is_alive(addr: usize) bool {
     return true;
 }
 
-fn getCurrentCalledClass() ?*const ClassMeta {
+pub fn getCurrentCalledClass() ?*const ClassMeta {
     const ptr = concurrency.getExecutionContext().called_class orelse return null;
     return @ptrFromInt(ptr);
 }
 
-fn setCurrentCalledClass(meta: ?*const ClassMeta) void {
+pub fn setCurrentCalledClass(meta: ?*const ClassMeta) void {
     concurrency.getExecutionContext().called_class = if (meta) |m| @intFromPtr(m) else null;
 }
 
-fn getCurrentScopeClass() ?*const ClassMeta {
+pub fn getCurrentScopeClass() ?*const ClassMeta {
     const ptr = concurrency.getExecutionContext().scope_class orelse return null;
     return @ptrFromInt(ptr);
 }
 
-fn setCurrentScopeClass(meta: ?*const ClassMeta) void {
+pub fn setCurrentScopeClass(meta: ?*const ClassMeta) void {
     concurrency.getExecutionContext().scope_class = if (meta) |m| @intFromPtr(m) else null;
 }
 

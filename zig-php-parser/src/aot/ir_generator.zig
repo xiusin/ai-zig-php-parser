@@ -4062,9 +4062,11 @@ pub const IRGenerator = struct {
         // 1. 空类名
         if (class_name.len == 0) return class_name;
 
-        // 1.5 特殊关键字：self/static → 解析为实际类名
-        // 注意：parent 不在此处解析，因为 parent:: 方法调用需要保持 $this 上下文
-        if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+        // 1.5 特殊关键字
+        // self → 编译时解析为定义类（不需要 LSB）
+        // static → 保留，运行时通过 getCurrentCalledClass() 解析（LSB）
+        // parent → 保留，运行时解析
+        if (std.mem.eql(u8, class_name, "self")) {
             if (self.current_class) |cls| return cls;
             return class_name;
         }
@@ -5934,13 +5936,14 @@ pub const IRGenerator = struct {
         var class_name = self.getString(access_data.class_name);
         const prop_name = self.getString(access_data.property_name);
 
-        // 解析特殊类名 (self/static/parent)
-        if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
+        // 解析特殊类名
+        // self:: → 编译时解析为定义类（不需要 LSB）
+        // static:: → 保留，运行时通过 getCurrentCalledClass() 解析（LSB）
+        // parent:: → 保留，运行时解析
+        if (std.mem.eql(u8, class_name, "self")) {
             if (self.current_class) |cls| {
                 class_name = cls;
             }
-        } else if (std.mem.eql(u8, class_name, "parent")) {
-            // parent:: 保持原样，运行时处理
         }
 
         return self.emitWithResult(.{ .static_property_get = .{
@@ -5960,6 +5963,14 @@ pub const IRGenerator = struct {
 
         // 特殊处理 ClassName::class → 返回类名字符串
         if (std.mem.eql(u8, const_name, "class")) {
+            // static::class → 运行时 LSB 解析
+            if (std.mem.eql(u8, class_name, "static")) {
+                return self.emitWithResult(.{ .call = .{
+                    .func_name = "php_get_called_class_name",
+                    .args = &.{},
+                    .return_type = .php_value,
+                } }, .php_value);
+            }
             const resolved = try self.resolveClassName(class_name);
             const str_id = try self.module.?.internString(resolved);
             return self.emitWithResult(.{ .const_string = str_id }, .php_string);

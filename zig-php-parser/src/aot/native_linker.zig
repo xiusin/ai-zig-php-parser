@@ -2468,12 +2468,18 @@ pub const NativeLinker = struct {
             };
             const escaped_class = try self.escapeString(class_name);
             defer self.allocator.free(escaped_class);
-            // 使用 findClass 但不要求必须存在（Trait 方法可能没有对应的类）
+            // LSB: 只设置 scope class（定义方法的类），不覆盖 called class
+            // 调用方（php_call_static / ClassContext.init）已正确设置 called class
+            // 如果 called class 未设置（直接调用），则同时设置为定义类
             try code.appendSlice(self.allocator, "    if (runtime.findClass(\"");
             try code.appendSlice(self.allocator, escaped_class);
             try code.appendSlice(self.allocator, "\")) |__class_meta| {\n");
-            try code.appendSlice(self.allocator, "        const __class_guard = runtime.ClassContext.init(__class_meta, __class_meta);\n");
-            try code.appendSlice(self.allocator, "        defer __class_guard.deinit();\n");
+            try code.appendSlice(self.allocator, "        const __prev_scope = runtime.getCurrentScopeClass();\n");
+            try code.appendSlice(self.allocator, "        runtime.setCurrentScopeClass(__class_meta);\n");
+            try code.appendSlice(self.allocator, "        defer runtime.setCurrentScopeClass(__prev_scope);\n");
+            try code.appendSlice(self.allocator, "        if (runtime.getCurrentCalledClass() == null) {\n");
+            try code.appendSlice(self.allocator, "            runtime.setCurrentCalledClass(__class_meta);\n");
+            try code.appendSlice(self.allocator, "        }\n");
             try code.appendSlice(self.allocator, "    }\n");
         }
 
@@ -8437,15 +8443,24 @@ pub const NativeLinker = struct {
                     const escaped_prop = try self.escapeString(op.property_name);
                     defer self.allocator.free(escaped_prop);
 
-                    // 设置ClassContext以支持self/static/parent
-                    try writer.print("    {{\n", .{});
-                    try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
-                    try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
-                    try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                    const is_special = std.mem.eql(u8, op.class_name, "static") or
+                        std.mem.eql(u8, op.class_name, "self") or
+                        std.mem.eql(u8, op.class_name, "parent");
 
-                    try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("        reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
-                    try writer.writeAll("    }\n");
+                    if (!is_special) {
+                        // 具体类名：设置 ClassContext
+                        try writer.print("    {{\n", .{});
+                        try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
+                        try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                        try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                        try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        try writer.print("        reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
+                        try writer.writeAll("    }\n");
+                    } else {
+                        // static/self/parent：不覆盖 ClassContext，运行时 resolveSpecialClassName 使用已有上下文
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        try writer.print("    reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
+                    }
                 }
             },
             .static_property_set => |op| {
@@ -8456,16 +8471,26 @@ pub const NativeLinker = struct {
                 const escaped_prop = try self.escapeString(op.property_name);
                 defer self.allocator.free(escaped_prop);
 
-                // 设置ClassContext以支持self/static/parent
-                try writer.print("    {{\n", .{});
-                try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
-                try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
-                try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                const is_special = std.mem.eql(u8, op.class_name, "static") or
+                    std.mem.eql(u8, op.class_name, "self") or
+                    std.mem.eql(u8, op.class_name, "parent");
 
-                try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
-                try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
-                try writer.writeAll(");\n");
-                try writer.writeAll("    }\n");
+                if (!is_special) {
+                    // 具体类名：设置 ClassContext
+                    try writer.print("    {{\n", .{});
+                    try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
+                    try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                    try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                    try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
+                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
+                    try writer.writeAll(");\n");
+                    try writer.writeAll("    }\n");
+                } else {
+                    // static/self/parent：不覆盖 ClassContext
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
+                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
+                    try writer.writeAll(");\n");
+                }
             },
             // ============ 异常处理指令 ============
             .try_begin => {
