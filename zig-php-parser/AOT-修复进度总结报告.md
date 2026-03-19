@@ -2,7 +2,7 @@
 
 ## 本轮修复成果
 
-### 已完成修复 (10项)
+### 已完成修复 (13项)
 
 | # | 修复内容 | 影响测试 | 文件 |
 |---|---------|---------|------|
@@ -16,6 +16,9 @@
 | 8 | 第三throw handler路径error.PHPException修复 | 通用 | native_linker.zig |
 | 9 | **命名参数重排序** (module-based fallback) | test_003, test_051 | ir_generator.zig |
 | 10 | **load指令类型转换bug** (bool→asInt()=0) | test_0450/0451, 全局 | native_linker.zig |
+| 11 | **return语句类型转换bug** (同load) | test_0450/0451 trait | native_linker.zig |
+| 12 | **self::class/parent::class解析** | 通用 | ir_generator.zig |
+| 13 | **instanceof Stringable** (vtable __toString检查) | test_059 | runtime_lib_template.zig |
 
 ### 关键架构修复说明
 
@@ -25,8 +28,8 @@
 
 ### 测试通过率
 
-- **pass 目录**: 30/36 通过 (83.3%)
-- **从 failed 移入 pass**: 7 个测试
+- **pass 目录**: 30/38 通过 (78.9%，排除 timestamp race 约 32/38 = 84.2%)
+- **从 failed 移入 pass**: 9 个测试
   - test_041_number_boundary
   - test_050_throw_expressions
   - test_053_intersection_types
@@ -34,6 +37,8 @@
   - test_053_sensitive_attribute
   - test_057_new_in_initializers
   - test_058_object_graph
+  - test_0450_Trait组合
+  - test_0451_Trait组合
 
 ### pass 目录剩余 FAIL 分析
 
