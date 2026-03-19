@@ -669,7 +669,7 @@ pub const IRGenerator = struct {
                 // Expression statement - just evaluate the expression
                 _ = try self.generateExpression(index);
             },
-            .assignment => try self.generateAssignment(node),
+            .assignment => { _ = try self.generateAssignment(node); },
             .compound_assignment => try self.generateCompoundAssignment(node),
             .list_assignment => try self.generateListAssignment(node),
             .list_empty => {},
@@ -3108,12 +3108,13 @@ pub const IRGenerator = struct {
     }
 
     /// Generate IR for assignment
-    fn generateAssignment(self: *Self, node: *const Node) !void {
+    fn generateAssignment(self: *Self, node: *const Node) !Register {
         const assign_data = node.data.assignment;
 
         // 引用赋值：$b = &$a
         if (assign_data.is_reference) {
-            return self.generateRefAssignment(assign_data.target, assign_data.value);
+            try self.generateRefAssignment(assign_data.target, assign_data.value);
+            return self.emitWithResult(.{ .const_null = {} }, .php_value);
         }
 
         // Generate value
@@ -3122,7 +3123,7 @@ pub const IRGenerator = struct {
         const value_is_object_init = value_node != null and (value_node.?.tag == .object_instantiation or value_node.?.tag == .anonymous_class);
 
         // Generate target
-        const target_node = self.getNode(assign_data.target) orelse return;
+        const target_node = self.getNode(assign_data.target) orelse return value_reg;
 
         switch (target_node.tag) {
             .variable => {
@@ -3141,7 +3142,7 @@ pub const IRGenerator = struct {
                             .return_type = .void,
                         } }, null);
                     }
-                    return;
+                    return value_reg;
                 }
 
                 // 检查是否是引用参数
@@ -3240,7 +3241,7 @@ pub const IRGenerator = struct {
                         .array = current_array,
                         .value = value_reg,
                     } }, null);
-                    return;
+                    return value_reg;
                 }
 
                 if (keys.items.len == 1) {
@@ -3287,7 +3288,7 @@ pub const IRGenerator = struct {
                     _ = try self.emit(.{ .release = .{ .operand = obj_reg } }, null);
                 }
                 _ = try self.emit(.{ .release = .{ .operand = value_reg } }, null);
-                return;
+                return value_reg;
             },
             .variable_property_access => {
                 const target_idx = target_node.data.variable_property_access.target;
@@ -3309,7 +3310,7 @@ pub const IRGenerator = struct {
                     _ = try self.emit(.{ .release = .{ .operand = obj_reg } }, null);
                 }
                 _ = try self.emit(.{ .release = .{ .operand = value_reg } }, null);
-                return;
+                return value_reg;
             },
             .static_property_access => {
                 var class_name = self.getString(target_node.data.static_property_access.class_name);
@@ -3349,6 +3350,7 @@ pub const IRGenerator = struct {
         if (value_is_object_init) {
             _ = try self.emit(.{ .release = .{ .operand = value_reg } }, null);
         }
+        return value_reg;
     }
 
     /// foreach list destructuring: foreach ($arr as [$x, $y])
@@ -3832,13 +3834,8 @@ pub const IRGenerator = struct {
                 break :blk self.emitWithResult(.const_null, .php_value);
             },
 
-            // Assignment as expression
-            .assignment => blk: {
-                try self.generateAssignment(node);
-                // Return the assigned value
-                const assign_data = node.data.assignment;
-                break :blk self.generateExpression(assign_data.value);
-            },
+            // Assignment as expression — 返回已赋值的寄存器，不重新求值
+            .assignment => try self.generateAssignment(node),
 
             // Compound assignment as expression
             .compound_assignment => blk: {
