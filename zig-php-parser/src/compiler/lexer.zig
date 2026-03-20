@@ -230,6 +230,8 @@ pub const Lexer = struct {
                     const next_pos = self.pos + 1;
                     if (next_pos < self.buffer.len and std.mem.startsWith(u8, self.buffer[next_pos..], label)) {
                         at_nowdoc_label = true;
+                        // Advance past the newline so next call starts at the label
+                        self.pos += 1;
                         break;
                     }
                 }
@@ -237,14 +239,11 @@ pub const Lexer = struct {
             self.pos += 1;
         }
         // PHP strips the newline before nowdoc closing label
-        // When at_nowdoc_label is true, self.pos is AT the newline character
-        var end_pos = self.pos;
-        if (at_nowdoc_label) {
-            // self.pos is at '\n', so end_pos already excludes it (content is [start, end_pos))
-            // But we need to also strip any preceding \r
-            if (end_pos > start and self.buffer[end_pos - 1] == '\r') {
-                end_pos -= 1;
-            }
+        // Content excludes the trailing newline
+        var end_pos = if (at_nowdoc_label) self.pos - 1 else self.pos;
+        // Also strip any preceding \r
+        if (end_pos > start and self.buffer[end_pos - 1] == '\r') {
+            end_pos -= 1;
         }
         return .{ .tag = .t_encapsed_and_whitespace, .loc = .{ .start = start, .end = end_pos } };
     }
