@@ -2816,6 +2816,7 @@ pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
 }
 
 /// exec - 执行命令并返回输出数组
+/// PHP签名: exec(string $command, array &$output = null, int &$result_code = null): string|false
 pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
     
@@ -2829,7 +2830,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
-    }) catch return Value.initNull();
+    }) catch return Value.initBool(false);
     
     defer {
         allocator.free(result.stdout);
@@ -2840,27 +2841,60 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
     const arr = try PHPArray.init(allocator);
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     var idx: i64 = 0;
+    var last_line: []const u8 = "";
     while (lines.next()) |line| {
         if (line.len == 0 and lines.peek() == null) break; // 跳过最后的空行
+        last_line = line;
         const line_str = try PHPString.init(allocator, line);
         try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(line_str));
         idx += 1;
     }
     
-    // 如果有第二个参数（output数组引用），填充它
-    if (args.len >= 2 and args[1].isArray()) {
-        // 简化：直接返回数组，不处理引用
+    // 如果有第二个参数（&$output引用），写回输出数组
+    if (args.len >= 2) {
+        const output_ref = args[1];
+        if (output_ref.isRef()) {
+            const ptr = output_ref.asRef();
+            // 如果引用指向的是数组，追加到现有数组；否则替换为新数组
+            if (ptr.isArray()) {
+                const existing_arr = ptr.asArray();
+                // 追加新行到现有数组
+                var new_lines = std.mem.splitScalar(u8, result.stdout, '\n');
+                while (new_lines.next()) |line| {
+                    if (line.len == 0 and new_lines.peek() == null) break;
+                    const line_str = try PHPString.init(allocator, line);
+                    try existing_arr.push(allocator, Value.initString(line_str));
+                }
+            } else {
+                // 替换为新数组
+                ptr.release(allocator);
+                _ = Value.initArray(arr).retain();
+                ptr.* = Value.initArray(arr);
+            }
+        }
     }
     
-    // 如果有第三个参数（return_code引用），设置返回码
+    // 如果有第三个参数（&$return_code引用），写回返回码
     if (args.len >= 3) {
-        // 简化：忽略return_code参数
+        const return_code_ref = args[2];
+        if (return_code_ref.isRef()) {
+            const ptr = return_code_ref.asRef();
+            ptr.release(allocator);
+            const exit_code: i64 = @intCast(result.term.Exited);
+            ptr.* = Value.initInt(exit_code);
+        }
     }
     
-    return Value.initArray(arr);
+    // 返回最后一行输出
+    if (last_line.len > 0) {
+        const last_str = try PHPString.init(allocator, last_line);
+        return Value.initString(last_str);
+    }
+    return Value.initString(try PHPString.init(allocator, ""));
 }
 
 /// system - 执行命令，输出到stdout，返回最后一行
+/// PHP签名: system(string $command, int &$result_code = null): string|false
 pub fn php_system(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
     
@@ -2874,7 +2908,7 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
-    }) catch return Value.initNull();
+    }) catch return Value.initBool(false);
     
     defer {
         allocator.free(result.stdout);
@@ -2882,11 +2916,24 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
     }
     
     // 输出到stdout（模拟PHP的system行为）
-    // 注意：在AOT编译的程序中，直接输出可能不可见
-    // 这里简化处理，只返回最后一行
+    if (result.stdout.len > 0) {
+        const stdout_file = std.fs.File{ .handle = 1 };
+        stdout_file.writeAll(result.stdout) catch {};
+    }
+    
+    // 如果有第二个参数（&$return_var引用），写回返回码
+    if (args.len >= 2) {
+        const return_var_ref = args[1];
+        if (return_var_ref.isRef()) {
+            const ptr = return_var_ref.asRef();
+            ptr.release(allocator);
+            const exit_code: i64 = @intCast(result.term.Exited);
+            ptr.* = Value.initInt(exit_code);
+        }
+    }
     
     // 返回最后一行
-    if (result.stdout.len == 0) return Value.initNull();
+    if (result.stdout.len == 0) return Value.initBool(false);
     
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     var last_line: []const u8 = "";

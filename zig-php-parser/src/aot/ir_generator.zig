@@ -38,6 +38,7 @@ const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const SourceLocation = Diagnostics.SourceLocation;
 const SymbolTableMod = @import("symbol_table.zig");
 const SymbolTable = SymbolTableMod.SymbolTable;
+const NativeLinker = @import("native_linker.zig").NativeLinker;
 const InferredType = SymbolTableMod.InferredType;
 const ConcreteType = SymbolTableMod.ConcreteType;
 const TypeInferenceMod = @import("type_inference.zig");
@@ -5217,18 +5218,28 @@ pub const IRGenerator = struct {
             else
                 null;
 
+            // 获取内建函数的引用参数信息
+            const builtin_ref_params = if (func_name.len > 0) NativeLinker.getBuiltinRefParams(func_name) else &[_]u8{};
+
             args = try self.allocator.alloc(Register, call_data.args.len);
             for (call_data.args, 0..) |arg_idx, i| {
                 const arg_node = self.getNode(arg_idx);
                 const expr_idx = if (arg_node != null and arg_node.?.tag == .named_arg) arg_node.?.data.named_arg.value else arg_idx;
 
-                // 检查是否是引用参数
-                const is_ref_param = if (target_func) |func| blk: {
-                    for (func.ref_params.items) |ref_idx| {
+                // 检查是否是引用参数（用户定义函数或内建函数）
+                const is_ref_param = blk: {
+                    // 先检查用户定义函数
+                    if (target_func) |func| {
+                        for (func.ref_params.items) |ref_idx| {
+                            if (ref_idx == i) break :blk true;
+                        }
+                    }
+                    // 再检查内建函数引用参数
+                    for (builtin_ref_params) |ref_idx| {
                         if (ref_idx == i) break :blk true;
                     }
                     break :blk false;
-                } else false;
+                };
 
                 if (is_ref_param) {
                     // 引用参数：需要传递变量的地址

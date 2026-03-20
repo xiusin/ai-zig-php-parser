@@ -2151,10 +2151,17 @@ pub const NativeLinker = struct {
         runtime_name: []const u8,
         needs_allocator: bool,
         may_raise: bool = true,
+        ref_params: []const u8 = &[_]u8{}, // indices of reference parameters (1-based for optional params)
     };
 
     fn builtinInfo(func_name: []const u8) ?BuiltinInfo {
         return builtin_map.get(func_name);
+    }
+
+    /// Get reference parameter indices for a builtin function (public for IR Generator)
+    pub fn getBuiltinRefParams(func_name: []const u8) []const u8 {
+        if (builtinInfo(func_name)) |info| return info.ref_params;
+        return &[_]u8{};
     }
 
     const builtin_map = std.StaticStringMap(BuiltinInfo).initComptime(@as([]const struct { []const u8, BuiltinInfo }, &.{
@@ -2188,8 +2195,8 @@ pub const NativeLinker = struct {
         .{ "memory_get_usage", bi(.{ .runtime_name = "php_memory_get_usage", .needs_allocator = true, .may_raise = false }) },
         .{ "memory_get_peak_usage", bi(.{ .runtime_name = "php_memory_get_peak_usage", .needs_allocator = true, .may_raise = false }) },
         .{ "shell_exec", bi(.{ .runtime_name = "php_shell_exec", .needs_allocator = true, .may_raise = false }) },
-        .{ "exec", bi(.{ .runtime_name = "php_exec", .needs_allocator = true, .may_raise = false }) },
-        .{ "system", bi(.{ .runtime_name = "php_system", .needs_allocator = true, .may_raise = false }) },
+        .{ "exec", bi(.{ .runtime_name = "php_exec", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{ 1, 2 } }) },
+        .{ "system", bi(.{ .runtime_name = "php_system", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{1} }) },
         .{ "substr_replace", bi(.{ .runtime_name = "php_substr_replace", .needs_allocator = true, .may_raise = false }) },
         .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
         .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
