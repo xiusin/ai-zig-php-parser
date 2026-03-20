@@ -8452,9 +8452,15 @@ pub const NativeLinker = struct {
                         const has_return = self.func_return_types.get(direct_name) orelse false;
 
                         if (inst.result) |reg| {
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                            const is_alloca_reg = if (self.current_alloca_regs) |alloca_regs|
+                                alloca_regs.contains(reg.id)
+                            else
+                                false;
+                            const deref = if (is_alloca_reg) ".*." else ".";
+                            const star = if (is_alloca_reg) ".*" else "";
+                            try writer.print("    reg_{d}{s}release(runtime.runtime_allocator);\n", .{reg.id, deref});
                             if (has_return) {
-                                try writer.print("    reg_{d} = try @\"{s}\"(", .{ reg.id, escaped_direct });
+                                try writer.print("    reg_{d}{s} = try @\"{s}\"(", .{ reg.id, star, escaped_direct });
                                 try self.writeRegRef(writer, op.object.id);
                                 try writer.writeAll(", ");
                                 try self.writeValueArgsArray(writer, op.args);
@@ -8465,7 +8471,7 @@ pub const NativeLinker = struct {
                                 try writer.writeAll(", ");
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                                try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                try writer.print("    reg_{d}{s} = runtime.Value.initNull();\n", .{reg.id, star});
                             }
                         } else {
                             try writer.print("    _ = try @\"{s}\"(", .{escaped_direct});
@@ -8496,11 +8502,17 @@ pub const NativeLinker = struct {
 
                 const method_in_try = self.current_exception_handler != null;
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    const is_alloca_reg = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(reg.id)
+                    else
+                        false;
+                    const deref = if (is_alloca_reg) ".*." else ".";
+                    const star = if (is_alloca_reg) ".*" else "";
+                    try writer.print("    reg_{d}{s}release(runtime.runtime_allocator);\n", .{reg.id, deref});
                     if (method_in_try) {
-                        try writer.print("    reg_{d} = runtime.php_object_call(", .{reg.id});
+                        try writer.print("    reg_{d}{s} = runtime.php_object_call(", .{reg.id, star});
                     } else {
-                        try writer.print("    reg_{d} = try runtime.php_object_call(", .{reg.id});
+                        try writer.print("    reg_{d}{s} = try runtime.php_object_call(", .{reg.id, star});
                     }
                     try self.writeRegRef(writer, op.object.id);
                     try writer.print(", \"{s}\", ", .{escaped_method});
