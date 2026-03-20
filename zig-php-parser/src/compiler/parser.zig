@@ -383,7 +383,7 @@ pub const Parser = struct {
             .k_const => self.parseConst(),
             .k_go => self.parseGo(),
             .k_lock => self.parseLock(),
-            // .k_goto => self.parseGoto(), // TODO: implement goto support
+            .k_goto => self.parseGoto(),
             .k_return => self.parseReturn(),
             .k_break => self.parseBreak(),
             .k_continue => self.parseContinue(),
@@ -418,9 +418,9 @@ pub const Parser = struct {
             .l_brace => self.parseBlock(),
             .t_string => {
                 // Check for goto label: identifier followed by colon at statement level
-                // if (self.peek.tag == .colon) {
-                //     return self.parseGotoLabel(); // TODO: implement goto label support
-                // }
+                if (self.peek.tag == .colon) {
+                    return self.parseGotoLabel();
+                }
                 return self.parseExpressionStatement();
             },
             .t_variable => {
@@ -1627,6 +1627,29 @@ pub const Parser = struct {
         }
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .continue_stmt, .main_token = token, .data = .{ .continue_stmt = .{ .level = level } } });
+    }
+
+    fn parseGoto(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_goto);
+        // goto label;
+        if (self.curr.tag != .t_string) {
+            self.reportError("expected label name after goto");
+            return error.ParseError;
+        }
+        const label_tok = self.curr;
+        const label_name = try self.context.intern(self.lexer.buffer[label_tok.loc.start..label_tok.loc.end]);
+        self.nextToken();
+        _ = try self.eat(.semicolon);
+        return self.createNode(.{ .tag = .goto_stmt, .main_token = token, .data = .{ .goto_stmt = .{ .label = label_name } } });
+    }
+
+    fn parseGotoLabel(self: *Parser) anyerror!ast.Node.Index {
+        // label:
+        const token = self.curr;
+        const label_name = try self.context.intern(self.lexer.buffer[token.loc.start..token.loc.end]);
+        self.nextToken(); // consume identifier
+        _ = try self.eat(.colon); // consume colon
+        return self.createNode(.{ .tag = .goto_label, .main_token = token, .data = .{ .goto_label = .{ .label = label_name } } });
     }
 
     fn parseEcho(self: *Parser) anyerror!ast.Node.Index {

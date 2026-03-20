@@ -2197,6 +2197,8 @@ pub const NativeLinker = struct {
         .{ "shell_exec", bi(.{ .runtime_name = "php_shell_exec", .needs_allocator = true, .may_raise = false }) },
         .{ "exec", bi(.{ .runtime_name = "php_exec", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{ 1, 2 } }) },
         .{ "system", bi(.{ .runtime_name = "php_system", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{1} }) },
+        .{ "escapeshellarg", bi(.{ .runtime_name = "php_escapeshellarg", .needs_allocator = true, .may_raise = false }) },
+        .{ "escapeshellcmd", bi(.{ .runtime_name = "php_escapeshellcmd", .needs_allocator = true, .may_raise = false }) },
         .{ "substr_replace", bi(.{ .runtime_name = "php_substr_replace", .needs_allocator = true, .may_raise = false }) },
         .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
         .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },

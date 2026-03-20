@@ -124,6 +124,15 @@ pub const IRGenerator = struct {
     namespace_imports: std.StringHashMapUnmanaged([]const u8),
     /// Trait 方法映射：trait_name::method_name -> 方法实现
     trait_methods: std.StringHashMapUnmanaged(*Function),
+    /// Goto 标签映射：label_name -> BasicBlock
+    goto_labels: std.StringHashMapUnmanaged(*BasicBlock),
+    /// 待处理的 goto 跳转：{当前块, 目标标签名}（用于前向引用）
+    pending_gotos: std.ArrayListUnmanaged(PendingGoto),
+
+    const PendingGoto = struct {
+        from_block: *BasicBlock,
+        label_name: []const u8,
+    };
 
     const Self = @This();
 
@@ -177,6 +186,8 @@ pub const IRGenerator = struct {
             .namespace_aliases = .{},
             .namespace_imports = .{},
             .trait_methods = .{},
+            .goto_labels = .{},
+            .pending_gotos = .{},
         };
     }
 
@@ -663,6 +674,8 @@ pub const IRGenerator = struct {
             .echo_stmt => try self.generateEchoStmt(node),
             .lock_stmt => try self.generateLockStmt(node),
             .go_stmt => try self.generateGoStmt(node),
+            .goto_stmt => try self.generateGotoStmt(node),
+            .goto_label => try self.generateGotoLabel(node),
             // ✅ 处理 namespace 和 use 语句
             .namespace_stmt => try self.generateNamespaceStatement(node),
             .use_stmt => try self.generateUseStatement(node),
@@ -754,6 +767,8 @@ pub const IRGenerator = struct {
         self.entry_allocas = .{};
         self.block_counter = 0;
         self.static_vars.clearRetainingCapacity(); // 清空静态变量集合
+        self.goto_labels.clearRetainingCapacity(); // 清空 goto 标签映射
+        self.pending_gotos.clearRetainingCapacity(); // 清空待处理 goto
 
         // Create entry block
         const entry = try func.createBlock("entry");
@@ -3088,6 +3103,68 @@ pub const IRGenerator = struct {
             const target_idx = self.loop_stack.items.len - level;
             const ctx = self.loop_stack.items[target_idx];
             self.setTerminator(.{ .br = ctx.continue_block });
+        }
+    }
+
+    /// Generate IR for goto statement
+    fn generateGotoStmt(self: *Self, node: *const Node) !void {
+        const goto_data = node.data.goto_stmt;
+        const label_name = self.getString(goto_data.label);
+
+        // 检查标签是否已定义
+        if (self.goto_labels.get(label_name)) |target_block| {
+            // 标签已定义，直接跳转
+            self.setTerminator(.{ .br = target_block });
+        } else {
+            // 标签尚未定义，记录待处理的 goto
+            const current = self.current_block orelse return error.NoCurrentBlock;
+            try self.pending_gotos.append(self.allocator, .{
+                .from_block = current,
+                .label_name = label_name,
+            });
+            // 暂时设置为 unreachable，稍后修复
+            self.setTerminator(.{ .unreachable_ = {} });
+        }
+
+        // 创建一个新的基本块用于 goto 之后的代码（可能是死代码）
+        const func = self.current_function orelse return error.NoCurrentFunction;
+        const after_block = try func.createBlock("goto_after");
+        self.current_block = after_block;
+    }
+
+    /// Generate IR for goto label
+    fn generateGotoLabel(self: *Self, node: *const Node) !void {
+        const label_data = node.data.goto_label;
+        const label_name = self.getString(label_data.label);
+
+        // 创建标签对应的基本块
+        const func = self.current_function orelse return error.NoCurrentFunction;
+        const label_block = try func.createBlock(label_name);
+
+        // 注册标签
+        try self.goto_labels.put(self.allocator, label_name, label_block);
+
+        // 如果当前块没有终止器，添加跳转到标签块
+        if (self.current_block) |current| {
+            if (!current.isTerminated()) {
+                self.setTerminator(.{ .br = label_block });
+            }
+        }
+
+        // 切换到标签块
+        self.current_block = label_block;
+
+        // 处理待处理的 goto（前向引用）
+        var i: usize = 0;
+        while (i < self.pending_gotos.items.len) {
+            const pending = self.pending_gotos.items[i];
+            if (std.mem.eql(u8, pending.label_name, label_name)) {
+                // 修复前向引用
+                pending.from_block.setTerminator(.{ .br = label_block });
+                _ = self.pending_gotos.swapRemove(i);
+            } else {
+                i += 1;
+            }
         }
     }
 

@@ -2945,6 +2945,132 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
     return Value.initString(last_str);
 }
 
+/// escapeshellarg - 转义shell参数
+/// PHP签名: escapeshellarg(string $arg): string
+pub fn php_escapeshellarg(arg_val: Value, allocator: Allocator) !Value {
+    if (!arg_val.isString()) {
+        const str = try arg_val.toString(allocator);
+        defer str.release(allocator);
+        return php_escapeshellarg(Value.initString(str), allocator);
+    }
+    
+    const arg = arg_val.asString().data;
+    
+    // 计算结果长度：每个单引号需要转义为 '\''，加上首尾的单引号
+    var result_len: usize = 2; // 首尾单引号
+    for (arg) |c| {
+        if (c == '\'') {
+            result_len += 4; // '\''
+        } else {
+            result_len += 1;
+        }
+    }
+    
+    const result = try allocator.alloc(u8, result_len);
+    var pos: usize = 0;
+    result[pos] = '\'';
+    pos += 1;
+    
+    for (arg) |c| {
+        if (c == '\'') {
+            // 替换 ' 为 '\''
+            result[pos] = '\'';
+            result[pos + 1] = '\\';
+            result[pos + 2] = '\'';
+            result[pos + 3] = '\'';
+            pos += 4;
+        } else {
+            result[pos] = c;
+            pos += 1;
+        }
+    }
+    
+    result[pos] = '\'';
+    
+    const php_str = try PHPString.init(allocator, result);
+    allocator.free(result);
+    return Value.initString(php_str);
+}
+
+/// escapeshellcmd - 转义shell命令中的特殊字符
+/// PHP签名: escapeshellcmd(string $command): string
+pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
+    if (!cmd_val.isString()) {
+        const str = try cmd_val.toString(allocator);
+        defer str.release(allocator);
+        return php_escapeshellcmd(Value.initString(str), allocator);
+    }
+    
+    const cmd = cmd_val.asString().data;
+    
+    // 需要转义的字符: &#;`|*?~<>^()[]{}$\, \x0A, \xFF, 以及未配对的引号
+    const special_chars = "&#;`|*?~<>^()[]{}$\\";
+    
+    // 计算结果长度
+    var result_len: usize = 0;
+    var single_quote_count: usize = 0;
+    var double_quote_count: usize = 0;
+    
+    for (cmd) |c| {
+        if (c == '\'') single_quote_count += 1;
+        if (c == '"') double_quote_count += 1;
+        
+        var is_special = false;
+        for (special_chars) |sc| {
+            if (c == sc) {
+                is_special = true;
+                break;
+            }
+        }
+        if (is_special or c == '\n' or c == 0xFF) {
+            result_len += 2; // 添加反斜杠
+        } else {
+            result_len += 1;
+        }
+    }
+    
+    // 处理未配对的引号
+    const escape_single = (single_quote_count % 2) == 1;
+    const escape_double = (double_quote_count % 2) == 1;
+    if (escape_single) result_len += single_quote_count;
+    if (escape_double) result_len += double_quote_count;
+    
+    const result = try allocator.alloc(u8, result_len);
+    var pos: usize = 0;
+    
+    for (cmd) |c| {
+        // 检查是否是特殊字符
+        var is_special = false;
+        for (special_chars) |sc| {
+            if (c == sc) {
+                is_special = true;
+                break;
+            }
+        }
+        
+        if (c == '\'' and escape_single) {
+            result[pos] = '\\';
+            result[pos + 1] = '\'';
+            pos += 2;
+        } else if (c == '"' and escape_double) {
+            result[pos] = '\\';
+            result[pos + 1] = '"';
+            pos += 2;
+        } else if (is_special or c == '\n' or c == 0xFF) {
+            result[pos] = '\\';
+            result[pos + 1] = c;
+            pos += 2;
+        } else {
+            result[pos] = c;
+            pos += 1;
+        }
+    }
+    
+    const php_str = try PHPString.init(allocator, result[0..pos]);
+    allocator.free(result);
+    return Value.initString(php_str);
+}
+
 /// substr_replace - 替换字符串的子串
 pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 2) return Value.initNull();
@@ -9049,6 +9175,71 @@ pub const ClassMeta = struct {
         });
         rcc_meta.magic_construct = rcc_meta.methods.get("__construct").?.func;
         try registerClass(rcc_meta);
+
+        // ReflectionFunction - 简化实现
+        const rf_meta = try ClassMeta.init(allocator, "ReflectionFunction");
+        try rf_meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len == 0) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    // 参数是函数名字符串或可调用对象
+                    const name_str = try args[0].toString(alloc);
+                    try this.setProperty("__func_name", Value.initString(name_str));
+                    // 默认参数数量（简化实现）
+                    try this.setProperty("__param_count", Value.initInt(0));
+                    try this.setProperty("__required_params", Value.initInt(0));
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rf_meta.addMethod(.{
+            .name = "getName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__func_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rf_meta.addMethod(.{
+            .name = "getNumberOfParameters",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initInt(0);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__param_count")) |v| {
+                        return v;
+                    }
+                    return Value.initInt(0);
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rf_meta.addMethod(.{
+            .name = "getNumberOfRequiredParameters",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initInt(0);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__required_params")) |v| {
+                        return v;
+                    }
+                    return Value.initInt(0);
+                }
+            }.call,
+            .is_static = false,
+        });
+        rf_meta.magic_construct = rf_meta.methods.get("__construct").?.func;
+        try registerClass(rf_meta);
 
         // Register Fiber class
         try registerFiberClass(allocator);
