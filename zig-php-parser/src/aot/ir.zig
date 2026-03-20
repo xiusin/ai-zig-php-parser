@@ -1148,6 +1148,7 @@ pub const Instruction = struct {
         func_ptr: Register,
         captures: []const Register,
         param_count: u8,
+        required_params: u8 = 0,
     };
 
     /// Bind closure to object

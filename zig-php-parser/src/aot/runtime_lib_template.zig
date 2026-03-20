@@ -49,6 +49,19 @@ const FunctionDeclLocation = struct {
 };
 pub var user_function_decl_locations: ?std.StringHashMap(FunctionDeclLocation) = null;
 
+/// 函数元数据（参数计数等，用于反射 API）
+pub const FunctionMeta = struct {
+    param_count: u16 = 0,
+    required_params: u16 = 0,
+};
+pub var function_meta_registry: ?std.StringHashMap(FunctionMeta) = null;
+
+pub fn registerFunctionMeta(name: []const u8, param_count: u16, required_params: u16) void {
+    if (function_meta_registry) |*registry| {
+        registry.put(name, .{ .param_count = param_count, .required_params = required_params }) catch {};
+    }
+}
+
 /// 全局常量表
 pub var constants: std.StringHashMap(Value) = undefined;
 
@@ -355,6 +368,7 @@ pub fn initRuntime(allocator: Allocator) void {
     registerZigSelect(runtime_allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
     user_function_decl_locations = std.StringHashMap(FunctionDeclLocation).init(runtime_allocator);
+    function_meta_registry = std.StringHashMap(FunctionMeta).init(runtime_allocator);
     constants = std.StringHashMap(Value).init(runtime_allocator);
     static_vars = std.StringHashMap(Value).init(runtime_allocator);
     array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(runtime_allocator);
@@ -646,6 +660,10 @@ pub fn deinitRuntime() void {
     if (user_function_decl_locations) |*locations| {
         locations.deinit();
         user_function_decl_locations = null;
+    }
+    if (function_meta_registry) |*meta_reg| {
+        meta_reg.deinit();
+        function_meta_registry = null;
     }
 
     // 清理constants
@@ -2430,6 +2448,8 @@ pub const PHPClosure = struct {
     ref_count: usize,
     gc_info: GCInfo,
     allocator: Allocator,
+    param_count: u16 = 0,
+    required_params: u16 = 0,
 
     pub fn init(
         allocator: Allocator,
@@ -2455,7 +2475,7 @@ pub const PHPClosure = struct {
             alloc_counters.php_closure_live_objects,
         );
 
-        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator };
+        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0 };
         return f;
     }
 
@@ -2606,6 +2626,13 @@ pub fn php_create_closure(name: Value, captures: Value, allocator: Allocator) !V
     if (func_ptr == null) return error.UnknownFunction;
 
     const closure = try PHPClosure.init(allocator, func_ptr.?, cap_list.items);
+    // 从元数据注册表设置参数计数
+    if (function_meta_registry) |meta_reg| {
+        if (meta_reg.get(func_name)) |meta| {
+            closure.param_count = meta.param_count;
+            closure.required_params = meta.required_params;
+        }
+    }
     return Value.initFunction(closure);
 }
 
@@ -9176,7 +9203,7 @@ pub const ClassMeta = struct {
         rcc_meta.magic_construct = rcc_meta.methods.get("__construct").?.func;
         try registerClass(rcc_meta);
 
-        // ReflectionFunction - 简化实现
+        // ReflectionFunction
         const rf_meta = try ClassMeta.init(allocator, "ReflectionFunction");
         try rf_meta.addMethod(.{
             .name = "__construct",
@@ -9184,12 +9211,31 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     if (args.len == 0) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    // 参数是函数名字符串或可调用对象
-                    const name_str = try args[0].toString(alloc);
-                    try this.setProperty("__func_name", Value.initString(name_str));
-                    // 默认参数数量（简化实现）
-                    try this.setProperty("__param_count", Value.initInt(0));
-                    try this.setProperty("__required_params", Value.initInt(0));
+                    var pc: i64 = 0;
+                    var rp: i64 = 0;
+                    if (args[0].isFunction()) {
+                        // 闭包/callable 对象
+                        const closure = args[0].asFunction();
+                        pc = @intCast(closure.param_count);
+                        rp = @intCast(closure.required_params);
+                        try this.setProperty("__func_name", Value.initString(try Value.initString("{closure}").toString(alloc)));
+                        try this.setProperty("__closure", args[0]);
+                        _ = args[0].retain();
+                    } else {
+                        // 函数名字符串
+                        const name_str = try args[0].toString(alloc);
+                        try this.setProperty("__func_name", Value.initString(name_str));
+                        // 从元数据注册表查询参数信息
+                        if (function_meta_registry) |meta_reg| {
+                            const name_data = args[0].asString().data;
+                            if (meta_reg.get(name_data)) |meta| {
+                                pc = @intCast(meta.param_count);
+                                rp = @intCast(meta.required_params);
+                            }
+                        }
+                    }
+                    try this.setProperty("__param_count", Value.initInt(pc));
+                    try this.setProperty("__required_params", Value.initInt(rp));
                     return Value.initNull();
                 }
             }.call,

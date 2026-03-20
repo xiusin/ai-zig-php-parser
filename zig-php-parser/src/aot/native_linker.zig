@@ -1076,6 +1076,25 @@ pub const NativeLinker = struct {
 
             // 直接注册函数，因为函数签名已经统一
             try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ func.name, func.name, func.location.file, func.location.line });
+            // 注册函数元数据（参数计数，用于反射 API）
+            const param_count = func.params.items.len;
+            var required_count: usize = 0;
+            for (func.params.items) |p| {
+                if (!p.has_default and !p.is_variadic) required_count += 1;
+            }
+            try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ func.name, param_count, required_count });
+        }
+
+        // 为闭包函数也注册元数据（闭包不走 register_at_startup 但需要反射元数据）
+        for (ir_module.functions.items) |func| {
+            if (std.mem.startsWith(u8, func.name, "__closure_") or std.mem.startsWith(u8, func.name, "__arrow_")) {
+                const cpc = func.params.items.len;
+                var crc: usize = 0;
+                for (func.params.items) |p| {
+                    if (!p.has_default and !p.is_variadic) crc += 1;
+                }
+                try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ func.name, cpc, crc });
+            }
         }
 
         try writer.writeAll(
@@ -7600,6 +7619,13 @@ pub const NativeLinker = struct {
                             const escaped_declared_name = try self.escapeString(declared_name);
                             defer self.allocator.free(escaped_declared_name);
                             try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
+                            // 注册函数元数据
+                            const pc = func.params.items.len;
+                            var rc: usize = 0;
+                            for (func.params.items) |p| {
+                                if (!p.has_default and !p.is_variadic) rc += 1;
+                            }
+                            try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ escaped_declared_name, pc, rc });
                         }
                     }
                     if (inst.result) |reg| {
@@ -7939,6 +7965,13 @@ pub const NativeLinker = struct {
                                 const escaped_declared_name = try self.escapeString(declared_name);
                                 defer self.allocator.free(escaped_declared_name);
                                 try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
+                                // 注册函数元数据
+                                const pc = func.params.items.len;
+                                var rc: usize = 0;
+                                for (func.params.items) |p| {
+                                    if (!p.has_default and !p.is_variadic) rc += 1;
+                                }
+                                try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ escaped_declared_name, pc, rc });
                             }
                         }
                     } else if (is_builtin) {
@@ -14278,6 +14311,13 @@ pub const NativeLinker = struct {
                     if (self.ir_module) |module| {
                         if (module.findFunction(declared_name)) |func| {
                             try writer.print("        try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                            // 注册函数元数据
+                            const pc = func.params.items.len;
+                            var rc: usize = 0;
+                            for (func.params.items) |p| {
+                                if (!p.has_default and !p.is_variadic) rc += 1;
+                            }
+                            try writer.print("        runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ declared_name, pc, rc });
                         }
                     }
                     if (result_reg) |r| {
@@ -14389,6 +14429,13 @@ pub const NativeLinker = struct {
                         if (self.ir_module) |module| {
                             if (module.findFunction(declared_name)) |func| {
                                 try writer.print("        try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                                // 注册函数元数据
+                                const pc = func.params.items.len;
+                                var rc: usize = 0;
+                                for (func.params.items) |p| {
+                                    if (!p.has_default and !p.is_variadic) rc += 1;
+                                }
+                                try writer.print("        runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ declared_name, pc, rc });
                             }
                         }
                     } else if (is_builtin) {

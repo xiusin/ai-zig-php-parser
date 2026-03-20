@@ -2316,6 +2316,9 @@ pub const VM = struct {
         // Register HTTP classes (HttpServer, HttpClient, Router)
         try builtin_http.registerHttpClasses(vm);
 
+        // Register reflection classes (ReflectionFunction, ReflectionClass)
+        try vm.registerReflectionClasses();
+
         // Initialize predefined constants
         try vm.initializePredefinedConstants();
 
@@ -2840,6 +2843,185 @@ pub const VM = struct {
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+    }
+
+    /// Register reflection classes (ReflectionFunction, ReflectionClass)
+    pub fn registerReflectionClasses(self: *VM) !void {
+        // Create ReflectionFunction class
+        const rf_name = try types.PHPString.init(self.allocator, "ReflectionFunction");
+        const rf_class = try self.allocator.create(types.PHPClass);
+        rf_class.* = try types.PHPClass.init(self.allocator, rf_name);
+        rf_name.release(self.allocator);
+        try self.classes.put("ReflectionFunction", rf_class);
+
+        // Create ReflectionClass class
+        const rc_name = try types.PHPString.init(self.allocator, "ReflectionClass");
+        const rc_class = try self.allocator.create(types.PHPClass);
+        rc_class.* = try types.PHPClass.init(self.allocator, rc_name);
+        rc_name.release(self.allocator);
+        try self.classes.put("ReflectionClass", rc_class);
+    }
+
+    /// Construct a ReflectionFunction object
+    fn constructReflectionFunction(self: *VM, arg_indices: []const u32) !Value {
+        if (arg_indices.len == 0) {
+            const exception = try ExceptionFactory.createArgumentCountError(self.allocator, 1, 0, "ReflectionFunction::__construct", "builtin", 0);
+            return self.throwException(exception);
+        }
+
+        const arg_value = try self.eval(arg_indices[0]);
+        defer self.releaseValue(arg_value);
+
+        const rf_class = self.getClass("ReflectionFunction") orelse return error.ClassNotFound;
+        const value = try Value.initObjectWithManager(&self.memory_manager, rf_class);
+        const object = value.getAsObject().data;
+
+        if (arg_value.getTag() == .closure or arg_value.getTag() == .user_function) {
+            // Closure or user function value
+            try object.setProperty(self.allocator, "__rf_name", try Value.initString(self.allocator, "{closure}"));
+            try object.setProperty(self.allocator, "__rf_func", arg_value.retain());
+            // Get param info from UserFunction or Closure
+            if (arg_value.getTag() == .user_function) {
+                const uf = arg_value.getAsUserFunc().data;
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(@intCast(uf.parameters.len)));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(@intCast(uf.min_args)));
+            } else if (arg_value.getTag() == .closure) {
+                const closure = arg_value.getAsClosure().data;
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(@intCast(closure.function.parameters.len)));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(@intCast(closure.function.min_args)));
+            } else {
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+            }
+        } else if (arg_value.isString()) {
+            // Function name string
+            const func_name = arg_value.getAsString().data.data;
+            try object.setProperty(self.allocator, "__rf_name", try Value.initString(self.allocator, func_name));
+            // Look up user function from global scope
+            if (self.global.get(func_name)) |func_val| {
+                if (func_val.getTag() == .user_function) {
+                    const uf = func_val.getAsUserFunc().data;
+                    try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(@intCast(uf.parameters.len)));
+                    try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(@intCast(uf.min_args)));
+                    try object.setProperty(self.allocator, "__rf_func", func_val.retain());
+                } else {
+                    try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+                    try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+                }
+            } else {
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+            }
+        } else {
+            try object.setProperty(self.allocator, "__rf_name", try Value.initString(self.allocator, ""));
+            try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+            try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+        }
+
+        return value;
+    }
+
+    /// Construct a ReflectionClass object
+    fn constructReflectionClass(self: *VM, arg_indices: []const u32) !Value {
+        if (arg_indices.len == 0) {
+            const exception = try ExceptionFactory.createArgumentCountError(self.allocator, 1, 0, "ReflectionClass::__construct", "builtin", 0);
+            return self.throwException(exception);
+        }
+
+        const arg_value = try self.eval(arg_indices[0]);
+        defer self.releaseValue(arg_value);
+
+        const rc_class = self.getClass("ReflectionClass") orelse return error.ClassNotFound;
+        const value = try Value.initObjectWithManager(&self.memory_manager, rc_class);
+        const object = value.getAsObject().data;
+
+        if (arg_value.isString()) {
+            const class_name = arg_value.getAsString().data.data;
+            try object.setProperty(self.allocator, "__rc_name", try Value.initString(self.allocator, class_name));
+        }
+
+        return value;
+    }
+
+    /// Handle method calls on ReflectionFunction objects
+    fn callReflectionFunctionMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getName")) {
+            if (obj.getProperty("__rf_name")) |name_val| {
+                return name_val.retain();
+            } else |_| {}
+            return Value.initString(self.allocator, "") catch Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getNumberOfParameters")) {
+            if (obj.getProperty("__rf_param_count")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "getNumberOfRequiredParameters")) {
+            if (obj.getProperty("__rf_required_params")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "invoke")) {
+            if (obj.getProperty("__rf_func")) |func_val| {
+                if (func_val.getTag() == .user_function) {
+                    const uf = func_val.getAsUserFunc().data;
+                    return self.callUserFunction(uf, args);
+                }
+            } else |_| {}
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "isClosure")) {
+            if (obj.getProperty("__rf_func")) |func_val| {
+                return Value.initBool(func_val.getTag() == .closure);
+            } else |_| {}
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isInternal")) {
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isUserDefined")) {
+            return Value.initBool(true);
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionFunction::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// Handle method calls on ReflectionClass objects
+    fn callReflectionClassMethod(self: *VM, obj_value: Value, method_name: []const u8, _: []const Value) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getName")) {
+            if (obj.getProperty("__rc_name")) |name_val| {
+                return name_val.retain();
+            } else |_| {}
+            return Value.initString(self.allocator, "") catch Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "isAbstract")) {
+            if (obj.getProperty("__rc_name")) |name_val| {
+                if (name_val.isString()) {
+                    const cn = name_val.getAsString().data.data;
+                    if (self.getClass(cn)) |cls| {
+                        return Value.initBool(cls.modifiers.is_abstract);
+                    }
+                }
+            } else |_| {}
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isFinal")) {
+            if (obj.getProperty("__rc_name")) |name_val| {
+                if (name_val.isString()) {
+                    const cn = name_val.getAsString().data.data;
+                    if (self.getClass(cn)) |cls| {
+                        return Value.initBool(cls.modifiers.is_final);
+                    }
+                }
+            } else |_| {}
+            return Value.initBool(false);
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionClass::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
     }
 
     /// Initialize predefined constants
@@ -7020,6 +7202,13 @@ pub const VM = struct {
             return self.evaluateStructInstantiation(struct_data);
         }
 
+        // Special handling for Reflection classes
+        if (std.mem.eql(u8, name, "ReflectionFunction")) {
+            return self.constructReflectionFunction(instantiation_data.args);
+        } else if (std.mem.eql(u8, name, "ReflectionClass")) {
+            return self.constructReflectionClass(instantiation_data.args);
+        }
+
         // Check if there's a builtin constructor (for concurrency classes)
         if (std.mem.eql(u8, name, "Mutex") or std.mem.eql(u8, name, "Atomic") or
             std.mem.eql(u8, name, "RWLock") or std.mem.eql(u8, name, "SharedData") or
@@ -7408,6 +7597,16 @@ pub const VM = struct {
                 return builtin_methods.ArrayMethods.count(self, target_value);
             } else if (std.mem.eql(u8, method_name, "isEmpty")) {
                 return builtin_methods.ArrayMethods.isEmpty(self, target_value);
+            }
+        }
+
+        // Special handling for Reflection objects
+        if (target_value.isObject()) {
+            const rf_class_name = target_value.getAsObject().data.class.name.data;
+            if (std.mem.eql(u8, rf_class_name, "ReflectionFunction")) {
+                return self.callReflectionFunctionMethod(target_value, method_name, args.items);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionClass")) {
+                return self.callReflectionClassMethod(target_value, method_name, args.items);
             }
         }
 
