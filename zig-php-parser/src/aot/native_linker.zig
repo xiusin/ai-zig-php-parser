@@ -2891,7 +2891,11 @@ pub const NativeLinker = struct {
                     if (inst.op != .alloca) {
                         // 只cleanup创建新值的指令
                         switch (inst.op) {
-                            .const_string, .concat, .array_new, .new_object, .call => {
+                            .new_object => {
+                                // 对象创建：无论类型是php_object还是php_value都需要清理
+                                try cleanup_registers_set.put(reg.id, {});
+                            },
+                            .const_string, .concat, .array_new, .call => {
                                 if (corrected_type == .php_value) {
                                     try cleanup_registers_set.put(reg.id, {});
                                 }
@@ -3722,16 +3726,9 @@ pub const NativeLinker = struct {
                                     if (unset_registers.contains(reg_id)) continue;
 
                                     if (is_ptr) {
-                                        // alloca指针：检查是否被store过
-                                        const has_store = alloca_with_store.contains(reg_id);
-                                        if (has_store) {
-                                            // 被store过：release两次（store会retain）
-                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                        } else {
-                                            // 没有被store：release一次
-                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                        }
+                                        // alloca指针：只需release一次
+                                        // store指令会retain，函数结束时release一次即可平衡
+                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                     } else {
                                         try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                     }
@@ -3795,16 +3792,9 @@ pub const NativeLinker = struct {
                                 if (unset_registers.contains(reg_id)) continue;
 
                                 if (is_ptr) {
-                                    // alloca指针：检查是否被store过
-                                    const has_store = alloca_with_store.contains(reg_id);
-                                    if (has_store) {
-                                        // 被store过：release两次
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                    } else {
-                                        // 没有被store：release一次
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                    }
+                                    // alloca指针：只需release一次
+                                    // store指令会retain，函数结束时release一次即可平衡
+                                    try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                 } else {
                                     try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                 }
@@ -3836,16 +3826,9 @@ pub const NativeLinker = struct {
 
                         const is_alloca = alloca_registers.contains(reg_id);
                         if (is_alloca) {
-                            // alloca指针：检查是否被store过
-                            const has_store = alloca_with_store.contains(reg_id);
-                            if (has_store) {
-                                // 被store过：release两次
-                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                            } else {
-                                // 没有被store：release一次
-                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                            }
+                            // alloca指针：只需release一次
+                            // store指令会retain，函数结束时release一次即可平衡
+                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                         } else {
                             try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                         }

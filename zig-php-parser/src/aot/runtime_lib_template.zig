@@ -11306,14 +11306,9 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         if (m.findMethodLookup("__construct")) |lookup| {
             const guard = ClassContext.init(m, lookup.owner);
             defer guard.deinit();
-            const prev_ref = obj.ref_count;
             _ = try lookup.method.func(obj_val, args, allocator);
-            // 补偿 __construct 中 store $this 产生的 retain
-            // 每个构造函数（包括父类）都会 store $this，产生 retain
-            // 但函数结束时只 release 一次，导致引用计数累积
-            if (obj.ref_count > prev_ref) {
-                obj.ref_count = prev_ref;
-            }
+            // 注意：构造函数中的 store $this 会 retain，函数结束时会 release
+            // 这是正确的引用计数行为，不需要补偿
         }
     }
 

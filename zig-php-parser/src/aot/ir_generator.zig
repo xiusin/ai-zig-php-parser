@@ -3218,8 +3218,6 @@ pub const IRGenerator = struct {
 
         // Generate value
         const value_reg = try self.generateExpression(assign_data.value);
-        const value_node = self.getNode(assign_data.value);
-        const value_is_object_init = value_node != null and (value_node.?.tag == .object_instantiation or value_node.?.tag == .anonymous_class);
 
         // Generate target
         const target_node = self.getNode(assign_data.target) orelse return value_reg;
@@ -3458,9 +3456,10 @@ pub const IRGenerator = struct {
             else => {},
         }
 
-        if (value_is_object_init) {
-            _ = try self.emit(.{ .release = .{ .operand = value_reg } }, null);
-        }
+        // 注意：对于对象实例化赋值给变量，不应该release
+        // 因为变量（全局变量表或局部alloca）会持有这个引用
+        // 只有property_access和variable_property_access这些临时对象才需要release
+        // 这些情况已经在上面的switch分支中处理了
         return value_reg;
     }
 
