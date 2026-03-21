@@ -237,6 +237,25 @@ pub const NativeLinker = struct {
         return true;
     }
 
+    /// 检查寄存器是否是指针类型（alloca 或 ref_ptr）
+    fn isPointerReg(self: *Self, reg_id: usize) bool {
+        // 检查是否是 alloca 寄存器
+        if (self.current_alloca_regs) |alloca_regs| {
+            if (alloca_regs.contains(reg_id)) {
+                return true;
+            }
+        }
+        
+        // 检查是否是 ref_ptr 寄存器（PHI/select 合并引用参数）
+        if (self.current_ref_ptr_regs) |ref_ptr_regs| {
+            if (ref_ptr_regs.contains(reg_id)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
     /// 类型推断统计（用于诊断和质量门禁）
     var type_infer_hit_count: usize = 0;
     var type_infer_fallback_count: usize = 0;
@@ -4316,10 +4335,30 @@ pub const NativeLinker = struct {
         if (all_single_incoming) {
             for (phi_infos.items) |info| {
                 if (info.incoming.len > 0) {
-                    try writer.print("    reg_{d} = reg_{d};\n", .{
-                        info.result_reg.id,
-                        info.incoming[0].value.id,
-                    });
+                    const result_is_ptr = self.isPointerReg(info.result_reg.id);
+                    const value_is_ptr = self.isPointerReg(info.incoming[0].value.id);
+                    
+                    if (result_is_ptr and value_is_ptr) {
+                        try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    } else if (result_is_ptr) {
+                        try writer.print("    reg_{d}.* = reg_{d};\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    } else if (value_is_ptr) {
+                        try writer.print("    reg_{d} = reg_{d}.*;\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    } else {
+                        try writer.print("    reg_{d} = reg_{d};\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    }
                 }
             }
             return;
@@ -4388,10 +4427,30 @@ pub const NativeLinker = struct {
         try writer.writeAll("            // Fallback: use first incoming value\n");
         for (phi_infos.items) |info| {
             if (info.incoming.len > 0) {
-                try writer.print("            reg_{d} = reg_{d};\n", .{
-                    info.result_reg.id,
-                    info.incoming[0].value.id,
-                });
+                const result_is_ptr = self.isPointerReg(info.result_reg.id);
+                const value_is_ptr = self.isPointerReg(info.incoming[0].value.id);
+                
+                if (result_is_ptr and value_is_ptr) {
+                    try writer.print("            reg_{d}.* = reg_{d}.*;\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                } else if (result_is_ptr) {
+                    try writer.print("            reg_{d}.* = reg_{d};\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                } else if (value_is_ptr) {
+                    try writer.print("            reg_{d} = reg_{d}.*;\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                } else {
+                    try writer.print("            reg_{d} = reg_{d};\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                }
             }
         }
         try writer.writeAll("        },\n");
@@ -4741,20 +4800,14 @@ pub const NativeLinker = struct {
         if (!has_any_dependency) {
             // 无依赖，直接赋值（不需要retain，因为phi代替store）
             for (assignments) |assign| {
-                const value_is_alloca = if (self.current_alloca_regs) |regs|
-                    regs.contains(assign.value.id)
-                else
-                    false;
-                const result_is_alloca = if (self.current_alloca_regs) |regs|
-                    regs.contains(assign.result.id)
-                else
-                    false;
+                const value_is_ptr = self.isPointerReg(assign.value.id);
+                const result_is_ptr = self.isPointerReg(assign.result.id);
 
-                if (result_is_alloca and value_is_alloca) {
+                if (result_is_ptr and value_is_ptr) {
                     try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                } else if (result_is_alloca) {
+                } else if (result_is_ptr) {
                     try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                } else if (value_is_alloca) {
+                } else if (value_is_ptr) {
                     try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
                 } else {
                     try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
@@ -4767,11 +4820,8 @@ pub const NativeLinker = struct {
             // 第一步：保存需要临时变量的源值
             for (assignments, 0..) |assign, i| {
                 if (needs_temp.items[i]) {
-                    const value_is_alloca = if (self.current_alloca_regs) |regs|
-                        regs.contains(assign.value.id)
-                    else
-                        false;
-                    if (value_is_alloca) {
+                    const value_is_ptr = self.isPointerReg(assign.value.id);
+                    if (value_is_ptr) {
                         try writer.print("{s}const phi_temp_{d} = reg_{d}.*;\n", .{ indent, i, assign.value.id });
                     } else {
                         try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
@@ -4780,27 +4830,21 @@ pub const NativeLinker = struct {
             }
             // 第二步：赋值（不需要retain）
             for (assignments, 0..) |assign, i| {
-                const result_is_alloca = if (self.current_alloca_regs) |regs|
-                    regs.contains(assign.result.id)
-                else
-                    false;
+                const result_is_ptr = self.isPointerReg(assign.result.id);
 
                 if (needs_temp.items[i]) {
-                    if (result_is_alloca) {
+                    if (result_is_ptr) {
                         try writer.print("{s}reg_{d}.* = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                     } else {
                         try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                     }
                 } else {
-                    const value_is_alloca = if (self.current_alloca_regs) |regs|
-                        regs.contains(assign.value.id)
-                    else
-                        false;
-                    if (result_is_alloca and value_is_alloca) {
+                    const value_is_ptr = self.isPointerReg(assign.value.id);
+                    if (result_is_ptr and value_is_ptr) {
                         try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                    } else if (result_is_alloca) {
+                    } else if (result_is_ptr) {
                         try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                    } else if (value_is_alloca) {
+                    } else if (value_is_ptr) {
                         try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
                     } else {
                         try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
@@ -7053,14 +7097,32 @@ pub const NativeLinker = struct {
                     const is_result_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(reg.id) else false;
 
                     if (is_result_ptr) {
-                        // 指针类型select：直接赋值指针，不做release/retain
+                        // 指针类型select：需要检查源值是否也是指针
+                        const then_is_ptr = self.isPointerReg(op.then_value.id);
+                        const else_is_ptr = self.isPointerReg(op.else_value.id);
+                        
                         try writer.writeAll("    if (");
                         try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
                         try writer.writeAll(") {\n");
-                        // 直接使用reg_X（不deref alloca），因为我们要保留指针
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.then_value.id });
+                        
+                        if (then_is_ptr) {
+                            // then_value 是指针，直接赋值
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.then_value.id });
+                        } else {
+                            // then_value 不是指针，需要取地址
+                            try writer.print("        reg_{d} = &reg_{d};\n", .{ reg.id, op.then_value.id });
+                        }
+                        
                         try writer.writeAll("    } else {\n");
-                        try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.else_value.id });
+                        
+                        if (else_is_ptr) {
+                            // else_value 是指针，直接赋值
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.else_value.id });
+                        } else {
+                            // else_value 不是指针，需要取地址
+                            try writer.print("        reg_{d} = &reg_{d};\n", .{ reg.id, op.else_value.id });
+                        }
+                        
                         try writer.writeAll("    }\n");
                     } else {
                         // 普通select：值类型
@@ -8104,7 +8166,7 @@ pub const NativeLinker = struct {
                                 } else {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initNull()");
                                 }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.writeAll(");\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_mkdir")) {
                                 // mkdir(dirname, permissions = 0777, recursive = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -8259,11 +8321,27 @@ pub const NativeLinker = struct {
                                 try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
                             }
                         } else {
-                            // 特殊处理php_ref_assign_ptr：第一个参数不解引用
+                            // 特殊处理php_ref_assign_ptr：第一个参数需要指针
                             if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                // 第一个参数：直接使用指针（不解引用）
-                                try writer.print("reg_{d}", .{op.args[0].id});
+                                // 第一个参数：检查是否已经是指针类型寄存器
+                                const first_arg = op.args[0];
+                                const is_ptr_reg = if (self.current_ref_ptr_regs) |rpr|
+                                    rpr.contains(first_arg.id)
+                                else
+                                    false;
+                                const is_alloca_reg = if (self.current_alloca_regs) |ar|
+                                    ar.contains(first_arg.id)
+                                else
+                                    false;
+                                
+                                if (is_ptr_reg or is_alloca_reg) {
+                                    // 已经是指针类型寄存器，直接使用
+                                    try writer.print("reg_{d}", .{first_arg.id});
+                                } else {
+                                    // 普通值类型寄存器，需要取地址
+                                    try writer.print("&reg_{d}", .{first_arg.id});
+                                }
                                 // 其余参数：正常处理
                                 for (op.args[1..]) |arg| {
                                     try writer.writeAll(", ");
