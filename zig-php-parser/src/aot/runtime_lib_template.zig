@@ -11129,6 +11129,12 @@ pub fn php_cast_array(val: Value) !Value {
 }
 
 pub fn php_cast_object(val: Value) !Value {
+    // 如果已经是对象，直接返回
+    if (Value_isObject(val)) {
+        return val;
+    }
+    
+    // 数组转对象：将数组元素作为对象属性
     if (val.isArray()) {
         const obj_val = try php_object_new("stdClass", runtime_allocator);
         const obj = Value_asObject(obj_val);
@@ -11149,7 +11155,13 @@ pub fn php_cast_object(val: Value) !Value {
         }
         return obj_val;
     }
-    return val;
+    
+    // 标量类型转对象：创建 stdClass 对象，值存储在 "scalar" 属性中
+    // PHP 行为：(object)"test" 创建 stdClass { scalar: "test" }
+    const obj_val = try php_object_new("stdClass", runtime_allocator);
+    const obj = Value_asObject(obj_val);
+    try obj.setProperty("scalar", val);
+    return obj_val;
 }
 
 /// 设置对象属性
