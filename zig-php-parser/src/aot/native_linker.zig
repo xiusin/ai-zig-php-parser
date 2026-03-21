@@ -2464,6 +2464,8 @@ pub const NativeLinker = struct {
         .{ "is_infinite", .{ .runtime_name = "php_is_infinite", .needs_allocator = false } },
         .{ "is_nan", .{ .runtime_name = "php_is_nan", .needs_allocator = false } },
         .{ "is_finite", .{ .runtime_name = "php_is_finite", .needs_allocator = false } },
+        .{ "is_countable", .{ .runtime_name = "php_is_countable", .needs_allocator = false } },
+        .{ "is_iterable", .{ .runtime_name = "php_is_iterable", .needs_allocator = false } },
         .{ "isset", .{ .runtime_name = "php_isset", .needs_allocator = false } },
         .{ "empty", .{ .runtime_name = "php_empty", .needs_allocator = false } },
         .{ "unset", .{ .runtime_name = "php_unset", .needs_allocator = true, .may_raise = false } },

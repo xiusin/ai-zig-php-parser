@@ -8375,6 +8375,48 @@ pub fn php_is_finite(val: Value) !Value {
     return Value.initBool(!std.math.isInf(f) and !std.math.isNan(f));
 }
 
+/// is_countable - 检查是否可计数（数组或实现Countable接口的对象）
+pub fn php_is_countable(val: Value) !Value {
+    // 数组总是可计数的
+    if (val.isArray()) return Value.initBool(true);
+    
+    // 对象需要实现Countable接口
+    if (Value_isObject(val)) {
+        const obj = Value_asObject(val);
+        if (obj.class_meta) |meta| {
+            // 检查是否实现了Countable接口（有count方法）
+            return Value.initBool(meta.findMethod("count") != null);
+        }
+    }
+    
+    return Value.initBool(false);
+}
+
+/// is_iterable - 检查是否可迭代（数组或实现Traversable接口的对象）
+pub fn php_is_iterable(val: Value) !Value {
+    // 数组总是可迭代的
+    if (val.isArray()) return Value.initBool(true);
+    
+    // 对象需要实现Traversable接口（Iterator或IteratorAggregate）
+    if (Value_isObject(val)) {
+        const obj = Value_asObject(val);
+        if (obj.class_meta) |meta| {
+            // 检查是否有迭代器方法
+            const has_current = meta.findMethod("current") != null;
+            const has_key = meta.findMethod("key") != null;
+            const has_next = meta.findMethod("next") != null;
+            const has_rewind = meta.findMethod("rewind") != null;
+            const has_valid = meta.findMethod("valid") != null;
+            const has_getiterator = meta.findMethod("getIterator") != null;
+            
+            // Iterator接口需要5个方法，IteratorAggregate需要getIterator
+            return Value.initBool((has_current and has_key and has_next and has_rewind and has_valid) or has_getiterator);
+        }
+    }
+    
+    return Value.initBool(false);
+}
+
 /// unset - 删除变量（立即释放引用）
 pub fn php_unset(args: []const Value, allocator: Allocator) !Value {
     _ = allocator;
