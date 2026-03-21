@@ -7018,7 +7018,12 @@ pub const NativeLinker = struct {
                                         if (inst_check.op == .store) {
                                             const store_op = inst_check.op.store;
                                             if (store_op.value.id == reg.id) {
-                                                try writer.print("    reg_{d} = reg_{d};\n", .{ store_op.ptr.id, reg.id });
+                                                // 检查目标寄存器类型：指针类型直接赋值，值类型需要解引用
+                                                if (self.isPointerReg(store_op.ptr.id)) {
+                                                    try writer.print("    reg_{d} = reg_{d};\n", .{ store_op.ptr.id, reg.id });
+                                                } else {
+                                                    try writer.print("    reg_{d} = reg_{d}.*;\n", .{ store_op.ptr.id, reg.id });
+                                                }
                                                 break;
                                             }
                                         }
