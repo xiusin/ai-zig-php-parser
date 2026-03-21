@@ -3697,7 +3697,8 @@ pub const IRGenerator = struct {
             if (target_node.tag == .array_pair) {
                 // 带键解构: ['id' => $userId]
                 key_node_idx = target_node.data.array_pair.key;
-                if (self.getNode(key_node_idx) != null) {
+                const key_node = self.getNode(key_node_idx);
+                if (key_node != null) {
                     use_key = true;
                 }
                 // 获取实际的目标节点

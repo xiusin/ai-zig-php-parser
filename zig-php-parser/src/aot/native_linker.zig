@@ -1515,10 +1515,20 @@ pub const NativeLinker = struct {
 
         try self.applyTraitAdaptations(trait_td, &imported_methods);
 
-        for (imported_methods.items) |method| {
-            if (self.findTypeMethod(trait_td, method.exposed_name) != null) {
-                continue;
+        // 如果trait自己定义了某个方法，移除所有同名的导入方法
+        // 这样trait自己的方法会覆盖导入的方法，避免冲突
+        for (trait_td.methods) |own_method| {
+            var i: usize = 0;
+            while (i < imported_methods.items.len) {
+                if (std.mem.eql(u8, imported_methods.items[i].exposed_name, own_method.name)) {
+                    _ = imported_methods.swapRemove(i);
+                } else {
+                    i += 1;
+                }
             }
+        }
+
+        for (imported_methods.items) |method| {
             try self.appendUniqueTraitMethod(&resolved_methods, method);
         }
 
