@@ -1878,18 +1878,59 @@ pub const Parser = struct {
                 const nested_list = try self.parseListExpression();
                 try targets.append(self.allocator, nested_list);
             } else {
-                // Single variable - get the variable name
-                if (self.curr.tag == .t_variable) {
+                // Check for keyed list: 'key' => $var or "key" => $var or 0 => $var
+                const is_keyed = (self.curr.tag == .t_string or self.curr.tag == .t_lnumber or self.curr.tag == .t_dnumber) and self.peek.tag == .fat_arrow;
+                
+                if (is_keyed) {
+                    // Parse keyed element: 'key' => $var
+                    const key_token = self.curr;
+                    // Directly parse the key literal (string or number)
+                    const key_expr = if (self.curr.tag == .t_string) blk: {
+                        const str_token = self.curr;
+                        self.nextToken();
+                        const str_id = try self.context.intern(self.lexer.buffer[str_token.loc.start..str_token.loc.end]);
+                        break :blk try self.createNode(.{ .tag = .literal_string, .main_token = str_token, .data = .{ .literal_string = .{ .value = str_id } } });
+                    } else if (self.curr.tag == .t_lnumber) blk: {
+                        const num_token = self.curr;
+                        self.nextToken();
+                        const num_str = self.lexer.buffer[num_token.loc.start..num_token.loc.end];
+                        const num_val = std.fmt.parseInt(i64, num_str, 10) catch 0;
+                        break :blk try self.createNode(.{ .tag = .literal_int, .main_token = num_token, .data = .{ .literal_int = .{ .value = num_val } } });
+                    } else blk: {
+                        const num_token = self.curr;
+                        self.nextToken();
+                        const num_str = self.lexer.buffer[num_token.loc.start..num_token.loc.end];
+                        const num_val = std.fmt.parseFloat(f64, num_str) catch 0.0;
+                        break :blk try self.createNode(.{ .tag = .literal_float, .main_token = num_token, .data = .{ .literal_float = .{ .value = num_val } } });
+                    };
+                    _ = try self.eat(.fat_arrow);
+                    
+                    // Parse the target (variable or nested list)
+                    const target_expr = if (self.curr.tag == .k_list)
+                        try self.parseListExpression()
+                    else if (self.curr.tag == .t_variable) blk: {
+                        const var_name = self.curr;
+                        const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                        self.nextToken();
+                        break :blk var_node;
+                    } else {
+                        return error.UnexpectedToken;
+                    };
+                    
+                    // Create array_pair node for keyed element
+                    const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = key_token, .data = .{ .array_pair = .{ .key = key_expr, .value = target_expr } } });
+                    try targets.append(self.allocator, pair_node);
+                } else if (self.curr.tag == .t_variable) {
+                    // Single variable - get the variable name
                     const var_name = self.curr;
                     const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
                     const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
                     try targets.append(self.allocator, var_node);
                     self.nextToken();
                 } else {
-                    // Empty slot - create a list_empty node
-                    const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
-                    const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
-                    try targets.append(self.allocator, empty_node);
+                    // Unknown token - skip it to avoid infinite loop
+                    self.nextToken();
                 }
             }
         }
@@ -1935,17 +1976,60 @@ pub const Parser = struct {
             if (self.curr.tag == .k_list) {
                 const nested = try self.parseListExpression();
                 try targets.append(self.allocator, nested);
-            } else if (self.curr.tag == .t_variable) {
-                const var_name = self.curr;
-                const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                try targets.append(self.allocator, var_node);
-                self.nextToken();
             } else {
-                // Empty slot - create a list_empty node
-                const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
-                const empty_node = try self.createNode(.{ .tag = .list_empty, .main_token = empty_token, .data = .{ .list_empty = {} } });
-                try targets.append(self.allocator, empty_node);
+                // Check for keyed list: 'key' => $var or "key" => $var or 0 => $var
+                const is_keyed = (self.curr.tag == .t_string or self.curr.tag == .t_lnumber or self.curr.tag == .t_dnumber) and self.peek.tag == .fat_arrow;
+                
+                if (is_keyed) {
+                    // Parse keyed element: 'key' => $var
+                    const key_token = self.curr;
+                    // Directly parse the key literal (string or number)
+                    const key_expr = if (self.curr.tag == .t_string) blk: {
+                        const str_token = self.curr;
+                        self.nextToken();
+                        const str_id = try self.context.intern(self.lexer.buffer[str_token.loc.start..str_token.loc.end]);
+                        break :blk try self.createNode(.{ .tag = .literal_string, .main_token = str_token, .data = .{ .literal_string = .{ .value = str_id } } });
+                    } else if (self.curr.tag == .t_lnumber) blk: {
+                        const num_token = self.curr;
+                        self.nextToken();
+                        const num_str = self.lexer.buffer[num_token.loc.start..num_token.loc.end];
+                        const num_val = std.fmt.parseInt(i64, num_str, 10) catch 0;
+                        break :blk try self.createNode(.{ .tag = .literal_int, .main_token = num_token, .data = .{ .literal_int = .{ .value = num_val } } });
+                    } else blk: {
+                        const num_token = self.curr;
+                        self.nextToken();
+                        const num_str = self.lexer.buffer[num_token.loc.start..num_token.loc.end];
+                        const num_val = std.fmt.parseFloat(f64, num_str) catch 0.0;
+                        break :blk try self.createNode(.{ .tag = .literal_float, .main_token = num_token, .data = .{ .literal_float = .{ .value = num_val } } });
+                    };
+                    _ = try self.eat(.fat_arrow);
+                    
+                    // Parse the target (variable or nested list)
+                    const target_expr = if (self.curr.tag == .k_list)
+                        try self.parseListExpression()
+                    else if (self.curr.tag == .t_variable) blk: {
+                        const var_name = self.curr;
+                        const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                        self.nextToken();
+                        break :blk var_node;
+                    } else {
+                        return error.UnexpectedToken;
+                    };
+                    
+                    // Create array_pair node for keyed element
+                    const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = key_token, .data = .{ .array_pair = .{ .key = key_expr, .value = target_expr } } });
+                    try targets.append(self.allocator, pair_node);
+                } else if (self.curr.tag == .t_variable) {
+                    const var_name = self.curr;
+                    const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
+                    const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+                    try targets.append(self.allocator, var_node);
+                    self.nextToken();
+                } else {
+                    // Unknown token - skip it to avoid infinite loop
+                    self.nextToken();
+                }
             }
         }
 
