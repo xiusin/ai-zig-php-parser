@@ -6950,7 +6950,11 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
 
 /// 完整PCRE2实现的preg_match
 /// 支持所有正则语法，与解释器/Bytecode行为一致
-pub fn preg_match(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
+pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
+    _ = flags; // TODO: 实现flags支持
+    _ = offset; // TODO: 实现offset支持
+    _ = matches_ref; // TODO: 实现matches填充
+    
     if (!pattern_val.isString() or !subject_val.isString()) {
         return Value.initInt(0);
     }
@@ -7034,7 +7038,10 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
 /// preg_match_all - 返回所有匹配
 /// matches_ref: 引用参数，填充为二维数组
 /// 返回：匹配次数
-pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Value, allocator: Allocator) !Value {
+pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
+    _ = flags; // TODO: 实现flags支持
+    _ = offset; // TODO: 实现offset支持
+    
     if (!pattern_val.isString() or !subject_val.isString()) {
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
@@ -7065,16 +7072,16 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
         all_matches.deinit(allocator);
     }
 
-    var offset: usize = 0;
+    var match_offset: usize = 0;
     var match_count: i64 = 0;
 
     // 循环匹配所有
-    while (offset <= subject_str.length) {
+    while (match_offset <= subject_str.length) {
         const rc = pcre2_match_8(
             re,
             subject_str.data.ptr,
             subject_str.length,
-            @intCast(offset),
+            @intCast(match_offset),
             0,
             match_data,
             null,
@@ -7100,10 +7107,10 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
 
         // 移动到下一个位置
         const match_end = ovec[1];
-        if (match_end == offset) {
-            offset += 1; // 避免空匹配无限循环
+        if (match_end == match_offset) {
+            match_offset += 1; // 避免空匹配无限循环
         } else {
-            offset = match_end;
+            match_offset = match_end;
         }
     }
 
@@ -8469,6 +8476,8 @@ pub const ClassMethod = struct {
     is_public: bool = true,
     is_protected: bool = false,
     is_private: bool = false,
+    param_count: u16 = 0,
+    required_params: u16 = 0,
 };
 
 /// 类属性定义
@@ -12137,6 +12146,17 @@ pub fn php_rand(min: Value, max: Value) !Value {
 /// @param max 最大值（可选）
 /// @return 随机整数
 pub fn php_mt_rand(min: Value, max: Value) !Value {
+    // 确保mt_state已初始化
+    if (mt_state == null) {
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
+    }
+    
+    // mt_rand() - 无参数，返回0到MT_RAND_MAX
+    // mt_rand(min, max) - 返回min到max之间的随机数
+    if (min.isNull() and max.isNull()) {
+        // 无参数：返回0到2147483647
+        return Value.initInt(@intCast(mt_state.?.generate() & 0x7FFFFFFF));
+    }
     return php_rand(min, max);
 }
 
@@ -13945,7 +13965,16 @@ pub fn php_dirname(path: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// json_encode - 将PHP值编码为JSON字符串
-pub fn php_json_encode(value: Value, allocator: Allocator) !Value {
+pub fn php_json_encode(value: Value, flags: Value, depth: Value, allocator: Allocator) !Value {
+    // 解析flags（可选，默认0）
+    const flags_int = if (flags.isInt()) flags.asInt() else 0;
+    
+    // 解析depth（可选，默认512）
+    const depth_int = if (depth.isInt()) depth.asInt() else 512;
+    
+    _ = flags_int; // TODO: 实现flags支持（JSON_PRETTY_PRINT等）
+    _ = depth_int; // TODO: 实现depth检查
+    
     var buffer = std.ArrayListUnmanaged(u8){};
     defer buffer.deinit(allocator);
 
@@ -14927,11 +14956,7 @@ pub fn php_array_chunk(arr: Value, size: Value, preserve_keys: Value, allocator:
 }
 
 /// array_column - 返回数组中指定列的值
-pub fn php_array_column(arr: Value, column_key: Value, allocator: Allocator) !Value {
-    return php_array_column_with_index(arr, column_key, Value.initNull(), allocator);
-}
-
-pub fn php_array_column_with_index(arr: Value, column_key: Value, index_key: Value, allocator: Allocator) !Value {
+pub fn php_array_column(arr: Value, column_key: Value, index_key: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
 
     const php_arr = arr.asArray();
@@ -15230,8 +15255,10 @@ pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
     return Value.initArray(arr);
 }
 
-pub fn php_preg_match(pattern: Value, subject: Value, matches: Value, allocator: Allocator) !Value {
+pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
     _ = matches;
+    _ = flags;
+    _ = offset;
     _ = allocator;
     if (!pattern.isString() or !subject.isString()) return Value.initInt(0);
     
@@ -15250,8 +15277,10 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: Value, allocator:
     return Value.initInt(0);
 }
 
-pub fn php_preg_match_all(pattern: Value, subject: Value, matches: Value, allocator: Allocator) !Value {
+pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
     _ = matches;
+    _ = flags;
+    _ = offset;
     _ = allocator;
     if (!pattern.isString() or !subject.isString()) return Value.initInt(0);
     

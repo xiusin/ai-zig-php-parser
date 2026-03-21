@@ -1609,8 +1609,19 @@ pub const NativeLinker = struct {
             full_method_name,
         );
         defer self.allocator.free(escaped_method_name);
+        // 从IR函数定义获取参数计数
+        var pc: usize = 0;
+        var rp: usize = 0;
+        if (self.ir_module) |ir_mod| {
+            if (self.findFunction(ir_mod, full_method_name)) |func| {
+                pc = func.params.items.len;
+                for (func.params.items) |p| {
+                    if (!p.has_default and !p.is_variadic) rp += 1;
+                }
+            }
+        }
         try writer.print(
-            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {} }});\n",
+            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .param_count = {d}, .required_params = {d} }});\n",
             .{
                 meta_name,
                 exposed_name,
@@ -1619,6 +1630,8 @@ pub const NativeLinker = struct {
                 visibility == .public,
                 visibility == .protected,
                 visibility == .private,
+                pc,
+                rp,
             },
         );
     }
@@ -4344,7 +4357,19 @@ pub const NativeLinker = struct {
             try writer.writeAll("        },\n");
         }
 
-        try writer.writeAll("        else => unreachable,\n");
+        // 默认情况：如果prev_block不在预期范围内，使用第一个incoming的值
+        // 这可能发生在控制流优化或未初始化的prev_block场景
+        try writer.writeAll("        else => {\n");
+        try writer.writeAll("            // Fallback: use first incoming value\n");
+        for (phi_infos.items) |info| {
+            if (info.incoming.len > 0) {
+                try writer.print("            reg_{d} = reg_{d};\n", .{
+                    info.result_reg.id,
+                    info.incoming[0].value.id,
+                });
+            }
+        }
+        try writer.writeAll("        },\n");
         try writer.writeAll("    }\n");
     }
 
@@ -4429,7 +4454,18 @@ pub const NativeLinker = struct {
             // }
             try writer.writeAll(" },\n");
         }
-        try writer.writeAll("        else => unreachable,\n");
+        // 默认情况：使用第一个incoming值作为fallback
+        if (valid_incoming.items.len > 0) {
+            const first_src = valid_incoming.items[0].src;
+            const src_real_type = self.current_reg_types.?.get(first_src.id) orelse first_src.type_;
+            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+            try writer.writeAll("        else => { reg_");
+            try writer.print("{d} = ", .{result_reg.id});
+            try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, first_src.id);
+            try writer.writeAll("; },\n");
+        } else {
+            try writer.writeAll("        else => {},\n");
+        }
         try writer.writeAll("    }\n");
     }
 
@@ -7642,50 +7678,153 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
 
-                        // 特殊处理 preg_match_with_matches：第3个参数是引用
-                        if (std.mem.eql(u8, runtime_name, "preg_match_with_matches")) {
-                            if (op.args.len >= 3) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                        // 特殊处理 preg_match：第3个参数是引用，第4、5个参数可选
+                        if (std.mem.eql(u8, runtime_name, "preg_match") or std.mem.eql(u8, runtime_name, "php_preg_match")) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len >= 2) {
                                 // 前2个参数正常传递
                                 try self.writeValueArgs(writer, op.args[0..2]);
                                 try writer.writeAll(", ");
-                                // 第3个参数：如果是指针类型（alloca），直接传递
-                                const matches_arg = op.args[2];
-                                const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
-                                if (matches_type == .ptr) {
-                                    // alloca本身就是指针，直接传递
-                                    try writer.print("reg_{d}", .{matches_arg.id});
+                                
+                                // 第3个参数matches（引用）
+                                if (op.args.len >= 3) {
+                                    const matches_arg = op.args[2];
+                                    const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
+                                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                        alloca_regs.contains(matches_arg.id)
+                                    else
+                                        false;
+                                    
+                                    if (matches_type == .ptr or is_alloca) {
+                                        // 指针类型，直接传递
+                                        try writer.print("reg_{d}", .{matches_arg.id});
+                                    } else {
+                                        // 非指针类型：检查是否是常量（const.null等）
+                                        // 对于常量，使用临时变量；对于寄存器，取地址
+                                        const inst_for_arg = blk: {
+                                            if (self.current_function_for_resolve) |func| {
+                                                for (func.blocks.items) |block| {
+                                                    for (block.instructions.items) |inst_item| {
+                                                        if (inst_item.result) |res| {
+                                                            if (res.id == matches_arg.id) {
+                                                                break :blk inst_item;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            break :blk null;
+                                        };
+                                        
+                                        // 如果是常量指令（const_null, const_int等），使用临时变量
+                                        const is_const = if (inst_for_arg) |inst_item|
+                                            (inst_item.op == .const_null or inst_item.op == .const_int or inst_item.op == .const_float or inst_item.op == .const_bool or inst_item.op == .const_string)
+                                        else
+                                            false;
+                                        
+                                        if (is_const) {
+                                            try writer.writeAll("blk: { var tmp = reg_");
+                                            try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                        } else {
+                                            try writer.print("&reg_{d}", .{matches_arg.id});
+                                        }
+                                    }
                                 } else {
-                                    // 非指针类型，传递地址
-                                    try writer.print("&reg_{d}", .{matches_arg.id});
+                                    // 使用一个临时变量
+                                    try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");
                                 }
+                                try writer.writeAll(", ");
+                                
+                                // 第4个参数flags（可选，默认0）
+                                if (op.args.len >= 4) {
+                                    try self.writeRegRef(writer, op.args[3].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                try writer.writeAll(", ");
+                                
+                                // 第5个参数offset（可选，默认0）
+                                if (op.args.len >= 5) {
+                                    try self.writeRegRef(writer, op.args[4].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else {
                                 // 参数不足，fallback
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                             }
-                        } else if (std.mem.eql(u8, runtime_name, "preg_match_all")) {
-                            // preg_match_all与preg_match_with_matches相同处理
+                        } else if (std.mem.eql(u8, runtime_name, "preg_match_all") or std.mem.eql(u8, runtime_name, "php_preg_match_all")) {
+                            // preg_match_all与preg_match相同处理
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len >= 2) {
+                                try self.writeValueArgs(writer, op.args[0..2]);
+                                try writer.writeAll(", ");
+                                
+                                if (op.args.len >= 3) {
+                                    const matches_arg = op.args[2];
+                                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                        alloca_regs.contains(matches_arg.id)
+                                    else
+                                        false;
+                                    
+                                    if (is_alloca) {
+                                        // 真正的alloca寄存器
+                                        try writer.print("reg_{d}", .{matches_arg.id});
+                                    } else {
+                                        // 非alloca：使用临时变量（因为可能是未定义的ptr寄存器）
+                                        try writer.writeAll("blk: { var tmp = reg_");
+                                        try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                    }
+                                } else {
+                                    try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");
+                                }
+                                try writer.writeAll(", ");
+                                
+                                if (op.args.len >= 4) {
+                                    try self.writeRegRef(writer, op.args[3].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                try writer.writeAll(", ");
+                                
+                                if (op.args.len >= 5) {
+                                    try self.writeRegRef(writer, op.args[4].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else {
+                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
+                            }
+                        } else if (std.mem.eql(u8, runtime_name, "preg_match_with_matches")) {
+                            // 旧版本兼容：preg_match_with_matches
                             if (op.args.len >= 3) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
                                 // 前2个参数正常传递
                                 try self.writeValueArgs(writer, op.args[0..2]);
                                 try writer.writeAll(", ");
-                                // 第3个参数：如果是指针类型（alloca），直接传递
+                                // 第3个参数：引用参数
                                 const matches_arg = op.args[2];
-                                const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
-                                if (matches_type == .ptr) {
+                                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                    alloca_regs.contains(matches_arg.id)
+                                else
+                                    false;
+                                
+                                // 只有真正的alloca寄存器（*Value）才直接传递，其他都取地址
+                                if (is_alloca) {
                                     try writer.print("reg_{d}", .{matches_arg.id});
                                 } else {
                                     try writer.print("&reg_{d}", .{matches_arg.id});
                                 }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                             } else {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                // 参数不足，fallback
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
                                 try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.writeAll(", blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                             }
                         } else if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -7707,6 +7846,18 @@ pub const NativeLinker = struct {
                                 try writer.writeAll(", runtime.Value.initNull()");
                             }
                             try writer.writeAll(", runtime.runtime_allocator);\n");
+                        } else if (std.mem.eql(u8, runtime_name, "php_mt_rand") or std.mem.eql(u8, runtime_name, "php_rand")) {
+                            // mt_rand(min = null, max = null) - 不需要allocator
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len == 0) {
+                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
+                            } else if (op.args.len == 1) {
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(", runtime.Value.initNull()");
+                            } else {
+                                try self.writeValueArgs(writer, op.args);
+                            }
+                            try writer.writeAll(");\n");
                         } else if (self.functionNeedsAllocator(op.func_name)) {
                             if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
                                 if (op.args.len == 0) {
@@ -7808,6 +7959,32 @@ pub const NativeLinker = struct {
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initInt(1)");
                                     }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_json_encode")) {
+                                // json_encode(value, flags = 0, depth = 512)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(512)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initInt(512)");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initInt(512)");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_column")) {
+                                // array_column(arr, column_key, index_key = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len >= 2) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initNull()");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_array_iter_init") or
