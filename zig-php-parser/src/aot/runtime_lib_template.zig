@@ -416,6 +416,12 @@ fn initPredefinedConstants() !void {
         const fdig_key = try runtime_allocator.dupe(u8, "PHP_FLOAT_DIG");
         try constants.put(fdig_key, Value.initInt(15));
 
+        // INF和NAN常量
+        const inf_key = try runtime_allocator.dupe(u8, "INF");
+        try constants.put(inf_key, Value.initFloat(std.math.inf(f64)));
+        const nan_key = try runtime_allocator.dupe(u8, "NAN");
+        try constants.put(nan_key, Value.initFloat(std.math.nan(f64)));
+
         const eol_key = try runtime_allocator.dupe(u8, "PHP_EOL");
         const eol_str = try PHPString.init(runtime_allocator, "\n");
         try constants.put(eol_key, Value.initString(eol_str));
@@ -8341,6 +8347,32 @@ pub fn php_is_callable(val: Value) !Value {
         }
     }
     return Value.initBool(false);
+}
+
+/// is_scalar - 检查是否为标量类型（int, float, string, bool）
+pub fn php_is_scalar(val: Value) !Value {
+    return Value.initBool(val.isInt() or val.isFloat() or val.isString() or val.isBool());
+}
+
+/// is_infinite - 检查浮点数是否为无穷大
+pub fn php_is_infinite(val: Value) !Value {
+    if (!val.isFloat()) return Value.initBool(false);
+    const f = val.asFloat();
+    return Value.initBool(std.math.isInf(f));
+}
+
+/// is_nan - 检查浮点数是否为NaN
+pub fn php_is_nan(val: Value) !Value {
+    if (!val.isFloat()) return Value.initBool(false);
+    const f = val.asFloat();
+    return Value.initBool(std.math.isNan(f));
+}
+
+/// is_finite - 检查浮点数是否为有限值
+pub fn php_is_finite(val: Value) !Value {
+    if (!val.isFloat()) return Value.initBool(true); // 非浮点数视为有限
+    const f = val.asFloat();
+    return Value.initBool(!std.math.isInf(f) and !std.math.isNan(f));
 }
 
 /// unset - 删除变量（立即释放引用）
