@@ -1132,6 +1132,15 @@ pub const NativeLinker = struct {
             // 只处理is_*类型检查函数（单参数，无allocator）
             if (!std.mem.startsWith(u8, key, "is_")) continue;
             if (info.needs_allocator) continue;
+            
+            // is_subclass_of 需要 2 个参数，特殊处理
+            if (std.mem.eql(u8, key, "is_subclass_of")) {
+                try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{key});
+                try writer.print("        if (args.len >= 2) return try runtime.{s}(args[0], args[1]);\n", .{info.runtime_name});
+                try writer.print("        return runtime.Value.initNull();\n    }}\n", .{});
+                continue;
+            }
+            
             try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{key});
             try writer.print("        if (args.len > 0) return try runtime.{s}(args[0]);\n", .{info.runtime_name});
             try writer.print("        return runtime.Value.initNull();\n    }}\n", .{});
@@ -1726,7 +1735,8 @@ pub const NativeLinker = struct {
 
         for (ir_module.types.items, 0..) |td_ptr, idx| {
             const td = td_ptr.*;
-            if (td.kind != .class and td.kind != .@"enum") continue;
+            // 收集所有类型：class, interface, trait, enum
+            if (td.kind != .class and td.kind != .@"enum" and td.kind != .interface and td.kind != .trait) continue;
             if (class_count >= 64) break;
             class_names[class_count] = td.name;
             class_short_names[class_count] = getLastPartOfClassName(td.name);
@@ -1760,6 +1770,17 @@ pub const NativeLinker = struct {
             defer self.allocator.free(escaped_full_cname);
             // ✅ 使用短名作为变量名，但注册时使用完整类名
             try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ short_cname, escaped_full_cname });
+
+            if (type_def_idx[ci]) |tdi| {
+                const td_ptr = ir_module.types.items[tdi];
+                const td = td_ptr.*;
+                // 设置 is_interface 和 is_trait 标志
+                if (td.kind == .interface) {
+                    try writer.print("    {s}_meta.is_interface = true;\n", .{short_cname});
+                } else if (td.kind == .trait) {
+                    try writer.print("    {s}_meta.is_trait = true;\n", .{short_cname});
+                }
+            }
 
             if (type_def_idx[ci]) |tdi| {
                 const td_ptr = ir_module.types.items[tdi];
@@ -2265,8 +2286,11 @@ pub const NativeLinker = struct {
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
 
         .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },
+        .{ "interface_exists", bi(.{ .runtime_name = "php_interface_exists", .needs_allocator = true }) },
+        .{ "trait_exists", bi(.{ .runtime_name = "php_trait_exists", .needs_allocator = true }) },
         .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
         .{ "property_exists", bi(.{ .runtime_name = "php_property_exists", .needs_allocator = false }) },
+        .{ "is_subclass_of", bi(.{ .runtime_name = "php_is_subclass_of", .needs_allocator = false }) },
         .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
         .{ "get_parent_class", .{ .runtime_name = "php_get_parent_class", .needs_allocator = true } },
         .{ "serialize", bi(.{ .runtime_name = "php_serialize", .needs_allocator = true }) },

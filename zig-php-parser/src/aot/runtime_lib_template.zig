@@ -8574,6 +8574,8 @@ pub const ClassMeta = struct {
     static_properties: std.StringHashMap(Value),
     is_abstract: bool = false,
     is_final: bool = false,
+    is_interface: bool = false,  // 是否为接口
+    is_trait: bool = false,      // 是否为trait
     allocator: Allocator,
 
     /// 魔法函数指针
@@ -11318,6 +11320,93 @@ pub fn class_exists(ctx: Value, args: []const Value, allocator: Allocator) anyer
     _ = ctx;
     if (args.len < 1) return error.MissingArgument;
     return php_class_exists(args[0], allocator);
+}
+
+/// 检查接口是否存在
+pub fn php_interface_exists(interface_name: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!interface_name.isString()) return Value.initBool(false);
+    const name = interface_name.asString().data;
+    // 在class_registry中查找，检查是否为接口
+    if (findClass(name)) |meta| {
+        return Value.initBool(meta.is_interface);
+    }
+    return Value.initBool(false);
+}
+
+pub fn interface_exists(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.MissingArgument;
+    return php_interface_exists(args[0], allocator);
+}
+
+/// 检查trait是否存在
+pub fn php_trait_exists(trait_name: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!trait_name.isString()) return Value.initBool(false);
+    const name = trait_name.asString().data;
+    // 在class_registry中查找，检查是否为trait
+    if (findClass(name)) |meta| {
+        return Value.initBool(meta.is_trait);
+    }
+    return Value.initBool(false);
+}
+
+pub fn trait_exists(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.MissingArgument;
+    return php_trait_exists(args[0], allocator);
+}
+
+/// 检查是否是某个类的子类
+pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
+    // 第一个参数可以是对象或类名字符串
+    var child_class_name: []const u8 = undefined;
+    var child_meta: ?*const ClassMeta = null;
+    
+    if (Value_isObject(child)) {
+        const obj = Value_asObject(child);
+        child_class_name = obj.class_name;
+        child_meta = obj.class_meta;
+    } else if (child.isString()) {
+        child_class_name = child.asString().data;
+        child_meta = findClass(child_class_name);
+    } else {
+        return Value.initBool(false);
+    }
+    
+    // 第二个参数必须是类名字符串
+    if (!parent.isString()) return Value.initBool(false);
+    const parent_class_name = parent.asString().data;
+    
+    // 如果子类元数据不存在，返回 false
+    if (child_meta == null) return Value.initBool(false);
+    
+    // 检查是否相同（PHP 的 is_subclass_of 不包括自身）
+    if (std.mem.eql(u8, child_class_name, parent_class_name)) {
+        return Value.initBool(false);
+    }
+    
+    // 检查继承链
+    if (child_meta.?.parent) |parent_meta| {
+        if (parent_meta.isSubclassOf(parent_class_name)) {
+            return Value.initBool(true);
+        }
+    }
+    
+    // 检查接口实现
+    if (child_meta.?.implementsInterface(parent_class_name)) {
+        return Value.initBool(true);
+    }
+    
+    return Value.initBool(false);
+}
+
+pub fn is_subclass_of(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.MissingArgument;
+    return php_is_subclass_of(args[0], args[1]);
 }
 
 /// instanceof 检查
