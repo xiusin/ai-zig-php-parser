@@ -9158,6 +9158,10 @@ pub const NativeLinker = struct {
                         try writer.print("    try setGlobalVar(\"{s}\", reg_{d}.*);\n", .{ escaped_name, val.id });
                     } else {
                         try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ escaped_name, val.id });
+                        // setGlobalVar 会 retain 值，所以立即 release 原寄存器以避免双重引用
+                        // 这样全局变量表持有唯一引用
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{val.id});
+                        try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{val.id});
                     }
                 }
             },

@@ -10785,10 +10785,15 @@ pub const PHPObject = struct {
             // 简单检查：如果class_registry已被清理，跳过__destruct
             if (class_registry != null) {
                 if (meta.findMethodLookup("__destruct")) |lookup| {
+                    // 临时增加引用计数，防止析构函数内部的retain/release导致无限递归
+                    // 析构函数执行期间，对象的refcount应该保持为1
+                    self.ref_count = 1;
                     const this_val = Value_initObject(self);
                     const guard = ClassContext.init(meta, lookup.owner);
                     defer guard.deinit();
                     _ = lookup.method.func(this_val, &.{}, self.allocator) catch {};
+                    // 析构函数执行完毕，恢复refcount为0以继续销毁流程
+                    self.ref_count = 0;
                 }
             }
         }
