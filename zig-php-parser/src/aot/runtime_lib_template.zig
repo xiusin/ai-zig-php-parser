@@ -14528,9 +14528,17 @@ pub fn php_empty(val: Value) !Value {
     return Value.initBool(false);
 }
 
-/// isset - 检查变量是否已设置且非null
-pub fn php_isset(val: Value) !Value {
-    return Value.initBool(!val.isNull());
+/// isset - 检查变量是否已设置且非null（支持多个参数）
+pub fn php_isset(args: []const Value) !Value {
+    // isset()需要至少1个参数
+    if (args.len == 0) return Value.initBool(false);
+    
+    // 所有参数都必须非null才返回true
+    for (args) |val| {
+        if (val.isNull()) return Value.initBool(false);
+    }
+    
+    return Value.initBool(true);
 }
 
 pub fn empty(val: Value) !Value {
@@ -14538,7 +14546,8 @@ pub fn empty(val: Value) !Value {
 }
 
 pub fn isset(val: Value) !Value {
-    return php_isset(val);
+    // 单参数版本的包装器
+    return Value.initBool(!val.isNull());
 }
 
 // ============================================================================

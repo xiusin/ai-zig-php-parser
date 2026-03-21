@@ -2273,6 +2273,7 @@ pub const NativeLinker = struct {
         .{ "str_repeat", bi(.{ .runtime_name = "php_str_repeat", .needs_allocator = true }) },
         .{ "str_pad", bi(.{ .runtime_name = "php_str_pad", .needs_allocator = true }) },
         .{ "strstr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) },
+        .{ "strchr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) }, // strchr是strstr的别名
         .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
         .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
@@ -7230,60 +7231,30 @@ pub const NativeLinker = struct {
             },
             .identical => |op| {
                 if (inst.result) |reg| {
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
 
-                    // 检查实际声明类型，不是推断类型
-                    if (type_tag == .php_value) {
-                        // 结果是 Value，不要 .toBool()
-                        try writer.print("    reg_{d} = try runtime.php_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = (try runtime.php_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(")).toBool();\n");
-                    } else {
-                        try writer.print("    reg_{d} = try runtime.php_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    }
+                    // 所有寄存器都声明为runtime.Value，所以总是生成返回Value的代码
+                    // 不再根据type_tag判断，因为会导致类型不匹配
+                    try writer.print("    reg_{d} = try runtime.php_identical(", .{reg.id});
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(");\n");
                 }
             },
             .not_identical => |op| {
                 if (inst.result) |reg| {
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
 
-                    // 检查实际声明类型，不是推断类型
-                    if (type_tag == .php_value) {
-                        // 结果是 Value，不要 .toBool()
-                        try writer.print("    reg_{d} = try runtime.php_not_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = (try runtime.php_not_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(")).toBool();\n");
-                    } else {
-                        try writer.print("    reg_{d} = try runtime.php_not_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    }
+                    // 所有寄存器都声明为runtime.Value，所以总是生成返回Value的代码
+                    // 不再根据type_tag判断，因为会导致类型不匹配
+                    try writer.print("    reg_{d} = try runtime.php_not_identical(", .{reg.id});
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(");\n");
                 }
             },
             .lt => |op| {
@@ -8084,6 +8055,28 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0)");
                                 }
                                 try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_isset")) {
+                                // isset(...$vars) - 可变参数，传递数组切片
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
+                                    }
+                                }
+                                try writer.writeAll("});\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_unset")) {
+                                // unset(...$vars) - 可变参数，传递数组切片
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
+                                    }
+                                }
+                                try writer.writeAll("}, runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_str_word_count")) {
                                 // str_word_count(str, format = 0, charlist = null)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
