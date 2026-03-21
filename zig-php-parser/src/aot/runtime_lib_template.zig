@@ -8862,6 +8862,7 @@ pub const ClassMeta = struct {
             "Error",
             "ArithmeticError",
             "DivisionByZeroError",
+            "UnhandledMatchError",
         };
         for (exception_subclasses) |name| {
             const child = try ClassMeta.init(allocator, name);

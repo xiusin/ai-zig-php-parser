@@ -6550,10 +6550,15 @@ pub const IRGenerator = struct {
             try arm_blocks.append(self.allocator, try self.createBlock("match_arm"));
         }
 
-        // default arm 块
+        // default arm 块或 unhandled 块
         var default_block: ?*BasicBlock = null;
+        var unhandled_block: ?*BasicBlock = null;
+        
         if (match_data.default) |_| {
             default_block = try self.createBlock("match_default");
+        } else {
+            // 没有default分支时，创建unhandled块用于抛出UnhandledMatchError
+            unhandled_block = try self.createBlock("match_unhandled");
         }
 
         // 跳转到第一个检查
@@ -6571,13 +6576,15 @@ pub const IRGenerator = struct {
             // 在检查块中生成条件（支持多值：1, 2, 3 => ...）
             self.setCurrentBlock(check_block);
 
-            // 下一个检查或 default
+            // 下一个检查或 default 或 unhandled
             const next_block = if (i + 1 < check_blocks.items.len)
                 check_blocks.items[i + 1]
             else if (default_block) |db|
                 db
+            else if (unhandled_block) |ub|
+                ub
             else
-                merge_block;
+                unreachable; // 不应该到这里
 
             if (arm_data.conditions.len == 1) {
                 // 单值：直接比较
@@ -6640,6 +6647,31 @@ pub const IRGenerator = struct {
             const result_reg = try self.generateExpression(default_data.body);
             try phi_incoming.append(self.allocator, .{ .value = result_reg, .block = default_block.? });
             self.setTerminator(.{ .br = merge_block });
+        } else if (unhandled_block) |ub| {
+            // 没有default分支：生成UnhandledMatchError
+            self.setCurrentBlock(ub);
+            
+            // 调用 throwThrowable("UnhandledMatchError", "Unhandled match case", runtime_allocator)
+            const error_class_id = try self.module.?.internString("UnhandledMatchError");
+            const error_class_reg = try self.emitWithResult(.{ .const_string = error_class_id }, .php_value);
+            
+            const error_msg_id = try self.module.?.internString("Unhandled match case");
+            const error_msg_reg = try self.emitWithResult(.{ .const_string = error_msg_id }, .php_value);
+            
+            // throwThrowable接受3个参数：class_name, message, allocator
+            // 在codegen时会生成：throwThrowable(class_name, message, runtime_allocator)
+            const call_args = try self.allocator.alloc(Register, 2);
+            call_args[0] = error_class_reg;
+            call_args[1] = error_msg_reg;
+            
+            const exception_reg = try self.emitWithResult(.{ .call = .{
+                .func_name = "throwThrowable",
+                .args = call_args,
+                .return_type = .php_value,
+            } }, .php_value);
+            
+            // 抛出异常
+            self.setTerminator(.{ .throw = exception_reg });
         }
 
         // Merge

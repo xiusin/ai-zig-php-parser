@@ -2515,6 +2515,9 @@ pub const NativeLinker = struct {
         // Socket 函数
         .{ "socket_create_pair", bi(.{ .runtime_name = "php_socket_create_pair", .needs_allocator = true }) },
         .{ "socket_close", bi(.{ .runtime_name = "php_socket_close", .needs_allocator = false }) },
+        
+        // 异常处理函数
+        .{ "throwThrowable", bi(.{ .runtime_name = "throwThrowable", .needs_allocator = true }) },
     }));
 
     fn bi(info: BuiltinInfo) BuiltinInfo {
@@ -7678,8 +7681,22 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
 
-                        // 特殊处理 preg_match：第3个参数是引用，第4、5个参数可选
-                        if (std.mem.eql(u8, runtime_name, "preg_match") or std.mem.eql(u8, runtime_name, "php_preg_match")) {
+                        // 特殊处理 throwThrowable：需要将Value参数转换为[]const u8
+                        if (std.mem.eql(u8, runtime_name, "throwThrowable")) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len >= 2) {
+                                // 第1个参数：class_name (Value -> []const u8)
+                                const class_arg = op.args[0];
+                                try writer.print("reg_{d}.asString().data, ", .{class_arg.id});
+                                
+                                // 第2个参数：message (Value -> []const u8)
+                                const msg_arg = op.args[1];
+                                try writer.print("reg_{d}.asString().data", .{msg_arg.id});
+                            } else {
+                                try writer.writeAll("\"UnhandledMatchError\", \"Unhandled match case\"");
+                            }
+                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                        } else if (std.mem.eql(u8, runtime_name, "preg_match") or std.mem.eql(u8, runtime_name, "php_preg_match")) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                             if (op.args.len >= 2) {
                                 // 前2个参数正常传递
