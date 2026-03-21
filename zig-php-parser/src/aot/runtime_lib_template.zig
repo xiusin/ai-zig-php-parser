@@ -14046,6 +14046,37 @@ pub fn php_gettype(val: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
+/// settype - 改变变量的类型
+/// 注意：这个函数返回转换后的值，调用者需要将其赋值回变量
+pub fn php_settype(var_val: Value, type_val: Value, allocator: Allocator) !Value {
+    if (!type_val.isString()) {
+        return error.InvalidArgument;
+    }
+    
+    const type_name = type_val.asString().data;
+    
+    // 根据类型名进行转换
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+        return Value.initBool(var_val.toBool());
+    } else if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+        return Value.initInt(var_val.toInt());
+    } else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) {
+        return Value.initFloat(var_val.toFloat());
+    } else if (std.mem.eql(u8, type_name, "string")) {
+        const str = try var_val.toString(allocator);
+        return Value.initString(str);
+    } else if (std.mem.eql(u8, type_name, "array")) {
+        return try php_cast_array(var_val);
+    } else if (std.mem.eql(u8, type_name, "object")) {
+        return try php_cast_object(var_val);
+    } else if (std.mem.eql(u8, type_name, "null")) {
+        return Value.initNull();
+    } else {
+        // 未知类型，返回 false
+        return Value.initBool(false);
+    }
+}
+
 // ============================================================================
 // 文件函数
 // ============================================================================
