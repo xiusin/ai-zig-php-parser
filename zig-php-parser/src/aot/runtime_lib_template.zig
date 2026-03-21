@@ -14267,6 +14267,35 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
             }
             try buffer.append(allocator, '}');
         }
+    } else if (Value_isObject(value)) {
+        // 对象序列化为JSON对象
+        const obj = Value_asObject(value);
+        try buffer.append(allocator, '{');
+        var first = true;
+        var it = obj.properties.iterator();
+        while (it.next()) |entry| {
+            if (!first) try buffer.append(allocator, ',');
+            
+            // 写入键
+            try buffer.append(allocator, '"');
+            for (entry.key_ptr.*) |c| {
+                switch (c) {
+                    '"' => try buffer.appendSlice(allocator, "\\\""),
+                    '\\' => try buffer.appendSlice(allocator, "\\\\"),
+                    '\n' => try buffer.appendSlice(allocator, "\\n"),
+                    '\r' => try buffer.appendSlice(allocator, "\\r"),
+                    '\t' => try buffer.appendSlice(allocator, "\\t"),
+                    else => try buffer.append(allocator, c),
+                }
+            }
+            try buffer.append(allocator, '"');
+            try buffer.appendSlice(allocator, ":");
+            
+            // 写入值
+            try jsonEncodeValue(entry.value_ptr.*, buffer, allocator);
+            first = false;
+        }
+        try buffer.append(allocator, '}');
     } else {
         try buffer.appendSlice(allocator, "null");
     }
