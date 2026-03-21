@@ -207,6 +207,7 @@ pub const TypeDef = struct {
         name: []const u8,
         visibility: Visibility,
         is_static: bool,
+        is_abstract: bool = false,
     };
 
     pub const Constant = struct {

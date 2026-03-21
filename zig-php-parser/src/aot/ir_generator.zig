@@ -1305,6 +1305,7 @@ pub const IRGenerator = struct {
                             .name = try self.allocator.dupe(u8, method_name_str),
                             .visibility = .public,
                             .is_static = false,
+                            .is_abstract = false,
                         });
                         // Generate hook method body
                         const prev_function = self.current_function;
@@ -1819,6 +1820,7 @@ pub const IRGenerator = struct {
             .name = self.getString(method_data.name),
             .visibility = self.getVisibility(method_data.modifiers),
             .is_static = method_data.modifiers.is_static,
+            .is_abstract = method_data.modifiers.is_abstract,
         };
     }
 
