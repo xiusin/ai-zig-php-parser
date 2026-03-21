@@ -7996,6 +7996,20 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initNull()");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_extract")) {
+                                // extract(arr, flags = EXTR_OVERWRITE, prefix = "")
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_array_iter_init") or
                                 std.mem.eql(u8, runtime_name, "php_array_iter_key") or
                                 std.mem.eql(u8, runtime_name, "php_array_iter_free"))
@@ -8089,6 +8103,20 @@ pub const NativeLinker = struct {
                                     }
                                 } else {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_mkdir")) {
+                                // mkdir(dirname, permissions = 0777, recursive = false)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(0o777), runtime.Value.initBool(false)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0o777), runtime.Value.initBool(false)");
                                 }
                                 try writer.writeAll(");\n");
                             } else if (std.mem.eql(u8, runtime_name, "aot_function_exists")) {

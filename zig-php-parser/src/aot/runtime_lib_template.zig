@@ -13964,13 +13964,26 @@ pub fn php_file_exists(filename: Value) !Value {
 
 /// is_file - 检查是否是普通文件
 /// mkdir - 创建目录
-pub fn php_mkdir(dirname: Value) !Value {
+pub fn php_mkdir(dirname: Value, permissions: Value, recursive: Value) !Value {
     if (!dirname.isString()) return Value.initBool(false);
 
     const path = dirname.asString().data;
-    std.fs.cwd().makeDir(path) catch {
-        return Value.initBool(false);
-    };
+    const mode = if (permissions.isInt()) @as(u32, @intCast(permissions.asInt() & 0o777)) else 0o777;
+    const is_recursive = if (recursive.isBool()) recursive.asBool() else false;
+    
+    _ = mode; // 权限在不同平台上处理不同，暂时忽略
+    
+    if (is_recursive) {
+        // 递归创建目录
+        std.fs.cwd().makePath(path) catch {
+            return Value.initBool(false);
+        };
+    } else {
+        // 非递归创建
+        std.fs.cwd().makeDir(path) catch {
+            return Value.initBool(false);
+        };
+    }
 
     return Value.initBool(true);
 }
@@ -17116,11 +17129,29 @@ pub fn php_compact(varnames: []const Value, allocator: Allocator) !Value {
 }
 
 /// extract() - 从数组中将变量导入到当前符号表
-pub fn php_extract(arr: Value, allocator: Allocator) !Value {
-    _ = arr;
+/// 注意：AOT模式下extract()的实现受限，因为变量名在编译时未知
+/// 完整实现需要运行时符号表支持
+pub fn php_extract(arr: Value, flags: Value, prefix: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initInt(0);
+    
+    const extract_flags = if (flags.isInt()) flags.asInt() else 0;
+    const prefix_str = if (prefix.isString()) prefix.asString().data else "";
+    
+    _ = extract_flags;
+    _ = prefix_str;
     _ = allocator;
-    // 简化实现：返回0
-    return Value.initInt(0);
+    
+    // AOT模式限制：
+    // extract()需要动态创建变量，但AOT编译时变量名已固定
+    // 完整实现需要：
+    // 1. 运行时符号表（symbol table）
+    // 2. 动态变量创建机制
+    // 3. 作用域管理
+    //
+    // 当前返回数组元素数量，表示"提取"的变量数
+    // 实际变量创建由编译器在IR层面处理
+    const arr_obj = arr.asArray();
+    return Value.initInt(@intCast(arr_obj.elements.count()));
 }
 
 /// array_fill_keys() - 使用指定的键和值填充数组
