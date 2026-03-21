@@ -1370,8 +1370,14 @@ pub const Parser = struct {
             first_by_ref = true;
         }
 
-        // 解析第一个表达式
-        const first_expr = try self.parseExpression(0);
+        // 检查是否是 list() 解构语法
+        const is_list_destruct = self.curr.tag == .k_list;
+        
+        // 解析第一个表达式（可能是 list() 解构）
+        const first_expr = if (is_list_destruct)
+            try self.parseListExpression()
+        else
+            try self.parseExpression(0);
 
         // 检查是否有 => 符号（键值对语法）
         var key: ?ast.Node.Index = null;
@@ -1388,7 +1394,12 @@ pub const Parser = struct {
                 _ = try self.eat(.ampersand);
                 value_by_ref = true;
             }
-            value = try self.parseExpression(0);
+            
+            // 检查值是否也是 list() 解构
+            value = if (self.curr.tag == .k_list)
+                try self.parseListExpression()
+            else
+                try self.parseExpression(0);
         } else {
             // 没有 => 符号，第一个表达式是值
             value = first_expr;
