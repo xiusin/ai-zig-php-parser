@@ -230,6 +230,7 @@ pub const IRGenerator = struct {
 
     fn putRefVar(self: *Self, name: []const u8) !void {
         if (!self.isRefVar(name)) {
+            std.log.err("[DEBUG] Adding ref_var: '{s}'", .{name});
             try self.ref_vars.append(self.allocator, name);
         }
     }
@@ -270,6 +271,7 @@ pub const IRGenerator = struct {
     }
 
     fn flushEntryAllocas(self: *Self, entry_block: *BasicBlock) !void {
+        std.debug.print("[DEBUG] flushEntryAllocas: flushing {d} allocas\n", .{self.entry_allocas.items.len});
         if (self.entry_allocas.items.len == 0) return;
 
         var new_insts: std.ArrayListUnmanaged(*Instruction) = .{};
@@ -280,6 +282,7 @@ pub const IRGenerator = struct {
         entry_block.instructions = new_insts;
 
         self.entry_allocas.clearRetainingCapacity();
+        std.debug.print("[DEBUG] flushEntryAllocas: done\n", .{});
     }
 
     /// Generate IR module from AST (assumes root node at index 0)
@@ -530,8 +533,11 @@ pub const IRGenerator = struct {
     /// Get or create a register for a variable
     fn getOrCreateVarRegister(self: *Self, name: []const u8, type_: Type) !Register {
         if (self.getVarRegister(name)) |reg| {
+            std.debug.print("[DEBUG] getOrCreateVarRegister('{s}'): found existing reg_{d}\n", .{name, reg.id});
             return reg;
         }
+
+        std.debug.print("[DEBUG] getOrCreateVarRegister('{s}'): creating new alloca\n", .{name});
 
         // Allocate stack space for the variable
         // 统一使用 php_value 类型，避免类型不匹配
@@ -551,6 +557,11 @@ pub const IRGenerator = struct {
         // 检查变量是否是引用变量，如果是则设置 no_optimize 防止 mem2reg 优化
         const is_ref_var = self.isRefVar(name);
         
+        // DEBUG: 输出引用变量信息
+        if (is_ref_var) {
+            std.debug.print("[DEBUG] Variable '{s}' is marked as ref_var, no_optimize=true\n", .{name});
+        }
+        
         const inst = try self.allocator.create(Instruction);
         inst.* = .{
             .result = result,
@@ -565,6 +576,7 @@ pub const IRGenerator = struct {
 
         // Prepend to entry block to ensure it's before any potential use
         try self.entry_allocas.append(self.allocator, inst);
+        std.debug.print("[DEBUG] Added alloca for '{s}' (reg_{d}) to entry_allocas, count={d}\n", .{name, result.id, self.entry_allocas.items.len});
 
         // 记录变量名到 Function（在优化后仍可用）
         try func.var_names.put(func.allocator, result.id, name);
@@ -1939,11 +1951,13 @@ pub const IRGenerator = struct {
             const prev_class = self.current_class;
             const prev_block = self.current_block;
             const prev_var_registers = self.var_registers;
+            const prev_entry_allocas = self.entry_allocas;
 
             self.current_function = func;
             self.current_class = class_name;
             self.var_registers = .{};
             self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
+            self.entry_allocas = .{};
             self.block_counter = 0;
 
             const entry = try func.createBlock("entry");
@@ -2013,9 +2027,13 @@ pub const IRGenerator = struct {
                 self.setTerminator(.{ .ret = null });
             }
 
+            try self.flushEntryAllocas(entry);
+
             self.current_has_this_param = false; // 重置标志
             self.var_registers.deinit(self.allocator);
+            self.entry_allocas.deinit(self.allocator);
             self.var_registers = prev_var_registers;
+            self.entry_allocas = prev_entry_allocas;
             self.current_function = prev_function;
             self.current_class = prev_class;
             self.current_block = prev_block;
@@ -2436,6 +2454,7 @@ pub const IRGenerator = struct {
             
             // 如果是引用，先标记变量为引用变量（在创建 alloca 之前）
             if (foreach_data.value_by_ref) {
+                std.debug.print("[DEBUG] foreach value_by_ref=true, calling putRefVar('{s}')\n", .{value_name});
                 try self.putRefVar(value_name);
             }
             
