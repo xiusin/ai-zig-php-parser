@@ -174,12 +174,12 @@ trait B {
 
 class Conflict {
     use A, B {
+        A::test insteadof B;
         B::test as testB;
-        A::test as testA;
     }
 
     public function run(): string {
-        return "A: " . $this->testA() . ", B: " . $this->testB();
+        return "A: " . $this->test() . ", B: " . $this->testB();
     }
 }
 
