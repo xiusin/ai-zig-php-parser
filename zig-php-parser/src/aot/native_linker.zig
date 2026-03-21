@@ -1310,6 +1310,23 @@ pub const NativeLinker = struct {
             lhs.is_static == rhs.is_static;
     }
 
+    fn isAbstractTraitMethod(self: *Self, method: ComposedTraitMethod) bool {
+        if (self.ir_module) |module| {
+            // 构造完整的方法名：使用function_trait（实际定义方法的trait）
+            const full_name = std.fmt.allocPrint(
+                self.allocator,
+                "{s}::{s}",
+                .{ method.function_trait, method.original_name },
+            ) catch return false;
+            defer self.allocator.free(full_name);
+            
+            // 如果找不到对应的Function，说明是抽象方法
+            const has_implementation = module.findFunction(full_name) != null;
+            return !has_implementation;
+        }
+        return false;
+    }
+
     fn appendTraitProperty(
         self: *Self,
         list: *std.ArrayListUnmanaged(ComposedTraitProperty),
@@ -1345,11 +1362,40 @@ pub const NativeLinker = struct {
         list: *std.ArrayListUnmanaged(ComposedTraitMethod),
         method: ComposedTraitMethod,
     ) !void {
-        for (list.items) |existing| {
+        for (list.items, 0..) |existing, idx| {
             if (!std.mem.eql(u8, existing.exposed_name, method.exposed_name)) {
                 continue;
             }
+            
+            // 如果方法完全等价，跳过
             if (self.traitMethodsEquivalent(existing, method)) return;
+            
+            // 检查是否是抽象方法与具体实现的组合
+            const existing_is_abstract = self.isAbstractTraitMethod(existing);
+            const method_is_abstract = self.isAbstractTraitMethod(method);
+            
+            // DEBUG
+            std.debug.print("Trait method conflict check:\n", .{});
+            std.debug.print("  Existing: {s}::{s} (function_trait={s}, abstract={any})\n", .{
+                existing.provider_trait, existing.exposed_name, existing.function_trait, existing_is_abstract
+            });
+            std.debug.print("  New: {s}::{s} (function_trait={s}, abstract={any})\n", .{
+                method.provider_trait, method.exposed_name, method.function_trait, method_is_abstract
+            });
+            
+            if (existing_is_abstract and !method_is_abstract) {
+                // 现有方法是抽象的，新方法是具体的 -> 用具体实现替换抽象方法
+                std.debug.print("  -> Replacing abstract with concrete\n", .{});
+                list.items[idx] = method;
+                return;
+            } else if (!existing_is_abstract and method_is_abstract) {
+                // 现有方法是具体的，新方法是抽象的 -> 保留具体实现，忽略抽象方法
+                std.debug.print("  -> Keeping concrete, ignoring abstract\n", .{});
+                return;
+            }
+            
+            // 两个都是具体实现，或两个都是抽象方法 -> 冲突
+            std.debug.print("  -> CONFLICT!\n", .{});
             return error.TraitMethodConflict;
         }
         try list.append(self.allocator, method);
