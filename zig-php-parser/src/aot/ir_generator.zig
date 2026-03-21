@@ -386,6 +386,7 @@ pub const IRGenerator = struct {
         self.current_block = null;
         self.var_registers = .{};
         self.var_usage = .{};
+        self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
         self.entry_allocas = .{};
         self.block_counter = 0;
 
@@ -546,10 +547,19 @@ pub const IRGenerator = struct {
         const func = self.current_function orelse return error.NoCurrentFunction;
 
         const result = func.newRegister(ptr_type);
+        
+        // 检查变量是否是引用变量，如果是则设置 no_optimize 防止 mem2reg 优化
+        const is_ref_var = self.isRefVar(name);
+        
         const inst = try self.allocator.create(Instruction);
         inst.* = .{
             .result = result,
-            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .var_name = name } },
+            .op = .{ .alloca = .{ 
+                .type_ = alloca_type, 
+                .count = 1, 
+                .var_name = name,
+                .no_optimize = is_ref_var,  // 引用变量禁止优化
+            } },
             .location = self.current_location,
         };
 
@@ -765,6 +775,7 @@ pub const IRGenerator = struct {
         self.var_registers = .{};
         self.var_usage = .{}; // 初始化变量使用跟踪
         self.entry_allocas = .{};
+        self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
         self.block_counter = 0;
         self.static_vars.clearRetainingCapacity(); // 清空静态变量集合
         self.goto_labels.clearRetainingCapacity(); // 清空 goto 标签映射
@@ -1932,6 +1943,7 @@ pub const IRGenerator = struct {
             self.current_function = func;
             self.current_class = class_name;
             self.var_registers = .{};
+            self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
             self.block_counter = 0;
 
             const entry = try func.createBlock("entry");
@@ -2421,6 +2433,12 @@ pub const IRGenerator = struct {
         const value_node = self.getNode(foreach_data.value);
         if (value_node != null and value_node.?.tag == .variable) {
             const value_name = self.getString(value_node.?.data.variable.name);
+            
+            // 如果是引用，先标记变量为引用变量（在创建 alloca 之前）
+            if (foreach_data.value_by_ref) {
+                try self.putRefVar(value_name);
+            }
+            
             const value_var = try self.getOrCreateVarRegister(value_name, .php_value);
 
             const val_args = try self.allocator.alloc(Register, 1);
@@ -2436,11 +2454,6 @@ pub const IRGenerator = struct {
             } }, .php_value);
 
             _ = try self.emit(.{ .store = .{ .ptr = value_var, .value = val_val } }, null);
-
-            // 如果是引用，标记变量为引用变量
-            if (foreach_data.value_by_ref) {
-                try self.putRefVar(value_name);
-            }
         } else if (value_node != null and (value_node.?.tag == .array_init or value_node.?.tag == .list_assignment)) {
             // List destructuring: foreach ($arr as [$x, $y])
             const val_args = try self.allocator.alloc(Register, 1);
@@ -6344,6 +6357,7 @@ pub const IRGenerator = struct {
 
         self.current_function = func;
         self.var_registers = .{};
+        self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
         self.global_vars = .{};
         self.current_has_this_param = false;
 
@@ -6441,6 +6455,7 @@ pub const IRGenerator = struct {
 
         self.current_function = func;
         self.var_registers = .{};
+        self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
         self.global_vars = .{};
         self.current_has_this_param = false;
 
