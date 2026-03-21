@@ -2553,7 +2553,7 @@ pub const NativeLinker = struct {
         .{ "strval", .{ .runtime_name = "php_strval", .needs_allocator = true } },
         .{ "boolval", .{ .runtime_name = "php_boolval", .needs_allocator = false } },
         .{ "gettype", .{ .runtime_name = "php_gettype", .needs_allocator = true } },
-        .{ "settype", .{ .runtime_name = "php_settype", .needs_allocator = true } },
+        .{ "settype", bi(.{ .runtime_name = "php_settype", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{0} }) },
         .{ "exit", .{ .runtime_name = "php_exit", .needs_allocator = false } },
         .{ "die", .{ .runtime_name = "php_exit", .needs_allocator = false } },
 

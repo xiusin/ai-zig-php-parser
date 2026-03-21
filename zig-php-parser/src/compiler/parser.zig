@@ -2597,11 +2597,36 @@ pub const Parser = struct {
             .t_lnumber => {
                 const t = try self.eat(.t_lnumber);
                 const raw = self.lexer.buffer[t.loc.start..t.loc.end];
-                // base 0: auto-detect prefix (0b=binary, 0x=hex, 0o=octal, else=decimal)
-                const value = std.fmt.parseInt(i64, raw, 0) catch |err| switch (err) {
-                    error.Overflow => std.math.maxInt(i64),
-                    else => return err,
+                
+                // PHP 支持传统八进制格式 (0755) 和新格式 (0o755)
+                // Zig 的 parseInt(base=0) 只支持新格式，需要手动处理传统格式
+                const value = blk: {
+                    // 检测传统八进制：以 0 开头，后面跟数字，且不是 0x/0b/0o
+                    if (raw.len >= 2 and raw[0] == '0' and raw[1] >= '0' and raw[1] <= '7') {
+                        // 可能是传统八进制，检查是否所有字符都是 0-7
+                        var is_octal = true;
+                        for (raw[1..]) |c| {
+                            if (c < '0' or c > '7') {
+                                is_octal = false;
+                                break;
+                            }
+                        }
+                        if (is_octal) {
+                            // 传统八进制格式，手动解析
+                            break :blk std.fmt.parseInt(i64, raw[1..], 8) catch |err| switch (err) {
+                                error.Overflow => std.math.maxInt(i64),
+                                else => return err,
+                            };
+                        }
+                    }
+                    
+                    // 其他格式：使用 base 0 自动检测 (0x=hex, 0b=binary, 0o=octal, else=decimal)
+                    break :blk std.fmt.parseInt(i64, raw, 0) catch |err| switch (err) {
+                        error.Overflow => std.math.maxInt(i64),
+                        else => return err,
+                    };
                 };
+                
                 return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = value } } });
             },
             .t_dnumber => {
