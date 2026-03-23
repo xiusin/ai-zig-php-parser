@@ -7705,7 +7705,27 @@ pub const VM = struct {
         }
 
         for (method_data.args) |arg_node_idx| {
-            try args.append(self.allocator, try self.eval(arg_node_idx));
+            const arg_node = self.context.nodes.items[arg_node_idx];
+            
+            // 处理 unpacking_expr: ...$array
+            if (arg_node.tag == .unpacking_expr) {
+                const array_val = try self.eval(arg_node.data.unpacking_expr.expr);
+                defer self.releaseValue(array_val);
+                
+                if (array_val.isArray()) {
+                    const arr = array_val.getAsArray().data;
+                    var i: usize = 0;
+                    while (i < arr.next_index) : (i += 1) {
+                        const key = types.ArrayKey{ .integer = @intCast(i) };
+                        if (arr.get(key)) |elem| {
+                            _ = elem.retain();
+                            try args.append(self.allocator, elem);
+                        }
+                    }
+                }
+            } else {
+                try args.append(self.allocator, try self.eval(arg_node_idx));
+            }
         }
 
         // 处理数字类型的内置方法（NumberWrapper）

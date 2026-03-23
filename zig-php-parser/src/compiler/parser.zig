@@ -2153,16 +2153,20 @@ pub const Parser = struct {
                         const args_param = try self.createNode(.{ .tag = .parameter, .main_token = op, .data = .{ .parameter = .{ .attributes = &.{}, .name = args_var_id, .type = null, .default_value = null, .is_promoted = false, .modifiers = .{}, .is_variadic = true, .is_reference = false } } });
                         
                         // 2. 创建 $args 变量引用
-                        const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = args_var_id } });
+                        const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = .{ .name = args_var_id } } });
                         
                         // 3. 创建 ...$args (unpack)
-                        const args_unpack = try self.createNode(.{ .tag = .unpack, .main_token = op, .data = .{ .unpack = args_var } });
+                        const args_unpack = try self.createNode(.{ .tag = .unpacking_expr, .main_token = op, .data = .{ .unpacking_expr = .{ .expr = args_var } } });
                         
                         // 4. 创建方法调用 $obj->method(...$args)
-                        const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = &[_]ast.Node.Index{args_unpack} } } });
+                        const method_call_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                        method_call_args[0] = args_unpack;
+                        const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = method_call_args } } });
                         
                         // 5. 创建箭头函数
-                        left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = &[_]ast.Node.Index{args_param}, .return_type = null, .body = method_call, .is_static = false } } });
+                        const arrow_params = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                        arrow_params[0] = args_param;
+                        left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = arrow_params, .return_type = null, .body = method_call, .is_static = false } } });
                     } else {
                         // 普通方法调用
                         var args = std.ArrayListUnmanaged(ast.Node.Index){};
@@ -2519,16 +2523,20 @@ pub const Parser = struct {
                         const args_param = try self.createNode(.{ .tag = .parameter, .main_token = op, .data = .{ .parameter = .{ .attributes = &.{}, .name = args_var_id, .type = null, .default_value = null, .is_promoted = false, .modifiers = .{}, .is_variadic = true, .is_reference = false } } });
                         
                         // 2. 创建 $args 变量引用
-                        const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = args_var_id } });
+                        const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = .{ .name = args_var_id } } });
                         
                         // 3. 创建 ...$args (unpack)
-                        const args_unpack = try self.createNode(.{ .tag = .unpack, .main_token = op, .data = .{ .unpack = args_var } });
+                        const args_unpack = try self.createNode(.{ .tag = .unpacking_expr, .main_token = op, .data = .{ .unpacking_expr = .{ .expr = args_var } } });
                         
                         // 4. 创建方法调用 $obj->method(...$args)
-                        const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = &[_]ast.Node.Index{args_unpack} } } });
+                        const method_call_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                        method_call_args[0] = args_unpack;
+                        const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = method_call_args } } });
                         
                         // 5. 创建箭头函数
-                        left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = &[_]ast.Node.Index{args_param}, .return_type = null, .body = method_call, .is_static = false } } });
+                        const arrow_params = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                        arrow_params[0] = args_param;
+                        left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = arrow_params, .return_type = null, .body = method_call, .is_static = false } } });
                     } else {
                         // 普通方法调用
                         var args = std.ArrayListUnmanaged(ast.Node.Index){};
