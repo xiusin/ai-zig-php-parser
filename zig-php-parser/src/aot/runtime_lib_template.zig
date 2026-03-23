@@ -15838,28 +15838,109 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
 }
 
 pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    _ = matches;
     _ = flags;
     _ = offset;
-    _ = allocator;
-    if (!pattern.isString() or !subject.isString()) return Value.initInt(0);
     
-    // 简化实现：返回匹配次数
-    const pat = pattern.asString().data;
-    const subj = subject.asString().data;
-    
-    if (pat.len < 3) return Value.initInt(0);
-    const actual_pat = pat[1..pat.len-1];
-    
-    var count: i64 = 0;
-    var pos: usize = 0;
-    while (pos < subj.len) {
-        if (std.mem.indexOf(u8, subj[pos..], actual_pat)) |idx| {
-            count += 1;
-            pos += idx + actual_pat.len;
-        } else break;
+    if (!pattern.isString() or !subject.isString()) {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
     }
-    return Value.initInt(count);
+
+    const pattern_str = pattern.asString();
+    const subject_str = subject.asString();
+    const parsed = parsePHPRegexPattern(pattern_str.data);
+
+    // 使用缓存获取编译后的正则
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
+    };
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
+    };
+    defer pcre2_match_data_free_8(match_data);
+
+    // 存储所有匹配（临时）
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    defer {
+        for (all_matches.items) |*match_groups| {
+            match_groups.deinit(allocator);
+        }
+        all_matches.deinit(allocator);
+    }
+
+    var match_offset: usize = 0;
+    var match_count: i64 = 0;
+
+    // 循环匹配所有
+    while (match_offset <= subject_str.length) {
+        const rc = pcre2_match_8(
+            re,
+            subject_str.data.ptr,
+            subject_str.length,
+            @intCast(match_offset),
+            0,
+            match_data,
+            null,
+        );
+
+        if (rc == PCRE2_ERROR_NOMATCH or rc < 0) break;
+
+        match_count += 1;
+        const ovec = pcre2_get_ovector_pointer_8(match_data);
+
+        // 保存当前匹配的所有组
+        var match_groups = std.ArrayListUnmanaged([]const u8){};
+        var i: usize = 0;
+        while (i < @as(usize, @intCast(rc))) : (i += 1) {
+            const start = ovec[i * 2];
+            const end = ovec[i * 2 + 1];
+            if (start < subject_str.length and end <= subject_str.length and start <= end) {
+                const capture = subject_str.data[start..end];
+                try match_groups.append(allocator, capture);
+            }
+        }
+        try all_matches.append(allocator, match_groups);
+
+        // 移动到下一个位置
+        const match_end = ovec[1];
+        if (match_end == match_offset) {
+            match_offset += 1; // 避免空匹配无限循环
+        } else {
+            match_offset = match_end;
+        }
+    }
+
+    // 转换为PREG_PATTERN_ORDER格式
+    // matches[0] = [所有完整匹配]
+    // matches[1] = [所有第1个捕获组]
+    const matches_arr = try PHPArray.init(allocator);
+
+    if (all_matches.items.len > 0) {
+        const num_groups = all_matches.items[0].items.len;
+
+        // 为每个组创建数组
+        var group_idx: usize = 0;
+        while (group_idx < num_groups) : (group_idx += 1) {
+            const group_arr = try PHPArray.init(allocator);
+
+            // 收集所有匹配中的该组
+            for (all_matches.items) |match_groups| {
+                if (group_idx < match_groups.items.len) {
+                    const capture = match_groups.items[group_idx];
+                    const capture_str = try PHPString.init(allocator, capture);
+                    try group_arr.push(allocator, Value.initString(capture_str));
+                }
+            }
+
+            try matches_arr.push(allocator, Value.initArray(group_arr));
+        }
+    }
+
+    matches.* = Value.initArray(matches_arr);
+    return Value.initInt(match_count);
 }
 
 pub fn php_preg_replace(pattern: Value, replacement: Value, subject: Value, allocator: Allocator) !Value {
