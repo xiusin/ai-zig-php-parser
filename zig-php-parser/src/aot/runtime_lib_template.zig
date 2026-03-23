@@ -3874,7 +3874,13 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
 
 pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allocator) !Value {
     // 引用透明：闭包自引用场景中 callback 可能是 Ref(cell)
-    const actual_cb = if (callback.isRef()) callback.asRef().* else callback;
+    var actual_cb = if (callback.isRef()) callback.asRef().* else callback;
+    
+    // 多层Ref解引用：捕获的闭包可能被多次包装
+    while (actual_cb.isRef()) {
+        actual_cb = actual_cb.asRef().*;
+    }
+    
     if (actual_cb.isFunction()) {
         const closure = actual_cb.asFunction();
         return closure.func(actual_cb, args, allocator);
@@ -12145,7 +12151,7 @@ pub fn hasException() bool {
 // ============================================================================
 
 /// time - 返回当前Unix时间戳
-pub fn php_time() !Value {
+pub fn php_time() Value {
     const timestamp = std.time.timestamp();
     return Value.initInt(timestamp);
 }
