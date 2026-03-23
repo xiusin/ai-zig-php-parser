@@ -15816,25 +15816,62 @@ pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    _ = matches;
-    _ = flags;
-    _ = offset;
-    _ = allocator;
-    if (!pattern.isString() or !subject.isString()) return Value.initInt(0);
+    _ = flags; // TODO: 实现flags支持
+    _ = offset; // TODO: 实现offset支持
     
-    // 简化实现：只支持基本模式
-    const pat = pattern.asString().data;
-    const subj = subject.asString().data;
-    
-    // 移除正则分隔符
-    if (pat.len < 3) return Value.initInt(0);
-    const actual_pat = pat[1..pat.len-1];
-    
-    // 简单字符串匹配
-    if (std.mem.indexOf(u8, subj, actual_pat)) |_| {
-        return Value.initInt(1);
+    if (!pattern.isString() or !subject.isString()) {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
     }
-    return Value.initInt(0);
+
+    const pattern_str = pattern.asString();
+    const subject_str = subject.asString();
+    const parsed = parsePHPRegexPattern(pattern_str.data);
+
+    // 使用缓存获取编译后的正则
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
+    };
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
+    };
+    defer pcre2_match_data_free_8(match_data);
+
+    const rc = pcre2_match_8(
+        re,
+        subject_str.data.ptr,
+        subject_str.length,
+        0,
+        0,
+        match_data,
+        null,
+    );
+
+    if (rc == PCRE2_ERROR_NOMATCH or rc < 0) {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initInt(0);
+    }
+
+    // 填充matches数组
+    const matches_arr = try PHPArray.init(allocator);
+    const ovec = pcre2_get_ovector_pointer_8(match_data);
+
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(rc))) : (i += 1) {
+        const start = ovec[i * 2];
+        const end = ovec[i * 2 + 1];
+        if (start < subject_str.length and end <= subject_str.length and start <= end) {
+            const capture = subject_str.data[start..end];
+            const capture_str = try PHPString.init(allocator, capture);
+            try matches_arr.push(allocator, Value.initString(capture_str));
+        }
+    }
+
+    matches.* = Value.initArray(matches_arr);
+    return Value.initInt(1);
 }
 
 pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
@@ -15978,95 +16015,93 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
     if (!pattern.isString() or !subject.isString()) 
         return Value.initBool(false);
     
-    const pat = pattern.asString().data;
-    const subj = subject.asString().data;
+    const pattern_str = pattern.asString().data;
+    const subject_str = subject.asString().data;
     
-    if (pat.len < 3) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subj)));
+    // 解析 PHP 正则模式
+    const parsed = parsePHPRegexPattern(pattern_str);
     
-    // 提取实际的模式（去掉分隔符和修饰符）
-    const actual_pat = pat[1..pat.len-1];
+    // 编译正则表达式
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+        return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subject_str)));
+    };
     
-    var result = try std.ArrayList(u8).initCapacity(allocator, subj.len);
+    // 创建匹配数据
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subject_str)));
+    };
+    defer pcre2_match_data_free_8(match_data);
+    
+    // 准备输出缓冲区
+    var result = try std.ArrayList(u8).initCapacity(allocator, subject_str.len * 2);
     defer result.deinit(allocator);
     
-    var pos: usize = 0;
+    var subject_offset: usize = 0;
+    var replace_count: usize = 0;
+    const limit: usize = std.math.maxInt(usize);
     
-    // 支持两种常见模式：{{word}} 和 {% word %}
-    // 模式1: \{\{(\w+)\}\} 匹配 {{name}}
-    // 模式2: \{% (\w+) %\} 匹配 {% comment %}
-    
-    const is_double_brace = std.mem.indexOf(u8, actual_pat, "\\{\\{") != null;
-    const is_percent_brace = std.mem.indexOf(u8, actual_pat, "\\{%") != null;
-    
-    while (pos < subj.len) {
-        var found = false;
-        var match_start: usize = 0;
-        var match_end: usize = 0;
-        var captured: []const u8 = "";
+    while (subject_offset < subject_str.len and replace_count < limit) {
+        const rc = pcre2_match_8(
+            re,
+            subject_str.ptr,
+            subject_str.len,
+            @as(c_int, @intCast(subject_offset)),
+            0,
+            match_data,
+            null,
+        );
         
-        if (is_double_brace) {
-            // 查找 {{word}}
-            if (std.mem.indexOf(u8, subj[pos..], "{{")) |start_idx| {
-                const abs_start = pos + start_idx;
-                if (std.mem.indexOf(u8, subj[abs_start+2..], "}}")) |end_idx| {
-                    match_start = abs_start;
-                    match_end = abs_start + 2 + end_idx + 2;
-                    captured = subj[abs_start+2..abs_start+2+end_idx];
-                    found = true;
-                }
-            }
-        } else if (is_percent_brace) {
-            // 查找 {% word %}
-            if (std.mem.indexOf(u8, subj[pos..], "{%")) |start_idx| {
-                const abs_start = pos + start_idx;
-                if (std.mem.indexOf(u8, subj[abs_start+2..], "%}")) |end_idx| {
-                    match_start = abs_start;
-                    match_end = abs_start + 2 + end_idx + 2;
-                    // 去掉前后空格
-                    var cap_start = abs_start + 2;
-                    var cap_end = abs_start + 2 + end_idx;
-                    while (cap_start < cap_end and subj[cap_start] == ' ') cap_start += 1;
-                    while (cap_end > cap_start and subj[cap_end-1] == ' ') cap_end -= 1;
-                    captured = subj[cap_start..cap_end];
-                    found = true;
-                }
-            }
+        if (rc == PCRE2_ERROR_NOMATCH or rc < 0) break;
+        
+        const ovec = pcre2_get_ovector_pointer_8(match_data);
+        const match_start = ovec[0];
+        const match_end = ovec[1];
+        
+        // 添加匹配前的内容
+        if (match_start > subject_offset) {
+            try result.appendSlice(allocator, subject_str[subject_offset..match_start]);
         }
         
-        if (found) {
-            // 添加匹配前的内容
-            try result.appendSlice(allocator, subj[pos..match_start]);
-            
-            // 创建匹配数组
-            const matches_arr = try PHPArray.init(allocator);
-            defer matches_arr.release(allocator);
-            
-            // matches[0] = 完整匹配
-            const full_match = try PHPString.init(allocator, try allocator.dupe(u8, subj[match_start..match_end]));
-            try matches_arr.push(allocator, Value.initString(full_match));
-            
-            // matches[1] = 捕获组
-            const captured_str = try PHPString.init(allocator, try allocator.dupe(u8, captured));
-            try matches_arr.push(allocator, Value.initString(captured_str));
-            
-            // 调用回调函数
-            const callback_result = try php_invoke_callable(callback, &[_]Value{Value.initArray(matches_arr)}, allocator);
-            defer callback_result.release(allocator);
-            
-            // 将回调结果添加到输出
-            if (callback_result.isString()) {
-                try result.appendSlice(allocator, callback_result.asString().data);
-            } else {
-                const str_result = try callback_result.toString(allocator);
-                defer str_result.release(allocator);
-                try result.appendSlice(allocator, str_result.data);
-            }
-            
-            pos = match_end;
+        // 构建匹配数组
+        const matches_arr = try PHPArray.init(allocator);
+        defer matches_arr.release(allocator);
+        
+        // 添加所有捕获组
+        var i: usize = 0;
+        while (i < @as(usize, @intCast(rc))) : (i += 1) {
+            const start = ovec[i * 2];
+            const end = ovec[i * 2 + 1];
+            const match_str = subject_str[start..end];
+            const php_str = try PHPString.init(allocator, try allocator.dupe(u8, match_str));
+            try matches_arr.push(allocator, Value.initString(php_str));
+        }
+        
+        // 调用回调函数
+        const callback_result = try php_invoke_callable(callback, &[_]Value{Value.initArray(matches_arr)}, allocator);
+        defer callback_result.release(allocator);
+        
+        // 将回调结果添加到输出
+        if (callback_result.isString()) {
+            try result.appendSlice(allocator, callback_result.asString().data);
+        } else if (callback_result.isInt()) {
+            // 处理整数返回值
+            const int_val = callback_result.asInt();
+            var buf: [32]u8 = undefined;
+            const int_str = try std.fmt.bufPrint(&buf, "{d}", .{int_val});
+            try result.appendSlice(allocator, int_str);
         } else {
-            try result.appendSlice(allocator, subj[pos..]);
-            break;
+            const str_result = try callback_result.toString(allocator);
+            defer str_result.release(allocator);
+            try result.appendSlice(allocator, str_result.data);
         }
+        
+        subject_offset = match_end;
+        replace_count += 1;
+    }
+    
+    // 添加剩余内容
+    if (subject_offset < subject_str.len) {
+        try result.appendSlice(allocator, subject_str[subject_offset..]);
     }
     
     const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
