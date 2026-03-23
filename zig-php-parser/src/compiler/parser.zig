@@ -2141,13 +2141,38 @@ pub const Parser = struct {
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
-                    var args = std.ArrayListUnmanaged(ast.Node.Index){};
-                    while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        try args.append(self.allocator, try self.parseCallArg());
-                        if (self.curr.tag == .comma) self.nextToken();
+                    
+                    // 检查是否是 first-class callable: $obj->method(...)
+                    if (self.curr.tag == .ellipsis) {
+                        self.nextToken();
+                        _ = try self.eat(.r_paren);
+                        
+                        // 创建一个闭包: fn(...$args) => $obj->method(...$args)
+                        // 1. 创建可变参数 ...$args
+                        const args_var_id = try self.context.intern("args");
+                        const args_param = try self.createNode(.{ .tag = .parameter, .main_token = op, .data = .{ .parameter = .{ .attributes = &.{}, .name = args_var_id, .type = null, .default_value = null, .is_promoted = false, .modifiers = .{}, .is_variadic = true, .is_reference = false } } });
+                        
+                        // 2. 创建 $args 变量引用
+                        const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = args_var_id } });
+                        
+                        // 3. 创建 ...$args (unpack)
+                        const args_unpack = try self.createNode(.{ .tag = .unpack, .main_token = op, .data = .{ .unpack = args_var } });
+                        
+                        // 4. 创建方法调用 $obj->method(...$args)
+                        const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = &[_]ast.Node.Index{args_unpack} } } });
+                        
+                        // 5. 创建箭头函数
+                        left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = &[_]ast.Node.Index{args_param}, .return_type = null, .body = method_call, .is_static = false } } });
+                    } else {
+                        // 普通方法调用
+                        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                        while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                            try args.append(self.allocator, try self.parseCallArg());
+                            if (self.curr.tag == .comma) self.nextToken();
+                        }
+                        _ = try self.eat(.r_paren);
+                        left = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
                     }
-                    _ = try self.eat(.r_paren);
-                    left = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
                 } else {
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
                 }
@@ -2481,15 +2506,39 @@ pub const Parser = struct {
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
 
                 if (self.curr.tag == .l_paren) {
-                    // Method call
                     self.nextToken();
-                    var args = std.ArrayListUnmanaged(ast.Node.Index){};
-                    while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                        try args.append(self.allocator, try self.parseCallArg());
-                        if (self.curr.tag == .comma) self.nextToken();
+                    
+                    // 检查是否是 first-class callable: $obj->method(...)
+                    if (self.curr.tag == .ellipsis) {
+                        self.nextToken();
+                        _ = try self.eat(.r_paren);
+                        
+                        // 创建一个闭包: fn(...$args) => $obj->method(...$args)
+                        // 1. 创建可变参数 ...$args
+                        const args_var_id = try self.context.intern("args");
+                        const args_param = try self.createNode(.{ .tag = .parameter, .main_token = op, .data = .{ .parameter = .{ .attributes = &.{}, .name = args_var_id, .type = null, .default_value = null, .is_promoted = false, .modifiers = .{}, .is_variadic = true, .is_reference = false } } });
+                        
+                        // 2. 创建 $args 变量引用
+                        const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = args_var_id } });
+                        
+                        // 3. 创建 ...$args (unpack)
+                        const args_unpack = try self.createNode(.{ .tag = .unpack, .main_token = op, .data = .{ .unpack = args_var } });
+                        
+                        // 4. 创建方法调用 $obj->method(...$args)
+                        const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = &[_]ast.Node.Index{args_unpack} } } });
+                        
+                        // 5. 创建箭头函数
+                        left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = &[_]ast.Node.Index{args_param}, .return_type = null, .body = method_call, .is_static = false } } });
+                    } else {
+                        // 普通方法调用
+                        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                        while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                            try args.append(self.allocator, try self.parseCallArg());
+                            if (self.curr.tag == .comma) self.nextToken();
+                        }
+                        _ = try self.eat(.r_paren);
+                        left = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
                     }
-                    _ = try self.eat(.r_paren);
-                    left = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
                 } else {
                     // Property access
                     left = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = left, .property_name = member_id } } });
