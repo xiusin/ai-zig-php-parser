@@ -479,6 +479,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "preg_match", .min_args = 2, .max_args = 5, .handler = pcre2.pregMatchFn },
             &.{ .name = "preg_match_all", .min_args = 2, .max_args = 5, .handler = pcre2.pregMatchAllFn },
             &.{ .name = "preg_replace", .min_args = 3, .max_args = 5, .handler = pcre2.pregReplaceFn },
+            &.{ .name = "preg_filter", .min_args = 3, .max_args = 5, .handler = pcre2.pregFilterFn },
             &.{ .name = "preg_split", .min_args = 2, .max_args = 4, .handler = pcre2.pregSplitFn },
             &.{ .name = "preg_grep", .min_args = 2, .max_args = 3, .handler = pcre2.pregGrepFn },
             &.{ .name = "preg_quote", .min_args = 1, .max_args = 2, .handler = pcre2.pregQuoteFn },

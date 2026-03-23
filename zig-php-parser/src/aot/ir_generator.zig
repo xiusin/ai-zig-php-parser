@@ -5577,6 +5577,14 @@ pub const IRGenerator = struct {
                     padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
                     args = padded;
                 }
+            } else if (std.mem.eql(u8, func_name, "preg_quote")) {
+                // preg_quote($str, $delimiter = null)
+                if (args.len == 1) {
+                    const padded = try self.allocator.alloc(Register, 2);
+                    padded[0] = args[0];
+                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    args = padded;
+                }
             } else if (std.mem.eql(u8, func_name, "explode")) {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);

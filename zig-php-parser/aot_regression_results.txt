@@ -1,0 +1,92 @@
+=== AOT 回归测试开始 ===
+测试目录: fuzzy_scripts_27/pass
+时间: Mon Mar 23 22:12:25 CST 2026
+
+[1] 测试 test_036_session.php ... ✅ 通过
+[2] 测试 test_042_static.php ... ✅ 通过
+[3] 测试 test_043_stringable.php ... ✅ 通过
+[4] 测试 test_044_arrows.php ... ✅ 通过
+[5] 测试 test_045_promoted.php ... ✅ 通过
+[6] 测试 test_046_goto.php ... ✅ 通过
+[7] 测试 test_057_isset_empty.php ... ✅ 通过
+[8] 测试 test_065_fluent.php ... ✅ 通过
+[9] 测试 test_068_magic_props.php ... ✅ 通过
+[10] 测试 test_070_singleton.php ... ✅ 通过
+[11] 测试 test_091_final.php ... ✅ 通过
+[12] 测试 test_092_visibility.php ... ✅ 通过
+[13] 测试 test_093_variadic.php ... ✅ 通过
+[14] 测试 test_095_return_types.php ... ✅ 通过
+[15] 测试 test_096_constructors2.php ... ✅ 通过
+[16] 测试 test_097_static_instance.php ... ✅ 通过
+[17] 测试 test_098_abstract.php ... ✅ 通过
+[18] 测试 test_102_magic_methods.php ... ✅ 通过
+[19] 测试 test_103_tostring.php ... ✅ 通过
+[20] 测试 test_108_nullsafe.php ... ✅ 通过
+[21] 测试 test_109_promoted_readonly.php ... ✅ 通过
+[22] 测试 test_114_string_helpers.php ... ✅ 通过
+[23] 测试 test_118_enums.php ... ✅ 通过
+[24] 测试 test_119_pure_enum.php ... ✅ 通过
+[25] 测试 test_120_enum_interface.php ... ✅ 通过
+[26] 测试 test_123_array_spread.php ... ✅ 通过
+[27] 测试 test_135_static_inherit.php ... ✅ 通过
+[28] 测试 test_137_deep_clone.php ... ✅ 通过
+[29] 测试 test_138_scalar_casting.php ... ✅ 通过
+[30] 测试 test_140_foreach_ref.php ... ✅ 通过
+[31] 测试 test_143_object_iteration.php ... ✅ 通过
+[32] 测试 test_146_comparisons.php ... ✅ 通过
+[33] 测试 test_149_instanceof.php ... ✅ 通过
+[34] 测试 test_154_array_ops.php ... ✅ 通过
+[35] 测试 test_155_strings.php ... ✅ 通过
+[36] 测试 test_156_regex.php ... ✅ 通过
+[37] 测试 test_157_const_inherit.php ... ✅ 通过
+[38] 测试 test_158_var_func.php ... ✅ 通过
+[39] 测试 test_159_spl_iter.php ... ✅ 通过
+[40] 测试 test_160_static_call.php ... ✅ 通过
+[41] 测试 test_161_prop_visibility.php ... ✅ 通过
+[42] 测试 test_162_type_hints.php ... ✅ 通过
+[43] 测试 test_163_array_access.php ... ✅ 通过
+[44] 测试 test_164_defaults.php ... ✅ 通过
+[45] 测试 test_179_concat.php ... ✅ 通过
+[46] 测试 test_180_constants.php ... ✅ 通过
+[47] 测试 test_181_arrow_fn.php ... ✅ 通过
+[48] 测试 test_182_match.php ... ✅ 通过
+[49] 测试 test_183_nullsafe.php ... ✅ 通过
+[50] 测试 test_184_named_args.php ... ✅ 通过
+[51] 测试 test_185_union_types.php ... ✅ 通过
+[52] 测试 test_186_mixed.php ... ✅ 通过
+[53] 测试 test_187_promotion.php ... ✅ 通过
+[54] 测试 test_188_readonly.php ... ✅ 通过
+[55] 测试 test_189_callable.php ... ✅ 通过
+[56] 测试 test_190_array_is_list.php ... ✅ 通过
+[57] 测试 test_202_magic_static.php ... ✅ 通过
+[58] 测试 test_203_value_object.php ... ✅ 通过
+[59] 测试 test_204_pipeline.php ... ✅ 通过
+[60] 测试 test_205_polymorphism.php ... ✅ 通过
+[61] 测试 test_206_template.php ... ✅ 通过
+[62] 测试 test_207_event_emitter.php ... ✅ 通过
+[63] 测试 test_208_query_builder.php ... ✅ 通过
+[64] 测试 test_209_memoize.php ... ✅ 通过
+[65] 测试 test_210_static_counter.php ... ✅ 通过
+[66] 测试 test_211_curry_compose.php ... ✅ 通过
+[67] 测试 test_212_tree_traversal.php ... ✅ 通过
+[68] 测试 test_213_sorting.php ... ✅ 通过
+[69] 测试 test_214_binary_search.php ... ✅ 通过
+[70] 测试 test_215_lru_cache.php ... ✅ 通过
+[71] 测试 test_216_array_algorithms.php ... ✅ 通过
+[72] 测试 test_217_collection_helpers.php ... ✅ 通过
+[73] 测试 test_218_string_utils.php ... ✅ 通过
+[74] 测试 test_219_rate_limiter.php ... ✅ 通过
+[75] 测试 test_220_validator.php ... ✅ 通过
+[76] 测试 test_221_statistics.php ... ✅ 通过
+[77] 测试 test_222_router.php ... ✅ 通过
+[78] 测试 test_223_deep_array.php ... ✅ 通过
+[79] 测试 test_224_priority_queue.php ... ✅ 通过
+[80] 测试 test_225_disjoint_set.php ... ✅ 通过
+
+=== 测试统计 ===
+总计: 80
+成功: 80
+编译失败: 0
+运行失败: 0
+成功率:  成功率: 
+

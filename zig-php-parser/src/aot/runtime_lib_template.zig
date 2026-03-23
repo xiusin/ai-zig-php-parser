@@ -7236,6 +7236,105 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
     return Value.initString(try PHPString.init(allocator, result));
 }
 
+/// preg_filter - 类似 preg_replace，但只返回匹配的元素
+pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Value, allocator: Allocator) !Value {
+    // 处理数组输入
+    if (subject_val.isArray()) {
+        const subject_arr = subject_val.asArray();
+        const result_arr = try PHPArray.init(allocator);
+
+        var iter = subject_arr.elements.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.isString()) {
+                const subject_str = entry.value_ptr.asString();
+                
+                if (pattern_val.isString() and replacement_val.isString()) {
+                    const pattern_str = pattern_val.asString();
+                    const parsed = parsePHPRegexPattern(pattern_str.data);
+                    
+                    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch continue;
+                    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse continue;
+                    defer pcre2_match_data_free_8(match_data);
+
+                    // 检查是否有匹配
+                    const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
+                    
+                    // 只有匹配时才进行替换并添加到结果
+                    if (rc_check >= 0) {
+                        const replacement_str = replacement_val.asString();
+                        const output_len: usize = subject_str.length * 2;
+                        const output = allocator.alloc(u8, output_len) catch continue;
+                        errdefer allocator.free(output);
+
+                        var output_size: usize = output_len;
+                        const rc = pcre2_substitute_8(re, subject_str.data.ptr, subject_str.length, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.data.ptr, replacement_str.length, output.ptr, @ptrCast(&output_size));
+
+                        if (rc >= 0) {
+                            const result = allocator.realloc(output, output_size) catch {
+                                allocator.free(output);
+                                continue;
+                            };
+                            const result_val = Value.initString(PHPString.init(allocator, result) catch {
+                                allocator.free(result);
+                                continue;
+                            });
+                            
+                            // 保持原始键
+                            switch (entry.key_ptr.*) {
+                                .integer => result_arr.set(allocator, entry.key_ptr.*, result_val) catch {},
+                                .string => result_arr.push(allocator, result_val) catch {},
+                            }
+                        } else {
+                            allocator.free(output);
+                        }
+                    }
+                }
+            }
+        }
+
+        return Value.initArray(result_arr);
+    }
+
+    // 处理字符串输入
+    if (!pattern_val.isString() or !replacement_val.isString() or !subject_val.isString()) {
+        return Value.initNull();
+    }
+
+    const pattern_str = pattern_val.asString();
+    const replacement_str = replacement_val.asString();
+    const subject_str = subject_val.asString();
+
+    const parsed = parsePHPRegexPattern(pattern_str.data);
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return Value.initNull();
+
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initNull();
+    defer pcre2_match_data_free_8(match_data);
+
+    // 检查是否有匹配
+    const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
+    
+    // 如果没有匹配，返回 null（preg_filter 的特性）
+    if (rc_check == PCRE2_ERROR_NOMATCH or rc_check < 0) {
+        return Value.initNull();
+    }
+
+    // 有匹配，执行替换
+    const output_len: usize = subject_str.length * 2;
+    const output = try allocator.alloc(u8, output_len);
+    errdefer allocator.free(output);
+
+    var output_size: usize = output_len;
+    const rc = pcre2_substitute_8(re, subject_str.data.ptr, subject_str.length, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.data.ptr, replacement_str.length, output.ptr, @ptrCast(&output_size));
+
+    if (rc < 0) {
+        allocator.free(output);
+        return Value.initNull();
+    }
+
+    const result = try allocator.realloc(output, output_size);
+    return Value.initString(try PHPString.init(allocator, result));
+}
+
 /// preg_split - 正则分割
 pub fn preg_split(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
     if (!pattern_val.isString() or !subject_val.isString()) {
@@ -7350,6 +7449,60 @@ pub fn preg_grep(pattern_val: Value, input_val: Value, flags_val: Value, allocat
     }
 
     return Value.initArray(result_arr);
+}
+
+/// preg_quote - 转义正则表达式字符
+pub fn preg_quote(str_val: Value, delimiter_val: Value, allocator: Allocator) !Value {
+    if (!str_val.isString()) {
+        return Value.initString(try PHPString.init(allocator, ""));
+    }
+
+    const str = str_val.asString();
+    const delimiter: u8 = if (delimiter_val.isString() and delimiter_val.asString().length > 0)
+        delimiter_val.asString().data[0]
+    else
+        0;
+
+    // 需要转义的特殊字符
+    const specials = ".\\+*?[^]$(){}=!<>|:-#";
+    var escape_table: [256]u8 = undefined;
+    @memset(escape_table[0..], 0);
+    for (specials) |ch| {
+        escape_table[@as(usize, @intCast(ch))] = 1;
+    }
+
+    // 计算结果长度
+    var result_len: usize = str.length;
+    for (str.data) |ch| {
+        const needs_escape = ch == '\\' or ch == delimiter or escape_table[@as(usize, @intCast(ch))] == 1;
+        if (needs_escape) {
+            result_len += 1;
+        }
+    }
+
+    // 分配结果缓冲区
+    const result = try allocator.alloc(u8, result_len);
+    errdefer allocator.free(result);
+
+    // 执行转义
+    var j: usize = 0;
+    for (str.data) |ch| {
+        const needs_escape = ch == '\\' or ch == delimiter or escape_table[@as(usize, @intCast(ch))] == 1;
+        if (needs_escape) {
+            result[j] = '\\';
+            j += 1;
+        }
+        result[j] = ch;
+        j += 1;
+    }
+
+    return Value.initString(try PHPString.init(allocator, result));
+}
+
+/// preg_last_error - 返回最后一次 PCRE 正则执行的错误代码
+pub fn preg_last_error() Value {
+    // AOT 模式下简化实现，总是返回 0 (PREG_NO_ERROR)
+    return Value.initInt(0);
 }
 
 /// str_starts_with - 检查字符串是否以指定前缀开始 (PHP 8.0+)

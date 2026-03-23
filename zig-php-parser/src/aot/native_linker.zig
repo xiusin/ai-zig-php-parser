@@ -647,9 +647,9 @@ pub const NativeLinker = struct {
             \\
             \\// AOT变量函数调用：覆盖runtime的invoke_callable，支持AOT注册函数
             \\pub fn aot_call_named_function(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
-            \\    _ = allocator;
-            \\    _ = args;
             \\    _ = name;
+            \\    _ = args;
+            \\    _ = allocator;
             \\    return error.UnknownFunction;
             \\}
             \\
@@ -1183,7 +1183,9 @@ pub const NativeLinker = struct {
             try writer.writeAll("    }\n");
         }
 
+        // Note: 如果没有用户函数，标记参数为故意未使用
         if (!has_user_functions) {
+            try writer.writeAll("    _ = name;\n");
             try writer.writeAll("    _ = args;\n");
             try writer.writeAll("    _ = allocator;\n");
         }
@@ -1199,35 +1201,38 @@ pub const NativeLinker = struct {
 
         // 生成静态方法的dispatch分支
         var has_static_methods = false;
-        var has_any_class = false;
         for (ir_module.types.items) |type_def| {
             if (type_def.kind != .class) continue;
             
-            has_any_class = true;
+            // 先检查这个类是否有静态方法
+            var class_has_static_methods = false;
+            for (type_def.methods) |method| {
+                if (method.is_static) {
+                    class_has_static_methods = true;
+                    break;
+                }
+            }
+            
+            // 只为有静态方法的类生成分支
+            if (!class_has_static_methods) continue;
+            
+            has_static_methods = true;
             try writer.print("    if (std.mem.eql(u8, class_name, \"{s}\")) {{\n", .{type_def.name});
             
-            var class_has_static_methods = false;
             for (type_def.methods) |method| {
                 if (!method.is_static) continue;
                 
-                has_static_methods = true;
-                class_has_static_methods = true;
                 try writer.print("        if (std.mem.eql(u8, method_name, \"{s}\")) {{\n", .{method.name});
                 // 静态方法的完整名称是 "ClassName::methodName"
                 try writer.print("            return @\"{s}::{s}\"(runtime.Value.initNull(), args, allocator);\n", .{type_def.name, method.name});
                 try writer.writeAll("        }\n");
             }
             
-            if (!class_has_static_methods) {
-                try writer.writeAll("        _ = method_name;\n");
-                try writer.writeAll("        _ = args;\n");
-                try writer.writeAll("        _ = allocator;\n");
-            }
-            
             try writer.writeAll("    }\n");
         }
 
-        if (!has_any_class) {
+        // 只有在完全没有任何静态方法时才标记参数未使用
+        if (!has_static_methods) {
             try writer.writeAll("    _ = class_name;\n");
             try writer.writeAll("    _ = method_name;\n");
             try writer.writeAll("    _ = args;\n");
@@ -2444,9 +2449,12 @@ pub const NativeLinker = struct {
         .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
         .{ "preg_match_all", bi(.{ .runtime_name = "preg_match_all", .needs_allocator = true }) },
         .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
+        .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true }) },
         .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true }) },
         .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
         .{ "preg_grep", bi(.{ .runtime_name = "preg_grep", .needs_allocator = true }) },
+        .{ "preg_quote", bi(.{ .runtime_name = "preg_quote", .needs_allocator = true }) },
+        .{ "preg_last_error", bi(.{ .runtime_name = "preg_last_error", .needs_allocator = false, .may_raise = false }) },
         .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
         .{ "str_word_count", bi(.{ .runtime_name = "php_str_word_count", .needs_allocator = false }) },
         .{ "str_ends_with", bi(.{ .runtime_name = "php_str_ends_with", .needs_allocator = false }) },
@@ -2790,12 +2798,12 @@ pub const NativeLinker = struct {
         }
 
         // 统一函数签名：(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value
+        // Note: allocator 参数在大多数情况下未使用，但保留参数名以便需要时使用
         try code.appendSlice(self.allocator, "ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {\n");
         try code.appendSlice(self.allocator, "    _ = &ctx;\n");
+        try code.appendSlice(self.allocator, "    _ = allocator; // 标记为故意未使用\n");
         try code.appendSlice(self.allocator, "    const __prev_call_args = runtime.setCurrentCallArgs(args);\n");
         try code.appendSlice(self.allocator, "    defer runtime.restoreCurrentCallArgs(__prev_call_args);\n");
-        try code.appendSlice(self.allocator, "    _ = allocator;\n");
-        try code.appendSlice(self.allocator, "    _ = runtime;\n");
 
         // 如果是类方法，设置 ClassContext
         if (std.mem.indexOf(u8, func.name, "::")) |_| {
