@@ -207,6 +207,104 @@ for (method_data.args) |arg_node_idx| {
 }
 ```
 
+### 修复 5: AOT IR Generator - 支持 unpacking_expr
+
+**文件**: `src/aot/ir_generator.zig`  
+**位置**: `generateMethodCall` 方法（行 5764-5820）
+
+```zig
+// ✅ 检测 unpacking_expr 并使用数组展开方式
+var has_unpacking: bool = false;
+for (call_data.args) |arg_idx| {
+    const arg_node = self.getNode(arg_idx) orelse continue;
+    if (arg_node.tag == .unpacking_expr) {
+        has_unpacking = true;
+        break;
+    }
+}
+
+if (has_unpacking) {
+    // 使用 php_object_call_args_array
+    const method_name_reg = try self.emitPropertyNameValue(method_name);
+    const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+
+    for (call_data.args) |arg_idx| {
+        const arg_node = self.getNode(arg_idx) orelse continue;
+        if (arg_node.tag == .unpacking_expr) {
+            const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+            const spread_args = try self.allocator.alloc(Register, 2);
+            spread_args[0] = args_arr;
+            spread_args[1] = spread_reg;
+            _ = try self.emit(.{ .call = .{
+                .func_name = "php_args_append_spread",
+                .args = spread_args,
+                .return_type = .php_value,
+            } }, null);
+            continue;
+        }
+
+        const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
+        const val_reg = try self.generateExpression(expr_idx);
+        _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+    }
+
+    const call_args = try self.allocator.alloc(Register, 3);
+    call_args[0] = obj_reg;
+    call_args[1] = method_name_reg;
+    call_args[2] = args_arr;
+    return self.emitWithResult(.{ .call = .{
+        .func_name = "php_object_call_args_array",
+        .args = call_args,
+        .return_type = .php_value,
+    } }, .php_value);
+}
+```
+
+### 修复 6: AOT Runtime - 实现 php_object_call_args_array
+
+**文件**: `src/aot/runtime_lib_template.zig`  
+**位置**: 行 4022-4048
+
+```zig
+// ✅ 新增函数：从数组中提取参数并调用对象方法
+pub fn php_object_call_args_array(obj_val: Value, method_name_val: Value, args_array: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) {
+        return throwException("Call to a member function on null", allocator);
+    }
+    if (!method_name_val.isString()) {
+        return throwException("Method name must be a string", allocator);
+    }
+    if (!args_array.isArray()) {
+        return throwException("Only arrays can be unpacked", allocator);
+    }
+
+    const arr = args_array.asArray();
+    const max_count: usize = @intCast(arr.next_index);
+    const tmp_args = try allocator.alloc(Value, max_count);
+    defer allocator.free(tmp_args);
+
+    var used: usize = 0;
+    var i: usize = 0;
+    while (i < max_count) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        if (arr.get(key)) |v| {
+            tmp_args[used] = v;
+            used += 1;
+        }
+    }
+
+    return php_object_call(obj_val, method_name_val.asString().data, tmp_args[0..used]);
+}
+```
+
+**文件**: `src/aot/native_linker.zig`  
+**位置**: 行 2595
+
+```zig
+// ✅ 注册新函数
+.{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
+```
+
 ---
 
 ## 测试结果
@@ -295,6 +393,9 @@ if (arg_node.tag == .unpacking_expr) {
 1. `src/compiler/parser.zig` - Parser 层修复（4 处修改）
 2. `src/runtime/types.zig` - Runtime 层修复（2 个方法）
 3. `src/runtime/vm.zig` - VM 层修复（1 个方法）
+4. `src/aot/ir_generator.zig` - AOT IR 生成器修复（1 个方法）
+5. `src/aot/runtime_lib_template.zig` - AOT Runtime 新增函数（1 个函数）
+6. `src/aot/native_linker.zig` - AOT 函数注册（1 处添加）
 
 ### 影响的功能
 
