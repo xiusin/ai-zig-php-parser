@@ -492,6 +492,21 @@ fn initPredefinedConstants() !void {
         const k = try runtime_allocator.dupe(u8, sk2);
         try constants.put(k, Value.initInt(sv2));
     }
+    
+    // Filter 常量
+    const filter_keys = [_][]const u8{
+        "FILTER_VALIDATE_EMAIL",
+        "FILTER_VALIDATE_URL",
+        "FILTER_VALIDATE_IP",
+        "FILTER_VALIDATE_INT",
+        "FILTER_VALIDATE_BOOLEAN",
+        "FILTER_VALIDATE_FLOAT",
+    };
+    const filter_vals = [_]i64{ 274, 273, 275, 257, 258, 259 };
+    for (filter_keys, filter_vals) |fk, fv| {
+        const k = try runtime_allocator.dupe(u8, fk);
+        try constants.put(k, Value.initInt(fv));
+    }
 }
 
 pub fn resetAllocStats() void {
@@ -13096,6 +13111,40 @@ pub fn php_array_diff(arrays: []const Value, allocator: Allocator) !Value {
     return Value.initArray(result);
 }
 
+pub fn php_array_diff_key(arrays: []const Value, allocator: Allocator) !Value {
+    if (arrays.len == 0 or !arrays[0].isArray()) return Value.initArray(try PHPArray.init(allocator));
+
+    const first = arrays[0].asArray();
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    // 遍历第一个数组的所有键值对
+    var it = first.elements.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const v = entry.value_ptr.*;
+        var keep = true;
+        
+        // 检查这个键是否在其他数组中存在
+        for (arrays[1..]) |other_val| {
+            if (!other_val.isArray()) continue;
+            const other_arr = other_val.asArray();
+            
+            // 如果其他数组中存在相同的键，则不保留
+            if (other_arr.elements.get(key)) |_| {
+                keep = false;
+                break;
+            }
+        }
+        
+        if (keep) {
+            try result.set(allocator, key, v);
+        }
+    }
+
+    return Value.initArray(result);
+}
+
 pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
     const php_arr = arr.asArray();
@@ -15662,6 +15711,105 @@ pub fn php_preg_replace(pattern: Value, replacement: Value, subject: Value, allo
     return Value.initString(output);
 }
 
+pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value, allocator: Allocator) !Value {
+    if (!pattern.isString() or !subject.isString()) 
+        return Value.initBool(false);
+    
+    const pat = pattern.asString().data;
+    const subj = subject.asString().data;
+    
+    if (pat.len < 3) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subj)));
+    
+    // 提取实际的模式（去掉分隔符和修饰符）
+    const actual_pat = pat[1..pat.len-1];
+    
+    var result = try std.ArrayList(u8).initCapacity(allocator, subj.len);
+    defer result.deinit(allocator);
+    
+    var pos: usize = 0;
+    
+    // 支持两种常见模式：{{word}} 和 {% word %}
+    // 模式1: \{\{(\w+)\}\} 匹配 {{name}}
+    // 模式2: \{% (\w+) %\} 匹配 {% comment %}
+    
+    const is_double_brace = std.mem.indexOf(u8, actual_pat, "\\{\\{") != null;
+    const is_percent_brace = std.mem.indexOf(u8, actual_pat, "\\{%") != null;
+    
+    while (pos < subj.len) {
+        var found = false;
+        var match_start: usize = 0;
+        var match_end: usize = 0;
+        var captured: []const u8 = "";
+        
+        if (is_double_brace) {
+            // 查找 {{word}}
+            if (std.mem.indexOf(u8, subj[pos..], "{{")) |start_idx| {
+                const abs_start = pos + start_idx;
+                if (std.mem.indexOf(u8, subj[abs_start+2..], "}}")) |end_idx| {
+                    match_start = abs_start;
+                    match_end = abs_start + 2 + end_idx + 2;
+                    captured = subj[abs_start+2..abs_start+2+end_idx];
+                    found = true;
+                }
+            }
+        } else if (is_percent_brace) {
+            // 查找 {% word %}
+            if (std.mem.indexOf(u8, subj[pos..], "{%")) |start_idx| {
+                const abs_start = pos + start_idx;
+                if (std.mem.indexOf(u8, subj[abs_start+2..], "%}")) |end_idx| {
+                    match_start = abs_start;
+                    match_end = abs_start + 2 + end_idx + 2;
+                    // 去掉前后空格
+                    var cap_start = abs_start + 2;
+                    var cap_end = abs_start + 2 + end_idx;
+                    while (cap_start < cap_end and subj[cap_start] == ' ') cap_start += 1;
+                    while (cap_end > cap_start and subj[cap_end-1] == ' ') cap_end -= 1;
+                    captured = subj[cap_start..cap_end];
+                    found = true;
+                }
+            }
+        }
+        
+        if (found) {
+            // 添加匹配前的内容
+            try result.appendSlice(allocator, subj[pos..match_start]);
+            
+            // 创建匹配数组
+            const matches_arr = try PHPArray.init(allocator);
+            defer matches_arr.release(allocator);
+            
+            // matches[0] = 完整匹配
+            const full_match = try PHPString.init(allocator, try allocator.dupe(u8, subj[match_start..match_end]));
+            try matches_arr.push(allocator, Value.initString(full_match));
+            
+            // matches[1] = 捕获组
+            const captured_str = try PHPString.init(allocator, try allocator.dupe(u8, captured));
+            try matches_arr.push(allocator, Value.initString(captured_str));
+            
+            // 调用回调函数
+            const callback_result = try php_invoke_callable(callback, &[_]Value{Value.initArray(matches_arr)}, allocator);
+            defer callback_result.release(allocator);
+            
+            // 将回调结果添加到输出
+            if (callback_result.isString()) {
+                try result.appendSlice(allocator, callback_result.asString().data);
+            } else {
+                const str_result = try callback_result.toString(allocator);
+                defer str_result.release(allocator);
+                try result.appendSlice(allocator, str_result.data);
+            }
+            
+            pos = match_end;
+        } else {
+            try result.appendSlice(allocator, subj[pos..]);
+            break;
+        }
+    }
+    
+    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
+    return Value.initString(output);
+}
+
 pub fn php_preg_split(pattern: Value, subject: Value, allocator: Allocator) !Value {
     if (!pattern.isString() or !subject.isString()) return Value.initBool(false);
     
@@ -15689,6 +15837,43 @@ pub fn php_preg_split(pattern: Value, subject: Value, allocator: Allocator) !Val
     }
     
     return Value.initArray(arr);
+}
+
+/// filter_var - 使用特定的过滤器过滤一个变量
+pub fn php_filter_var(value: Value, filter: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    
+    if (!filter.isInt()) return Value.initBool(false);
+    
+    const filter_type = filter.asInt();
+    
+    // FILTER_VALIDATE_EMAIL = 274
+    if (filter_type == 274) {
+        if (!value.isString()) return Value.initBool(false);
+        
+        const email = value.asString().data;
+        
+        // 简单的邮箱验证：必须包含 @ 和 .，且格式合理
+        if (email.len < 3) return Value.initBool(false);
+        
+        // 查找 @
+        const at_pos = std.mem.indexOf(u8, email, "@") orelse return Value.initBool(false);
+        if (at_pos == 0 or at_pos == email.len - 1) return Value.initBool(false);
+        
+        // @ 后面必须有 .
+        const domain = email[at_pos+1..];
+        const dot_pos = std.mem.indexOf(u8, domain, ".") orelse return Value.initBool(false);
+        if (dot_pos == 0 or dot_pos == domain.len - 1) return Value.initBool(false);
+        
+        // 检查是否有多个 @
+        if (std.mem.indexOf(u8, email[at_pos+1..], "@") != null) return Value.initBool(false);
+        
+        // 验证通过，返回原值
+        return value;
+    }
+    
+    // 其他过滤器类型暂不支持
+    return Value.initBool(false);
 }
 
 /// htmlspecialchars - 将特殊字符转换为HTML实体
