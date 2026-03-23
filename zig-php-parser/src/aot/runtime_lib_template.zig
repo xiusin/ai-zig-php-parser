@@ -8406,6 +8406,11 @@ pub fn php_log10(val: Value) !Value {
     return Value.initFloat(@log10(val.toFloat()));
 }
 
+/// log2 - 以2为底的对数
+pub fn php_log2(val: Value) !Value {
+    return Value.initFloat(@log2(val.toFloat()));
+}
+
 /// exp - e的x次方
 pub fn php_exp(val: Value) !Value {
     return Value.initFloat(@exp(val.toFloat()));
@@ -8432,6 +8437,16 @@ pub fn php_pow_func(base: Value, exponent: Value) !Value {
 /// fmod - 浮点数取模
 pub fn php_fmod(x: Value, y: Value) !Value {
     return Value.initFloat(@mod(x.toFloat(), y.toFloat()));
+}
+
+/// intdiv - 整数除法
+pub fn php_intdiv(dividend: Value, divisor: Value) !Value {
+    const a = dividend.toInt();
+    const b = divisor.toInt();
+    if (b == 0) {
+        return error.DivisionByZero;
+    }
+    return Value.initInt(@divTrunc(a, b));
 }
 
 /// hypot - 计算直角三角形斜边长度

@@ -337,6 +337,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "tan", .min_args = 1, .max_args = 1, .handler = tanFn },
             &.{ .name = "log", .min_args = 1, .max_args = 2, .handler = logFn },
             &.{ .name = "log10", .min_args = 1, .max_args = 1, .handler = log10Fn },
+            &.{ .name = "log2", .min_args = 1, .max_args = 1, .handler = log2Fn },
             &.{ .name = "exp", .min_args = 1, .max_args = 1, .handler = expFn },
             &.{ .name = "pi", .min_args = 0, .max_args = 0, .handler = piFn },
             &.{ .name = "deg2rad", .min_args = 1, .max_args = 1, .handler = deg2radFn },
@@ -347,6 +348,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "atan2", .min_args = 2, .max_args = 2, .handler = atan2Fn },
             &.{ .name = "hypot", .min_args = 2, .max_args = 2, .handler = hypotFn },
             &.{ .name = "fmod", .min_args = 2, .max_args = 2, .handler = fmodFn },
+            &.{ .name = "intdiv", .min_args = 2, .max_args = 2, .handler = intdivFn },
         };
 
         for (math_functions) |func| {
@@ -4743,6 +4745,11 @@ fn log10Fn(vm: *VM, args: []const Value) !Value {
     return Value.initFloat(@log10(num));
 }
 
+fn log2Fn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@log2(num));
+}
+
 fn deg2radFn(vm: *VM, args: []const Value) !Value {
     const degrees = try toFloat(vm, args[0]);
     return Value.initFloat(degrees * std.math.pi / 180.0);
@@ -4784,6 +4791,16 @@ fn fmodFn(vm: *VM, args: []const Value) !Value {
     const x = try toFloat(vm, args[0]);
     const y = try toFloat(vm, args[1]);
     return Value.initFloat(@mod(x, y));
+}
+
+fn intdivFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    const dividend = args[0].toInt();
+    const divisor = args[1].toInt();
+    if (divisor == 0) {
+        return error.DivisionByZero;
+    }
+    return Value.initInt(@divTrunc(dividend, divisor));
 }
 
 // 辅助函数：将 Value 转换为整数
