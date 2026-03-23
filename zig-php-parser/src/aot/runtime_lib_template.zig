@@ -8009,6 +8009,52 @@ pub fn php_array_values(arr: Value, allocator: Allocator) !Value {
     return Value.initArray(result);
 }
 
+/// array_is_list - 检查数组是否是列表
+///
+/// 检查给定的数组是否是列表。如果数组的键是连续的整数，从0开始，则认为是列表。
+/// 空数组被认为是列表。
+///
+/// @param arr 要检查的数组
+/// @return 如果是列表返回true，否则返回false
+///
+/// 示例：
+/// ```php
+/// array_is_list([]);              // true
+/// array_is_list([1, 2, 3]);       // true
+/// array_is_list([0 => 'a', 1 => 'b']);  // true
+/// array_is_list([1 => 'a', 0 => 'b']);  // false (顺序不对)
+/// array_is_list([0 => 'a', 2 => 'b']);  // false (不连续)
+/// array_is_list(['a' => 1, 'b' => 2]);  // false (字符串键)
+/// ```
+pub fn php_array_is_list(arr: Value) Value {
+    if (!arr.isArray()) return Value.initBool(false);
+
+    const php_arr = arr.asArray();
+    
+    // 空数组是列表
+    if (php_arr.elements.count() == 0) return Value.initBool(true);
+
+    var iter = php_arr.elements.iterator();
+    var expected_idx: i64 = 0;
+
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        switch (key) {
+            .integer => |i| {
+                // 键必须等于期望的索引
+                if (i != expected_idx) return Value.initBool(false);
+                expected_idx += 1;
+            },
+            .string => {
+                // 有字符串键，不是列表
+                return Value.initBool(false);
+            },
+        }
+    }
+
+    return Value.initBool(true);
+}
+
 // ============================================================================
 // 数学函数
 // ============================================================================

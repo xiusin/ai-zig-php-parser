@@ -2409,6 +2409,7 @@ pub const NativeLinker = struct {
         .{ "in_array", bi(.{ .runtime_name = "php_in_array", .needs_allocator = false }) },
         .{ "array_key_exists", bi(.{ .runtime_name = "php_array_key_exists", .needs_allocator = false }) },
         .{ "array_keys", bi(.{ .runtime_name = "php_array_keys", .needs_allocator = true }) },
+        .{ "array_is_list", bi(.{ .runtime_name = "php_array_is_list", .needs_allocator = false, .may_raise = false }) },
         .{ "array_values", bi(.{ .runtime_name = "php_array_values", .needs_allocator = true }) },
         .{ "array_push", bi(.{ .runtime_name = "php_array_push", .needs_allocator = true }) },
         .{ "array_pop", bi(.{ .runtime_name = "php_array_pop", .needs_allocator = true }) },
@@ -8257,7 +8258,15 @@ pub const NativeLinker = struct {
                                 }
                                 try writer.writeAll(");\n");
                             } else {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                // 通用builtin函数调用
+                                const builtin_info = builtinInfo(op.func_name);
+                                const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                
+                                if (may_raise) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                } else {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                }
                                 try self.writeValueArgs(writer, op.args);
                                 try writer.writeAll(");\n");
                             }
@@ -8415,7 +8424,15 @@ pub const NativeLinker = struct {
                                 }
                                 try writer.writeAll(");\n");
                             } else {
-                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                // 通用builtin函数调用（无返回值）
+                                const builtin_info = builtinInfo(op.func_name);
+                                const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                
+                                if (may_raise) {
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                } else {
+                                    try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                }
                                 try self.writeValueArgs(writer, op.args);
                                 try writer.writeAll(");\n");
                             }
