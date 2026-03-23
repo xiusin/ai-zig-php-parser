@@ -126,6 +126,8 @@ pub const StandardLibrary = struct {
         const b_array_reduce: BuiltinFunction = .{ .name = "array_reduce", .min_args = 2, .max_args = 3, .handler = arrayReduceFn };
         const b_json_encode: BuiltinFunction = .{ .name = "json_encode", .min_args = 1, .max_args = 3, .handler = jsonEncodeFn };
         const b_json_decode: BuiltinFunction = .{ .name = "json_decode", .min_args = 1, .max_args = 4, .handler = jsonDecodeFn };
+        const b_json_last_error: BuiltinFunction = .{ .name = "json_last_error", .min_args = 0, .max_args = 0, .handler = jsonLastErrorFn };
+        const b_json_last_error_msg: BuiltinFunction = .{ .name = "json_last_error_msg", .min_args = 0, .max_args = 0, .handler = jsonLastErrorMsgFn };
         const b_echo: BuiltinFunction = .{ .name = "echo", .min_args = 1, .max_args = 255, .handler = echoFn };
 
         const result = switch (id) {
@@ -145,6 +147,8 @@ pub const StandardLibrary = struct {
             .array_reduce => try b_array_reduce.call(vm, args),
             .json_encode => try b_json_encode.call(vm, args),
             .json_decode => try b_json_decode.call(vm, args),
+            .json_last_error => try b_json_last_error.call(vm, args),
+            .json_last_error_msg => try b_json_last_error_msg.call(vm, args),
             .echo => try b_echo.call(vm, args),
             else => return null,
         };

@@ -2389,6 +2389,7 @@ pub const NativeLinker = struct {
         .{ "unserialize", bi(.{ .runtime_name = "php_unserialize", .needs_allocator = true }) },
         .{ "json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
         .{ "json_decode", bi(.{ .runtime_name = "php_json_decode", .needs_allocator = true }) },
+        .{ "json_last_error", bi(.{ .runtime_name = "php_json_last_error", .needs_allocator = false, .may_raise = false }) },
         .{ "json_last_error_msg", bi(.{ .runtime_name = "php_json_last_error_msg", .needs_allocator = true, .may_raise = false }) },
         .{ "func_get_args", bi(.{ .runtime_name = "php_func_get_args", .needs_allocator = true }) },
         .{ "func_get_arg", bi(.{ .runtime_name = "php_func_get_arg", .needs_allocator = false }) },

@@ -14640,6 +14640,10 @@ const json_error_syntax: i32 = 4;
 
 threadlocal var last_json_error_code: i32 = json_error_none;
 
+pub fn php_json_last_error() Value {
+    return Value.initInt(last_json_error_code);
+}
+
 pub fn php_json_last_error_msg(allocator: Allocator) !Value {
     const msg = switch (last_json_error_code) {
         json_error_none => "No error",
