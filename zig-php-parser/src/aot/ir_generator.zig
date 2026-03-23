@@ -5768,7 +5768,53 @@ pub const IRGenerator = struct {
         const obj_reg = try self.generateExpression(call_data.target);
         const method_name = self.getString(call_data.method_name);
 
-        // Generate arguments
+        // 检查是否有 unpacking_expr
+        var has_unpacking: bool = false;
+        for (call_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .unpacking_expr) {
+                has_unpacking = true;
+                break;
+            }
+        }
+
+        if (has_unpacking) {
+            // 使用数组展开方式
+            const method_name_reg = try self.emitPropertyNameValue(method_name);
+            const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                    const spread_args = try self.allocator.alloc(Register, 2);
+                    spread_args[0] = args_arr;
+                    spread_args[1] = spread_reg;
+                    _ = try self.emit(.{ .call = .{
+                        .func_name = "php_args_append_spread",
+                        .args = spread_args,
+                        .return_type = .php_value,
+                    } }, null);
+                    continue;
+                }
+
+                const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
+                const val_reg = try self.generateExpression(expr_idx);
+                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+            }
+
+            const call_args = try self.allocator.alloc(Register, 3);
+            call_args[0] = obj_reg;
+            call_args[1] = method_name_reg;
+            call_args[2] = args_arr;
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_call_args_array",
+                .args = call_args,
+                .return_type = .php_value,
+            } }, .php_value);
+        }
+
+        // 普通方法调用（无 unpacking）
         const args = try self.allocator.alloc(Register, call_data.args.len);
         for (call_data.args, 0..) |arg_idx, i| {
             args[i] = try self.generateExpression(arg_idx);

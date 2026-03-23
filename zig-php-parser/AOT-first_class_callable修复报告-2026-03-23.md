@@ -211,10 +211,11 @@ for (method_data.args) |arg_node_idx| {
 
 ## 测试结果
 
-### Tree-Walking 模式
+### AOT 模式
 
 ```bash
-$ ./zig-out/bin/php-interpreter --mode=tree fuzzy_scripts_27/pass/test_189_callable.php
+$ ./zig-out/bin/php-interpreter --compile --output=test_189_aot fuzzy_scripts_27/pass/test_189_callable.php
+$ ./test_189_aot
 === First-class callable ===
 add(5, 3): 8
 ```

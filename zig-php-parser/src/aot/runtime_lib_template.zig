@@ -4019,6 +4019,35 @@ pub fn php_object_call_safe_args_array(obj_val: Value, method_name_val: Value, a
     return php_object_call(obj_val, method_name_val.asString().data, tmp_args[0..used]);
 }
 
+pub fn php_object_call_args_array(obj_val: Value, method_name_val: Value, args_array: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) {
+        return throwException("Call to a member function on null", allocator);
+    }
+    if (!method_name_val.isString()) {
+        return throwException("Method name must be a string", allocator);
+    }
+    if (!args_array.isArray()) {
+        return throwException("Only arrays can be unpacked", allocator);
+    }
+
+    const arr = args_array.asArray();
+    const max_count: usize = @intCast(arr.next_index);
+    const tmp_args = try allocator.alloc(Value, max_count);
+    defer allocator.free(tmp_args);
+
+    var used: usize = 0;
+    var i: usize = 0;
+    while (i < max_count) : (i += 1) {
+        const key = ArrayKey{ .integer = @intCast(i) };
+        if (arr.get(key)) |v| {
+            tmp_args[used] = v;
+            used += 1;
+        }
+    }
+
+    return php_object_call(obj_val, method_name_val.asString().data, tmp_args[0..used]);
+}
+
 // ============================================================================
 // 算术运算符
 // ============================================================================
