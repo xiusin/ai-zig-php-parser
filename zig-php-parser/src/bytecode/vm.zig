@@ -1034,19 +1034,13 @@ pub const BytecodeVM = struct {
     /// 主执行循环 - 使用计算跳转表优化
     /// 通过函数指针数组替代switch语句，减少分支预测失败
     fn runOptimized(self: *BytecodeVM) VMError!Value {
-        std.debug.print("DEBUG: BytecodeVM runOptimized started\n", .{});
         var frame = &self.frames[self.frame_count - 1];
-        std.debug.print("DEBUG: bytecode length = {}\n", .{frame.function.bytecode.len});
 
         var instruction_count: usize = 0;
         while (true) {
             instruction_count += 1;
-            if (instruction_count % 1000 == 0) {
-                std.debug.print("DEBUG: executed {} instructions, ip={}\n", .{ instruction_count, frame.ip });
-            }
             
             if (frame.ip >= frame.function.bytecode.len) {
-                std.debug.print("DEBUG: ip out of bounds: {} >= {}\n", .{ frame.ip, frame.function.bytecode.len });
                 return .null_val;
             }
             
@@ -1401,6 +1395,8 @@ pub const BytecodeVM = struct {
 
                     self.stack_top = frame.base_pointer;
                     frame = &self.frames[self.frame_count - 1];
+                    // void 函数也需要压入返回值（null），这样调用者可以正确 pop
+                    try self.push(.null_val);
                 },
 
                 .loop_start, .loop_end => {
@@ -5246,7 +5242,9 @@ fn handleCallStatic(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
     const arg_count = inst.operand1;
 
     // 栈布局验证：至少需要 class_name + method_name + args
-    if (vm.stack_top < arg_count + 2) {
+    // stack_top 指向下一个可用位置，所以需要 >= arg_count + 2 个元素
+    const required_elements = arg_count + 2;
+    if (vm.stack_top < required_elements) {
         return BytecodeVM.VMError.StackUnderflow;
     }
 
@@ -5592,6 +5590,8 @@ fn handleRetVoid(vm: *BytecodeVM, frame: *CallFrame, _: Instruction) BytecodeVM.
         return .{ .return_value = .null_val };
     }
     vm.stack_top = frame.base_pointer;
+    // void 函数也需要压入返回值（null），这样调用者可以正确 pop
+    try vm.push(.null_val);
     return .frame_changed;
 }
 

@@ -1997,7 +1997,8 @@ pub const BytecodeGenerator = struct {
                         "{s}{s}{s}",
                         .{ class_name, separator, method_name }
                     );
-                    defer self.allocator.free(full_method_name);
+                    // 注意：不要释放 full_method_name，它被用作 HashMap 的 key
+                    // HashMap 不会复制 key，所以我们需要保持它的生命周期
                     
                     try self.functions.put(self.allocator, full_method_name, compiled);
 
