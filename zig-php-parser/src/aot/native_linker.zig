@@ -7021,7 +7021,13 @@ pub const NativeLinker = struct {
             .param => |op| {
                 if (inst.result) |reg| {
                     if (std.mem.eql(u8, op.name, "this")) {
-                        try writer.print("    reg_{d} = ctx;\n", .{reg.id});
+                        // 检查reg是否是alloca指针
+                        const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                        if (is_alloca) {
+                            try writer.print("    reg_{d}.* = ctx;\n", .{reg.id});
+                        } else {
+                            try writer.print("    reg_{d} = ctx;\n", .{reg.id});
+                        }
                     } else {
                         // 检查函数是否有this参数
                         const has_this = blk: {
@@ -7088,18 +7094,31 @@ pub const NativeLinker = struct {
                             if (is_variadic) {
                                 // 可变参数：收集从 args_index 开始的所有参数到数组
                                 // 特殊处理：如果恰好一个参数且是关联数组（命名 variadic 参数），直接使用
-                                try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                const is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(reg.id) else false;
+                                if (is_alloca) {
+                                    try writer.print("    reg_{d}.* = runtime.Value.initNull();\n", .{reg.id});
+                                } else {
+                                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                }
                                 try writer.print("    {{\n", .{});
                                 try writer.print("        const __va_start: usize = {d};\n", .{args_index});
                                 try writer.print("        if (args.len == __va_start + 1 and args[__va_start].isArray() and args[__va_start].asArray().hasStringKeys()) {{\n", .{});
-                                try writer.print("            reg_{d} = args[__va_start];\n", .{reg.id});
+                                if (is_alloca) {
+                                    try writer.print("            reg_{d}.* = args[__va_start];\n", .{reg.id});
+                                } else {
+                                    try writer.print("            reg_{d} = args[__va_start];\n", .{reg.id});
+                                }
                                 try writer.print("        }} else {{\n", .{});
                                 try writer.print("            var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
                                 try writer.print("            var i: usize = __va_start;\n", .{});
                                 try writer.print("            while (i < args.len) : (i += 1) {{\n", .{});
                                 try writer.print("                try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
                                 try writer.print("            }}\n", .{});
-                                try writer.print("            reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                if (is_alloca) {
+                                    try writer.print("            reg_{d}.* = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                } else {
+                                    try writer.print("            reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                }
                                 try writer.print("        }}\n", .{});
                                 try writer.print("    }}\n", .{});
                             } else {
@@ -8504,14 +8523,51 @@ pub const NativeLinker = struct {
                     }
                     // coalesce 上下文: 基值为 null 时直接返回 null，不触发警告
                     const is_coalesce_ag = if (self.current_coalesce_nowarn_regs) |cr| cr.contains(reg.id) else false;
+                    
+                    // 检查操作数是否是alloca
+                    const array_is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(op.array.id) else false;
+                    const key_is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(op.key.id) else false;
+                    
                     if (is_coalesce_ag) {
-                        try writer.print("    if (reg_{d}.isNull()) {{\n", .{op.array.id});
+                        if (array_is_alloca) {
+                            try writer.print("    if (reg_{d}.*.isNull()) {{\n", .{op.array.id});
+                        } else {
+                            try writer.print("    if (reg_{d}.isNull()) {{\n", .{op.array.id});
+                        }
                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initNull();\n", .{});
                         try writer.print("    }} else {{\n", .{});
-                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_array_get(reg_{d}, reg_{d}, runtime.runtime_allocator);\n", .{ op.array.id, op.key.id });
+                        try writer.writeAll("    ");
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
+                        try writer.writeAll("try runtime.php_array_get(");
+                        if (array_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.array.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.array.id});
+                        }
+                        try writer.writeAll(", ");
+                        if (key_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.key.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.key.id});
+                        }
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
                         try writer.print("    }}\n", .{});
                     } else {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_array_get(reg_{d}, reg_{d}, runtime.runtime_allocator);\n", .{ op.array.id, op.key.id });
+                        try writer.writeAll("    ");
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
+                        try writer.writeAll("try runtime.php_array_get(");
+                        if (array_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.array.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.array.id});
+                        }
+                        try writer.writeAll(", ");
+                        if (key_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.key.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.key.id});
+                        }
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
                     }
                 }
             },
@@ -8762,8 +8818,24 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     const escaped_prop = try self.escapeString(op.property_name);
                     defer self.allocator.free(escaped_prop);
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                    const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                    const object_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.object.id) else false;
+                    
+                    if (result_is_alloca) {
+                        try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
+                        if (object_is_alloca) {
+                            try writer.print("    reg_{d}.* = try runtime.php_object_get(reg_{d}.*, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        } else {
+                            try writer.print("    reg_{d}.* = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        }
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        if (object_is_alloca) {
+                            try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}.*, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        }
+                    }
                 }
             },
             .property_set => |op| {
