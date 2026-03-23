@@ -21,6 +21,313 @@ echo "add(5, 3): " . $add(5, 3) . "\n";  // 调用
 
 ---
 
+## 当前修复状态
+
+### ✅ 已完成
+
+1. **对象方法的 first-class callable**: `$obj->method(...)` - 完全支持
+2. **`Closure::fromCallable()` 函数**: 基础实现完成
+3. **VM 支持 `Class::method` 字符串调用**: 在 `callUserFunc` 中添加了静态方法调用支持
+
+### ⚠️ 部分完成
+
+1. **静态方法 first-class callable**: `Class::method(...)` - Parser 支持，但运行时有问题
+2. **函数 first-class callable**: `func(...)` - Parser 支持，运行时基本工作
+
+### ❌ 待修复
+
+1. **内存管理问题**: `Closure.init` 复制 `UserFunction` 导致内存泄漏
+2. **静态方法闭包调用**: 返回的字符串无法正确调用静态方法
+
+---
+
+## 本次修复内容
+
+### 修复 1: 实现 `Closure::fromCallable()` 函数
+
+**文件**: `src/runtime/builtin_vars.zig`  
+**位置**: 行 315-395
+
+```zig
+/// Closure::fromCallable - Create a closure from a callable
+pub fn closureFromCallableFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "Closure::fromCallable", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const callable = args[0];
+
+    // If it's already a closure or arrow function, return it directly
+    if (callable.getTag() == .closure or callable.getTag() == .arrow_function) {
+        _ = callable.retain();
+        return callable;
+    }
+
+    // If it's a user function, wrap it in a closure
+    if (callable.getTag() == .user_function) {
+        const user_func = callable.getAsUserFunc().data;
+        const closure_data = Closure.init(vm.allocator, user_func.*);
+        const closure = try vm.memory_manager.allocClosure(closure_data);
+        const closure_value = Value.fromBox(closure, Value.TYPE_CLOSURE);
+        return closure_value;
+    }
+
+    // If it's a string, parse it as function name or "Class::method"
+    if (callable.getTag() == .string) {
+        const callable_str = callable.getAsString().data.data;
+        
+        // Check if it's a static method call: "ClassName::methodName"
+        if (std.mem.indexOf(u8, callable_str, "::")) |sep_pos| {
+            const class_name = callable_str[0..sep_pos];
+            const method_name = callable_str[sep_pos + 2 ..];
+            
+            // Validate class and method exist
+            const class = vm.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(vm.allocator, class_name, vm.current_file, vm.current_line);
+                return vm.throwException(exception);
+            };
+            
+            const method_lookup = class.getMethodLookup(method_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedMethodError(vm.allocator, class_name, method_name, vm.current_file, vm.current_line);
+                return vm.throwException(exception);
+            };
+            
+            _ = method_lookup;
+            
+            // Return the string as a callable (VM will handle it)
+            const callable_str_copy = try vm.memory_manager.allocString(callable_str);
+            const callable_str_value = Value.fromBox(callable_str_copy, Value.TYPE_STRING);
+            return callable_str_value;
+        }
+        
+        // It's a regular function name
+        const func_val = vm.global.get(callable_str) orelse {
+            const exception = try ExceptionFactory.createUndefinedFunctionError(vm.allocator, callable_str, vm.current_file, vm.current_line);
+            return vm.throwException(exception);
+        };
+        
+        // Recursively call fromCallable on the function value
+        return closureFromCallableFn(vm, &[_]Value{func_val});
+    }
+
+    // Invalid callable type
+    const exception = try ExceptionFactory.createTypeError(vm.allocator, "Closure::fromCallable() expects parameter 1 to be a valid callback", vm.current_file, vm.current_line);
+    return vm.throwException(exception);
+}
+```
+
+**注册函数**:
+```zig
+&.{ .name = "Closure::fromCallable", .min_args = 1, .max_args = 1, .handler = closureFromCallableFn },
+```
+
+### 修复 2: VM 支持 `Class::method` 字符串调用
+
+**文件**: `src/runtime/vm.zig`  
+**位置**: `callUserFunc` 方法（行 5447-5520）
+
+```zig
+pub fn callUserFunc(self: *VM, function_name: []const u8, args: []const Value) !Value {
+    // Check if it's a static method call: "ClassName::methodName"
+    if (std.mem.indexOf(u8, function_name, "::")) |sep_pos| {
+        const class_name = function_name[0..sep_pos];
+        const method_name = function_name[sep_pos + 2 ..];
+        
+        // Get the class
+        const class = self.getClass(class_name) orelse {
+            const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+        
+        // Get the method
+        const method_lookup = class.getMethodLookup(method_name) orelse {
+            const exception = try ExceptionFactory.createUndefinedMethodError(self.allocator, class_name, method_name, self.current_file, self.current_line);
+            return self.throwException(exception);
+        };
+        
+        const method = method_lookup.method;
+        
+        // Call the static method
+        const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+        defer self.allocator.free(full_method_name);
+        try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
+        defer self.popCallFrame();
+        
+        // Bind arguments to parameters
+        for (method.parameters, 0..) |param, i| {
+            if (i < args.len) {
+                try self.setVariable(param.name.data, args[i]);
+            } else if (param.default_value) |default| {
+                try self.setVariable(param.name.data, default);
+            }
+        }
+        
+        // Execute method body
+        if (method.body) |body| {
+            const body_node_idx: u32 = @intCast(@intFromPtr(body));
+            return self.eval(body_node_idx);
+        }
+        
+        return Value.initNull();
+    }
+    
+    // ... 原有的函数查找逻辑
+}
+```
+
+---
+
+## 测试结果
+
+### Tree-Walking 模式
+
+```bash
+$ ./zig-out/bin/php-interpreter fuzzy_scripts_27/pass/test_189_callable.php
+=== First-class callable ===
+add(5, 3): 8
+```
+
+✅ **对象方法 first-class callable 通过**
+
+### 函数 first-class callable
+
+```php
+function subtract($a, $b) { return $a - $b; }
+$sub = subtract(...);
+echo $sub(10, 3);  // 输出: 7
+```
+
+✅ **函数 first-class callable 基本工作**
+
+### 静态方法 first-class callable
+
+```php
+class Math {
+    public static function add($a, $b) { return $a + $b; }
+}
+$add = Math::add(...);
+echo $add(5, 3);  // 预期: 8, 实际: 错误
+```
+
+⚠️ **静态方法 first-class callable 需要进一步修复**
+
+---
+
+## 技术要点
+
+### 1. Closure::fromCallable 实现策略
+
+**设计决策**:
+- 对于已有的 closure/arrow_function: 直接返回（retain）
+- 对于 user_function: 包装为 Closure
+- 对于字符串 "Class::method": 返回字符串，由 VM 处理
+- 对于字符串 "func": 查找全局函数并递归调用
+
+**优点**:
+- 简单直接，避免复杂的类型转换
+- 利用现有的 VM 调用机制
+- 内存管理清晰
+
+**缺点**:
+- 静态方法需要特殊处理
+- 字符串调用有性能开销
+
+### 2. VM 静态方法调用支持
+
+**实现**:
+```zig
+if (std.mem.indexOf(u8, function_name, "::")) |sep_pos| {
+    // 解析 class_name 和 method_name
+    // 查找类和方法
+    // 绑定参数并执行
+}
+```
+
+**问题**:
+- Method.body 是 `?*anyopaque`，需要转换为 AST 节点索引
+- 当前实现假设 body 指针可以直接转换为节点索引，这可能不正确
+
+---
+
+## 已知问题
+
+### P0 - 高优先级
+
+| 问题 | 影响面 | 落地成本 |
+|------|--------|----------|
+| 静态方法 first-class callable 调用失败 | 高 | 中 |
+| Closure.init 内存泄漏 | 高 | 中 |
+| Method.body 指针转换不正确 | 高 | 高 |
+
+### P1 - 中优先级
+
+| 问题 | 影响面 | 落地成本 |
+|------|--------|----------|
+| 字符串调用性能开销 | 中 | 高 |
+| 缺少可变参数支持验证 | 中 | 低 |
+
+---
+
+## 后续建议
+
+### P0 - 立即修复
+
+1. **修复 Method.body 处理**
+   - 影响面: 高 - 所有静态方法调用
+   - 落地成本: 高 - 需要重新设计 Method 结构
+   - 建议: 将 Method.body 改为存储 AST 节点索引而不是指针
+
+2. **修复内存泄漏**
+   - 影响面: 高 - 所有使用 Closure::fromCallable 的代码
+   - 落地成本: 中 - 需要正确管理 UserFunction 的生命周期
+   - 建议: 使用引用计数或共享所有权
+
+3. **完善静态方法 first-class callable**
+   - 影响面: 高 - PHP 8.1 核心特性
+   - 落地成本: 中 - 需要创建真正的闭包对象
+   - 建议: 创建 ArrowFunction 包装静态方法调用
+
+### P1 - 后续优化
+
+1. **优化字符串调用性能**
+   - 影响面: 中 - 频繁调用场景
+   - 落地成本: 高 - 需要缓存机制
+   - 建议: 实现 callable 缓存，避免重复解析
+
+2. **添加完整测试覆盖**
+   - 影响面: 中 - 测试完整性
+   - 落地成本: 低 - 编写测试用例
+   - 建议: 覆盖所有 callable 类型组合
+
+### P2 - 长期改进
+
+1. **支持对象方法 first-class callable**: `[$obj, 'method'](...)`
+2. **支持实例方法 first-class callable**: `$obj->method(...)`（已支持）
+3. **性能优化**: 内联高频 callable 调用
+
+---
+
+## 总结
+
+本次修复实现了 `Closure::fromCallable()` 函数的基础功能，并在 VM 中添加了对 `Class::method` 字符串格式的支持。对象方法的 first-class callable 完全工作，函数的 first-class callable 基本工作，但静态方法的 first-class callable 还需要进一步修复。
+
+主要挑战在于：
+1. Method 和 UserFunction 的类型不兼容
+2. Method.body 的指针管理问题
+3. 内存管理的复杂性
+
+建议优先修复 Method.body 的处理逻辑，然后再完善静态方法的 first-class callable 支持。
+
+---
+
+**修复完成时间**: 2026-03-23  
+**测试状态**: ⚠️ 部分通过（对象方法✅，函数✅，静态方法❌）  
+**下一步**: 修复 Method.body 处理和内存泄漏问题
+
+---
+
 ## 根本原因分析
 
 ### 1. Parser 层问题

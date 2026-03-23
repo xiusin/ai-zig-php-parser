@@ -5444,6 +5444,49 @@ pub const VM = struct {
     }
 
     pub fn callUserFunc(self: *VM, function_name: []const u8, args: []const Value) !Value {
+        // Check if it's a static method call: "ClassName::methodName"
+        if (std.mem.indexOf(u8, function_name, "::")) |sep_pos| {
+            const class_name = function_name[0..sep_pos];
+            const method_name = function_name[sep_pos + 2 ..];
+            
+            // Get the class
+            const class = self.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            // Get the method
+            const method_lookup = class.getMethodLookup(method_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedMethodError(self.allocator, class_name, method_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            const method = method_lookup.method;
+            
+            // Call the static method
+            const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+            defer self.allocator.free(full_method_name);
+            try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
+            defer self.popCallFrame();
+            
+            // Bind arguments to parameters
+            for (method.parameters, 0..) |param, i| {
+                if (i < args.len) {
+                    try self.setVariable(param.name.data, args[i]);
+                } else if (param.default_value) |default| {
+                    try self.setVariable(param.name.data, default);
+                }
+            }
+            
+            // Execute method body
+            if (method.body) |body| {
+                const body_node_idx: u32 = @intCast(@intFromPtr(body));
+                return self.eval(body_node_idx);
+            }
+            
+            return Value.initNull();
+        }
+        
         if (try StandardLibrary.callBuiltinFast(self, function_name, args)) |v| return v;
 
         // Second, check extension functions (Requirements: 9.2)

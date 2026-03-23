@@ -12,6 +12,7 @@ const Value = types.Value;
 const PHPString = types.PHPString;
 const PHPArray = types.PHPArray;
 const ArrayKey = types.ArrayKey;
+const Closure = types.Closure;
 const exceptions = @import("exceptions.zig");
 const ExceptionFactory = exceptions.ExceptionFactory;
 
@@ -311,6 +312,81 @@ pub fn callUserFuncArrayFn(vm: *VM, args: []const Value) !Value {
     }
 
     return executeCallback(vm, callback, arg_values);
+}
+
+/// Closure::fromCallable - Create a closure from a callable
+pub fn closureFromCallableFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, @intCast(args.len), "Closure::fromCallable", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const callable = args[0];
+
+    // If it's already a closure or arrow function, return it directly
+    if (callable.getTag() == .closure or callable.getTag() == .arrow_function) {
+        _ = callable.retain();
+        return callable;
+    }
+
+    // If it's a user function, wrap it in a closure
+    if (callable.getTag() == .user_function) {
+        const user_func = callable.getAsUserFunc().data;
+        
+        // Create a closure that wraps the user function
+        const closure_data = Closure.init(vm.allocator, user_func.*);
+        const closure = try vm.memory_manager.allocClosure(closure_data);
+        
+        const closure_value = Value.fromBox(closure, Value.TYPE_CLOSURE);
+        return closure_value;
+    }
+
+    // If it's a string, parse it as function name or "Class::method"
+    if (callable.getTag() == .string) {
+        const callable_str = callable.getAsString().data.data;
+        
+        // Check if it's a static method call: "ClassName::methodName"
+        if (std.mem.indexOf(u8, callable_str, "::")) |sep_pos| {
+            const class_name = callable_str[0..sep_pos];
+            const method_name = callable_str[sep_pos + 2 ..];
+            
+            // Get the class
+            const class = vm.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(vm.allocator, class_name, vm.current_file, vm.current_line);
+                return vm.throwException(exception);
+            };
+            
+            // Get the method
+            const method_lookup = class.getMethodLookup(method_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedMethodError(vm.allocator, class_name, method_name, vm.current_file, vm.current_line);
+                return vm.throwException(exception);
+            };
+            
+            _ = method_lookup;
+            
+            // For static methods, we create an arrow function that calls the static method
+            // This is a simplified approach - we store the callable string and call it later
+            const callable_str_copy = try vm.memory_manager.allocString(callable_str);
+            const callable_str_value = Value.fromBox(callable_str_copy, Value.TYPE_STRING);
+            
+            // Return the string as a callable (PHP allows this)
+            return callable_str_value;
+        }
+        
+        // It's a regular function name
+        const func_val = vm.global.get(callable_str) orelse {
+            const exception = try ExceptionFactory.createUndefinedFunctionError(vm.allocator, callable_str, vm.current_file, vm.current_line);
+            return vm.throwException(exception);
+        };
+        
+        // Recursively call fromCallable on the function value
+        return closureFromCallableFn(vm, &[_]Value{func_val});
+    }
+
+    // Invalid callable type
+    const exception = try ExceptionFactory.createTypeError(vm.allocator, "Closure::fromCallable() expects parameter 1 to be a valid callback", vm.current_file, vm.current_line);
+    return vm.throwException(exception);
 }
 
 // ============================================================================
@@ -1456,6 +1532,7 @@ pub fn registerVariableFunctions(stdlib: anytype) !void {
         // Callback functions
         &.{ .name = "call_user_func", .min_args = 1, .max_args = 255, .handler = callUserFuncFn },
         &.{ .name = "call_user_func_array", .min_args = 2, .max_args = 2, .handler = callUserFuncArrayFn },
+        &.{ .name = "Closure::fromCallable", .min_args = 1, .max_args = 1, .handler = closureFromCallableFn },
 
         // Class/Object functions
         &.{ .name = "class_exists", .min_args = 1, .max_args = 2, .handler = classExistsFn },
