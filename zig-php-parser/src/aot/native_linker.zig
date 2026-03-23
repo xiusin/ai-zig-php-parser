@@ -1122,8 +1122,24 @@ pub const NativeLinker = struct {
             \\    runtime.aot_callable_hook = &aot_dispatch_callable;
             \\}
             \\
-            \\// AOT变量函数dispatch：支持所有AOT注册的builtin函数
+            \\// AOT变量函数dispatch：支持所有AOT注册的builtin函数、用户函数和静态方法
             \\fn aot_dispatch_callable(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+            \\    // 1. 检查是否是静态方法调用: "ClassName::methodName"
+            \\    if (std.mem.indexOf(u8, name, "::")) |sep_pos| {
+            \\        const class_name = name[0..sep_pos];
+            \\        const method_name = name[sep_pos + 2..];
+            \\        return aot_dispatch_static_method(class_name, method_name, args, allocator);
+            \\    }
+            \\
+            \\    // 2. 检查是否是用户定义的函数
+            \\    const user_func_result = aot_dispatch_user_function(name, args, allocator);
+            \\    if (user_func_result) |result| {
+            \\        return result;
+            \\    } else |err| {
+            \\        if (err != error.UnknownFunction) return err;
+            \\    }
+            \\
+            \\    // 3. 检查是否是 builtin 函数
             \\
         );
 
@@ -1147,7 +1163,68 @@ pub const NativeLinker = struct {
         }
 
         try writer.writeAll(
-            \\    _ = allocator;
+            \\
+            \\    return error.UnknownFunction;
+            \\}
+            \\
+            \\// 分发用户定义的函数调用
+            \\fn aot_dispatch_user_function(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+            \\
+        );
+
+        // 生成用户函数的dispatch分支
+        var has_user_functions = false;
+        for (ir_module.functions.items) |func| {
+            if (func.is_method) continue; // 跳过方法，只处理全局函数
+            
+            has_user_functions = true;
+            try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{func.name});
+            try writer.print("        return @\"{s}\"(runtime.Value.initNull(), args, allocator);\n", .{func.name});
+            try writer.writeAll("    }\n");
+        }
+
+        if (!has_user_functions) {
+            try writer.writeAll("    _ = args;\n");
+            try writer.writeAll("    _ = allocator;\n");
+        }
+
+        try writer.writeAll(
+            \\    return error.UnknownFunction;
+            \\}
+            \\
+            \\// 分发静态方法调用
+            \\fn aot_dispatch_static_method(class_name: []const u8, method_name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+            \\
+        );
+
+        // 生成静态方法的dispatch分支
+        var has_static_methods = false;
+        for (ir_module.types.items) |type_def| {
+            if (type_def.kind != .class) continue;
+            
+            try writer.print("    if (std.mem.eql(u8, class_name, \"{s}\")) {{\n", .{type_def.name});
+            
+            for (type_def.methods) |method| {
+                if (!method.is_static) continue;
+                
+                has_static_methods = true;
+                try writer.print("        if (std.mem.eql(u8, method_name, \"{s}\")) {{\n", .{method.name});
+                // 静态方法的完整名称是 "ClassName::methodName"
+                try writer.print("            return @\"{s}::{s}\"(runtime.Value.initNull(), args, allocator);\n", .{type_def.name, method.name});
+                try writer.writeAll("        }\n");
+            }
+            
+            try writer.writeAll("    }\n");
+        }
+
+        if (!has_static_methods) {
+            try writer.writeAll("    _ = class_name;\n");
+            try writer.writeAll("    _ = method_name;\n");
+            try writer.writeAll("    _ = args;\n");
+            try writer.writeAll("    _ = allocator;\n");
+        }
+
+        try writer.writeAll(
             \\    return error.UnknownFunction;
             \\}
             \\
