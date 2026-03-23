@@ -5833,6 +5833,24 @@ pub const IRGenerator = struct {
         const short_class_name = self.getString(call_data.class_name);
         const method_name = self.getString(call_data.method_name);
 
+        // ✅ 特殊处理: Closure::fromCallable
+        if (std.mem.eql(u8, short_class_name, "Closure") and std.mem.eql(u8, method_name, "fromCallable") and call_data.args.len == 1) {
+            const arg_node = self.getNode(call_data.args[0]) orelse {
+                return self.emitWithResult(.{ .const_null = {} }, .php_value);
+            };
+            // Extract the function name from the argument node
+            const callable_name = switch (arg_node.tag) {
+                .variable => self.getString(arg_node.data.variable.name),
+                .literal_string => self.getString(arg_node.data.literal_string.value),
+                else => "",
+            };
+            if (callable_name.len > 0) {
+                const sid = try self.module.?.internString(callable_name);
+                return self.emitWithResult(.{ .const_string = sid }, .php_string);
+            }
+            return self.emitWithResult(.{ .const_null = {} }, .php_value);
+        }
+
         // ✅ 解析类名（处理命名空间、别名）
         const class_name = try self.resolveClassName(short_class_name);
 

@@ -21,6 +21,7 @@ const reflection = @import("reflection.zig");
 const builtin_classes = @import("builtin_classes.zig");
 const builtin_registry = @import("builtin_registry.zig");
 const BuiltinRegistry = builtin_registry.BuiltinRegistry;
+const builtin_vars = @import("builtin_vars.zig");
 const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
 const string_utils = @import("string_utils.zig");
@@ -7256,6 +7257,64 @@ pub const VM = struct {
     pub fn callFunctionByNameWithRefs(self: *VM, name: []const u8, args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
         if (try StandardLibrary.callBuiltinFast(self, name, args)) |v| return v;
 
+        // Check if it's a static method call: "ClassName::methodName"
+        if (std.mem.indexOf(u8, name, "::")) |sep_pos| {
+            const class_name = name[0..sep_pos];
+            const method_name = name[sep_pos + 2 ..];
+            
+            // Get the class
+            const class = self.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            // Get the method
+            const method_lookup = class.getMethodLookup(method_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedMethodError(self.allocator, class_name, method_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            const method = method_lookup.method;
+            
+            // Build full method name for call stack
+            var full_method_name_buf: [256]u8 = undefined;
+            const full_method_name = std.fmt.bufPrint(&full_method_name_buf, "{s}::{s}", .{ class_name, method_name }) catch name;
+            
+            // Push call frame
+            try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
+            defer self.popCallFrame();
+            
+            // Bind parameters
+            for (method.parameters, 0..) |param, i| {
+                if (i < args.len) {
+                    try self.setVariable(param.name.data, args[i]);
+                } else if (param.default_value) |default| {
+                    try self.setVariable(param.name.data, default);
+                } else {
+                    const exception = try ExceptionFactory.createArgumentCountError(self.allocator, @intCast(method.parameters.len), @intCast(args.len), method_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            }
+            
+            // Execute method body
+            if (method.body) |body| {
+                const body_node_idx: u32 = @truncate(@intFromPtr(body));
+                return self.eval(body_node_idx) catch |err| {
+                    if (err == error.Return) {
+                        if (self.return_value) |val| {
+                            const ret = val;
+                            self.return_value = null;
+                            return ret;
+                        }
+                        return Value.initNull();
+                    }
+                    return err;
+                };
+            }
+            
+            return Value.initNull();
+        }
+
         // Then check global functions
         const function_val = self.global.get(name) orelse {
             const exception = try ExceptionFactory.createUndefinedFunctionError(self.allocator, name, self.current_file, self.current_line);
@@ -11263,6 +11322,27 @@ pub const VM = struct {
     fn evaluateStaticMethodCall(self: *VM, static_call_data: anytype) !Value {
         const class_name = self.context.string_pool.keys()[static_call_data.class_name];
         const method_name = self.context.string_pool.keys()[static_call_data.method_name];
+
+        // Special handling for Closure::fromCallable
+        if (std.mem.eql(u8, class_name, "Closure") and std.mem.eql(u8, method_name, "fromCallable")) {
+            // Evaluate arguments
+            var args = std.ArrayList(Value){};
+            try args.ensureTotalCapacity(self.allocator, static_call_data.args.len);
+            defer {
+                for (args.items) |arg| {
+                    self.releaseValue(arg);
+                }
+                args.deinit(self.allocator);
+            }
+
+            for (static_call_data.args) |arg_node_idx| {
+                const arg_value = try self.eval(arg_node_idx);
+                try args.append(self.allocator, arg_value);
+            }
+
+            // Call the builtin function
+            return builtin_vars.closureFromCallableFn(self, args.items);
+        }
 
         // 解析类引用：self、parent、static、具体类名或变量（$obj::method()）
         var called_class: *types.PHPClass = undefined;

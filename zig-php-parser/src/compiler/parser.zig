@@ -2244,15 +2244,16 @@ pub const Parser = struct {
                             });
                             const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                             callable_args[0] = callable_node;
+                            
+                            // Create a static method call to Closure::fromCallable
+                            const closure_class_id = try self.context.intern("Closure");
+                            const from_callable_id = try self.context.intern("fromCallable");
                             left = try self.createNode(.{
-                                .tag = .function_call,
+                                .tag = .static_method_call,
                                 .main_token = op,
-                                .data = .{ .function_call = .{
-                                    .name = try self.createNode(.{
-                                        .tag = .variable,
-                                        .main_token = op,
-                                        .data = .{ .variable = .{ .name = try self.context.intern("Closure::fromCallable") } },
-                                    }),
+                                .data = .{ .static_method_call = .{
+                                    .class_name = closure_class_id,
+                                    .method_name = from_callable_id,
                                     .args = callable_args,
                                 } },
                             });
@@ -2278,15 +2279,16 @@ pub const Parser = struct {
                     const closure_name_node = left;
                     const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                     callable_args[0] = closure_name_node;
+                    
+                    // Create a static method call to Closure::fromCallable
+                    const closure_class_id = try self.context.intern("Closure");
+                    const from_callable_id = try self.context.intern("fromCallable");
                     left = try self.createNode(.{
-                        .tag = .function_call,
+                        .tag = .static_method_call,
                         .main_token = op,
-                        .data = .{ .function_call = .{
-                            .name = try self.createNode(.{
-                                .tag = .variable,
-                                .main_token = op,
-                                .data = .{ .variable = .{ .name = try self.context.intern("Closure::fromCallable") } },
-                            }),
+                        .data = .{ .static_method_call = .{
+                            .class_name = closure_class_id,
+                            .method_name = from_callable_id,
                             .args = callable_args,
                         } },
                     });
@@ -2432,15 +2434,16 @@ pub const Parser = struct {
                     const closure_name_node = left;
                     const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                     callable_args[0] = closure_name_node;
+                    
+                    // Create a static method call to Closure::fromCallable
+                    const closure_class_id = try self.context.intern("Closure");
+                    const from_callable_id = try self.context.intern("fromCallable");
                     left = try self.createNode(.{
-                        .tag = .function_call,
+                        .tag = .static_method_call,
                         .main_token = op,
-                        .data = .{ .function_call = .{
-                            .name = try self.createNode(.{
-                                .tag = .variable,
-                                .main_token = op,
-                                .data = .{ .variable = .{ .name = try self.context.intern("Closure::fromCallable") } },
-                            }),
+                        .data = .{ .static_method_call = .{
+                            .class_name = closure_class_id,
+                            .method_name = from_callable_id,
                             .args = callable_args,
                         } },
                     });
