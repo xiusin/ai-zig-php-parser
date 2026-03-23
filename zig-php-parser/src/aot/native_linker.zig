@@ -1199,25 +1199,35 @@ pub const NativeLinker = struct {
 
         // 生成静态方法的dispatch分支
         var has_static_methods = false;
+        var has_any_class = false;
         for (ir_module.types.items) |type_def| {
             if (type_def.kind != .class) continue;
             
+            has_any_class = true;
             try writer.print("    if (std.mem.eql(u8, class_name, \"{s}\")) {{\n", .{type_def.name});
             
+            var class_has_static_methods = false;
             for (type_def.methods) |method| {
                 if (!method.is_static) continue;
                 
                 has_static_methods = true;
+                class_has_static_methods = true;
                 try writer.print("        if (std.mem.eql(u8, method_name, \"{s}\")) {{\n", .{method.name});
                 // 静态方法的完整名称是 "ClassName::methodName"
                 try writer.print("            return @\"{s}::{s}\"(runtime.Value.initNull(), args, allocator);\n", .{type_def.name, method.name});
                 try writer.writeAll("        }\n");
             }
             
+            if (!class_has_static_methods) {
+                try writer.writeAll("        _ = method_name;\n");
+                try writer.writeAll("        _ = args;\n");
+                try writer.writeAll("        _ = allocator;\n");
+            }
+            
             try writer.writeAll("    }\n");
         }
 
-        if (!has_static_methods) {
+        if (!has_any_class) {
             try writer.writeAll("    _ = class_name;\n");
             try writer.writeAll("    _ = method_name;\n");
             try writer.writeAll("    _ = args;\n");
