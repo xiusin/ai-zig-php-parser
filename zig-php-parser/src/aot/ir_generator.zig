@@ -3441,6 +3441,80 @@ pub const IRGenerator = struct {
                     }
                 }
 
+                // 特殊处理: $obj->prop[] = value 或 $obj->prop[key] = value
+                // 需要使用 php_property_array_push/php_property_array_set 来正确处理COW
+                if (base_target != null and base_target.?.tag == .property_access) {
+                    const prop_access = base_target.?.data.property_access;
+                    const obj_reg = try self.generateExpression(prop_access.target);
+                    const prop_name = self.getString(prop_access.property_name);
+                    const prop_name_id = try self.module.?.internString(prop_name);
+                    const prop_name_reg = try self.emitWithResult(.{ .const_string = prop_name_id }, .php_value);
+
+                    if (is_push_assignment and keys.items.len == 0) {
+                        // $obj->prop[] = value
+                        const args = try self.allocator.alloc(Register, 4);
+                        args[0] = obj_reg;
+                        args[1] = prop_name_reg;
+                        args[2] = value_reg;
+                        args[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value); // allocator placeholder
+                        _ = try self.emit(.{ .call = .{
+                            .func_name = "php_property_array_push_with_obj",
+                            .args = args,
+                            .return_type = .void,
+                        } }, null);
+                    } else if (keys.items.len == 1) {
+                        // $obj->prop[key] = value
+                        const args = try self.allocator.alloc(Register, 5);
+                        args[0] = obj_reg;
+                        args[1] = prop_name_reg;
+                        args[2] = keys.items[0];
+                        args[3] = value_reg;
+                        args[4] = try self.emitWithResult(.{ .const_null = {} }, .php_value); // allocator placeholder
+                        _ = try self.emit(.{ .call = .{
+                            .func_name = "php_property_array_set_with_obj",
+                            .args = args,
+                            .return_type = .void,
+                        } }, null);
+                    } else {
+                        // 复杂情况：$obj->prop[k0][k1]... = value
+                        // 回退到普通处理（可能不完全正确，但这种情况较少见）
+                        const base_array = try self.emitWithResult(.{ .property_get = .{
+                            .object = obj_reg,
+                            .property_name = prop_name,
+                        } }, .php_value);
+
+                        if (is_push_assignment) {
+                            var current_array = base_array;
+                            var i: usize = 0;
+                            while (i < keys.items.len) : (i += 1) {
+                                current_array = try self.emitWithResult(.{ .array_ensure = .{
+                                    .array = current_array,
+                                    .key = keys.items[i],
+                                } }, .php_value);
+                            }
+                            _ = try self.emit(.{ .array_push = .{
+                                .array = current_array,
+                                .value = value_reg,
+                            } }, null);
+                        } else {
+                            var current_array = base_array;
+                            var i: usize = 0;
+                            while (i + 1 < keys.items.len) : (i += 1) {
+                                current_array = try self.emitWithResult(.{ .array_ensure = .{
+                                    .array = current_array,
+                                    .key = keys.items[i],
+                                } }, .php_value);
+                            }
+                            _ = try self.emit(.{ .array_set = .{
+                                .array = current_array,
+                                .key = keys.items[keys.items.len - 1],
+                                .value = value_reg,
+                            } }, null);
+                        }
+                    }
+                    return value_reg;
+                }
+
                 // 生成基础数组
                 const base_array = try self.generateExpression(current.data.array_access.target);
 
@@ -3615,37 +3689,110 @@ pub const IRGenerator = struct {
         }
     }
 
-    /// 引用赋值：$b = &$a（简化实现：全局变量退化为值拷贝，局部变量支持真引用）
+    /// 引用赋值：$b = &$a（支持变量、数组元素等目标）
     fn generateRefAssignment(self: *Self, target_idx: u32, source_idx: u32) !void {
         const target_node = self.getNode(target_idx) orelse return;
         const source_node = self.getNode(source_idx) orelse return;
 
-        if (source_node.tag != .variable or target_node.tag != .variable) {
-            const val = try self.generateExpression(source_idx);
-            if (target_node.tag == .variable) {
-                const var_name = self.getString(target_node.data.variable.name);
-                const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
-                if (is_main or self.global_vars.contains(var_name)) {
-                    _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = val } }, null);
+        // 获取源引用
+        var source_ref: ?Register = null;
+        
+        // 源是变量
+        if (source_node.tag == .variable) {
+            const src_name = self.getString(source_node.data.variable.name);
+            const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+            
+            // 检查源是否是引用变量（如foreach引用）
+            if (self.isRefVar(src_name)) {
+                // 源已经是引用，直接传递引用
+                if (self.lookupVarRegister(src_name)) |ptr_reg| {
+                    // 获取引用变量存储的引用值
+                    source_ref = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
                 }
+            } else if (is_main or self.global_vars.contains(src_name)) {
+                // 全局变量：创建引用绑定
+                // 暂时不支持，使用值拷贝
+                const val = try self.emitWithResult(.{ .global_get = .{ .name = src_name } }, .php_value);
+                source_ref = try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_make_ref_from_value",
+                    .args = &[_]Register{val},
+                    .return_type = .php_value,
+                } }, .php_value);
+            } else {
+                // 局部变量：创建引用
+                const src_reg = try self.getOrCreateVarRegister(src_name, .php_value);
+                source_ref = try self.emitWithResult(.{ .make_ref = .{ .ptr = src_reg } }, .php_value);
             }
-            return;
+        } else {
+            // 源不是变量，尝试获取其引用（如数组元素的引用）
+            // 对于数组访问 $arr[$key]，我们需要获取元素的指针
+            // 这需要特殊处理
+            return; // 暂不支持非变量源
         }
 
-        const src_name = self.getString(source_node.data.variable.name);
-        const tgt_name = self.getString(target_node.data.variable.name);
-        const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+        const ref_val = source_ref orelse return;
 
-        if (is_main or self.global_vars.contains(src_name)) {
-            // 全局变量：创建引用绑定
-            _ = try self.emit(.{ .global_ref_bind = .{ .target = tgt_name, .source = src_name } }, null);
-        } else {
-            // 局部变量：真引用
-            const src_reg = try self.getOrCreateVarRegister(src_name, .php_value);
-            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = src_reg } }, .php_value);
-            const tgt_reg = try self.getOrCreateVarRegister(tgt_name, .php_value);
-            _ = try self.emit(.{ .store = .{ .ptr = tgt_reg, .value = ref_reg } }, null);
-            try self.ref_vars.append(self.allocator, tgt_name);
+        // 处理目标
+        switch (target_node.tag) {
+            .variable => {
+                const tgt_name = self.getString(target_node.data.variable.name);
+                const tgt_reg = try self.getOrCreateVarRegister(tgt_name, .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = tgt_reg, .value = ref_val } }, null);
+                try self.putRefVar(tgt_name);
+            },
+            .array_access => {
+                // $arr[] = &$var 或 $arr[$key] = &$var
+                const access_data = target_node.data.array_access;
+                
+                // 收集键
+                var keys: std.ArrayList(Register) = .empty;
+                defer keys.deinit(self.allocator);
+                var is_push = false;
+                
+                var current = target_node;
+                while (current.tag == .array_access) {
+                    if (current.data.array_access.index) |idx| {
+                        const key_reg = try self.generateExpression(idx);
+                        try keys.insert(self.allocator, 0, key_reg);
+                    } else {
+                        is_push = true;
+                    }
+                    const target_expr = self.getNode(current.data.array_access.target);
+                    if (target_expr == null or target_expr.?.tag != .array_access) break;
+                    current = target_expr.?;
+                }
+                
+                // 生成基础数组
+                const base_array = try self.generateExpression(current.data.array_access.target);
+                
+                if (is_push and keys.items.len == 0) {
+                    // $arr[] = &$var - 追加引用到数组
+                    const args = try self.allocator.alloc(Register, 3);
+                    args[0] = base_array;
+                    args[1] = ref_val;
+                    args[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value); // allocator placeholder
+                    _ = try self.emit(.{ .call = .{
+                        .func_name = "php_array_push_ref",
+                        .args = args,
+                        .return_type = .void,
+                    } }, null);
+                } else if (keys.items.len == 1) {
+                    // $arr[$key] = &$var - 设置引用到数组
+                    const args = try self.allocator.alloc(Register, 4);
+                    args[0] = base_array;
+                    args[1] = keys.items[0];
+                    args[2] = ref_val;
+                    args[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    _ = try self.emit(.{ .call = .{
+                        .func_name = "php_array_set_ref",
+                        .args = args,
+                        .return_type = .void,
+                    } }, null);
+                }
+            },
+            else => {
+                // 其他目标类型暂不支持
+            },
         }
     }
 
@@ -6425,7 +6572,7 @@ pub const IRGenerator = struct {
         const class_name_id = access_data.class_name;
         const const_name_id = access_data.constant_name;
 
-        const class_name = self.getString(class_name_id);
+        var class_name = self.getString(class_name_id);
         const const_name = self.getString(const_name_id);
 
         // 特殊处理 ClassName::class → 返回类名字符串
@@ -6443,9 +6590,37 @@ pub const IRGenerator = struct {
             return self.emitWithResult(.{ .const_string = str_id }, .php_string);
         }
 
+        // 解析特殊类名：parent, self, static
+        var resolved_class_name: []const u8 = class_name;
+        if (std.mem.eql(u8, class_name, "parent")) {
+            // parent::CONSTANT -> 需要查找父类的常量
+            if (self.current_class) |cls| {
+                if (self.module) |module| {
+                    if (module.type_defs.get(cls)) |type_def| {
+                        if (type_def.parent) |parent_name| {
+                            resolved_class_name = parent_name;
+                        }
+                    }
+                }
+            }
+            // 如果无法解析，保留 parent 运行时处理
+        } else if (std.mem.eql(u8, class_name, "self")) {
+            // self::CONSTANT -> 当前类
+            if (self.current_class) |cls| {
+                resolved_class_name = cls;
+            }
+        } else if (std.mem.eql(u8, class_name, "static")) {
+            // static::CONSTANT -> 运行时 LSB 解析
+            // 回退到运行时查找
+            return self.emitWithResult(.{ .static_property_get = .{
+                .class_name = class_name,
+                .property_name = const_name,
+            } }, .php_value);
+        }
+
         // 优化：O(1) 哈希表查找 + 编译时内联
         var key_buf: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_name }) catch {
+        const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ resolved_class_name, const_name }) catch {
             // 回退：运行时查找
             return self.emitWithResult(.{ .static_property_get = .{
                 .class_name = class_name,
@@ -7207,8 +7382,35 @@ pub const IRGenerator = struct {
             .class_constant_access => blk: {
                 // 支持类常量折叠
                 const access_data = node.data.class_constant_access;
-                const class_name = self.getString(access_data.class_name);
+                var class_name = self.getString(access_data.class_name);
                 const const_name = self.getString(access_data.constant_name);
+
+                // 解析特殊类名：parent, self
+                if (std.mem.eql(u8, class_name, "parent")) {
+                    // parent::CONSTANT -> 获取父类名
+                    if (self.current_class) |cls| {
+                        // 查找当前类的父类
+                        if (self.module) |module| {
+                            if (module.type_defs.get(cls)) |type_def| {
+                                if (type_def.parent) |parent_name| {
+                                    class_name = parent_name;
+                                } else {
+                                    // 没有父类，无法解析
+                                    break :blk null;
+                                }
+                            }
+                        }
+                    } else {
+                        break :blk null;
+                    }
+                } else if (std.mem.eql(u8, class_name, "self")) {
+                    // self::CONSTANT -> 当前类
+                    if (self.current_class) |cls| {
+                        class_name = cls;
+                    } else {
+                        break :blk null;
+                    }
+                }
 
                 var key_buf: [256]u8 = undefined;
                 const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_name }) catch break :blk null;
