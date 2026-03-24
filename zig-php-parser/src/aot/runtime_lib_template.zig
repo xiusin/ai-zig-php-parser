@@ -2647,6 +2647,42 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "str_word_count", wrapBuiltin_str_word_count },
     .{ "substr", wrapBuiltin_substr },
     .{ "strpos", wrapBuiltin_strpos },
+    // 数学函数
+    .{ "floor", wrapBuiltin_floor },
+    .{ "ceil", wrapBuiltin_ceil },
+    .{ "sin", wrapBuiltin_sin },
+    .{ "cos", wrapBuiltin_cos },
+    .{ "tan", wrapBuiltin_tan },
+    .{ "log", wrapBuiltin_log },
+    .{ "exp", wrapBuiltin_exp },
+    .{ "hypot", wrapBuiltin_hypot },
+    .{ "pow", wrapBuiltin_pow },
+    .{ "min", wrapBuiltin_min },
+    .{ "max", wrapBuiltin_max },
+    // 字符串函数
+    .{ "stripos", wrapBuiltin_stripos },
+    .{ "strstr", wrapBuiltin_strstr },
+    .{ "str_split", wrapBuiltin_str_split },
+    .{ "implode", wrapBuiltin_implode },
+    .{ "explode", wrapBuiltin_explode },
+    // 回调函数
+    .{ "is_callable", wrapBuiltin_is_callable },
+    .{ "get_debug_type", wrapBuiltin_get_debug_type },
+    .{ "call_user_func", wrapBuiltin_call_user_func },
+    .{ "call_user_func_array", wrapBuiltin_call_user_func_array },
+    .{ "compact", wrapBuiltin_compact },
+    .{ "extract", wrapBuiltin_extract },
+    // 字符操作函数
+    .{ "ord", wrapBuiltin_ord },
+    .{ "chr", wrapBuiltin_chr },
+    .{ "md5", wrapBuiltin_md5 },
+    .{ "sha1", wrapBuiltin_sha1 },
+    .{ "crc32", wrapBuiltin_crc32 },
+    .{ "strrev", wrapBuiltin_strrev },
+    .{ "ltrim", wrapBuiltin_ltrim },
+    .{ "rtrim", wrapBuiltin_rtrim },
+    .{ "addslashes", wrapBuiltin_addslashes },
+    .{ "stripslashes", wrapBuiltin_stripslashes },
 });
 
 fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
@@ -21221,4 +21257,422 @@ fn wrapBuiltin_strpos(ctx: Value, args: []const Value, _: Allocator) !Value {
     if (args.len < 2) return error.InvalidArgumentCount;
     const offset = if (args.len >= 3) args[2] else Value.initInt(0);
     return php_strpos(args[0], args[1], offset);
+}
+
+// 数学函数包装器
+fn wrapBuiltin_floor(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_floor(args[0]);
+}
+
+fn wrapBuiltin_ceil(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_ceil(args[0]);
+}
+
+fn wrapBuiltin_sin(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sin(args[0]);
+}
+
+fn wrapBuiltin_cos(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_cos(args[0]);
+}
+
+fn wrapBuiltin_tan(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_tan(args[0]);
+}
+
+fn wrapBuiltin_log(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_log(args[0]);
+}
+
+fn wrapBuiltin_exp(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_exp(args[0]);
+}
+
+fn wrapBuiltin_hypot(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_hypot(args[0], args[1]);
+}
+
+fn wrapBuiltin_pow(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_pow(args[0], args[1]);
+}
+
+fn wrapBuiltin_min(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_min(args);
+}
+
+fn wrapBuiltin_max(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_max(args);
+}
+
+// 字符串函数包装器
+fn wrapBuiltin_stripos(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 3) args[2] else Value.initInt(0);
+    return php_stripos(args[0], args[1], offset);
+}
+
+fn wrapBuiltin_strstr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strstr(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_str_split(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const length = if (args.len >= 2) args[1] else Value.initInt(1);
+    return php_str_split(args[0], length, allocator);
+}
+
+fn wrapBuiltin_implode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const glue = if (args.len >= 1) args[0] else Value.initNull();
+    const pieces = if (args.len >= 2) args[1] else Value.initNull();
+    return php_implode(glue, pieces, allocator);
+}
+
+fn wrapBuiltin_explode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const limit = if (args.len >= 3) args[2] else Value.initNull();
+    return php_explode(args[0], args[1], limit, allocator);
+}
+
+/// get_debug_type - 获取变量的调试类型（PHP 8+）
+pub fn php_get_debug_type(val: Value, allocator: Allocator) !Value {
+    if (val.isNull()) {
+        return Value.initString(try PHPString.init(allocator, "null"));
+    }
+    if (val.isBool()) {
+        return Value.initString(try PHPString.init(allocator, "bool"));
+    }
+    if (val.isInt()) {
+        return Value.initString(try PHPString.init(allocator, "int"));
+    }
+    if (val.isFloat()) {
+        return Value.initString(try PHPString.init(allocator, "float"));
+    }
+    if (val.isString()) {
+        return Value.initString(try PHPString.init(allocator, "string"));
+    }
+    if (val.isArray()) {
+        return Value.initString(try PHPString.init(allocator, "array"));
+    }
+    if (Value_isObject(val)) {
+        const obj = Value_asObject(val);
+        if (obj.class_meta) |meta| {
+            return Value.initString(try PHPString.init(allocator, meta.name));
+        }
+        return Value.initString(try PHPString.init(allocator, "object"));
+    }
+    if (val.isFunction()) {
+        return Value.initString(try PHPString.init(allocator, "Closure"));
+    }
+    return Value.initString(try PHPString.init(allocator, "unknown"));
+}
+
+/// call_user_func - 调用回调函数
+pub fn php_call_user_func(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return error.InvalidArgumentCount;
+
+    const callback = args[0];
+    const call_args = args[1..];
+
+    // 处理字符串函数名
+    if (callback.isString()) {
+        const func_name = callback.asString().data;
+
+        // 先检查用户函数
+        if (user_function_registry) |registry| {
+            if (registry.get(func_name)) |func| {
+                return func(Value.initNull(), call_args, allocator);
+            }
+        }
+
+        // 再检查内置函数
+        if (lookupBuiltinFunction(func_name)) |func| {
+            return func(Value.initNull(), call_args, allocator);
+        }
+
+        // 最后检查 AOT hook
+        if (aot_callable_hook) |hook| {
+            return hook(func_name, call_args, allocator);
+        }
+
+        return error.UnknownFunction;
+    }
+
+    // 处理数组形式 [obj/class, method]
+    if (callback.isArray()) {
+        const arr = callback.asArray();
+        var key_idx: usize = 0;
+        var iter = arr.elements.iterator();
+        var obj_or_class: ?Value = null;
+        var method_name: ?Value = null;
+
+        while (iter.next()) |entry| : (key_idx += 1) {
+            if (key_idx == 0) obj_or_class = entry.value_ptr.*;
+            if (key_idx == 1) method_name = entry.value_ptr.*;
+        }
+
+        if (obj_or_class) |obj| {
+            if (method_name) |method| {
+                if (method.isString()) {
+                    const method_str = method.asString().data;
+                    if (Value_isObject(obj)) {
+                        const php_obj = Value_asObject(obj);
+                        if (php_obj.class_meta) |meta| {
+                            if (meta.findMethod(method_str)) |method_info| {
+                                return method_info.func(obj, call_args, allocator);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return error.UnknownFunction;
+    }
+
+    // 处理 __invoke 对象
+    if (Value_isObject(callback)) {
+        const obj = Value_asObject(callback);
+        if (obj.class_meta) |meta| {
+            if (meta.findMethod("__invoke")) |method| {
+                return method.func(callback, call_args, allocator);
+            }
+        }
+    }
+
+    return error.UnknownFunction;
+}
+
+/// call_user_func_array - 使用数组参数调用回调函数
+pub fn php_call_user_func_array(callback: Value, args_arr: Value, allocator: Allocator) !Value {
+    if (!args_arr.isArray()) {
+        return php_call_user_func(&[_]Value{callback}, allocator);
+    }
+
+    const arr = args_arr.asArray();
+    var call_args = std.ArrayList(Value).init(allocator);
+    defer call_args.deinit();
+
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        try call_args.append(entry.value_ptr.*);
+    }
+
+    var full_args = std.ArrayList(Value).init(allocator);
+    defer full_args.deinit();
+    try full_args.append(callback);
+    for (call_args.items) |arg| {
+        try full_args.append(arg);
+    }
+
+    return php_call_user_func(full_args.items, allocator);
+}
+
+// 更多函数包装器
+fn wrapBuiltin_is_callable(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_callable(args[0]);
+}
+
+fn wrapBuiltin_get_debug_type(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_debug_type(args[0], allocator);
+}
+
+fn wrapBuiltin_call_user_func(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_call_user_func(args, allocator);
+}
+
+fn wrapBuiltin_call_user_func_array(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_call_user_func_array(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_compact(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_compact(args, allocator);
+}
+
+fn wrapBuiltin_extract(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const flags = if (args.len >= 2) args[1] else Value.initInt(0);
+    const prefix = if (args.len >= 3) args[2] else Value.initNull();
+    return php_extract(args[0], flags, prefix, allocator);
+}
+
+// 字符操作函数包装器
+fn wrapBuiltin_ord(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_ord(args[0]);
+}
+
+fn wrapBuiltin_chr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_chr(args[0], allocator);
+}
+
+fn wrapBuiltin_md5(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const raw = if (args.len >= 2) args[1] else Value.initBool(false);
+    return php_md5(args[0], raw, allocator);
+}
+
+fn wrapBuiltin_sha1(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const raw = if (args.len >= 2) args[1] else Value.initBool(false);
+    return php_sha1(args[0], raw, allocator);
+}
+
+fn wrapBuiltin_crc32(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_crc32(args[0]);
+}
+
+fn wrapBuiltin_strrev(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_strrev(args[0], allocator);
+}
+
+fn wrapBuiltin_ltrim(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const mask = if (args.len >= 2) args[1] else Value.initNull();
+    return php_ltrim(args[0], mask, allocator);
+}
+
+fn wrapBuiltin_rtrim(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const mask = if (args.len >= 2) args[1] else Value.initNull();
+    return php_rtrim(args[0], mask, allocator);
+}
+
+/// addslashes - 使用反斜线引用字符串
+pub fn php_addslashes(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+
+    const php_str = str.asString();
+    const data = php_str.data;
+
+    // 计算结果长度
+    var result_len: usize = 0;
+    for (data) |c| {
+        // 需要转义的字符: ', ", \, NUL
+        if (c == '\'' or c == '"' or c == '\\' or c == 0) {
+            result_len += 2;
+        } else {
+            result_len += 1;
+        }
+    }
+
+    const result = try allocator.alloc(u8, result_len);
+    errdefer allocator.free(result);
+
+    var pos: usize = 0;
+    for (data) |c| {
+        if (c == '\'' or c == '"' or c == '\\' or c == 0) {
+            result[pos] = '\\';
+            result[pos + 1] = if (c == 0) '0' else c;
+            pos += 2;
+        } else {
+            result[pos] = c;
+            pos += 1;
+        }
+    }
+
+    const php_result = try PHPString.init(allocator, result);
+    allocator.free(result);
+    return Value.initString(php_result);
+}
+
+/// stripslashes - 反引用一个引用字符串
+pub fn php_stripslashes(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+
+    const php_str = str.asString();
+    const data = php_str.data;
+
+    // 计算结果长度（最多等于原长度）
+    const result = try allocator.alloc(u8, data.len);
+    errdefer allocator.free(result);
+
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < data.len) {
+        if (data[i] == '\\' and i + 1 < data.len) {
+            const next = data[i + 1];
+            if (next == '0') {
+                result[pos] = 0;
+                pos += 1;
+                i += 2;
+            } else if (next == '\'' or next == '"' or next == '\\') {
+                result[pos] = next;
+                pos += 1;
+                i += 2;
+            } else {
+                result[pos] = data[i];
+                pos += 1;
+                i += 1;
+            }
+        } else {
+            result[pos] = data[i];
+            pos += 1;
+            i += 1;
+        }
+    }
+
+    const php_result = try PHPString.init(allocator, result[0..pos]);
+    allocator.free(result);
+    return Value.initString(php_result);
+}
+
+fn wrapBuiltin_addslashes(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_addslashes(args[0], allocator);
+}
+
+fn wrapBuiltin_stripslashes(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_stripslashes(args[0], allocator);
 }
