@@ -7853,6 +7853,84 @@ pub fn php_strcasecmp(str1: Value, str2: Value, allocator: Allocator) !Value {
     return Value.initInt(php_string_compare_bytes(s1.data[0..s1.length], s2.data[0..s2.length], true));
 }
 
+/// strnatcmp - 自然排序字符串比较（区分大小写）
+pub fn php_strnatcmp(str1: Value, str2: Value) !Value {
+    if (!str1.isString() or !str2.isString()) return Value.initInt(0);
+
+    const s1 = str1.asString();
+    const s2 = str2.asString();
+    return Value.initInt(naturalCompare(s1.data[0..s1.length], s2.data[0..s2.length], false));
+}
+
+/// strnatcasecmp - 自然排序字符串比较（不区分大小写）
+pub fn php_strnatcasecmp(str1: Value, str2: Value) !Value {
+    if (!str1.isString() or !str2.isString()) return Value.initInt(0);
+
+    const s1 = str1.asString();
+    const s2 = str2.asString();
+    return Value.initInt(naturalCompare(s1.data[0..s1.length], s2.data[0..s2.length], true));
+}
+
+/// 自然排序比较算法
+/// 将数字部分作为整数比较，非数字部分按字符比较
+fn naturalCompare(s1: []const u8, s2: []const u8, case_insensitive: bool) i64 {
+    var i1: usize = 0;
+    var i2: usize = 0;
+
+    while (i1 < s1.len and i2 < s2.len) {
+        const c1 = s1[i1];
+        const c2 = s2[i2];
+
+        // 检查是否都是数字
+        if (std.ascii.isDigit(c1) and std.ascii.isDigit(c2)) {
+            // 跳过前导零
+            while (i1 < s1.len and s1[i1] == '0') i1 += 1;
+            while (i2 < s2.len and s2[i2] == '0') i2 += 1;
+
+            // 提取数字
+            var num1: i64 = 0;
+            var num2: i64 = 0;
+            var len1: usize = 0;
+            var len2: usize = 0;
+
+            while (i1 + len1 < s1.len and std.ascii.isDigit(s1[i1 + len1])) {
+                num1 = num1 * 10 + (s1[i1 + len1] - '0');
+                len1 += 1;
+            }
+
+            while (i2 + len2 < s2.len and std.ascii.isDigit(s2[i2 + len2])) {
+                num2 = num2 * 10 + (s2[i2 + len2] - '0');
+                len2 += 1;
+            }
+
+            // 比较数字
+            if (num1 != num2) {
+                return if (num1 < num2) -1 else 1;
+            }
+
+            // 数字相同，继续比较
+            i1 += len1;
+            i2 += len2;
+        } else {
+            // 非数字部分，按字符比较
+            const ch1 = if (case_insensitive) std.ascii.toLower(c1) else c1;
+            const ch2 = if (case_insensitive) std.ascii.toLower(c2) else c2;
+
+            if (ch1 != ch2) {
+                return if (ch1 < ch2) -1 else 1;
+            }
+
+            i1 += 1;
+            i2 += 1;
+        }
+    }
+
+    // 长度不同
+    if (i1 < s1.len) return 1;
+    if (i2 < s2.len) return -1;
+    return 0;
+}
+
 // ============================================================================
 // 数组函数
 // ============================================================================
@@ -8447,6 +8525,14 @@ pub fn php_intdiv(dividend: Value, divisor: Value) !Value {
         return error.DivisionByZero;
     }
     return Value.initInt(@divTrunc(a, b));
+}
+
+/// fdiv - 浮点除法（PHP 8.0+，除以零返回 INF/NAN）
+pub fn php_fdiv(dividend: Value, divisor: Value) Value {
+    const a = dividend.toFloat();
+    const b = divisor.toFloat();
+    // fdiv 不抛出异常，除以零返回 INF/-INF/NAN
+    return Value.initFloat(a / b);
 }
 
 /// hypot - 计算直角三角形斜边长度
@@ -14495,6 +14581,12 @@ pub fn php_dirname(path: Value, allocator: Allocator) !Value {
     const dir = std.fs.path.dirname(path_str) orelse ".";
     const result = try PHPString.init(allocator, dir);
     return Value.initString(result);
+}
+
+/// getmypid - 获取当前进程ID
+pub fn php_getmypid() Value {
+    const pid = std.c.getpid();
+    return Value.initInt(@intCast(pid));
 }
 
 // ============================================================================

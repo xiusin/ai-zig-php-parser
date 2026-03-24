@@ -2469,6 +2469,8 @@ pub const NativeLinker = struct {
         .{ "str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
         .{ "strcmp", bi(.{ .runtime_name = "php_strcmp", .needs_allocator = false }) },
         .{ "strcasecmp", bi(.{ .runtime_name = "php_strcasecmp", .needs_allocator = true }) },
+        .{ "strnatcmp", bi(.{ .runtime_name = "php_strnatcmp", .needs_allocator = false }) },
+        .{ "strnatcasecmp", bi(.{ .runtime_name = "php_strnatcasecmp", .needs_allocator = false }) },
         .{ "stripos", bi(.{ .runtime_name = "php_stripos", .needs_allocator = false }) },
         .{ "strrpos", bi(.{ .runtime_name = "php_strrpos", .needs_allocator = false }) },
         .{ "strripos", bi(.{ .runtime_name = "php_strripos", .needs_allocator = false }) },
@@ -2607,6 +2609,7 @@ pub const NativeLinker = struct {
         .{ "exp", .{ .runtime_name = "php_exp", .needs_allocator = false } },
         .{ "fmod", .{ .runtime_name = "php_fmod", .needs_allocator = false } },
         .{ "intdiv", .{ .runtime_name = "php_intdiv", .needs_allocator = false } },
+        .{ "fdiv", bi(.{ .runtime_name = "php_fdiv", .needs_allocator = false, .may_raise = false }) },
         .{ "hypot", .{ .runtime_name = "php_hypot", .needs_allocator = false } },
         .{ "deg2rad", .{ .runtime_name = "php_deg2rad", .needs_allocator = false } },
         .{ "rad2deg", .{ .runtime_name = "php_rad2deg", .needs_allocator = false } },
@@ -2673,6 +2676,7 @@ pub const NativeLinker = struct {
         .{ "rmdir", .{ .runtime_name = "php_rmdir", .needs_allocator = false } },
         .{ "basename", .{ .runtime_name = "php_basename", .needs_allocator = true } },
         .{ "dirname", .{ .runtime_name = "php_dirname", .needs_allocator = true } },
+        .{ "getmypid", bi(.{ .runtime_name = "php_getmypid", .needs_allocator = false, .may_raise = false }) },
 
         .{ "go", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
 
