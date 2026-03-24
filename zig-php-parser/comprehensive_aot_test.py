@@ -12,7 +12,7 @@ import shutil
 import re
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_executor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 # 配置

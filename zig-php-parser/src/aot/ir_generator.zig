@@ -1514,12 +1514,54 @@ pub const IRGenerator = struct {
             }
         }
 
+        // 收集接口继承的其他接口（PHP接口用 extends 继承多个接口）
+        // 注意：PHP中接口的extends字段存储的是父接口列表，而implements为空
+        var parent_interfaces = std.ArrayList([]const u8).init(self.allocator);
+        defer parent_interfaces.deinit();
+        
+        // 接口继承：interface C extends A, B { }
+        // 在AST中，extends字段可能包含多个父接口（用expr_list）
+        if (iface_data.extends) |ext_idx| {
+            const ext_node = self.getNode(ext_idx) orelse null;
+            if (ext_node) |en| {
+                switch (en.tag) {
+                    .named_type => {
+                        // 单个父接口
+                        const parent_name = self.getString(en.data.named_type.name);
+                        try parent_interfaces.append(parent_name);
+                    },
+                    .variable => {
+                        // 可能为变量形式
+                        const parent_name = self.getString(en.data.variable.name);
+                        try parent_interfaces.append(parent_name);
+                    },
+                    .expr_list => {
+                        // 多个父接口：interface C extends A, B { }
+                        const list = en.data.expr_list;
+                        for (list.exprs) |parent_idx| {
+                            const parent_node = self.getNode(parent_idx) orelse continue;
+                            const parent_name = switch (parent_node.tag) {
+                                .named_type => self.getString(parent_node.data.named_type.name),
+                                .variable => self.getString(parent_node.data.variable.name),
+                                .literal_string => self.getString(parent_node.data.literal_string.value),
+                                else => continue,
+                            };
+                            try parent_interfaces.append(parent_name);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+        
+        const interfaces_slice = try parent_interfaces.toOwnedSlice(self.allocator);
+
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
             .name = iface_name,
             .kind = .interface,
             .parent = null,
-            .interfaces = &.{},
+            .interfaces = interfaces_slice,
             .traits = &.{},
             .trait_adaptations = &.{},
             .properties = &.{},
@@ -2777,21 +2819,54 @@ pub const IRGenerator = struct {
                 const cnode = self.getNode(catch_idx) orelse continue;
                 if (cnode.tag != .catch_clause) continue;
                 const cdata = cnode.data.catch_clause;
-                var exc_type: ?[]const u8 = null;
+                var exc_types: std.ArrayListUnmanaged([]const u8) = .{};
+                defer exc_types.deinit(self.allocator);
+                
                 if (cdata.exception_type) |type_idx| {
                     const tnode = self.getNode(type_idx);
-                    if (tnode != null and tnode.?.tag == .named_type) {
-                        exc_type = self.getString(tnode.?.data.named_type.name);
+                    if (tnode != null) {
+                        switch (tnode.?.tag) {
+                            .named_type => {
+                                const type_name = self.getString(tnode.?.data.named_type.name);
+                                try exc_types.append(self.allocator, type_name);
+                            },
+                            .union_type => {
+                                // 多重捕获: catch (A | B $e)
+                                const types = tnode.?.data.union_type.types;
+                                for (types) |t| {
+                                    const tn = self.getNode(t) orelse continue;
+                                    if (tn.tag == .named_type) {
+                                        const type_name = self.getString(tn.data.named_type.name);
+                                        try exc_types.append(self.allocator, type_name);
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
                     }
                 }
-                if (exc_type) |etype| {
-                    // 有类型限定：检查 instanceof
-                    const class_name_id = try self.module.?.internString(etype);
-                    const class_name_reg = try self.emitWithResult(.{ .const_string = class_name_id }, .php_value);
-                    const match_reg = try self.emitWithResult(.{ .instanceof = .{ .object = exc_reg, .class_name = class_name_reg } }, .bool);
+                
+                if (exc_types.items.len > 0) {
+                    // 有类型限定：检查 instanceof（对于多重捕获，任意一个匹配即可）
+                    var match_reg: ?Register = null;
+                    for (exc_types.items) |etype| {
+                        const class_name_id = try self.module.?.internString(etype);
+                        const class_name_reg = try self.emitWithResult(.{ .const_string = class_name_id }, .php_value);
+                        const current_match = try self.emitWithResult(.{ .instanceof = .{ .object = exc_reg, .class_name = class_name_reg } }, .bool);
+                        if (match_reg) |mr| {
+                            // 使用 OR 组合多个匹配条件
+                            const args = try self.allocator.alloc(Register, 2);
+                            args[0] = mr;
+                            args[1] = current_match;
+                            match_reg = try self.emitWithResult(.{ .call = .{ .func_name = "php_bool_or", .args = args, .return_type = .bool } }, .bool);
+                        } else {
+                            match_reg = current_match;
+                        }
+                    }
+                    
                     const next_check = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else target_after_catch;
                     self.setTerminator(.{ .cond_br = .{
-                        .cond = match_reg,
+                        .cond = match_reg.?,
                         .then_block = catch_blocks_list.items[ci],
                         .else_block = next_check,
                     } });
@@ -2819,23 +2894,55 @@ pub const IRGenerator = struct {
                 const cdata2 = cnode2.data.catch_clause;
                 // 如果不是最后一个 catch 且有类型，需要在块入口也检查类型
                 // （因为可能从上一个 catch 的 else_block 直接跳过来）
-                var exc_type2: ?[]const u8 = null;
+                var exc_types2: std.ArrayListUnmanaged([]const u8) = .{};
+                defer exc_types2.deinit(self.allocator);
+                
                 if (cdata2.exception_type) |type_idx2| {
                     const tnode2 = self.getNode(type_idx2);
-                    if (tnode2 != null and tnode2.?.tag == .named_type) {
-                        exc_type2 = self.getString(tnode2.?.data.named_type.name);
+                    if (tnode2 != null) {
+                        switch (tnode2.?.tag) {
+                            .named_type => {
+                                const type_name = self.getString(tnode2.?.data.named_type.name);
+                                try exc_types2.append(self.allocator, type_name);
+                            },
+                            .union_type => {
+                                const types = tnode2.?.data.union_type.types;
+                                for (types) |t| {
+                                    const tn = self.getNode(t) orelse continue;
+                                    if (tn.tag == .named_type) {
+                                        const type_name = self.getString(tn.data.named_type.name);
+                                        try exc_types2.append(self.allocator, type_name);
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
                     }
                 }
-                if (ci > 0 and exc_type2 != null) {
+                
+                if (ci > 0 and exc_types2.items.len > 0) {
                     // 非第一个有类型的 catch：需要在入口检查类型（不消费异常）
                     const exc_reg2 = try self.emitWithResult(.{ .peek_exception = {} }, .php_value);
-                    const class_name_id2 = try self.module.?.internString(exc_type2.?);
-                    const class_name_reg2 = try self.emitWithResult(.{ .const_string = class_name_id2 }, .php_value);
-                    const match_reg2 = try self.emitWithResult(.{ .instanceof = .{ .object = exc_reg2, .class_name = class_name_reg2 } }, .bool);
+                    
+                    var match_reg2: ?Register = null;
+                    for (exc_types2.items) |etype| {
+                        const class_name_id2 = try self.module.?.internString(etype);
+                        const class_name_reg2 = try self.emitWithResult(.{ .const_string = class_name_id2 }, .php_value);
+                        const current_match = try self.emitWithResult(.{ .instanceof = .{ .object = exc_reg2, .class_name = class_name_reg2 } }, .bool);
+                        if (match_reg2) |mr| {
+                            const args = try self.allocator.alloc(Register, 2);
+                            args[0] = mr;
+                            args[1] = current_match;
+                            match_reg2 = try self.emitWithResult(.{ .call = .{ .func_name = "php_bool_or", .args = args, .return_type = .bool } }, .bool);
+                        } else {
+                            match_reg2 = current_match;
+                        }
+                    }
+                    
                     const next_target = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else target_after_catch;
                     const body_block = try self.createBlock("catch_body");
                     self.setTerminator(.{ .cond_br = .{
-                        .cond = match_reg2,
+                        .cond = match_reg2.?,
                         .then_block = body_block,
                         .else_block = next_target,
                     } });
@@ -5823,6 +5930,64 @@ pub const IRGenerator = struct {
         }
 
         // 普通方法调用（无 unpacking）
+        // 检查是否有命名参数
+        var has_named: bool = false;
+        for (call_data.args) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .named_arg) {
+                has_named = true;
+                break;
+            }
+        }
+
+        if (has_named) {
+            // 需要对命名参数进行重排序
+            // 收集位置参数和命名参数
+            var positional_args = std.ArrayListUnmanaged(Node.Index){};
+            defer positional_args.deinit(self.allocator);
+            var named_args = std.StringHashMapUnmanaged(Node.Index){};
+            defer named_args.deinit(self.allocator);
+
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .named_arg) {
+                    const arg_name = self.getString(arg_node.data.named_arg.name);
+                    try named_args.put(self.allocator, arg_name, arg_node.data.named_arg.value);
+                } else {
+                    try positional_args.append(self.allocator, arg_idx);
+                }
+            }
+
+            // 生成参数数组，让运行时处理命名参数
+            const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+
+            // 首先添加位置参数
+            for (positional_args.items) |arg_idx| {
+                const val_reg = try self.generateExpression(arg_idx);
+                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+            }
+
+            // 添加命名参数作为关联数组元素
+            var named_it = named_args.iterator();
+            while (named_it.next()) |entry| {
+                const val_reg = try self.generateExpression(entry.value_ptr.*);
+                const key_id = try self.module.?.internString(entry.key_ptr.*);
+                const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+            }
+
+            const method_name_reg = try self.emitPropertyNameValue(method_name);
+            const call_args = try self.allocator.alloc(Register, 3);
+            call_args[0] = obj_reg;
+            call_args[1] = method_name_reg;
+            call_args[2] = args_arr;
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_call_named_args",
+                .args = call_args,
+                .return_type = .php_value,
+            } }, .php_value);
+        }
+
         const args = try self.allocator.alloc(Register, call_data.args.len);
         for (call_data.args, 0..) |arg_idx, i| {
             args[i] = try self.generateExpression(arg_idx);
