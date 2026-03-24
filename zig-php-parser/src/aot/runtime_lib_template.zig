@@ -2632,6 +2632,21 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "ctype_space", wrapBuiltin_ctype_space },
     .{ "ctype_upper", wrapBuiltin_ctype_upper },
     .{ "ctype_xdigit", wrapBuiltin_ctype_xdigit },
+    // Mbstring 多字节字符串函数
+    .{ "mb_strlen", wrapBuiltin_mb_strlen },
+    .{ "mb_substr", wrapBuiltin_mb_substr },
+    .{ "mb_strtoupper", wrapBuiltin_mb_strtoupper },
+    .{ "mb_strtolower", wrapBuiltin_mb_strtolower },
+    // 字符串函数
+    .{ "substr_count", wrapBuiltin_substr_count },
+    .{ "ucfirst", wrapBuiltin_ucfirst },
+    .{ "lcfirst", wrapBuiltin_lcfirst },
+    .{ "ucwords", wrapBuiltin_ucwords },
+    .{ "strrpos", wrapBuiltin_strrpos },
+    .{ "strripos", wrapBuiltin_strripos },
+    .{ "str_word_count", wrapBuiltin_str_word_count },
+    .{ "substr", wrapBuiltin_substr },
+    .{ "strpos", wrapBuiltin_strpos },
 });
 
 fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
@@ -20921,4 +20936,289 @@ fn wrapBuiltin_ctype_xdigit(ctx: Value, args: []const Value, _: Allocator) !Valu
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_ctype_xdigit(args[0]);
+}
+
+// ============================================================================
+// Mbstring 扩展函数
+// ============================================================================
+
+/// mb_strlen - 获取字符串长度（支持多字节字符）
+/// 对于ASCII字符串，行为与strlen相同
+/// 对于UTF-8字符串，返回字符数而非字节数
+pub fn php_mb_strlen(str: Value, encoding: Value) !Value {
+    _ = encoding; // 简化实现：忽略encoding参数，默认使用UTF-8
+    if (!str.isString()) return Value.initInt(0);
+
+    const php_str = str.asString();
+    const data = php_str.data;
+
+    // UTF-8字符计数
+    var char_count: usize = 0;
+    var i: usize = 0;
+    while (i < data.len) {
+        const byte = data[i];
+        // UTF-8连续字节以10开头，跳过这些
+        if ((byte & 0xC0) != 0x80) {
+            char_count += 1;
+        }
+        i += 1;
+    }
+
+    return Value.initInt(@intCast(char_count));
+}
+
+/// mb_substr - 获取子字符串（支持多字节字符）
+/// 对于UTF-8字符串，按字符位置操作而非字节位置
+pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, allocator: Allocator) !Value {
+    _ = encoding; // 简化实现：忽略encoding参数，默认使用UTF-8
+    if (!str.isString()) return Value.initNull();
+
+    const php_str = str.asString();
+    const data = php_str.data;
+
+    // 将字节位置映射到字符位置
+    const CharPos = struct {
+        byte_idx: usize,
+        char_idx: usize,
+    };
+
+    // 构建字符位置映射表
+    var char_positions = std.ArrayList(CharPos).init(allocator);
+    defer char_positions.deinit();
+
+    var char_idx: usize = 0;
+    var byte_idx: usize = 0;
+    while (byte_idx < data.len) {
+        const byte = data[byte_idx];
+        if ((byte & 0xC0) != 0x80) {
+            try char_positions.append(.{ .byte_idx = byte_idx, .char_idx = char_idx });
+            char_idx += 1;
+        }
+        byte_idx += 1;
+    }
+    // 添加结束位置
+    try char_positions.append(.{ .byte_idx = data.len, .char_idx = char_idx });
+
+    const total_chars = char_idx;
+
+    // 处理start参数
+    const start_int = start.toInt();
+    const start_char: usize = blk: {
+        if (start_int >= 0) {
+            const s: usize = @intCast(@min(start_int, @as(i64, @intCast(total_chars))));
+            break :blk s;
+        } else {
+            // 负数从末尾开始计数
+            const abs_start: usize = @intCast(@min(-start_int, @as(i64, @intCast(total_chars))));
+            break :blk if (abs_start > total_chars) @as(usize, 0) else total_chars - abs_start;
+        }
+    };
+
+    // 处理length参数
+    const end_char: usize = blk: {
+        if (length.isNull()) {
+            break :blk total_chars;
+        }
+        const len_int = length.toInt();
+        if (len_int < 0) {
+            // 负数长度从末尾截断
+            const abs_len: usize = @intCast(@min(-len_int, @as(i64, @intCast(total_chars))));
+            const end = total_chars - abs_len;
+            break :blk @min(end, total_chars);
+        }
+        const end = start_char + @as(usize, @intCast(len_int));
+        break :blk @min(end, total_chars);
+    };
+
+    if (start_char >= end_char or start_char >= total_chars) {
+        const empty = try PHPString.init(allocator, "");
+        return Value.initString(empty);
+    }
+
+    // 获取字节范围
+    const start_byte = char_positions.items[start_char].byte_idx;
+    const end_byte = char_positions.items[end_char].byte_idx;
+
+    const result = try PHPString.init(allocator, data[start_byte..end_byte]);
+    return Value.initString(result);
+}
+
+/// mb_strtoupper - 转换为大写（支持多字节字符）
+/// 注意：简化实现仅处理ASCII字符，完整实现需要Unicode大小写映射表
+pub fn php_mb_strtoupper(str: Value, encoding: Value, allocator: Allocator) !Value {
+    _ = encoding;
+    if (!str.isString()) return str;
+
+    const php_str = str.asString();
+    const data = php_str.data;
+
+    // 对于ASCII字符串，直接使用 strtoupper
+    // 对于UTF-8，需要更复杂的处理，这里简化为ASCII处理
+    const result_data = try allocator.alloc(u8, data.len);
+    errdefer allocator.free(result_data);
+
+    var i: usize = 0;
+    while (i < data.len) {
+        const byte = data[i];
+        // 只转换ASCII字母
+        if (byte >= 'a' and byte <= 'z') {
+            result_data[i] = byte - 32;
+        } else {
+            result_data[i] = byte;
+        }
+        i += 1;
+    }
+
+    const result = try PHPString.init(allocator, result_data);
+    allocator.free(result_data);
+    return Value.initString(result);
+}
+
+/// mb_strtolower - 转换为小写（支持多字节字符）
+/// 注意：简化实现仅处理ASCII字符
+pub fn php_mb_strtolower(str: Value, encoding: Value, allocator: Allocator) !Value {
+    _ = encoding;
+    if (!str.isString()) return str;
+
+    const php_str = str.asString();
+    const data = php_str.data;
+
+    const result_data = try allocator.alloc(u8, data.len);
+    errdefer allocator.free(result_data);
+
+    var i: usize = 0;
+    while (i < data.len) {
+        const byte = data[i];
+        // 只转换ASCII字母
+        if (byte >= 'A' and byte <= 'Z') {
+            result_data[i] = byte + 32;
+        } else {
+            result_data[i] = byte;
+        }
+        i += 1;
+    }
+
+    const result = try PHPString.init(allocator, result_data);
+    allocator.free(result_data);
+    return Value.initString(result);
+}
+
+/// substr_count - 计算子字符串出现次数
+pub fn php_substr_count(haystack: Value, needle: Value, offset: Value, length: Value) !Value {
+    _ = offset;
+    _ = length;
+    if (!haystack.isString() or !needle.isString()) return Value.initInt(0);
+
+    const hay = haystack.asString();
+    const need = needle.asString();
+
+    if (need.length == 0) return Value.initInt(0);
+    if (need.length > hay.length) return Value.initInt(0);
+
+    var count: i64 = 0;
+    var pos: usize = 0;
+
+    while (pos <= hay.length - need.length) {
+        if (std.mem.eql(u8, hay.data[pos .. pos + need.length], need.data)) {
+            count += 1;
+            pos += need.length;
+        } else {
+            pos += 1;
+        }
+    }
+
+    return Value.initInt(count);
+}
+
+// Mbstring 和字符串函数包装器
+fn wrapBuiltin_mb_strlen(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const encoding = if (args.len >= 2) args[1] else Value.initNull();
+    return php_mb_strlen(args[0], encoding);
+}
+
+fn wrapBuiltin_mb_substr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const length = if (args.len >= 3) args[2] else Value.initNull();
+    const encoding = if (args.len >= 4) args[3] else Value.initNull();
+    return php_mb_substr(args[0], args[1], length, encoding, allocator);
+}
+
+fn wrapBuiltin_mb_strtoupper(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const encoding = if (args.len >= 2) args[1] else Value.initNull();
+    return php_mb_strtoupper(args[0], encoding, allocator);
+}
+
+fn wrapBuiltin_mb_strtolower(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const encoding = if (args.len >= 2) args[1] else Value.initNull();
+    return php_mb_strtolower(args[0], encoding, allocator);
+}
+
+fn wrapBuiltin_substr_count(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 3) args[2] else Value.initNull();
+    const length = if (args.len >= 4) args[3] else Value.initNull();
+    return php_substr_count(args[0], args[1], offset, length);
+}
+
+fn wrapBuiltin_ucfirst(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_ucfirst(args[0], allocator);
+}
+
+fn wrapBuiltin_lcfirst(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_lcfirst(args[0], allocator);
+}
+
+fn wrapBuiltin_ucwords(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const delimiters = if (args.len >= 2) args[1] else Value.initNull();
+    return php_ucwords(args[0], delimiters, allocator);
+}
+
+fn wrapBuiltin_strrpos(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 3) args[2] else Value.initInt(0);
+    return php_strrpos(args[0], args[1], offset);
+}
+
+fn wrapBuiltin_strripos(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 3) args[2] else Value.initInt(0);
+    return php_strripos(args[0], args[1], offset);
+}
+
+fn wrapBuiltin_str_word_count(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const format = if (args.len >= 2) args[1] else Value.initInt(0);
+    const charlist = if (args.len >= 3) args[2] else Value.initNull();
+    return php_str_word_count(args[0], format, charlist);
+}
+
+fn wrapBuiltin_substr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const length = if (args.len >= 3) args[2] else Value.initNull();
+    return php_substr(args[0], args[1], length, allocator);
+}
+
+fn wrapBuiltin_strpos(ctx: Value, args: []const Value, _: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 3) args[2] else Value.initInt(0);
+    return php_strpos(args[0], args[1], offset);
 }
