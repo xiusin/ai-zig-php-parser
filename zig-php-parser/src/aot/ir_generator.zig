@@ -1516,8 +1516,8 @@ pub const IRGenerator = struct {
 
         // 收集接口继承的其他接口（PHP接口用 extends 继承多个接口）
         // 注意：PHP中接口的extends字段存储的是父接口列表，而implements为空
-        var parent_interfaces = std.ArrayList([]const u8).init(self.allocator);
-        defer parent_interfaces.deinit();
+        var parent_interfaces: std.ArrayList([]const u8) = .empty;
+        defer parent_interfaces.deinit(self.allocator);
         
         // 接口继承：interface C extends A, B { }
         // 在AST中，extends字段可能包含多个父接口（用expr_list）
@@ -1528,12 +1528,12 @@ pub const IRGenerator = struct {
                     .named_type => {
                         // 单个父接口
                         const parent_name = self.getString(en.data.named_type.name);
-                        try parent_interfaces.append(parent_name);
+                        try parent_interfaces.append(self.allocator, parent_name);
                     },
                     .variable => {
                         // 可能为变量形式
                         const parent_name = self.getString(en.data.variable.name);
-                        try parent_interfaces.append(parent_name);
+                        try parent_interfaces.append(self.allocator, parent_name);
                     },
                     .expr_list => {
                         // 多个父接口：interface C extends A, B { }
@@ -1546,7 +1546,7 @@ pub const IRGenerator = struct {
                                 .literal_string => self.getString(parent_node.data.literal_string.value),
                                 else => continue,
                             };
-                            try parent_interfaces.append(parent_name);
+                            try parent_interfaces.append(self.allocator, parent_name);
                         }
                     },
                     else => {},
@@ -3742,8 +3742,6 @@ pub const IRGenerator = struct {
             },
             .array_access => {
                 // $arr[] = &$var 或 $arr[$key] = &$var
-                const access_data = target_node.data.array_access;
-                
                 // 收集键
                 var keys: std.ArrayList(Register) = .empty;
                 defer keys.deinit(self.allocator);
@@ -6572,7 +6570,7 @@ pub const IRGenerator = struct {
         const class_name_id = access_data.class_name;
         const const_name_id = access_data.constant_name;
 
-        var class_name = self.getString(class_name_id);
+        const class_name = self.getString(class_name_id);
         const const_name = self.getString(const_name_id);
 
         // 特殊处理 ClassName::class → 返回类名字符串
@@ -6596,9 +6594,13 @@ pub const IRGenerator = struct {
             // parent::CONSTANT -> 需要查找父类的常量
             if (self.current_class) |cls| {
                 if (self.module) |module| {
-                    if (module.type_defs.get(cls)) |type_def| {
-                        if (type_def.parent) |parent_name| {
-                            resolved_class_name = parent_name;
+                    // 遍历 types 查找匹配的类定义
+                    for (module.types.items) |type_def| {
+                        if (std.mem.eql(u8, type_def.name, cls)) {
+                            if (type_def.parent) |parent_name| {
+                                resolved_class_name = parent_name;
+                            }
+                            break;
                         }
                     }
                 }
@@ -7391,14 +7393,20 @@ pub const IRGenerator = struct {
                     if (self.current_class) |cls| {
                         // 查找当前类的父类
                         if (self.module) |module| {
-                            if (module.type_defs.get(cls)) |type_def| {
-                                if (type_def.parent) |parent_name| {
-                                    class_name = parent_name;
-                                } else {
-                                    // 没有父类，无法解析
-                                    break :blk null;
+                            var found = false;
+                            for (module.types.items) |type_def| {
+                                if (std.mem.eql(u8, type_def.name, cls)) {
+                                    if (type_def.parent) |parent_name| {
+                                        class_name = parent_name;
+                                    } else {
+                                        // 没有父类，无法解析
+                                        break :blk null;
+                                    }
+                                    found = true;
+                                    break;
                                 }
                             }
+                            if (!found) break :blk null;
                         }
                     } else {
                         break :blk null;

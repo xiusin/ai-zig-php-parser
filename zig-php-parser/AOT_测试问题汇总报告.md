@@ -1256,6 +1256,49 @@ OK
 | 内置接口注册 | 添加registerBuiltinInterfaces函数注册PHP内置接口(Countable等) | runtime_lib_template.zig |
 | 多重捕获异常 | 修复catch子句中联合类型(如 A\|B)的处理 | ir_generator.zig |
 | 方法命名参数 | 添加方法调用中命名参数的处理支持 | ir_generator.zig, runtime_lib_template.zig |
+| filemtime/atime/ctime | 实现文件时间戳函数 | runtime_lib_template.zig |
+| gethostbyname/gethostname | 实现主机名解析函数 | runtime_lib_template.zig |
+| ip2long/long2ip | 实现IP地址转换函数 | runtime_lib_template.zig |
+| parse_url | 实现URL解析函数 | runtime_lib_template.zig |
+| set_error_handler | 实现错误处理器注册函数 | runtime_lib_template.zig |
+| restore_error_handler | 实现错误处理器恢复函数 | runtime_lib_template.zig |
+| trigger_error | 实现用户错误触发函数 | runtime_lib_template.zig |
+| error_reporting | 实现错误报告级别设置函数 | runtime_lib_template.zig |
+| ctype_* 函数 | 实现 ctype_alnum, ctype_alpha, ctype_cntrl, ctype_digit, ctype_graph, ctype_lower, ctype_print, ctype_punct, ctype_space, ctype_upper, ctype_xdigit | runtime_lib_template.zig |
+| mb_strlen | 实现多字节字符串长度计算（支持UTF-8） | runtime_lib_template.zig |
+| mb_substr | 实现多字节字符串截取（支持UTF-8） | runtime_lib_template.zig |
+| mb_strtoupper | 实现多字节字符串大写转换 | runtime_lib_template.zig |
+| mb_strtolower | 实现多字节字符串小写转换 | runtime_lib_template.zig |
+| substr_count | 实现子字符串计数函数 | runtime_lib_template.zig |
+| ucfirst/lcfirst | 实现首字母大小写转换 | runtime_lib_template.zig |
+| ucwords | 实现单词首字母大写 | runtime_lib_template.zig |
+| strrpos/strripos | 实现字符串反向查找函数 | runtime_lib_template.zig |
+| str_word_count | 实现单词计数函数 | runtime_lib_template.zig |
+| substr | 实现字符串截取函数 | runtime_lib_template.zig |
+| strpos | 实现字符串位置查找函数 | runtime_lib_template.zig |
+| floor/ceil | 实现向下/向上取整函数 | runtime_lib_template.zig |
+| sin/cos/tan | 实现三角函数 | runtime_lib_template.zig |
+| log/exp | 实现对数和指数函数 | runtime_lib_template.zig |
+| hypot | 实现斜边计算函数 | runtime_lib_template.zig |
+| pow | 实现幂运算函数 | runtime_lib_template.zig |
+| min/max | 实现最小/最大值函数 | runtime_lib_template.zig |
+| stripos | 实现不区分大小写的字符串位置查找 | runtime_lib_template.zig |
+| strstr | 实现字符串查找函数 | runtime_lib_template.zig |
+| str_split | 实现字符串分割函数 | runtime_lib_template.zig |
+| implode/explode | 实现字符串连接和分割函数 | runtime_lib_template.zig |
+| is_callable | 实现回调检查函数 | runtime_lib_template.zig |
+| get_debug_type | 实现调试类型获取函数 | runtime_lib_template.zig |
+| call_user_func | 实现回调函数调用 | runtime_lib_template.zig |
+| call_user_func_array | 实现带数组参数的回调函数调用 | runtime_lib_template.zig |
+| compact | 实现变量打包函数 | runtime_lib_template.zig |
+| extract | 实现数组解包函数 | runtime_lib_template.zig |
+| ord/chr | 实现字符编码转换函数 | runtime_lib_template.zig |
+| md5/sha1 | 实现哈希函数 | runtime_lib_template.zig |
+| crc32 | 实现CRC32校验函数 | runtime_lib_template.zig |
+| strrev | 实现字符串反转函数 | runtime_lib_template.zig |
+| ltrim/rtrim | 实现左侧/右侧空白去除函数 | runtime_lib_template.zig |
+| addslashes/stripslashes | 实现字符串转义和反转义函数 | runtime_lib_template.zig |
+| 常量继承 | 修复 parent::CONSTANT 和 self::CONSTANT 的常量访问 | ir_generator.zig |
 
 ### 待修复问题
 

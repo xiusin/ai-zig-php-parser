@@ -3539,6 +3539,7 @@ pub const E_ALL: i64 = 32767;
 
 /// set_error_handler - 设置用户自定义错误处理函数
 pub fn php_set_error_handler(handler: Value, error_types: Value, allocator: Allocator) !Value {
+    _ = allocator;
     // 返回之前设置的错误处理器
     const prev_handler = if (global_error_handler) |h| h else Value.initNull();
     
@@ -3584,7 +3585,7 @@ pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator
                     Value.initString(try PHPString.init(allocator, "")), // errfile
                     Value.initInt(0), // errline
                 };
-                _ = closure.call(args[0..], Value.initNull(), allocator) catch {};
+                _ = closure.func(Value.initNull(), args[0..], allocator) catch {};
             }
         }
     } else {
@@ -4002,6 +4003,28 @@ pub fn php_forward_static_call_array_builtin(ctx: Value, args: []const Value, al
     return wrapBuiltin_forward_static_call_array(ctx, args, allocator);
 }
 
+/// Convert PHPValue to ArrayKey
+fn valueToArrayKey(val: Value, allocator: Allocator) !ArrayKey {
+    _ = allocator;
+    if (val.isInt()) {
+        return ArrayKey{ .integer = val.asInt() };
+    } else if (val.isString()) {
+        const str = val.asString();
+        // Try to parse as integer
+        const int_val = std.fmt.parseInt(i64, str.data, 10) catch {
+            return ArrayKey{ .string = str };
+        };
+        return ArrayKey{ .integer = int_val };
+    } else if (val.isNull()) {
+        return ArrayKey{ .integer = 0 };
+    } else if (val.isBool()) {
+        return ArrayKey{ .integer = if (val.asBool()) 1 else 0 };
+    } else if (val.isFloat()) {
+        return ArrayKey{ .integer = @intFromFloat(val.asFloat()) };
+    }
+    return ArrayKey{ .integer = 0 };
+}
+
 pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
     if (Value_isObject(arr_val)) {
         return php_object_call(arr_val, "offsetGet", &[_]Value{key_val});
@@ -4369,7 +4392,7 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
 
     // 获取方法的参数信息
     const meta = obj.class_meta orelse return throwException("Cannot find class metadata", allocator);
-    const method = meta.findMethod(method_name) orelse return throwException("Call to undefined method", allocator);
+    _ = meta.findMethod(method_name) orelse return throwException("Call to undefined method", allocator);
 
     // 收集位置参数（整数键，按顺序）
     var positional = std.ArrayListUnmanaged(Value){};
@@ -6635,22 +6658,24 @@ fn arrayObject_asort(ctx: Value, args: []const Value, allocator: Allocator) !Val
             const arr = storage.asArray();
             const flags = if (args.len > 0) args[0].toInt() else 0;
             _ = flags;
-            // 简单排序实现
-            var keys = std.ArrayList(ArrayKey).init(allocator);
-            defer keys.deinit();
-            var iter = arr.elements.iterator();
-            while (iter.next()) |entry| try keys.append(entry.key_ptr.*);
 
-            // 按值排序（简化版本）
-            const SortContext = struct {
-                elements: *const std.HashMap(ArrayKey, Value, ArrayKey.HashContext, std.hash_map.default_max_load_percentage),
-                fn lessThan(ctx: @This(), a: ArrayKey, b: ArrayKey) bool {
-                    const va = ctx.elements.get(a) orelse return false;
-                    const vb = ctx.elements.get(b) orelse return true;
-                    return Value_lessThan(va, vb);
+            // 收集所有键
+            var keys = std.ArrayListUnmanaged(ArrayKey){};
+            defer keys.deinit(allocator);
+            var iter = arr.elements.iterator();
+            while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
+
+            // 按值排序
+            const SortCtx = struct {
+                elems: *const PHPArray.Elements,
+                fn lessThan(self_ctx: @This(), a: ArrayKey, b: ArrayKey) bool {
+                    const va = self_ctx.elems.get(a) orelse return false;
+                    const vb = self_ctx.elems.get(b) orelse return true;
+                    // 使用浮点比较作为通用比较
+                    return va.toFloat() < vb.toFloat();
                 }
             };
-            std.sort.insertion(ArrayKey, keys.items, SortContext{ .elements = &arr.elements }, SortContext.lessThan);
+            std.sort.insertion(ArrayKey, keys.items, SortCtx{ .elems = &arr.elements }, SortCtx.lessThan);
 
             // 重建有序数组
             const new_arr = try PHPArray.init(allocator);
@@ -6660,7 +6685,10 @@ fn arrayObject_asort(ctx: Value, args: []const Value, allocator: Allocator) !Val
                     try new_arr.elements.put(key, val);
                 }
             }
-            arr.elements.clearAndFree();
+            // 用新数组的元素替换旧数组
+            arr.elements.deinit();
+            arr.elements = PHPArray.Elements.init(allocator);
+            arr.elements.parent = arr;
             var new_iter = new_arr.elements.iterator();
             while (new_iter.next()) |entry| {
                 try arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
@@ -6759,10 +6787,10 @@ fn arrayObject_ksort(ctx: Value, _: []const Value, allocator: Allocator) !Value 
     if (obj.getProperty("_storage")) |storage| {
         if (storage.isArray()) {
             const arr = storage.asArray();
-            var keys = std.ArrayList(ArrayKey).init(allocator);
-            defer keys.deinit();
+            var keys = std.ArrayListUnmanaged(ArrayKey){};
+            defer keys.deinit(allocator);
             var iter = arr.elements.iterator();
-            while (iter.next()) |entry| try keys.append(entry.key_ptr.*);
+            while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
 
             std.sort.insertion(ArrayKey, keys.items, {}, struct {
                 fn lessThan(_: void, a: ArrayKey, b: ArrayKey) bool {
@@ -6773,7 +6801,7 @@ fn arrayObject_ksort(ctx: Value, _: []const Value, allocator: Allocator) !Value 
                         },
                         .string => |as| switch (b) {
                             .integer => return false, // string > int
-                            .string => |bs| return std.mem.lessThan(u8, as, bs),
+                            .string => |bs| return std.mem.order(u8, as.data, bs.data) == .lt,
                         },
                     }
                 }
@@ -6786,7 +6814,10 @@ fn arrayObject_ksort(ctx: Value, _: []const Value, allocator: Allocator) !Value 
                     try new_arr.elements.put(key, val);
                 }
             }
-            arr.elements.clearAndFree();
+            // 用新数组的元素替换旧数组
+            arr.elements.deinit();
+            arr.elements = PHPArray.Elements.init(allocator);
+            arr.elements.parent = arr;
             var new_iter = new_arr.elements.iterator();
             while (new_iter.next()) |entry| {
                 try arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
@@ -6821,7 +6852,7 @@ fn arrayObject_offsetExists(ctx: Value, args: []const Value, _: Allocator) anyer
         if (storage.isArray()) {
             const arr = storage.asArray();
             const key = try valueToArrayKey(args[0], runtime_allocator);
-            return Value.initBool(arr.elements.contains(key));
+            return Value.initBool(arr.elements.get(key) != null);
         }
     }
     return Value.initBool(false);
@@ -6880,7 +6911,7 @@ fn arrayObject_offsetUnset(ctx: Value, args: []const Value, _: Allocator) anyerr
 /// ArrayObject::serialize
 fn arrayObject_serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
-    var result = std.ArrayList(u8).init(allocator);
+    var result = try std.ArrayList(u8).initCapacity(allocator, 64);
     defer result.deinit(allocator);
     const writer = result.writer(allocator);
 
@@ -6898,7 +6929,7 @@ fn arrayObject_serialize(ctx: Value, _: []const Value, allocator: Allocator) any
                         try writer.print("i:{d};", .{i});
                     },
                     .string => |s| {
-                        try writer.print("s:{d}:\"{s}\";", .{ s.len, s });
+                        try writer.print("s:{d}:\"{s}\";", .{ s.length, s.data });
                     },
                 }
                 // 简化值序列化
@@ -6955,10 +6986,10 @@ fn arrayObject___serialize(ctx: Value, _: []const Value, allocator: Allocator) a
     const arr = try PHPArray.init(allocator);
 
     if (obj.getProperty("_storage")) |storage| {
-        try arr.put(allocator, try PHPString.init(allocator, "storage"), storage);
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "storage") }, storage);
     }
     if (obj.getProperty("_flags")) |flags| {
-        try arr.put(allocator, try PHPString.init(allocator, "flags"), flags);
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "flags") }, flags);
     }
 
     return Value.initArray(arr);
@@ -6969,10 +7000,12 @@ fn arrayObject___unserialize(ctx: Value, args: []const Value, _: Allocator) anye
     const obj = Value_asObject(ctx);
     if (args.len > 0 and args[0].isArray()) {
         const data = args[0].asArray();
-        if (data.get(Value.initString(try PHPString.init(runtime_allocator, "storage")))) |storage| {
+        const storage_key = ArrayKey{ .string = try PHPString.init(runtime_allocator, "storage") };
+        if (data.get(storage_key)) |storage| {
             try obj.setProperty("_storage", storage);
         }
-        if (data.get(Value.initString(try PHPString.init(runtime_allocator, "flags")))) |flags| {
+        const flags_key = ArrayKey{ .string = try PHPString.init(runtime_allocator, "flags") };
+        if (data.get(flags_key)) |flags| {
             try obj.setProperty("_flags", flags);
         }
     }
@@ -6985,7 +7018,7 @@ fn arrayObject___debugInfo(ctx: Value, _: []const Value, allocator: Allocator) a
     const arr = try PHPArray.init(allocator);
 
     if (obj.getProperty("_storage")) |storage| {
-        try arr.put(allocator, try PHPString.init(allocator, "storage"), storage);
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "storage") }, storage);
     }
 
     return Value.initArray(arr);
@@ -9917,7 +9950,7 @@ pub const ClassMeta = struct {
         timezone_name: []const u8,
 
         fn isLeapYear(year: i64) bool {
-            return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
+            return (@rem(year, 4) == 0 and @rem(year, 100) != 0) or (@rem(year, 400) == 0);
         }
 
         fn getDaysInMonth(year: i64, month: u32) u32 {
@@ -9939,7 +9972,7 @@ pub const ClassMeta = struct {
         fn getDayOfWeek(year: i64, month: u32, day: u32) u32 {
             const y = if (month < 3) year - 1 else year;
             const m = if (month < 3) month + 12 else month;
-            const w = (day + @divFloor(13 * (m + 1), 5) + y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400)) % 7;
+            const w = @mod(day + @divFloor(13 * (m + 1), 5) + y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400), 7);
             return @intCast(w);
         }
 
@@ -10156,10 +10189,10 @@ pub const ClassMeta = struct {
                         const num_str = num_buf[0..num_len];
                         const num_val = std.fmt.parseFloat(f64, num_str) catch 0;
                         switch (c) {
-                            'Y' => y = @intFromFloat(num_val),
-                            'M' => if (in_time) i = @intFromFloat(num_val) else m = @intFromFloat(num_val),
-                            'D' => d = @intFromFloat(num_val),
-                            'H' => h = @intFromFloat(num_val),
+                            'Y' => { y = @intFromFloat(num_val); },
+                            'M' => { if (in_time) i = @intFromFloat(num_val) else m = @intFromFloat(num_val); },
+                            'D' => { d = @intFromFloat(num_val); },
+                            'H' => { h = @intFromFloat(num_val); },
                             'S' => { s = @intFromFloat(@floor(num_val)); },
                             else => {},
                         }
@@ -10441,8 +10474,8 @@ pub const ClassMeta = struct {
 
                 if (args.len > 1 and Value_isObject(args[1])) {
                     const tz_obj = Value_asObject(args[1]);
-                    if (tz_obj.getProperty("__offset")) |offset| tz_offset = @intCast(offset.toInt());
-                    if (tz_obj.getProperty("timezone")) |tz| if (tz.isString()) tz_name = tz.asString().data;
+                    if (tz_obj.getProperty("__offset")) |offset| { tz_offset = @intCast(offset.toInt()); }
+                    if (tz_obj.getProperty("timezone")) |tz| { if (tz.isString()) { tz_name = tz.asString().data; } }
                     try this.setProperty("timezone", args[1]);
                 } else try this.setProperty("timezone", Value.initString(try PHPString.init(runtime_alloc, "UTC")));
                 try this.setProperty("__offset", Value.initInt(tz_offset));
@@ -10488,9 +10521,9 @@ pub const ClassMeta = struct {
 
                 var tz_name: []const u8 = "UTC";
                 if (this.getProperty("timezone")) |tz| {
-                    if (tz.isString()) tz_name = tz.asString().data
+                    if (tz.isString()) { tz_name = tz.asString().data; }
                     else if (Value_isObject(tz)) {
-                        if (Value_asObject(tz).getProperty("timezone")) |tz_str| if (tz_str.isString()) tz_name = tz_str.asString().data;
+                        if (Value_asObject(tz).getProperty("timezone")) |tz_str| { if (tz_str.isString()) { tz_name = tz_str.asString().data; } }
                     }
                 }
 
@@ -10584,7 +10617,7 @@ pub const ClassMeta = struct {
                 if (args.len == 0 or !Value_isObject(args[0])) return Value.initNull();
                 const this_ts = if (this.getProperty("timestamp")) |t| t.toInt() else 0;
                 const target_ts = if (Value_asObject(args[0]).getProperty("timestamp")) |t| t.toInt() else 0;
-                const diff_seconds = @abs(this_ts - target_ts);
+                const diff_seconds: i64 = @intCast(@abs(this_ts - target_ts));
                 const interval_meta = findClass("DateInterval") orelse return Value.initNull();
                 const interval = try PHPObject.initWithMeta(alloc, interval_meta);
                 try interval.setProperty("y", Value.initInt(0));
@@ -10898,13 +10931,13 @@ pub const ClassMeta = struct {
                 fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     // 参数验证：必须提供一个对象
                     if (args.len == 0) {
-                        return throwError("WeakReference::create() expects exactly 1 argument, 0 given");
+                        return error.InvalidArgumentCount;
                     }
                     const target = args[0];
 
                     // 只能对对象创建弱引用
                     if (!Value_isObject(target)) {
-                        return throwError("WeakReference::create() expects parameter 1 to be object");
+                        return error.InvalidArgument;
                     }
 
                     const target_obj = Value_asObject(target);
@@ -10923,9 +10956,9 @@ pub const ClassMeta = struct {
                     try weakref_obj.setProperty("__target_addr", Value.initInt(@as(i64, @intCast(target_addr))));
 
                     // 存储目标对象的类名（用于调试和反射）
-                    const target_class_name = target_obj.meta orelse "stdClass";
-                    const class_name_copy = try alloc.dupe(u8, target_class_name.name);
-                    try weakref_obj.setProperty("__target_class", Value.initString(class_name_copy));
+                    const target_class_name = if (target_obj.class_meta) |m| m.name else "stdClass";
+                    const class_name_str = try PHPString.init(alloc, target_class_name);
+                    try weakref_obj.setProperty("__target_class", Value.initString(class_name_str));
 
                     // 存储一个轻量级的引用，用于在对象未被销毁时获取它
                     // 这里我们不增加引用计数（真正弱引用语义），但需要能追踪对象
@@ -11024,10 +11057,12 @@ pub const ClassMeta = struct {
         const meta = try ClassMeta.init(allocator, "WeakMap");
 
         // 实现接口标记
-        try meta.addInterface("Countable");
-        try meta.addInterface("ArrayAccess");
-        try meta.addInterface("IteratorAggregate");
-        try meta.addInterface("Traversable");
+        const ifaces = try allocator.alloc([]const u8, 4);
+        ifaces[0] = "Countable";
+        ifaces[1] = "ArrayAccess";
+        ifaces[2] = "IteratorAggregate";
+        ifaces[3] = "Traversable";
+        meta.interfaces = ifaces;
 
         // __construct() - 构造函数
         try meta.addMethod(.{
@@ -11061,10 +11096,10 @@ pub const ClassMeta = struct {
                         const entries = entries_val.asArray();
 
                         // 收集需要移除的键
-                        var dead_keys = std.ArrayList([]const u8).init(alloc);
+                        var dead_keys = try std.ArrayList([]const u8).initCapacity(alloc, 0);
                         defer {
                             for (dead_keys.items) |key| alloc.free(key);
-                            dead_keys.deinit();
+                            dead_keys.deinit(alloc);
                         }
 
                         var iter = entries.elements.iterator();
@@ -11112,7 +11147,7 @@ pub const ClassMeta = struct {
 
                     // 只接受对象作为键
                     if (!Value_isObject(args[0])) {
-                        return throwError("WeakMap key must be an object");
+                        return error.InvalidArgument;
                     }
 
                     const key_obj = Value_asObject(args[0]);
@@ -11128,8 +11163,16 @@ pub const ClassMeta = struct {
                         const entries = entries_val.asArray();
                         var buf: [32]u8 = undefined;
                         const key_str = std.fmt.bufPrint(&buf, "{}", .{addr}) catch "";
-                        const exists = entries.elements.contains(.{ .string = key_str });
-                        return Value.initBool(exists);
+                        // 遍历查找匹配的键
+                        var it = entries.elements.iterator();
+                        while (it.next()) |entry| {
+                            if (entry.key_ptr.* == .string) {
+                                if (std.mem.eql(u8, entry.key_ptr.*.string.data, key_str)) {
+                                    return Value.initBool(true);
+                                }
+                            }
+                        }
+                        return Value.initBool(false);
                     }
 
                     return Value.initBool(false);
@@ -11150,7 +11193,7 @@ pub const ClassMeta = struct {
 
                     // 只接受对象作为键
                     if (!Value_isObject(args[0])) {
-                        return throwError("WeakMap key must be an object");
+                        return error.InvalidArgument;
                     }
 
                     const key_obj = Value_asObject(args[0]);
@@ -11167,14 +11210,23 @@ pub const ClassMeta = struct {
                         var buf: [32]u8 = undefined;
                         const key_str = std.fmt.bufPrint(&buf, "{}", .{addr}) catch "";
 
-                        if (entries.elements.get(.{ .string = key_str })) |entry_val| {
-                            // entry_val 应该是一个包含 value 的数组
-                            if (entry_val.isArray()) {
-                                const entry_arr = entry_val.asArray();
-                                if (entry_arr.elements.get(.{ .integer = 1 })) |value| {
-                                    _ = value.retain();
-                                    return value;
+                        // 遍历查找匹配的键
+                        var it = entries.elements.iterator();
+                        while (it.next()) |entry| {
+                            if (entry.key_ptr.* == .string) {
+                                if (std.mem.eql(u8, entry.key_ptr.*.string.data, key_str)) {
+                                    const entry_val = entry.value_ptr.*;
+                                    if (entry_val.isArray()) {
+                                        const entry_arr = entry_val.asArray();
+                                        if (entry_arr.elements.get(.{ .integer = 1 })) |value| {
+                                            _ = value.retain();
+                                            return value;
+                                        }
+                                    }
+                                    break;
                                 }
+                            }
+                        }
                             }
                         }
                     }
@@ -11194,12 +11246,12 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(ctx);
 
                     if (args.len < 2) {
-                        return throwError("WeakMap::offsetSet() expects exactly 2 arguments");
+                        return error.InvalidArgumentCount;
                     }
 
                     // 只接受对象作为键
                     if (!Value_isObject(args[0])) {
-                        return throwError("WeakMap key must be an object");
+                        return error.InvalidArgument;
                     }
 
                     const key_obj = Value_asObject(args[0]);
@@ -11225,11 +11277,21 @@ pub const ClassMeta = struct {
                         _ = value.retain();
                         try entry_arr.push(alloc, value);
 
-                        // 检查是否是新条目
-                        const is_new = !entries.elements.contains(.{ .string = key_str });
+                        // 检查是否是新条目（遍历查找）
+                        var is_new = true;
+                        var it = entries.elements.iterator();
+                        while (it.next()) |entry| {
+                            if (entry.key_ptr.* == .string) {
+                                if (std.mem.eql(u8, entry.key_ptr.*.string.data, key_str)) {
+                                    is_new = false;
+                                    break;
+                                }
+                            }
+                        }
 
                         // 存储条目
-                        try entries.elements.put(.{ .string = try alloc.dupe(u8, key_str) }, Value.initArray(entry_arr));
+                        const entry_key = try PHPString.init(alloc, key_str);
+                        try entries.elements.put(.{ .string = entry_key }, Value.initArray(entry_arr));
 
                         // 更新计数
                         if (is_new) {
@@ -11249,7 +11311,7 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{
             .name = "offsetUnset",
             .func = struct {
-                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
 
@@ -11269,19 +11331,30 @@ pub const ClassMeta = struct {
                         var buf: [32]u8 = undefined;
                         const key_str = std.fmt.bufPrint(&buf, "{}", .{addr}) catch "";
 
-                        // 获取条目以释放键对象的引用
-                        if (entries.elements.get(.{ .string = key_str })) |entry_val| {
-                            if (entry_val.isArray()) {
-                                const entry_arr = entry_val.asArray();
-                                // 释放键对象和值
-                                if (entry_arr.elements.get(.{ .integer = 0 })) |key_val| {
-                                    _ = key_val.release();
-                                }
-                                if (entry_arr.elements.get(.{ .integer = 1 })) |value_val| {
-                                    _ = value_val.release();
+                        // 遍历查找匹配的键并移除
+                        var found_key: ?ArrayKey = null;
+                        var it = entries.elements.iterator();
+                        while (it.next()) |entry| {
+                            if (entry.key_ptr.* == .string) {
+                                if (std.mem.eql(u8, entry.key_ptr.*.string.data, key_str)) {
+                                    // 释放条目中的值
+                                    if (entry.value_ptr.*.isArray()) {
+                                        const entry_arr = entry.value_ptr.*.asArray();
+                                        if (entry_arr.elements.get(.{ .integer = 0 })) |key_val| {
+                                            key_val.release(runtime_allocator);
+                                        }
+                                        if (entry_arr.elements.get(.{ .integer = 1 })) |value_val| {
+                                            value_val.release(runtime_allocator);
+                                        }
+                                    }
+                                    found_key = entry.key_ptr.*;
+                                    break;
                                 }
                             }
-                            _ = entries.elements.remove(.{ .string = key_str });
+                        }
+
+                        if (found_key) |fk| {
+                            _ = entries.elements.remove(fk);
 
                             // 更新计数
                             if (this.getPropertyDirect("_size")) |size_val| {
@@ -11411,7 +11484,9 @@ pub const ClassMeta = struct {
         const meta = try ClassMeta.init(allocator, "WeakMapIterator");
 
         // 实现迭代器接口
-        try meta.addInterface("Iterator");
+        const ifaces = try allocator.alloc([]const u8, 1);
+        ifaces[0] = "Iterator";
+        meta.interfaces = ifaces;
 
         // current() - 返回当前元素
         try meta.addMethod(.{
@@ -11514,7 +11589,7 @@ pub const ClassMeta = struct {
                         if (this.getPropertyDirect("_position")) |pos_val| {
                             const arr = arr_val.asArray();
                             const pos = pos_val.toInt();
-                            const exists = arr.elements.contains(.{ .integer = pos });
+                            const exists = arr.elements.get(.{ .integer = pos }) != null;
                             return Value.initBool(exists);
                         }
                     }
@@ -13032,12 +13107,12 @@ fn weakref_get(addr: usize) Value {
 fn weakref_cleanup() void {
     if (weakref_table) |*table| {
         var iter = table.iterator();
-        var to_remove = std.ArrayList(usize).init(runtime_allocator);
-        defer to_remove.deinit();
+        var to_remove = try std.ArrayList(usize).initCapacity(runtime_allocator, 0);
+        defer to_remove.deinit(runtime_allocator);
 
         while (iter.next()) |entry| {
             if (!php_weak_is_alive(entry.key_ptr.*)) {
-                to_remove.append(entry.key_ptr.*) catch {};
+                to_remove.append(runtime_allocator, entry.key_ptr.*) catch {};
             }
         }
 
@@ -21019,15 +21094,15 @@ pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, a
     };
 
     // 构建字符位置映射表
-    var char_positions = std.ArrayList(CharPos).init(allocator);
-    defer char_positions.deinit();
+    var char_positions = try std.ArrayList(CharPos).initCapacity(allocator, 0);
+    defer char_positions.deinit(allocator);
 
     var char_idx: usize = 0;
     var byte_idx: usize = 0;
     while (byte_idx < data.len) {
         const byte = data[byte_idx];
         if ((byte & 0xC0) != 0x80) {
-            try char_positions.append(.{ .byte_idx = byte_idx, .char_idx = char_idx });
+            try char_positions.append(allocator, .{ .byte_idx = byte_idx, .char_idx = char_idx });
             char_idx += 1;
         }
         byte_idx += 1;
@@ -21067,8 +21142,8 @@ pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, a
     };
 
     if (start_char >= end_char or start_char >= total_chars) {
-        const empty = try PHPString.init(allocator, "");
-        return Value.initString(empty);
+        const empty_str = try PHPString.init(allocator, "");
+        return Value.initString(empty_str);
     }
 
     // 获取字节范围
@@ -21477,17 +21552,17 @@ pub fn php_call_user_func_array(callback: Value, args_arr: Value, allocator: All
     }
 
     const arr = args_arr.asArray();
-    var call_args = std.ArrayList(Value).init(allocator);
-    defer call_args.deinit();
+    var call_args = try std.ArrayList(Value).initCapacity(allocator, 0);
+    defer call_args.deinit(allocator);
 
     var iter = arr.elements.iterator();
     while (iter.next()) |entry| {
-        try call_args.append(entry.value_ptr.*);
+        try call_args.append(allocator, entry.value_ptr.*);
     }
 
-    var full_args = std.ArrayList(Value).init(allocator);
-    defer full_args.deinit();
-    try full_args.append(callback);
+    var full_args = try std.ArrayList(Value).initCapacity(allocator, 0);
+    defer full_args.deinit(allocator);
+    try full_args.append(allocator, callback);
     for (call_args.items) |arg| {
         try full_args.append(arg);
     }
