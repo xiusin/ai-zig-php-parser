@@ -4270,31 +4270,32 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
         if (aot_callable_hook) |hook| {
             return hook(func_name, args, allocator);
         }
-        return error.UnknownFunction;
+        // PHP: 对不存在的函数发出 warning 并返回 false
+        return Value.initBool(false);
     }
     if (actual_cb.isArray()) {
         const arr = actual_cb.asArray();
-        if (arr.elements.count() != 2) return error.InvalidCallback;
+        if (arr.elements.count() != 2) return Value.initBool(false);
 
         const key0 = ArrayKey{ .integer = 0 };
         const key1 = ArrayKey{ .integer = 1 };
 
-        const val0 = arr.elements.get(key0) orelse return error.InvalidCallback;
-        const val1 = arr.elements.get(key1) orelse return error.InvalidCallback;
+        const val0 = arr.elements.get(key0) orelse return Value.initBool(false);
+        const val1 = arr.elements.get(key1) orelse return Value.initBool(false);
 
-        if (!val1.isString()) return error.InvalidCallback;
+        if (!val1.isString()) return Value.initBool(false);
         const method_name = val1.asString().data;
 
         if (Value_isObject(val0)) {
             const obj_ptr = Value_asObject(val0);
-            return obj_ptr.callMethod(method_name, args);
+            return obj_ptr.callMethod(method_name, args) catch Value.initBool(false);
         }
         if (val0.isString()) {
-            return php_call_static(val0.asString().data, method_name, args, allocator);
+            return php_call_static(val0.asString().data, method_name, args, allocator) catch Value.initBool(false);
         }
-        return error.NotImplemented;
+        return Value.initBool(false);
     }
-    return error.InvalidCallback;
+    return Value.initBool(false);
 }
 
 pub fn php_args_append_spread(dest: Value, src: Value, allocator: Allocator) !Value {
@@ -13708,8 +13709,7 @@ pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
 /// @return 属性值，如果不存在返回null
 pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
-        if (isErrorSuppressed()) return Value.initNull();
-        return error.NotAnObject;
+        return Value.initNull();
     }
 
     const obj = Value_asObject(obj_val);
@@ -13718,8 +13718,7 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
 
 pub fn php_object_get_direct(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
-        if (isErrorSuppressed()) return Value.initNull();
-        return error.NotAnObject;
+        return Value.initNull();
     }
 
     const obj = Value_asObject(obj_val);
@@ -13739,11 +13738,10 @@ pub fn php_object_get_safe_value(obj_val: Value, prop_name_val: Value) !Value {
 
 pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
     if (!Value_isObject(obj_val)) {
-        if (isErrorSuppressed()) return Value.initNull();
-        return error.NotAnObject;
+        return Value.initNull();
     }
     if (!prop_name_val.isString()) {
-        return error.InvalidPropertyName;
+        return Value.initNull();
     }
     const obj = Value_asObject(obj_val);
     const prop_str = prop_name_val.asString();
@@ -13752,10 +13750,10 @@ pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
 
 pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value) !Value {
     if (!Value_isObject(obj_val)) {
-        return error.NotAnObject;
+        return Value.initNull();
     }
     if (!prop_name_val.isString()) {
-        return error.InvalidPropertyName;
+        return Value.initNull();
     }
     const obj = Value_asObject(obj_val);
     const prop_str = prop_name_val.asString();
@@ -13836,7 +13834,8 @@ pub fn php_cast_object(val: Value) !Value {
 /// @param value 属性值
 pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !Value {
     if (!Value_isObject(obj_val)) {
-        return error.NotAnObject;
+        // PHP: 对非对象设置属性发出警告但不终止
+        return Value.initNull();
     }
 
     const obj = Value_asObject(obj_val);
