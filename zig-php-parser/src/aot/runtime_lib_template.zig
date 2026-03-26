@@ -17253,9 +17253,9 @@ pub fn php_realpath(path_val: Value, allocator: Allocator) !Value {
     const c_path = try allocator.dupeZ(u8, path);
     defer allocator.free(c_path);
 
-    const resolved = std.c.realpath(c_path.ptr, null);
+    var buf: [std.posix.PATH_MAX]u8 = undefined;
+    const resolved = std.c.realpath(c_path.ptr, &buf);
     if (resolved == null) return Value.initBool(false);
-    defer std.c.free(resolved);
 
     const result_str = std.mem.span(resolved.?);
     return Value.initString(try PHPString.init(allocator, result_str));
@@ -17306,7 +17306,7 @@ pub fn php_ob_get_contents(allocator: Allocator) !Value {
 pub fn php_ob_end_clean() !Value {
     ensureObInit();
     if (ob_stack.items.len == 0) return Value.initBool(false);
-    var level = ob_stack.pop();
+    var level = ob_stack.pop().?;
     level.buffer.deinit(runtime_allocator);
     if (level.callback) |cb| cb.release(runtime_allocator);
     return Value.initBool(true);
@@ -17317,7 +17317,7 @@ pub fn php_ob_get_clean(allocator: Allocator) !Value {
     ensureObInit();
     if (ob_stack.items.len == 0) return Value.initBool(false);
     const contents = try PHPString.init(allocator, ob_stack.items[ob_stack.items.len - 1].buffer.items);
-    var level = ob_stack.pop();
+    var level = ob_stack.pop().?;
     level.buffer.deinit(runtime_allocator);
     if (level.callback) |cb| cb.release(runtime_allocator);
     return Value.initString(contents);
@@ -17347,7 +17347,7 @@ pub fn php_ob_flush() !Value {
 pub fn php_ob_end_flush() !Value {
     ensureObInit();
     if (ob_stack.items.len == 0) return Value.initBool(false);
-    var level = ob_stack.pop();
+    var level = ob_stack.pop().?;
     if (level.buffer.items.len > 0) {
         const stdout = std.io.getStdOut().writer();
         stdout.writeAll(level.buffer.items) catch {};
