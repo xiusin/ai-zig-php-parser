@@ -7097,8 +7097,10 @@ pub fn registerArrayObject(allocator: Allocator) !void {
     meta.magic_construct = arrayObject_construct;
 
     // 注册常量
-    try constants.put("ArrayObject::STD_PROP_LIST", Value.initInt(STD_PROP_LIST));
-    try constants.put("ArrayObject::ARRAY_AS_PROPS", Value.initInt(ARRAY_AS_PROPS));
+    const key1 = try allocator.dupe(u8, "ArrayObject::STD_PROP_LIST");
+    try constants.put(key1, Value.initInt(STD_PROP_LIST));
+    const key2 = try allocator.dupe(u8, "ArrayObject::ARRAY_AS_PROPS");
+    try constants.put(key2, Value.initInt(ARRAY_AS_PROPS));
 
     try registerClass(meta);
 }
@@ -10516,16 +10518,22 @@ pub const ClassMeta = struct {
         try registerClass(iface);
 
         // DateTimeInterface 常量
-        try constants.put("DateTimeInterface::ATOM", Value.initString(try PHPString.init(allocator, "Y-m-d\\TH:i:sP")));
-        try constants.put("DateTimeInterface::COOKIE", Value.initString(try PHPString.init(allocator, "l, d-M-Y H:i:s T")));
-        try constants.put("DateTimeInterface::ISO8601", Value.initString(try PHPString.init(allocator, "Y-m-d\\TH:i:sO")));
-        try constants.put("DateTimeInterface::RFC822", Value.initString(try PHPString.init(allocator, "D, d M y H:i:s O")));
-        try constants.put("DateTimeInterface::RFC850", Value.initString(try PHPString.init(allocator, "l, d-M-y H:i:s T")));
-        try constants.put("DateTimeInterface::RFC1123", Value.initString(try PHPString.init(allocator, "D, d M Y H:i:s O")));
-        try constants.put("DateTimeInterface::RFC2822", Value.initString(try PHPString.init(allocator, "D, d M Y H:i:s O")));
-        try constants.put("DateTimeInterface::RFC3339", Value.initString(try PHPString.init(allocator, "Y-m-d\\TH:i:sP")));
-        try constants.put("DateTimeInterface::RSS", Value.initString(try PHPString.init(allocator, "D, d M Y H:i:s O")));
-        try constants.put("DateTimeInterface::W3C", Value.initString(try PHPString.init(allocator, "Y-m-d\\TH:i:sP")));
+        const dt_consts = [_]struct { key: []const u8, val: []const u8 }{
+            .{ .key = "DateTimeInterface::ATOM", .val = "Y-m-d\\TH:i:sP" },
+            .{ .key = "DateTimeInterface::COOKIE", .val = "l, d-M-Y H:i:s T" },
+            .{ .key = "DateTimeInterface::ISO8601", .val = "Y-m-d\\TH:i:sO" },
+            .{ .key = "DateTimeInterface::RFC822", .val = "D, d M y H:i:s O" },
+            .{ .key = "DateTimeInterface::RFC850", .val = "l, d-M-y H:i:s T" },
+            .{ .key = "DateTimeInterface::RFC1123", .val = "D, d M Y H:i:s O" },
+            .{ .key = "DateTimeInterface::RFC2822", .val = "D, d M Y H:i:s O" },
+            .{ .key = "DateTimeInterface::RFC3339", .val = "Y-m-d\\TH:i:sP" },
+            .{ .key = "DateTimeInterface::RSS", .val = "D, d M Y H:i:s O" },
+            .{ .key = "DateTimeInterface::W3C", .val = "Y-m-d\\TH:i:sP" },
+        };
+        for (dt_consts) |c| {
+            const k = try allocator.dupe(u8, c.key);
+            try constants.put(k, Value.initString(try PHPString.init(allocator, c.val)));
+        }
 
         // 注册辅助类
         try registerDateTimeZoneClass(allocator);
