@@ -17626,9 +17626,12 @@ pub fn php_ob_get_status(full_status: Value, allocator: Allocator) !Value {
         const result = try PHPArray.init(allocator);
         for (ob_stack.items, 0..) |_, i| {
             const level_arr = try PHPArray.init(allocator);
-            try level_arr.setByString(allocator, "level", Value.initInt(@intCast(i + 1)));
-            try level_arr.setByString(allocator, "name", Value.initString(try PHPString.init(allocator, "default output handler")));
-            try level_arr.setByString(allocator, "buffer_size", Value.initInt(0));
+            const k_level = try PHPString.init(allocator, "level");
+            try level_arr.set(allocator, ArrayKey{ .string = k_level }, Value.initInt(@intCast(i + 1)));
+            const k_name = try PHPString.init(allocator, "name");
+            try level_arr.set(allocator, ArrayKey{ .string = k_name }, Value.initString(try PHPString.init(allocator, "default output handler")));
+            const k_buf = try PHPString.init(allocator, "buffer_size");
+            try level_arr.set(allocator, ArrayKey{ .string = k_buf }, Value.initInt(0));
             try result.push(allocator, Value.initArray(level_arr));
         }
         return Value.initArray(result);
@@ -17636,9 +17639,12 @@ pub fn php_ob_get_status(full_status: Value, allocator: Allocator) !Value {
     // 返回当前级别的状态
     if (ob_stack.items.len == 0) return Value.initArray(try PHPArray.init(allocator));
     const level_arr = try PHPArray.init(allocator);
-    try level_arr.setByString(allocator, "level", Value.initInt(@intCast(ob_stack.items.len)));
-    try level_arr.setByString(allocator, "name", Value.initString(try PHPString.init(allocator, "default output handler")));
-    try level_arr.setByString(allocator, "buffer_size", Value.initInt(0));
+    const k_level = try PHPString.init(allocator, "level");
+    try level_arr.set(allocator, ArrayKey{ .string = k_level }, Value.initInt(@intCast(ob_stack.items.len)));
+    const k_name = try PHPString.init(allocator, "name");
+    try level_arr.set(allocator, ArrayKey{ .string = k_name }, Value.initString(try PHPString.init(allocator, "default output handler")));
+    const k_buf = try PHPString.init(allocator, "buffer_size");
+    try level_arr.set(allocator, ArrayKey{ .string = k_buf }, Value.initInt(0));
     return Value.initArray(level_arr);
 }
 
@@ -19691,7 +19697,7 @@ pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
         return Value.initString(try PHPString.init(allocator, &hex_str));
     } else if (std.mem.eql(u8, algo, "sha512/256") or std.mem.eql(u8, algo, "sha512256")) {
         var hash: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha512256.hash(input, &hash, .{});
+        std.crypto.hash.sha2.Sha512_256.hash(input, &hash, .{});
         var hex_str: [64]u8 = undefined;
         for (hash, 0..) |byte, i| {
             _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
