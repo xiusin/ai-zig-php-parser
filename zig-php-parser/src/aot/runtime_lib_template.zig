@@ -13954,10 +13954,28 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
     }
 
     if (!Value_isObject(obj_val)) {
-        return error.NotAnObject;
+        // PHP: 对非对象调用方法时发出 Fatal error
+        const stderr = std.fs.File{ .handle = 2 };
+        stderr.writeAll("PHP Fatal error:  Call to a member function on a non-object\n") catch {};
+        const stdout = std.fs.File{ .handle = 1 };
+        stdout.writeAll("\nFatal error: Call to a member function on a non-object\n") catch {};
+        return Value.initNull();
     }
     const obj = Value_asObject(obj_val);
-    return obj.callMethod(method_name, args);
+    return obj.callMethod(method_name, args) catch |err| {
+        if (err == error.MethodNotFound) {
+            const class_name = if (obj.class_meta) |m| m.name else "unknown";
+            const stderr = std.fs.File{ .handle = 2 };
+            var buf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "PHP Fatal error:  Uncaught Error: Call to undefined method {s}::{s}()\n", .{ class_name, method_name }) catch "PHP Fatal error: MethodNotFound\n";
+            stderr.writeAll(msg) catch {};
+            const stdout = std.fs.File{ .handle = 1 };
+            const msg2 = std.fmt.bufPrint(&buf, "\nFatal error: Uncaught Error: Call to undefined method {s}::{s}()\n", .{ class_name, method_name }) catch "";
+            stdout.writeAll(msg2) catch {};
+            return Value.initNull();
+        }
+        return err;
+    };
 }
 
 /// 创建新对象并调用构造函数
@@ -19434,7 +19452,7 @@ pub fn php_sha256(str: Value, allocator: Allocator) !Value {
 
 /// hash - 生成哈希值
 pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
-    if (!algorithm.isString() or !data.isString()) return error.InvalidArgument;
+    if (!algorithm.isString() or !data.isString()) return Value.initBool(false);
 
     const algo = algorithm.asString().data;
 
@@ -19444,9 +19462,17 @@ pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
         return php_sha1(data, Value.initBool(false), allocator);
     } else if (std.mem.eql(u8, algo, "sha256")) {
         return php_sha256(data, allocator);
+    } else if (std.mem.eql(u8, algo, "crc32") or std.mem.eql(u8, algo, "crc32b")) {
+        // crc32b 返回 8 位十六进制
+        const input = data.asString().data;
+        const crc = std.hash.crc.Crc32.hash(input);
+        var hex_buf: [8]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buf, "{x:0>8}", .{crc}) catch return Value.initBool(false);
+        return Value.initString(try PHPString.init(allocator, &hex_buf));
     }
 
-    return error.UnsupportedAlgorithm;
+    // PHP hash() 对不支持的算法发出警告并返回 false
+    return Value.initBool(false);
 }
 
 /// crc32 - 计算字符串的CRC32校验值
@@ -22054,7 +22080,10 @@ pub fn php_call_user_func(args: []const Value, allocator: Allocator) !Value {
         }
     }
 
-    return error.UnknownFunction;
+    // PHP: call_user_func 对不存在的回调发出 warning 并返回 false
+    const stderr = std.fs.File{ .handle = 2 };
+    stderr.writeAll("PHP Warning:  call_user_func() expects parameter 1 to be a valid callback\n") catch {};
+    return Value.initBool(false);
 }
 
 /// call_user_func_array - 使用数组参数调用回调函数
