@@ -2744,9 +2744,18 @@ pub const NativeLinker = struct {
         // 错误处理
         .{ "trigger_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = true }) },
         .{ "user_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = true }) },
+        .{ "set_exception_handler", bi(.{ .runtime_name = "php_set_exception_handler", .needs_allocator = true }) },
+        .{ "restore_exception_handler", bi(.{ .runtime_name = "php_restore_exception_handler", .needs_allocator = false }) },
 
         // 字符串
         .{ "stripslashes", bi(.{ .runtime_name = "php_stripslashes", .needs_allocator = true }) },
+
+        // URL/网络
+        .{ "http_build_query", bi(.{ .runtime_name = "php_http_build_query", .needs_allocator = true }) },
+        .{ "parse_str", bi(.{ .runtime_name = "php_parse_str", .needs_allocator = true }) },
+
+        // 文件系统
+        .{ "glob", bi(.{ .runtime_name = "php_glob", .needs_allocator = true }) },
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },

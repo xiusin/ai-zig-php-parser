@@ -357,16 +357,8 @@ pub fn initRuntime(allocator: Allocator) void {
     stats_allocator = StatsAllocator.init(allocator);
     runtime_allocator = stats_allocator.allocator();
 
+    // 先初始化全局表，再注册类（类注册可能需要写入 constants）
     initClassRegistry(runtime_allocator);
-    ClassMeta.registerStdClass(runtime_allocator) catch {};
-    registerArrayIterator(runtime_allocator) catch {};
-    registerArrayObject(runtime_allocator) catch {};
-    registerSplFixedArray(runtime_allocator) catch {};
-    registerSplStack(runtime_allocator) catch {};
-    registerSplQueue(runtime_allocator) catch {};
-    ClassMeta.registerDateTimeClasses(runtime_allocator) catch {};
-    registerZigChannel(runtime_allocator) catch {};
-    registerZigSelect(runtime_allocator) catch {};
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
     user_function_decl_locations = std.StringHashMap(FunctionDeclLocation).init(runtime_allocator);
     function_meta_registry = std.StringHashMap(FunctionMeta).init(runtime_allocator);
@@ -378,6 +370,17 @@ pub fn initRuntime(allocator: Allocator) void {
     cycle_roots = .{};
     gc_in_progress = false;
     gc_enabled = true;
+
+    // 注册内置类
+    ClassMeta.registerStdClass(runtime_allocator) catch {};
+    registerArrayIterator(runtime_allocator) catch {};
+    registerArrayObject(runtime_allocator) catch {};
+    registerSplFixedArray(runtime_allocator) catch {};
+    registerSplStack(runtime_allocator) catch {};
+    registerSplQueue(runtime_allocator) catch {};
+    ClassMeta.registerDateTimeClasses(runtime_allocator) catch {};
+    registerZigChannel(runtime_allocator) catch {};
+    registerZigSelect(runtime_allocator) catch {};
     gc_release_events = 0;
     current_exception = Value.initNull();
     has_exception = false;
@@ -3518,6 +3521,7 @@ pub fn php_filectime(filename: Value) !Value {
 // 全局错误处理器存储
 threadlocal var global_error_handler: ?Value = null;
 threadlocal var global_error_types: i64 = E_ALL;
+threadlocal var global_exception_handler: ?Value = null;
 
 // 错误级别常量
 pub const E_ERROR: i64 = 1;
@@ -3564,6 +3568,26 @@ pub fn php_restore_error_handler() !Value {
     const prev_handler = if (global_error_handler) |h| h else Value.initNull();
     global_error_handler = null;
     return prev_handler;
+}
+
+/// set_exception_handler - 设置用户自定义异常处理函数
+pub fn php_set_exception_handler(handler: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    const prev = if (global_exception_handler) |h| h else Value.initNull();
+    if (handler.isNull()) {
+        global_exception_handler = null;
+    } else {
+        _ = handler.retain();
+        global_exception_handler = handler;
+    }
+    return prev;
+}
+
+/// restore_exception_handler - 恢复之前的异常处理函数
+pub fn php_restore_exception_handler() !Value {
+    const prev = if (global_exception_handler) |h| h else Value.initNull();
+    global_exception_handler = null;
+    return prev;
 }
 
 /// trigger_error - 触发用户错误
@@ -5174,6 +5198,11 @@ pub fn php_and(lhs: Value, rhs: Value) !Value {
 
 /// 逻辑或运算
 pub fn php_or(lhs: Value, rhs: Value) !Value {
+    return Value.initBool(lhs.toBool() or rhs.toBool());
+}
+
+/// 布尔或运算（用于 match 表达式多条件合并）
+pub fn php_bool_or(lhs: Value, rhs: Value) Value {
     return Value.initBool(lhs.toBool() or rhs.toBool());
 }
 
@@ -9431,6 +9460,50 @@ pub fn php_hypot(x: Value, y: Value) !Value {
     return Value.initFloat(std.math.hypot(x.toFloat(), y.toFloat()));
 }
 
+/// base_convert - 在任意进制之间转换数字
+pub fn php_base_convert(number: Value, frombase: Value, tobase: Value, allocator: Allocator) !Value {
+    if (!number.isString()) return Value.initString(try PHPString.init(allocator, "0"));
+
+    const num_str = number.asString().data;
+    const from: u8 = @intCast(@min(@max(frombase.toInt(), 2), 36));
+    const to: u8 = @intCast(@min(@max(tobase.toInt(), 2), 36));
+
+    // 先将源进制转为十进制整数
+    var decimal: u64 = 0;
+    for (num_str) |c| {
+        const digit: u64 = if (c >= '0' and c <= '9')
+            c - '0'
+        else if (c >= 'a' and c <= 'z')
+            c - 'a' + 10
+        else if (c >= 'A' and c <= 'Z')
+            c - 'A' + 10
+        else
+            continue;
+        if (digit >= from) continue;
+        decimal = decimal * from + digit;
+    }
+
+    // 十进制转目标进制
+    if (decimal == 0) return Value.initString(try PHPString.init(allocator, "0"));
+
+    const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    var buf: [65]u8 = undefined;
+    var pos: usize = buf.len;
+    var val = decimal;
+    while (val > 0) {
+        pos -= 1;
+        buf[pos] = digits[@intCast(@rem(val, to))];
+        val /= to;
+    }
+
+    return Value.initString(try PHPString.init(allocator, buf[pos..]));
+}
+
+/// gc_enabled - 检查 GC 是否启用
+pub fn php_gc_enabled() Value {
+    return Value.initBool(gc_enabled);
+}
+
 /// deg2rad - 角度转弧度
 pub fn php_deg2rad(degrees: Value) !Value {
     const rad = degrees.toFloat() * std.math.pi / 180.0;
@@ -11107,9 +11180,9 @@ pub const ClassMeta = struct {
                             switch (entry.key_ptr.*) {
                                 .string => |key_str| {
                                     // 从键字符串解析对象地址
-                                    const addr = std.fmt.parseInt(usize, key_str, 10) catch 0;
+                                    const addr = std.fmt.parseInt(usize, key_str.data, 10) catch 0;
                                     if (addr == 0 or !php_weak_is_alive(addr)) {
-                                        try dead_keys.append(try alloc.dupe(u8, key_str));
+                                        try dead_keys.append(alloc, try alloc.dupe(u8, key_str.data));
                                     } else {
                                         alive_count += 1;
                                     }
@@ -11122,7 +11195,18 @@ pub const ClassMeta = struct {
 
                         // 移除死亡的条目
                         for (dead_keys.items) |key| {
-                            _ = entries.elements.remove(.{ .string = key });
+                            // 遍历查找匹配的键并移除
+                            var found: ?ArrayKey = null;
+                            var rm_iter = entries.elements.iterator();
+                            while (rm_iter.next()) |rm_entry| {
+                                if (rm_entry.key_ptr.* == .string) {
+                                    if (std.mem.eql(u8, rm_entry.key_ptr.*.string.data, key)) {
+                                        found = rm_entry.key_ptr.*;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (found) |fk| _ = entries.elements.remove(fk);
                         }
                     }
 
@@ -11225,8 +11309,6 @@ pub const ClassMeta = struct {
                                     }
                                     break;
                                 }
-                            }
-                        }
                             }
                         }
                     }
@@ -11399,7 +11481,7 @@ pub const ClassMeta = struct {
                             switch (entry.key_ptr.*) {
                                 .string => |key_str| {
                                     // 从键字符串解析对象地址
-                                    const addr = std.fmt.parseInt(usize, key_str, 10) catch 0;
+                                    const addr = std.fmt.parseInt(usize, key_str.data, 10) catch 0;
                                     if (addr != 0 and php_weak_is_alive(addr)) {
                                         // 条目存活，添加到结果数组
                                         if (entry.value_ptr.*.isArray()) {
@@ -11450,7 +11532,7 @@ pub const ClassMeta = struct {
                         while (arr_iter.next()) |entry| {
                             switch (entry.key_ptr.*) {
                                 .string => |key_str| {
-                                    const addr = std.fmt.parseInt(usize, key_str, 10) catch 0;
+                                    const addr = std.fmt.parseInt(usize, key_str.data, 10) catch 0;
                                     if (addr != 0 and php_weak_is_alive(addr)) {
                                         if (entry.value_ptr.*.isArray()) {
                                             const entry_arr = entry.value_ptr.*.asArray();
@@ -13752,6 +13834,48 @@ pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !
     const obj = Value_asObject(obj_val);
     try obj.setProperty(property_name, value);
     return Value.initNull();
+}
+
+/// $obj->prop[] = value — 向对象属性数组追加元素
+pub fn php_property_array_push_with_obj(obj_val: Value, prop_name: Value, value: Value, _: Value) !void {
+    if (!Value_isObject(obj_val)) return;
+    const obj = Value_asObject(obj_val);
+    const name = if (prop_name.isString()) prop_name.asString().data else return;
+
+    // 获取属性值
+    var prop_val = obj.getPropertyDirect(name) orelse Value.initNull();
+
+    // 如果属性不是数组，创建一个新数组
+    if (!prop_val.isArray()) {
+        const arr = try PHPArray.init(runtime_allocator);
+        prop_val = Value.initArray(arr);
+        try obj.setProperty(name, prop_val);
+    }
+
+    const arr = prop_val.asArray();
+    _ = value.retain();
+    try arr.push(runtime_allocator, value);
+}
+
+/// $obj->prop[key] = value — 向对象属性数组设置元素
+pub fn php_property_array_set_with_obj(obj_val: Value, prop_name: Value, key: Value, value: Value, _: Value) !void {
+    if (!Value_isObject(obj_val)) return;
+    const obj = Value_asObject(obj_val);
+    const name = if (prop_name.isString()) prop_name.asString().data else return;
+
+    // 获取属性值
+    var prop_val = obj.getPropertyDirect(name) orelse Value.initNull();
+
+    // 如果属性不是数组，创建一个新数组
+    if (!prop_val.isArray()) {
+        const arr = try PHPArray.init(runtime_allocator);
+        prop_val = Value.initArray(arr);
+        try obj.setProperty(name, prop_val);
+    }
+
+    const arr = prop_val.asArray();
+    const arr_key = normalizeArrayKeyFromValue(key);
+    try arr.set(runtime_allocator, arr_key, value);
 }
 
 /// 调用对象方法
@@ -16381,29 +16505,37 @@ pub fn php_gethostbyname(hostname: Value, allocator: Allocator) !Value {
 
     const name = hostname.asString().data;
 
-    // 使用std.net进行DNS解析
-    const address = std.net.Address.resolveIp(name, 0) catch {
-        // 解析失败，返回原主机名
-        return hostname;
-    };
+    // 使用 C 库 getaddrinfo 进行 DNS 解析
+    const c_name = try allocator.dupeZ(u8, name);
+    defer allocator.free(c_name);
 
-    // 获取IP地址字符串
-    var buf: [100]u8 = undefined;
-    const ip_str = address.formatIp(&buf) catch {
-        return hostname;
-    };
+    var hints: std.posix.addrinfo = std.mem.zeroes(std.posix.addrinfo);
+    hints.family = std.posix.AF.INET;
+    hints.socktype = std.posix.SOCK.STREAM;
 
-    const result = try PHPString.init(allocator, try allocator.dupe(u8, ip_str));
+    var result_ptr: ?*std.posix.addrinfo = null;
+    const rc = std.c.getaddrinfo(c_name.ptr, null, &hints, &result_ptr);
+    if (@intFromEnum(rc) != 0 or result_ptr == null) {
+        return hostname;
+    }
+    defer std.c.freeaddrinfo(result_ptr.?);
+
+    const addr_in: *const std.posix.sockaddr.in = @ptrCast(@alignCast(result_ptr.?.addr.?));
+    const ip_bytes = @as(*const [4]u8, @ptrCast(&addr_in.addr));
+    const ip_str = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] });
+    defer allocator.free(ip_str);
+
+    const result = try PHPString.init(allocator, ip_str);
     return Value.initString(result);
 }
 
 /// gethostname - 获取主机名
 pub fn php_gethostname(allocator: Allocator) !Value {
-    var buf: [256]u8 = undefined;
+    var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
     const hostname = std.posix.gethostname(&buf) catch {
         return Value.initString(try PHPString.init(allocator, "localhost"));
     };
-    const result = try PHPString.init(allocator, try allocator.dupe(u8, hostname));
+    const result = try PHPString.init(allocator, hostname);
     return Value.initString(result);
 }
 
@@ -16423,7 +16555,7 @@ pub fn php_ip2long(ip: Value) !Value {
         if (shift > 0) shift -= 8 else break;
     }
 
-    return Value.initInt(@as(i64, @bitCast(result)));
+    return Value.initInt(@as(i64, result));
 }
 
 /// long2ip - 将长整型转换为IP地址
@@ -16453,7 +16585,7 @@ pub fn php_parse_url(url: Value, allocator: Allocator) !Value {
     // 解析scheme
     if (std.mem.indexOf(u8, rest, "://")) |scheme_end| {
         const scheme = rest[0..scheme_end];
-        try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "scheme") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, scheme))));
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "scheme") }, Value.initString(try PHPString.init(allocator, scheme)));
         rest = rest[scheme_end + 3..];
     }
 
@@ -16465,35 +16597,173 @@ pub fn php_parse_url(url: Value, allocator: Allocator) !Value {
         if (std.mem.indexOf(u8, host_port, ":")) |port_pos| {
             const host = host_port[0..port_pos];
             const port = host_port[port_pos + 1..];
-            try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "host") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, host))));
-            try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "port") }, Value.initInt(std.fmt.parseInt(i64, port, 10) catch 0));
+            try arr.set(allocator, .{ .string = try PHPString.init(allocator, "host") }, Value.initString(try PHPString.init(allocator, host)));
+            try arr.set(allocator, .{ .string = try PHPString.init(allocator, "port") }, Value.initInt(std.fmt.parseInt(i64, port, 10) catch 0));
         } else {
-            try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "host") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, host_port))));
+            try arr.set(allocator, .{ .string = try PHPString.init(allocator, "host") }, Value.initString(try PHPString.init(allocator, host_port)));
         }
     }
 
     // 解析path
     if (std.mem.indexOf(u8, rest, "?")) |path_end| {
         const path = rest[0..path_end];
-        try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "path") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, path))));
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "path") }, Value.initString(try PHPString.init(allocator, path)));
         rest = rest[path_end + 1..];
 
         // 解析query
         if (std.mem.indexOf(u8, rest, "#")) |query_end| {
             const query = rest[0..query_end];
             const fragment = rest[query_end + 1..];
-            try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "query") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, query))));
-            try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "fragment") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, fragment))));
+            try arr.set(allocator, .{ .string = try PHPString.init(allocator, "query") }, Value.initString(try PHPString.init(allocator, query)));
+            try arr.set(allocator, .{ .string = try PHPString.init(allocator, "fragment") }, Value.initString(try PHPString.init(allocator, fragment)));
         } else {
-            try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "query") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, rest))));
+            try arr.set(allocator, .{ .string = try PHPString.init(allocator, "query") }, Value.initString(try PHPString.init(allocator, rest)));
         }
     } else {
         if (rest.len > 0) {
-            try arr.set(allocator, ArrayKey{ .string = try allocator.dupe(u8, "path") }, Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, rest))));
+            try arr.set(allocator, .{ .string = try PHPString.init(allocator, "path") }, Value.initString(try PHPString.init(allocator, rest)));
         }
     }
 
     return Value.initArray(arr);
+}
+
+/// http_build_query - 生成 URL 编码的查询字符串
+pub fn php_http_build_query(data: Value, allocator: Allocator) !Value {
+    if (!data.isArray()) return Value.initString(try PHPString.init(allocator, ""));
+
+    const arr = data.asArray();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 64);
+    defer result.deinit(allocator);
+    const writer = result.writer(allocator);
+
+    var first = true;
+    var iter = arr.elements.iterator();
+    while (iter.next()) |entry| {
+        if (!first) try writer.writeAll("&");
+        first = false;
+
+        // 写入键
+        switch (entry.key_ptr.*) {
+            .integer => |i| try writer.print("{d}", .{i}),
+            .string => |s| try writer.writeAll(s.data),
+        }
+        try writer.writeAll("=");
+
+        // 写入值
+        const val = entry.value_ptr.*;
+        if (val.isString()) {
+            // URL 编码
+            for (val.asString().data) |c| {
+                if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+                    try writer.writeByte(c);
+                } else if (c == ' ') {
+                    try writer.writeByte('+');
+                } else {
+                    try writer.print("%{X:0>2}", .{c});
+                }
+            }
+        } else if (val.isInt()) {
+            try writer.print("{d}", .{val.asInt()});
+        } else if (val.isFloat()) {
+            try writer.print("{d}", .{val.asFloat()});
+        } else if (val.isBool()) {
+            if (val.asBool()) try writer.writeAll("1");
+        }
+    }
+
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// parse_str - 将查询字符串解析到变量中
+pub fn php_parse_str(str: Value, result_arr: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return Value.initNull();
+
+    const query = str.asString().data;
+    const arr = if (result_arr.isArray()) result_arr.asArray() else try PHPArray.init(allocator);
+
+    var pairs = std.mem.splitScalar(u8, query, '&');
+    while (pairs.next()) |pair| {
+        if (pair.len == 0) continue;
+        if (std.mem.indexOf(u8, pair, "=")) |eq_pos| {
+            const key = pair[0..eq_pos];
+            const val = pair[eq_pos + 1 ..];
+            const key_str = try PHPString.init(allocator, key);
+            const val_str = try PHPString.init(allocator, val);
+            try arr.set(allocator, .{ .string = key_str }, Value.initString(val_str));
+        } else {
+            const key_str = try PHPString.init(allocator, pair);
+            const empty_str = try PHPString.init(allocator, "");
+            try arr.set(allocator, .{ .string = key_str }, Value.initString(empty_str));
+        }
+    }
+
+    if (!result_arr.isArray()) {
+        return Value.initArray(arr);
+    }
+    return Value.initNull();
+}
+
+/// glob - 查找匹配模式的文件路径
+pub fn php_glob(pattern: Value, allocator: Allocator) !Value {
+    if (!pattern.isString()) return Value.initArray(try PHPArray.init(allocator));
+
+    const pat = pattern.asString().data;
+    const arr = try PHPArray.init(allocator);
+
+    // 简单实现：使用目录遍历 + 模式匹配
+    // 提取目录部分和文件名模式
+    const dir_path = std.fs.path.dirname(pat) orelse ".";
+    const file_pattern = std.fs.path.basename(pat);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        return Value.initArray(arr);
+    };
+    defer dir.close();
+
+    var dir_iter = dir.iterate();
+    while (dir_iter.next() catch null) |entry| {
+        if (globMatch(file_pattern, entry.name)) {
+            const full_path = if (std.mem.eql(u8, dir_path, "."))
+                try PHPString.init(allocator, entry.name)
+            else blk: {
+                const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+                defer allocator.free(path);
+                break :blk try PHPString.init(allocator, path);
+            };
+            try arr.push(allocator, Value.initString(full_path));
+        }
+    }
+
+    return Value.initArray(arr);
+}
+
+/// 简单的 glob 模式匹配（支持 * 和 ?）
+fn globMatch(pattern: []const u8, name: []const u8) bool {
+    var pi: usize = 0;
+    var ni: usize = 0;
+    var star_pi: ?usize = null;
+    var star_ni: usize = 0;
+
+    while (ni < name.len) {
+        if (pi < pattern.len and (pattern[pi] == name[ni] or pattern[pi] == '?')) {
+            pi += 1;
+            ni += 1;
+        } else if (pi < pattern.len and pattern[pi] == '*') {
+            star_pi = pi;
+            star_ni = ni;
+            pi += 1;
+        } else if (star_pi) |sp| {
+            pi = sp + 1;
+            star_ni += 1;
+            ni = star_ni;
+        } else {
+            return false;
+        }
+    }
+
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi == pattern.len;
 }
 
 /// stripos - 不区分大小写查找子字符串位置
@@ -20918,7 +21188,7 @@ pub fn php_ctype_print(text: Value) Value {
 pub fn php_ctype_punct(text: Value) Value {
     if (text.isInt()) {
         const c = @as(u8, @intCast(text.toInt() & 0xFF));
-        return Value.initBool(std.ascii.isPunct(c));
+        return Value.initBool(isPunct(c));
     }
     if (!text.isString()) return Value.initBool(false);
     
@@ -20926,9 +21196,14 @@ pub fn php_ctype_punct(text: Value) Value {
     if (str.length == 0) return Value.initBool(false);
     
     for (str.data) |c| {
-        if (!std.ascii.isPunct(c)) return Value.initBool(false);
+        if (!isPunct(c)) return Value.initBool(false);
     }
     return Value.initBool(true);
+}
+
+/// 标点符号判断：可打印的非字母数字非空格字符
+fn isPunct(c: u8) bool {
+    return std.ascii.isPrint(c) and !std.ascii.isAlphanumeric(c) and c != ' ';
 }
 
 /// ctype_space - 检查是否为空白字符
@@ -20969,7 +21244,7 @@ pub fn php_ctype_upper(text: Value) Value {
 pub fn php_ctype_xdigit(text: Value) Value {
     if (text.isInt()) {
         const c = @as(u8, @intCast(text.toInt() & 0xFF));
-        return Value.initBool(std.ascii.isXDigit(c));
+        return Value.initBool(isXDigit(c));
     }
     if (!text.isString()) return Value.initBool(false);
     
@@ -20977,9 +21252,14 @@ pub fn php_ctype_xdigit(text: Value) Value {
     if (str.length == 0) return Value.initBool(false);
     
     for (str.data) |c| {
-        if (!std.ascii.isXDigit(c)) return Value.initBool(false);
+        if (!isXDigit(c)) return Value.initBool(false);
     }
     return Value.initBool(true);
+}
+
+/// 十六进制数字判断
+fn isXDigit(c: u8) bool {
+    return std.ascii.isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
 }
 
 // Ctype 函数包装器
@@ -21108,7 +21388,7 @@ pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, a
         byte_idx += 1;
     }
     // 添加结束位置
-    try char_positions.append(.{ .byte_idx = data.len, .char_idx = char_idx });
+    try char_positions.append(allocator, .{ .byte_idx = data.len, .char_idx = char_idx });
 
     const total_chars = char_idx;
 
@@ -21564,7 +21844,7 @@ pub fn php_call_user_func_array(callback: Value, args_arr: Value, allocator: All
     defer full_args.deinit(allocator);
     try full_args.append(allocator, callback);
     for (call_args.items) |arg| {
-        try full_args.append(arg);
+        try full_args.append(allocator, arg);
     }
 
     return php_call_user_func(full_args.items, allocator);
