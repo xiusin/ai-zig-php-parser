@@ -2769,6 +2769,15 @@ pub const NativeLinker = struct {
         .{ "ob_flush", bi(.{ .runtime_name = "php_ob_flush", .needs_allocator = false }) },
         .{ "ob_end_flush", bi(.{ .runtime_name = "php_ob_end_flush", .needs_allocator = false }) },
 
+        // 临时文件/调试
+        .{ "tempnam", bi(.{ .runtime_name = "php_tempnam", .needs_allocator = true }) },
+        .{ "debug_zval_dump", bi(.{ .runtime_name = "php_debug_zval_dump", .needs_allocator = false }) },
+
+        // HTTP 头（CLI 模式）
+        .{ "headers_list", bi(.{ .runtime_name = "php_headers_list", .needs_allocator = true }) },
+        .{ "header", bi(.{ .runtime_name = "php_header", .needs_allocator = false }) },
+        .{ "http_response_code", bi(.{ .runtime_name = "php_http_response_code", .needs_allocator = false }) },
+
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
         .{ "php_array_iter_init_ref", bi(.{ .runtime_name = "php_array_iter_init_ref", .needs_allocator = true }) },
@@ -8527,6 +8536,18 @@ pub const NativeLinker = struct {
                                     }
                                     try self.writeRegAssignment(writer, reg.id, "runtime.Value.initNull()");
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_header")) {
+                                // header(string, replace = true, response_code = 0)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initBool(true), runtime.Value.initInt(0)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initInt(0)");
+                                    }
+                                }
+                                try writer.writeAll(");\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_pathinfo")) {
                                 // pathinfo(path, option = -1)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});

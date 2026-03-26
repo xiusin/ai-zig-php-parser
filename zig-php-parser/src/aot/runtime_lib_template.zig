@@ -17261,6 +17261,71 @@ pub fn php_realpath(path_val: Value, allocator: Allocator) !Value {
     return Value.initString(try PHPString.init(allocator, result_str));
 }
 
+/// tempnam - 创建唯一的临时文件名
+pub fn php_tempnam(dir: Value, prefix: Value, allocator: Allocator) !Value {
+    const dir_str = if (dir.isString()) dir.asString().data else "/tmp";
+    const prefix_str = if (prefix.isString()) prefix.asString().data else "tmp";
+
+    // 生成唯一文件名
+    const ts = std.time.milliTimestamp();
+    const pid = std.c.getpid();
+    const name = try std.fmt.allocPrint(allocator, "{s}/{s}{d}_{d}.tmp", .{ dir_str, prefix_str, pid, ts });
+    defer allocator.free(name);
+
+    return Value.initString(try PHPString.init(allocator, name));
+}
+
+/// debug_zval_dump - 输出变量的 zval 信息
+pub fn php_debug_zval_dump(value: Value) !Value {
+    const stdout_file = std.fs.File{ .handle = 1 };
+    const stdout = stdout_file.writer();
+    if (value.isString()) {
+        const s = value.asString();
+        stdout.print("string({d}) \"{s}\" refcount(1)\n", .{ s.length, s.data }) catch {};
+    } else if (value.isInt()) {
+        stdout.print("int({d})\n", .{value.asInt()}) catch {};
+    } else if (value.isFloat()) {
+        stdout.print("float({d})\n", .{value.asFloat()}) catch {};
+    } else if (value.isBool()) {
+        stdout.print("bool({s})\n", .{if (value.asBool()) "true" else "false"}) catch {};
+    } else if (value.isNull()) {
+        stdout.writeAll("NULL\n") catch {};
+    } else if (value.isArray()) {
+        const arr = value.asArray();
+        stdout.print("array({d}) refcount(1){{\n}}\n", .{arr.count()}) catch {};
+    } else {
+        stdout.writeAll("unknown type\n") catch {};
+    }
+    return Value.initNull();
+}
+
+/// headers_list - 返回已发送的 HTTP 头列表
+/// 在 CLI 模式下返回空数组
+pub fn php_headers_list(allocator: Allocator) !Value {
+    return Value.initArray(try PHPArray.init(allocator));
+}
+
+/// header - 发送 HTTP 头（CLI 模式下无操作）
+pub fn php_header(header_str: Value, replace: Value, response_code: Value) !Value {
+    _ = header_str;
+    _ = replace;
+    _ = response_code;
+    // CLI 模式下 header() 无实际效果
+    return Value.initNull();
+}
+
+/// http_response_code - 获取/设置 HTTP 响应状态码
+threadlocal var current_http_response_code: i64 = 200;
+
+pub fn php_http_response_code(code: Value) !Value {
+    if (!code.isNull() and code.isInt()) {
+        const prev = current_http_response_code;
+        current_http_response_code = code.asInt();
+        return Value.initInt(prev);
+    }
+    return Value.initInt(current_http_response_code);
+}
+
 // ============================================================================
 // 输出缓冲系统
 // ============================================================================
@@ -17334,10 +17399,9 @@ pub fn php_ob_flush() !Value {
     ensureObInit();
     if (ob_stack.items.len == 0) return Value.initBool(false);
     const level = &ob_stack.items[ob_stack.items.len - 1];
-    // 将缓冲区内容输出到 stdout
     if (level.buffer.items.len > 0) {
-        const stdout = std.io.getStdOut().writer();
-        stdout.writeAll(level.buffer.items) catch {};
+        const stdout_file = std.fs.File{ .handle = 1 };
+        stdout_file.writeAll(level.buffer.items) catch {};
         level.buffer.clearRetainingCapacity();
     }
     return Value.initBool(true);
@@ -17349,8 +17413,8 @@ pub fn php_ob_end_flush() !Value {
     if (ob_stack.items.len == 0) return Value.initBool(false);
     var level = ob_stack.pop().?;
     if (level.buffer.items.len > 0) {
-        const stdout = std.io.getStdOut().writer();
-        stdout.writeAll(level.buffer.items) catch {};
+        const stdout_file = std.fs.File{ .handle = 1 };
+        stdout_file.writeAll(level.buffer.items) catch {};
     }
     level.buffer.deinit(runtime_allocator);
     if (level.callback) |cb| cb.release(runtime_allocator);
