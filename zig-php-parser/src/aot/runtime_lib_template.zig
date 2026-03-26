@@ -17278,23 +17278,30 @@ pub fn php_tempnam(dir: Value, prefix: Value, allocator: Allocator) !Value {
 /// debug_zval_dump - 输出变量的 zval 信息
 pub fn php_debug_zval_dump(value: Value) !Value {
     const stdout_file = std.fs.File{ .handle = 1 };
-    const stdout = stdout_file.writer();
     if (value.isString()) {
         const s = value.asString();
-        stdout.print("string({d}) \"{s}\" refcount(1)\n", .{ s.length, s.data }) catch {};
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "string({d}) \"{s}\" refcount(1)\n", .{ s.length, s.data }) catch "string(?)\n";
+        stdout_file.writeAll(msg) catch {};
     } else if (value.isInt()) {
-        stdout.print("int({d})\n", .{value.asInt()}) catch {};
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "int({d})\n", .{value.asInt()}) catch "int(?)\n";
+        stdout_file.writeAll(msg) catch {};
     } else if (value.isFloat()) {
-        stdout.print("float({d})\n", .{value.asFloat()}) catch {};
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "float({d})\n", .{value.asFloat()}) catch "float(?)\n";
+        stdout_file.writeAll(msg) catch {};
     } else if (value.isBool()) {
-        stdout.print("bool({s})\n", .{if (value.asBool()) "true" else "false"}) catch {};
+        stdout_file.writeAll(if (value.asBool()) "bool(true)\n" else "bool(false)\n") catch {};
     } else if (value.isNull()) {
-        stdout.writeAll("NULL\n") catch {};
+        stdout_file.writeAll("NULL\n") catch {};
     } else if (value.isArray()) {
         const arr = value.asArray();
-        stdout.print("array({d}) refcount(1){{\n}}\n", .{arr.count()}) catch {};
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "array({d}) refcount(1){{\n}}\n", .{arr.count()}) catch "array(?)\n";
+        stdout_file.writeAll(msg) catch {};
     } else {
-        stdout.writeAll("unknown type\n") catch {};
+        stdout_file.writeAll("unknown type\n") catch {};
     }
     return Value.initNull();
 }
