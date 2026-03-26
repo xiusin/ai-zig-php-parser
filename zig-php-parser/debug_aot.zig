@@ -6,21 +6,131 @@ const runtime = @import("runtime_lib.zig");
 
 // String table
 const string_table = [_][]const u8{
-    "$text",
-    "123 456 789",
-    "$matches",
-    "Before: ",
-    "var_dump",
-    "$count",
-    "preg_match_all",
-    "/\\d+/",
-    "After: ",
-    "Count: ",
+    "NamedArgsLab",
+    "process",
+    "string",
+    "$name",
+    "int",
+    "$age",
+    "bool",
+    "$active",
+    "array",
+    "$tags",
+    "$email",
+    "Name: ",
+    ", Age: ",
+    ", Active: ",
+    "yes",
+    "no",
+    ", Tags: ",
+    "implode",
+    ",",
+    ", Email: ",
+    "none",
+    "combine",
+    "$first",
+    "",
+    "$second",
+    "$third",
+    "trim",
+    " ",
+    "globalProcess",
+    "$x",
+    "$y",
+    "$op",
+    "add",
+    "$verbose",
+    "Computing ",
     "\n",
-    "is_array",
-    "isset",
-    "First group: ",
+    "sub",
+    "mul",
+    "div",
+    "intdiv",
+    "$lab",
+    "=== Named Arguments ===\n",
+    "name",
+    "John",
+    "age",
+    "tags",
+    "php",
+    "developer",
+    "email",
+    "john@example.com",
+    "Jane",
+    "active",
+    "designer",
+    "artist",
+    "second",
+    "middle",
+    "first",
+    "First",
+    "third",
+    "Third",
+    "\n=== Spread Operator in Arrays ===\n",
+    "$base",
+    "$added",
+    "$combined",
+    "Combined: ",
+    "$head",
+    "Prepend 0: ",
+    "$tail",
+    "Append 6: ",
+    "\n=== Spread Operator in Function Calls ===\n",
+    "$nums",
+    "max(...nums): ",
+    "max",
+    "min(...nums): ",
+    "min",
+    "sum",
+    "$a",
+    "$b",
+    "$c",
+    "$d",
+    "$e",
+    "$numbers",
+    "sum(5, ...numbers): ",
+    "\n=== Argument Unpacking with array_map ===\n",
+    "$summed",
+    "array_map",
+    "array_map sum: ",
+    "\n=== Global function with named args ===\n",
+    "x",
+    "y",
+    "op",
+    "verbose",
+    "\n=== Complex unpacking ===\n",
+    "$defaults",
+    "a",
+    "b",
+    "c",
+    "$override",
+    "$merged",
+    "Merged array: ",
     "json_encode",
+    "\n=== Function returning array with spread ===\n",
+    "getNumbers",
+    "$withExtra",
+    "Spread function result: ",
+    "\n=== Named constructor args simulation ===\n",
+    "Config",
+    "__construct",
+    "$host",
+    "localhost",
+    "$port",
+    "$ssl",
+    "$username",
+    "$cfg",
+    "username",
+    "admin",
+    "host",
+    "example.com",
+    "ssl",
+    "port",
+    "Config host: ",
+    ", port: ",
+    ", ssl: ",
+    ", user: ",
+    "__arrow_7",
 };
 
 // 静态字符串池（运行时初始化一次）
@@ -37,13 +147,641 @@ fn initStaticStrings() void {
 
 
 // MARKER: generateFunction called
-pub fn @"__main__"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+pub fn @"NamedArgsLab::process"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
     _ = &ctx;
     _ = allocator; // 标记为故意未使用
     const __prev_call_args = runtime.setCurrentCallArgs(args);
     defer runtime.restoreCurrentCallArgs(__prev_call_args);
-    runtime.profiler.enterGlobal("__main__");
-    defer runtime.profiler.exitGlobal("__main__");
+    if (runtime.findClass("NamedArgsLab")) |__class_meta| {
+        const __prev_scope = runtime.getCurrentScopeClass();
+        runtime.setCurrentScopeClass(__class_meta);
+        defer runtime.setCurrentScopeClass(__prev_scope);
+        if (runtime.getCurrentCalledClass() == null) {
+            runtime.setCurrentCalledClass(__class_meta);
+        }
+    }
+    runtime.profiler.enterGlobal("NamedArgsLab::process");
+    defer runtime.profiler.exitGlobal("NamedArgsLab::process");
+    // Register declarations
+    var reg_43: runtime.Value = runtime.Value.initNull();
+    _ = &reg_43;
+    var reg_20: runtime.Value = runtime.Value.initNull();
+    _ = &reg_20;
+    var reg_12: runtime.Value = runtime.Value.initNull();
+    _ = &reg_12;
+    var reg_35: runtime.Value = runtime.Value.initNull();
+    _ = &reg_35;
+    var reg_32: runtime.Value = runtime.Value.initNull();
+    _ = &reg_32;
+    var reg_47: runtime.Value = runtime.Value.initNull();
+    _ = &reg_47;
+    var reg_19: runtime.Value = runtime.Value.initNull();
+    _ = &reg_19;
+    var reg_2_storage: runtime.Value = runtime.Value.initNull();
+    var reg_2: *runtime.Value = &reg_2_storage;
+    _ = &reg_2;
+    var __def_2: bool = false;
+    _ = &__def_2;
+    var reg_3_storage: runtime.Value = runtime.Value.initNull();
+    var reg_3: *runtime.Value = &reg_3_storage;
+    _ = &reg_3;
+    var __def_3: bool = false;
+    _ = &__def_3;
+    var reg_55: runtime.Value = runtime.Value.initNull();
+    _ = &reg_55;
+    var reg_22: runtime.Value = runtime.Value.initNull();
+    _ = &reg_22;
+    var reg_59: runtime.Value = runtime.Value.initNull();
+    _ = &reg_59;
+    var reg_15: runtime.Value = runtime.Value.initNull();
+    _ = &reg_15;
+    var reg_11: runtime.Value = runtime.Value.initNull();
+    _ = &reg_11;
+    var reg_37: runtime.Value = runtime.Value.initNull();
+    _ = &reg_37;
+    var reg_49: runtime.Value = runtime.Value.initNull();
+    _ = &reg_49;
+    var reg_67: runtime.Value = runtime.Value.initNull();
+    _ = &reg_67;
+    var reg_65: runtime.Value = runtime.Value.initNull();
+    _ = &reg_65;
+    var reg_10: runtime.Value = runtime.Value.initNull();
+    _ = &reg_10;
+    var reg_42: runtime.Value = runtime.Value.initNull();
+    _ = &reg_42;
+    var reg_50: runtime.Value = runtime.Value.initNull();
+    _ = &reg_50;
+    var reg_56: runtime.Value = runtime.Value.initNull();
+    _ = &reg_56;
+    var reg_34: runtime.Value = runtime.Value.initNull();
+    _ = &reg_34;
+    var reg_57: runtime.Value = runtime.Value.initNull();
+    _ = &reg_57;
+    var reg_40: runtime.Value = runtime.Value.initNull();
+    _ = &reg_40;
+    var reg_70: runtime.Value = runtime.Value.initNull();
+    _ = &reg_70;
+    var reg_54: runtime.Value = runtime.Value.initNull();
+    _ = &reg_54;
+    var reg_14: runtime.Value = runtime.Value.initNull();
+    _ = &reg_14;
+    var reg_51: runtime.Value = runtime.Value.initNull();
+    _ = &reg_51;
+    var reg_33: runtime.Value = runtime.Value.initNull();
+    _ = &reg_33;
+    var reg_0: runtime.Value = runtime.Value.initNull();
+    _ = &reg_0;
+    var reg_62: runtime.Value = runtime.Value.initNull();
+    _ = &reg_62;
+    var reg_6_storage: runtime.Value = runtime.Value.initNull();
+    var reg_6: *runtime.Value = &reg_6_storage;
+    _ = &reg_6;
+    var __def_6: bool = false;
+    _ = &__def_6;
+    var reg_64: runtime.Value = runtime.Value.initNull();
+    _ = &reg_64;
+    var reg_29: runtime.Value = runtime.Value.initNull();
+    _ = &reg_29;
+    var reg_5_storage: runtime.Value = runtime.Value.initNull();
+    var reg_5: *runtime.Value = &reg_5_storage;
+    _ = &reg_5;
+    var __def_5: bool = false;
+    _ = &__def_5;
+    var reg_45: runtime.Value = runtime.Value.initNull();
+    _ = &reg_45;
+    var reg_46: runtime.Value = runtime.Value.initNull();
+    _ = &reg_46;
+    var reg_24: runtime.Value = runtime.Value.initNull();
+    _ = &reg_24;
+    var reg_36: runtime.Value = runtime.Value.initNull();
+    _ = &reg_36;
+    var reg_44: runtime.Value = runtime.Value.initNull();
+    _ = &reg_44;
+    var reg_53: runtime.Value = runtime.Value.initNull();
+    _ = &reg_53;
+    var reg_39: runtime.Value = runtime.Value.initNull();
+    _ = &reg_39;
+    var reg_21: runtime.Value = runtime.Value.initNull();
+    _ = &reg_21;
+    var reg_60: runtime.Value = runtime.Value.initNull();
+    _ = &reg_60;
+    var reg_9: runtime.Value = runtime.Value.initNull();
+    _ = &reg_9;
+    var reg_27: runtime.Value = runtime.Value.initNull();
+    _ = &reg_27;
+    var reg_1_storage: runtime.Value = runtime.Value.initNull();
+    var reg_1: *runtime.Value = &reg_1_storage;
+    _ = &reg_1;
+    var __def_1: bool = false;
+    _ = &__def_1;
+    var reg_58: runtime.Value = runtime.Value.initNull();
+    _ = &reg_58;
+    var reg_25: runtime.Value = runtime.Value.initNull();
+    _ = &reg_25;
+    var reg_38: runtime.Value = runtime.Value.initNull();
+    _ = &reg_38;
+    var reg_66: runtime.Value = runtime.Value.initNull();
+    _ = &reg_66;
+    var reg_13: runtime.Value = runtime.Value.initNull();
+    _ = &reg_13;
+    var reg_7: runtime.Value = runtime.Value.initNull();
+    _ = &reg_7;
+    var reg_8: runtime.Value = runtime.Value.initNull();
+    _ = &reg_8;
+    var reg_69: runtime.Value = runtime.Value.initNull();
+    _ = &reg_69;
+    var reg_26: runtime.Value = runtime.Value.initNull();
+    _ = &reg_26;
+    var reg_17: runtime.Value = runtime.Value.initNull();
+    _ = &reg_17;
+    var reg_41: runtime.Value = runtime.Value.initNull();
+    _ = &reg_41;
+    var reg_61: runtime.Value = runtime.Value.initNull();
+    _ = &reg_61;
+    var reg_30: runtime.Value = runtime.Value.initNull();
+    _ = &reg_30;
+    var reg_31: runtime.Value = runtime.Value.initNull();
+    _ = &reg_31;
+    var reg_23: runtime.Value = runtime.Value.initNull();
+    _ = &reg_23;
+    var reg_63: runtime.Value = runtime.Value.initNull();
+    _ = &reg_63;
+    var reg_4_storage: runtime.Value = runtime.Value.initNull();
+    var reg_4: *runtime.Value = &reg_4_storage;
+    _ = &reg_4;
+    var __def_4: bool = false;
+    _ = &__def_4;
+    var reg_18: runtime.Value = runtime.Value.initNull();
+    _ = &reg_18;
+    var reg_68: runtime.Value = runtime.Value.initNull();
+    _ = &reg_68;
+    var reg_52: runtime.Value = runtime.Value.initNull();
+    _ = &reg_52;
+    var reg_16: runtime.Value = runtime.Value.initNull();
+    _ = &reg_16;
+    var reg_48: runtime.Value = runtime.Value.initNull();
+    _ = &reg_48;
+    var reg_28: runtime.Value = runtime.Value.initNull();
+    _ = &reg_28;
+
+    var null_val = runtime.Value.initNull();
+    _ = &null_val;
+
+    // State machine for complex control flow
+    // Control flow state machine
+    var current_block: u32 = 0;
+    var prev_block: u32 = 0;
+    _ = &current_block;
+    _ = &prev_block;
+    while (true) {
+        switch (current_block) {
+            0 => { // entry
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_0 = ctx;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_1.*.release(runtime.runtime_allocator);
+    _ = reg_0.retain();
+    runtime.val_assign(reg_1, reg_0);
+    __def_1 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_7 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_8 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_9 = runtime.Value.initBool(reg_7.toBool() and reg_8.toBool());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_10 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_11 = runtime.Value.initBool(reg_9.toBool() and reg_10.toBool());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_12 = runtime.Value.initBool((args.len > 4) and !args[4].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_13 = runtime.Value.initBool(reg_11.toBool() and reg_12.toBool());
+                if (reg_13.toBool()) {
+                    prev_block = current_block;
+                    current_block = 1;
+                } else {
+                    prev_block = current_block;
+                    current_block = 2;
+                }
+            },
+            1 => { // params_all_present
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_14 = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_15 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_16 = if (args.len > 2 and !args[2].isMissing()) runtime.Value.initBool(args[2].toBool()) else runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_17 = if (args.len > 3 and !args[3].isMissing()) args[3] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_18 = if (args.len > 4 and !args[4].isMissing()) args[4] else runtime.Value.initNull();
+            reg_36 = reg_14;
+            reg_37 = reg_15;
+            reg_38 = reg_16;
+            reg_39 = reg_17;
+            reg_40 = reg_18;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            2 => { // params_has_missing
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_19 = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_20 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:3
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 3);
+    reg_21 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:6
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 6);
+    reg_22 = runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:6
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 6);
+    reg_23.release(runtime.runtime_allocator);
+    if (reg_20.toBool()) {
+        reg_23 = reg_21;
+        _ = reg_23.retain();
+    } else {
+        reg_23 = reg_22;
+        _ = reg_23.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:6
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 6);
+    reg_24 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:6
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 6);
+    reg_25 = if (args.len > 2 and !args[2].isMissing()) runtime.Value.initBool(args[2].toBool()) else runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:7
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 7);
+    reg_26 = runtime.Value.initBool(true);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:7
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 7);
+    reg_27.release(runtime.runtime_allocator);
+    if (reg_24.toBool()) {
+        reg_27 = reg_25;
+        _ = reg_27.retain();
+    } else {
+        reg_27 = reg_26;
+        _ = reg_27.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:7
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 7);
+    reg_28 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:7
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 7);
+    reg_29 = if (args.len > 3 and !args[3].isMissing()) args[3] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:8
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 8);
+    reg_30.release(runtime.runtime_allocator);
+    reg_30 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:8
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 8);
+    reg_31.release(runtime.runtime_allocator);
+    if (reg_28.toBool()) {
+        reg_31 = reg_29;
+        _ = reg_31.retain();
+    } else {
+        reg_31 = reg_30;
+        _ = reg_31.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:8
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 8);
+    reg_32 = runtime.Value.initBool((args.len > 4) and !args[4].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:8
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 8);
+    reg_33 = if (args.len > 4 and !args[4].isMissing()) args[4] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    reg_34 = runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    if (reg_32.toBool()) {
+        reg_35 = reg_33;
+        _ = reg_35.retain();
+    } else {
+        reg_35 = reg_34;
+        _ = reg_35.retain();
+    }
+            reg_36 = reg_19;
+            reg_37 = reg_23;
+            reg_38 = reg_27;
+            reg_39 = reg_31;
+            reg_40 = reg_35;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            3 => { // params_merge
+    switch (prev_block) {
+        1 => {
+            reg_36 = reg_14;
+        },
+        2 => {
+            reg_36 = reg_19;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_36 = reg_14;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    reg_2.*.release(runtime.runtime_allocator);
+    _ = reg_36.retain();
+    runtime.val_assign(reg_2, reg_36);
+    __def_2 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    // PHI: reg_37 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    reg_3.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_3, runtime.Value.initInt(reg_37.toInt()));
+    __def_3 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    // PHI: reg_38 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    reg_4.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_4, runtime.Value.initBool(reg_38.toBool()));
+    __def_4 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    // PHI: reg_39 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    reg_5.*.release(runtime.runtime_allocator);
+    _ = reg_39.retain();
+    runtime.val_assign(reg_5, reg_39);
+    __def_5 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    // PHI: reg_40 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:9
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 9);
+    reg_6.*.release(runtime.runtime_allocator);
+    _ = reg_40.retain();
+    runtime.val_assign(reg_6, reg_40);
+    __def_6 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_41.release(runtime.runtime_allocator);
+    reg_41 = runtime.Value.initString(static_strings[11]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    if (!__def_2) runtime.emitWarning("Undefined variable $name");
+    reg_42.release(runtime.runtime_allocator);
+    reg_42 = runtime.val_deref(reg_2).*;
+    _ = reg_42.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_43.release(runtime.runtime_allocator);
+    reg_43 = try runtime.php_concat(reg_41, reg_42, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_44.release(runtime.runtime_allocator);
+    reg_44 = runtime.Value.initString(static_strings[12]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_45.release(runtime.runtime_allocator);
+    reg_45 = try runtime.php_concat(reg_43, reg_44, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    if (!__def_3) runtime.emitWarning("Undefined variable $age");
+    reg_46.release(runtime.runtime_allocator);
+    reg_46 = runtime.val_deref(reg_3).*;
+    _ = reg_46.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_47.release(runtime.runtime_allocator);
+    reg_47 = try runtime.php_concat(reg_45, reg_46, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_48.release(runtime.runtime_allocator);
+    reg_48 = runtime.Value.initString(static_strings[13]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_49.release(runtime.runtime_allocator);
+    reg_49 = try runtime.php_concat(reg_47, reg_48, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    if (!__def_4) runtime.emitWarning("Undefined variable $active");
+    reg_50.release(runtime.runtime_allocator);
+    reg_50 = runtime.val_deref(reg_4).*;
+    _ = reg_50.retain();
+                if (reg_50.toBool()) {
+                    prev_block = current_block;
+                    current_block = 4;
+                } else {
+                    prev_block = current_block;
+                    current_block = 5;
+                }
+            },
+            4 => { // ternary_then_0
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_51.release(runtime.runtime_allocator);
+    reg_51 = runtime.Value.initString(static_strings[14]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_52 = reg_51;
+            reg_55 = reg_52;
+                prev_block = current_block;
+                current_block = 6;
+            },
+            5 => { // ternary_else_1
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_53.release(runtime.runtime_allocator);
+    reg_53 = runtime.Value.initString(static_strings[15]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_54 = reg_53;
+            reg_55 = reg_54;
+                prev_block = current_block;
+                current_block = 6;
+            },
+            6 => { // ternary_merge_2
+    switch (prev_block) {
+        5 => {
+            reg_55 = reg_54;
+        },
+        4 => {
+            reg_55 = reg_52;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_55 = reg_52;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:11
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 11);
+    reg_56.release(runtime.runtime_allocator);
+    reg_56 = try runtime.php_concat(reg_49, reg_55, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_57.release(runtime.runtime_allocator);
+    reg_57 = runtime.Value.initString(static_strings[16]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_58.release(runtime.runtime_allocator);
+    reg_58 = try runtime.php_concat(reg_56, reg_57, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_59.release(runtime.runtime_allocator);
+    reg_59 = runtime.Value.initString(static_strings[18]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    if (!__def_5) runtime.emitWarning("Undefined variable $tags");
+    reg_60.release(runtime.runtime_allocator);
+    reg_60 = runtime.val_deref(reg_5).*;
+    _ = reg_60.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_61.release(runtime.runtime_allocator);
+    reg_61 = try runtime.php_implode(reg_59, reg_60, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_56.release(runtime.runtime_allocator);
+        reg_56 = runtime.Value.initNull();
+        reg_70.release(runtime.runtime_allocator);
+        reg_70 = runtime.Value.initNull();
+        reg_47.release(runtime.runtime_allocator);
+        reg_47 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_62.release(runtime.runtime_allocator);
+        reg_62 = runtime.Value.initNull();
+        reg_64.release(runtime.runtime_allocator);
+        reg_64 = runtime.Value.initNull();
+        reg_45.release(runtime.runtime_allocator);
+        reg_45 = runtime.Value.initNull();
+        reg_49.release(runtime.runtime_allocator);
+        reg_49 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_62.release(runtime.runtime_allocator);
+    reg_62 = try runtime.php_concat(reg_58, reg_61, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_63.release(runtime.runtime_allocator);
+    reg_63 = runtime.Value.initString(static_strings[19]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_64.release(runtime.runtime_allocator);
+    reg_64 = try runtime.php_concat(reg_62, reg_63, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    if (!__def_6) runtime.emitWarning("Undefined variable $email");
+    reg_65.release(runtime.runtime_allocator);
+    reg_65 = runtime.val_deref(reg_6).*;
+    _ = reg_65.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_66 = runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_67 = try runtime.php_identical(reg_65, reg_66);
+                if (reg_67.toBool()) {
+                    prev_block = current_block;
+                    current_block = 7;
+                } else {
+                    reg_69 = reg_65;
+                    prev_block = current_block;
+                    current_block = 8;
+                }
+            },
+            7 => { // coalesce_rhs_3
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_68.release(runtime.runtime_allocator);
+    reg_68 = runtime.Value.initString(static_strings[20]);
+            reg_69 = reg_68;
+                prev_block = current_block;
+                current_block = 8;
+            },
+            8 => { // coalesce_merge_4
+    switch (prev_block) {
+        7 => {
+            reg_69 = reg_68;
+        },
+        6 => {
+            reg_69 = reg_65;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_69 = reg_65;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_70.release(runtime.runtime_allocator);
+    reg_70 = try runtime.php_concat(reg_64, reg_69, runtime.runtime_allocator);
+                // Cleanup (except return value)
+                reg_2.*.release(runtime.runtime_allocator);
+                reg_3.*.release(runtime.runtime_allocator);
+                reg_1.*.release(runtime.runtime_allocator);
+                reg_4.*.release(runtime.runtime_allocator);
+                reg_6.*.release(runtime.runtime_allocator);
+                reg_5.*.release(runtime.runtime_allocator);
+                return reg_70;
+            },
+            else => unreachable,
+        }
+    }
+}
+
+// MARKER: generateFunction called
+pub fn @"NamedArgsLab::combine"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    _ = &ctx;
+    _ = allocator; // 标记为故意未使用
+    const __prev_call_args = runtime.setCurrentCallArgs(args);
+    defer runtime.restoreCurrentCallArgs(__prev_call_args);
+    if (runtime.findClass("NamedArgsLab")) |__class_meta| {
+        const __prev_scope = runtime.getCurrentScopeClass();
+        runtime.setCurrentScopeClass(__class_meta);
+        defer runtime.setCurrentScopeClass(__prev_scope);
+        if (runtime.getCurrentCalledClass() == null) {
+            runtime.setCurrentCalledClass(__class_meta);
+        }
+    }
+    runtime.profiler.enterGlobal("NamedArgsLab::combine");
+    defer runtime.profiler.exitGlobal("NamedArgsLab::combine");
     // Register declarations
     var reg_20: runtime.Value = runtime.Value.initNull();
     _ = &reg_20;
@@ -59,28 +797,40 @@ pub fn @"__main__"(ctx: runtime.Value, args: []const runtime.Value, allocator: s
     _ = &reg_9;
     var reg_19: runtime.Value = runtime.Value.initNull();
     _ = &reg_19;
-    var reg_2: runtime.Value = runtime.Value.initNull();
+    var reg_2_storage: runtime.Value = runtime.Value.initNull();
+    var reg_2: *runtime.Value = &reg_2_storage;
     _ = &reg_2;
-    var reg_3: runtime.Value = runtime.Value.initNull();
+    var __def_2: bool = false;
+    _ = &__def_2;
+    var reg_3_storage: runtime.Value = runtime.Value.initNull();
+    var reg_3: *runtime.Value = &reg_3_storage;
     _ = &reg_3;
+    var __def_3: bool = false;
+    _ = &__def_3;
     var reg_27: runtime.Value = runtime.Value.initNull();
     _ = &reg_27;
-    var reg_1: runtime.Value = runtime.Value.initNull();
+    var reg_1_storage: runtime.Value = runtime.Value.initNull();
+    var reg_1: *runtime.Value = &reg_1_storage;
     _ = &reg_1;
+    var __def_1: bool = false;
+    _ = &__def_1;
     var reg_22: runtime.Value = runtime.Value.initNull();
     _ = &reg_22;
     var reg_25: runtime.Value = runtime.Value.initNull();
     _ = &reg_25;
     var reg_15: runtime.Value = runtime.Value.initNull();
     _ = &reg_15;
+    var reg_38: runtime.Value = runtime.Value.initNull();
+    _ = &reg_38;
     var reg_13: runtime.Value = runtime.Value.initNull();
     _ = &reg_13;
     var reg_11: runtime.Value = runtime.Value.initNull();
     _ = &reg_11;
+    var reg_37: runtime.Value = runtime.Value.initNull();
+    _ = &reg_37;
     var reg_7: runtime.Value = runtime.Value.initNull();
     _ = &reg_7;
-    var reg_8_storage: runtime.Value = runtime.Value.initNull();
-    var reg_8: *runtime.Value = &reg_8_storage;
+    var reg_8: runtime.Value = runtime.Value.initNull();
     _ = &reg_8;
     var reg_10: runtime.Value = runtime.Value.initNull();
     _ = &reg_10;
@@ -100,8 +850,11 @@ pub fn @"__main__"(ctx: runtime.Value, args: []const runtime.Value, allocator: s
     _ = &reg_23;
     var reg_0: runtime.Value = runtime.Value.initNull();
     _ = &reg_0;
-    var reg_4: runtime.Value = runtime.Value.initNull();
+    var reg_4_storage: runtime.Value = runtime.Value.initNull();
+    var reg_4: *runtime.Value = &reg_4_storage;
     _ = &reg_4;
+    var __def_4: bool = false;
+    _ = &__def_4;
     var reg_6: runtime.Value = runtime.Value.initNull();
     _ = &reg_6;
     var reg_18: runtime.Value = runtime.Value.initNull();
@@ -118,6 +871,8 @@ pub fn @"__main__"(ctx: runtime.Value, args: []const runtime.Value, allocator: s
     _ = &reg_24;
     var reg_28: runtime.Value = runtime.Value.initNull();
     _ = &reg_28;
+    var reg_36: runtime.Value = runtime.Value.initNull();
+    _ = &reg_36;
 
     var null_val = runtime.Value.initNull();
     _ = &null_val;
@@ -131,467 +886,10470 @@ pub fn @"__main__"(ctx: runtime.Value, args: []const runtime.Value, allocator: s
     while (true) {
         switch (current_block) {
             0 => { // entry
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:3
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 3);
-    reg_0.release(runtime.runtime_allocator);
-    reg_0 = runtime.Value.initString(static_strings[1]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:3
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 3);
-    try setGlobalVar("$text", reg_0);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:4
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 4);
-    reg_1 = runtime.Value.initNull();
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:4
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 4);
-    try setGlobalVar("$matches", reg_1);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:6
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 6);
-    reg_2.release(runtime.runtime_allocator);
-    reg_2 = runtime.Value.initString(static_strings[3]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:6
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 6);
-    _ = try runtime.php_echo(reg_2);
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:7
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 7);
-    reg_3.release(runtime.runtime_allocator);
-    reg_3 = getGlobalVar("$matches");
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:7
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 7);
-    reg_4.release(runtime.runtime_allocator);
-    reg_4 = try runtime.php_var_dump(reg_3);
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    reg_5.release(runtime.runtime_allocator);
-    reg_5 = runtime.Value.initString(static_strings[7]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    reg_6.release(runtime.runtime_allocator);
-    reg_6 = getGlobalVar("$text");
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    reg_7 = runtime.Value.initNull();
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    reg_9 = runtime.Value.initNull();
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    reg_8.*.release(runtime.runtime_allocator);
-    _ = reg_9.retain();
-    runtime.val_assign(reg_8, reg_9);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    reg_10.release(runtime.runtime_allocator);
-    reg_10 = try runtime.php_preg_match_all(reg_5, reg_6, reg_8, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    reg_11.release(runtime.runtime_allocator);
-    reg_11 = runtime.val_deref(reg_8).*;
-    _ = reg_11.retain();
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    try setGlobalVar("$matches", reg_11);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:9
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 9);
-    try setGlobalVar("$count", reg_10);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:11
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 11);
-    reg_12.release(runtime.runtime_allocator);
-    reg_12 = runtime.Value.initString(static_strings[8]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:11
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 11);
-    _ = try runtime.php_echo(reg_12);
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:12
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 12);
-    reg_13.release(runtime.runtime_allocator);
-    reg_13 = getGlobalVar("$matches");
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:12
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 12);
-    reg_14.release(runtime.runtime_allocator);
-    reg_14 = try runtime.php_var_dump(reg_13);
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:13
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 13);
-    reg_15.release(runtime.runtime_allocator);
-    reg_15 = runtime.Value.initString(static_strings[9]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:13
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 13);
-    reg_16.release(runtime.runtime_allocator);
-    reg_16 = getGlobalVarNoWarn("$count");
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:13
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 13);
-    reg_17.release(runtime.runtime_allocator);
-    reg_17 = try runtime.php_concat_with_undef(reg_15, reg_16, false, "", !globalVarIsDefined("$count"), "$count", runtime.runtime_allocator);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:13
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 13);
-    reg_18.release(runtime.runtime_allocator);
-    reg_18 = runtime.Value.initString(static_strings[10]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:13
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 13);
-    reg_19.release(runtime.runtime_allocator);
-    reg_19 = try runtime.php_concat(reg_17, reg_18, runtime.runtime_allocator);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:13
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 13);
-    _ = try runtime.php_echo(reg_19);
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
-    reg_20.release(runtime.runtime_allocator);
-    reg_20 = getGlobalVar("$matches");
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
-    reg_21.release(runtime.runtime_allocator);
-    reg_21 = try runtime.php_is_array(reg_20);
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
-    reg_22 = runtime.Value.initBool(false);
-                if (reg_21.toBool()) {
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_0 = ctx;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_1.*.release(runtime.runtime_allocator);
+    _ = reg_0.retain();
+    runtime.val_assign(reg_1, reg_0);
+    __def_1 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_5 = runtime.Value.initBool((args.len > 0) and !args[0].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_6 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_7 = runtime.Value.initBool(reg_5.toBool() and reg_6.toBool());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_8 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_9 = runtime.Value.initBool(reg_7.toBool() and reg_8.toBool());
+                if (reg_9.toBool()) {
                     prev_block = current_block;
                     current_block = 1;
                 } else {
-                    reg_27 = reg_22;
                     prev_block = current_block;
                     current_block = 2;
                 }
             },
-            1 => { // logical_rhs_0
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
-    reg_23.release(runtime.runtime_allocator);
-    reg_23 = getGlobalVar("$matches");
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
-    reg_24 = runtime.Value.initInt(0);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
-    reg_25.release(runtime.runtime_allocator);
-        reg_25 = try runtime.php_array_get(reg_23, reg_24, runtime.runtime_allocator);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
-    reg_26 = try runtime.php_isset(&[_]runtime.Value{reg_25});
-    if (runtime.hasException()) {
-        @branchHint(.unlikely);
-        // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
-        return error.RuntimeError;
-    }
-            reg_27 = reg_26;
+            1 => { // params_all_present
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_10 = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_11 = if (args.len > 1 and !args[1].isMissing()) args[1] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_12 = if (args.len > 2 and !args[2].isMissing()) args[2] else runtime.Value.initNull();
+            reg_25 = reg_10;
+            reg_26 = reg_11;
+            reg_27 = reg_12;
                 prev_block = current_block;
-                current_block = 2;
+                current_block = 3;
             },
-            2 => { // logical_merge_1
+            2 => { // params_has_missing
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_13 = runtime.Value.initBool((args.len > 0) and !args[0].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:12
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 12);
+    reg_14 = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_15.release(runtime.runtime_allocator);
+    reg_15 = runtime.Value.initString(static_strings[23]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_16.release(runtime.runtime_allocator);
+    if (reg_13.toBool()) {
+        reg_16 = reg_14;
+        _ = reg_16.retain();
+    } else {
+        reg_16 = reg_15;
+        _ = reg_16.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_17 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_18 = if (args.len > 1 and !args[1].isMissing()) args[1] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_19.release(runtime.runtime_allocator);
+    reg_19 = runtime.Value.initString(static_strings[23]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_20.release(runtime.runtime_allocator);
+    if (reg_17.toBool()) {
+        reg_20 = reg_18;
+        _ = reg_20.retain();
+    } else {
+        reg_20 = reg_19;
+        _ = reg_20.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_21 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_22 = if (args.len > 2 and !args[2].isMissing()) args[2] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_23.release(runtime.runtime_allocator);
+    reg_23 = runtime.Value.initString(static_strings[23]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_24.release(runtime.runtime_allocator);
+    if (reg_21.toBool()) {
+        reg_24 = reg_22;
+        _ = reg_24.retain();
+    } else {
+        reg_24 = reg_23;
+        _ = reg_24.retain();
+    }
+            reg_25 = reg_16;
+            reg_26 = reg_20;
+            reg_27 = reg_24;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            3 => { // params_merge
     switch (prev_block) {
         1 => {
-            reg_27 = reg_26;
+            reg_25 = reg_10;
         },
-        0 => {
-            reg_27 = reg_22;
+        2 => {
+            reg_25 = reg_16;
         },
         else => {
             // Fallback: use first incoming value
-            reg_27 = reg_22;
+            reg_25 = reg_10;
         },
     }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:15
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 15);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_2.*.release(runtime.runtime_allocator);
+    _ = reg_25.retain();
+    runtime.val_assign(reg_2, reg_25);
+    __def_2 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    // PHI: reg_26 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_3.*.release(runtime.runtime_allocator);
+    _ = reg_26.retain();
+    runtime.val_assign(reg_3, reg_26);
+    __def_3 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
     // PHI: reg_27 (handled in terminator)
-                if (reg_27.toBool()) {
-                    prev_block = current_block;
-                    current_block = 3;
-                } else {
-                    prev_block = current_block;
-                    current_block = 4;
-                }
-            },
-            3 => { // if_then_2
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:15
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 15);
+    reg_4.*.release(runtime.runtime_allocator);
+    _ = reg_27.retain();
+    runtime.val_assign(reg_4, reg_27);
+    __def_4 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    if (!__def_2) runtime.emitWarning("Undefined variable $first");
     reg_28.release(runtime.runtime_allocator);
-    reg_28 = runtime.Value.initString(static_strings[13]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
+    reg_28 = runtime.val_deref(reg_2).*;
+    _ = reg_28.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
     reg_29.release(runtime.runtime_allocator);
-    reg_29 = getGlobalVar("$matches");
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
-    reg_30 = runtime.Value.initInt(0);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
+    reg_29 = runtime.Value.initString(static_strings[27]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    reg_30.release(runtime.runtime_allocator);
+    reg_30 = try runtime.php_concat(reg_28, reg_29, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    if (!__def_3) runtime.emitWarning("Undefined variable $second");
     reg_31.release(runtime.runtime_allocator);
-        reg_31 = try runtime.php_array_get(reg_29, reg_30, runtime.runtime_allocator);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
+    reg_31 = runtime.val_deref(reg_3).*;
+    _ = reg_31.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
     reg_32.release(runtime.runtime_allocator);
-    reg_32 = try runtime.php_json_encode(reg_31, runtime.Value.initInt(0), runtime.Value.initInt(512), runtime.runtime_allocator);
+    reg_32 = try runtime.php_concat(reg_30, reg_31, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    reg_33.release(runtime.runtime_allocator);
+    reg_33 = runtime.Value.initString(static_strings[27]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    reg_34.release(runtime.runtime_allocator);
+    reg_34 = try runtime.php_concat(reg_32, reg_33, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    if (!__def_4) runtime.emitWarning("Undefined variable $third");
+    reg_35.release(runtime.runtime_allocator);
+    reg_35 = runtime.val_deref(reg_4).*;
+    _ = reg_35.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    reg_36.release(runtime.runtime_allocator);
+    reg_36 = try runtime.php_concat(reg_34, reg_35, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    reg_37 = runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:16
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 16);
+    reg_38.release(runtime.runtime_allocator);
+    reg_38 = try runtime.php_trim(reg_36, reg_37, runtime.runtime_allocator);
     if (runtime.hasException()) {
         @branchHint(.unlikely);
         // Cleanup on exception
-        reg_33.release(runtime.runtime_allocator);
-        reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
-        reg_35.release(runtime.runtime_allocator);
-        reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
+        reg_36.release(runtime.runtime_allocator);
+        reg_36 = runtime.Value.initNull();
+        reg_38.release(runtime.runtime_allocator);
+        reg_38 = runtime.Value.initNull();
+        reg_34.release(runtime.runtime_allocator);
+        reg_34 = runtime.Value.initNull();
         reg_32.release(runtime.runtime_allocator);
         reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
+        reg_30.release(runtime.runtime_allocator);
+        reg_30 = runtime.Value.initNull();
         return error.RuntimeError;
     }
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
+                // Cleanup (except return value)
+                reg_3.*.release(runtime.runtime_allocator);
+                reg_1.*.release(runtime.runtime_allocator);
+                reg_4.*.release(runtime.runtime_allocator);
+                reg_2.*.release(runtime.runtime_allocator);
+                return reg_38;
+            },
+            else => unreachable,
+        }
+    }
+}
+
+// MARKER: generateFunction called
+pub fn @"globalProcess"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    _ = &ctx;
+    _ = allocator; // 标记为故意未使用
+    const __prev_call_args = runtime.setCurrentCallArgs(args);
+    defer runtime.restoreCurrentCallArgs(__prev_call_args);
+    runtime.profiler.enterGlobal("globalProcess");
+    defer runtime.profiler.exitGlobal("globalProcess");
+    // Register declarations
+    var reg_43: runtime.Value = runtime.Value.initNull();
+    _ = &reg_43;
+    var reg_20: runtime.Value = runtime.Value.initNull();
+    _ = &reg_20;
+    var reg_12: runtime.Value = runtime.Value.initNull();
+    _ = &reg_12;
+    var reg_35: runtime.Value = runtime.Value.initNull();
+    _ = &reg_35;
+    var reg_32: runtime.Value = runtime.Value.initNull();
+    _ = &reg_32;
+    var reg_47: runtime.Value = runtime.Value.initNull();
+    _ = &reg_47;
+    var reg_19: runtime.Value = runtime.Value.initNull();
+    _ = &reg_19;
+    var reg_2_storage: runtime.Value = runtime.Value.initNull();
+    var reg_2: *runtime.Value = &reg_2_storage;
+    _ = &reg_2;
+    var __def_2: bool = false;
+    _ = &__def_2;
+    var reg_3_storage: runtime.Value = runtime.Value.initNull();
+    var reg_3: *runtime.Value = &reg_3_storage;
+    _ = &reg_3;
+    var __def_3: bool = false;
+    _ = &__def_3;
+    var reg_59: runtime.Value = runtime.Value.initNull();
+    _ = &reg_59;
+    var reg_22: runtime.Value = runtime.Value.initNull();
+    _ = &reg_22;
+    var reg_55: runtime.Value = runtime.Value.initNull();
+    _ = &reg_55;
+    var reg_15: runtime.Value = runtime.Value.initNull();
+    _ = &reg_15;
+    var reg_11: runtime.Value = runtime.Value.initNull();
+    _ = &reg_11;
+    var reg_37: runtime.Value = runtime.Value.initNull();
+    _ = &reg_37;
+    var reg_49: runtime.Value = runtime.Value.initNull();
+    _ = &reg_49;
+    var reg_67: runtime.Value = runtime.Value.initNull();
+    _ = &reg_67;
+    var reg_65: runtime.Value = runtime.Value.initNull();
+    _ = &reg_65;
+    var reg_10: runtime.Value = runtime.Value.initNull();
+    _ = &reg_10;
+    var reg_42: runtime.Value = runtime.Value.initNull();
+    _ = &reg_42;
+    var reg_50: runtime.Value = runtime.Value.initNull();
+    _ = &reg_50;
+    var reg_56: runtime.Value = runtime.Value.initNull();
+    _ = &reg_56;
+    var reg_34: runtime.Value = runtime.Value.initNull();
+    _ = &reg_34;
+    var reg_70: runtime.Value = runtime.Value.initNull();
+    _ = &reg_70;
+    var reg_40: runtime.Value = runtime.Value.initNull();
+    _ = &reg_40;
+    var reg_57: runtime.Value = runtime.Value.initNull();
+    _ = &reg_57;
+    var reg_54: runtime.Value = runtime.Value.initNull();
+    _ = &reg_54;
+    var reg_14: runtime.Value = runtime.Value.initNull();
+    _ = &reg_14;
+    var reg_51: runtime.Value = runtime.Value.initNull();
+    _ = &reg_51;
+    var reg_33: runtime.Value = runtime.Value.initNull();
+    _ = &reg_33;
+    var reg_0_storage: runtime.Value = runtime.Value.initNull();
+    var reg_0: *runtime.Value = &reg_0_storage;
+    _ = &reg_0;
+    var __def_0: bool = false;
+    _ = &__def_0;
+    var reg_62: runtime.Value = runtime.Value.initNull();
+    _ = &reg_62;
+    var reg_6: runtime.Value = runtime.Value.initNull();
+    _ = &reg_6;
+    var reg_64: runtime.Value = runtime.Value.initNull();
+    _ = &reg_64;
+    var reg_29: runtime.Value = runtime.Value.initNull();
+    _ = &reg_29;
+    var reg_71: runtime.Value = runtime.Value.initNull();
+    _ = &reg_71;
+    var reg_5: runtime.Value = runtime.Value.initNull();
+    _ = &reg_5;
+    var reg_24: runtime.Value = runtime.Value.initNull();
+    _ = &reg_24;
+    var reg_45: runtime.Value = runtime.Value.initNull();
+    _ = &reg_45;
+    var reg_36: runtime.Value = runtime.Value.initNull();
+    _ = &reg_36;
+    var reg_44: runtime.Value = runtime.Value.initNull();
+    _ = &reg_44;
+    var reg_46: runtime.Value = runtime.Value.initNull();
+    _ = &reg_46;
+    var reg_53: runtime.Value = runtime.Value.initNull();
+    _ = &reg_53;
+    var reg_39: runtime.Value = runtime.Value.initNull();
+    _ = &reg_39;
+    var reg_21: runtime.Value = runtime.Value.initNull();
+    _ = &reg_21;
+    var reg_60: runtime.Value = runtime.Value.initNull();
+    _ = &reg_60;
+    var reg_9: runtime.Value = runtime.Value.initNull();
+    _ = &reg_9;
+    var reg_27: runtime.Value = runtime.Value.initNull();
+    _ = &reg_27;
+    var reg_1_storage: runtime.Value = runtime.Value.initNull();
+    var reg_1: *runtime.Value = &reg_1_storage;
+    _ = &reg_1;
+    var __def_1: bool = false;
+    _ = &__def_1;
+    var reg_58: runtime.Value = runtime.Value.initNull();
+    _ = &reg_58;
+    var reg_25: runtime.Value = runtime.Value.initNull();
+    _ = &reg_25;
+    var reg_38: runtime.Value = runtime.Value.initNull();
+    _ = &reg_38;
+    var reg_66: runtime.Value = runtime.Value.initNull();
+    _ = &reg_66;
+    var reg_13: runtime.Value = runtime.Value.initNull();
+    _ = &reg_13;
+    var reg_7: runtime.Value = runtime.Value.initNull();
+    _ = &reg_7;
+    var reg_8: runtime.Value = runtime.Value.initNull();
+    _ = &reg_8;
+    var reg_69: runtime.Value = runtime.Value.initNull();
+    _ = &reg_69;
+    var reg_26: runtime.Value = runtime.Value.initNull();
+    _ = &reg_26;
+    var reg_17: runtime.Value = runtime.Value.initNull();
+    _ = &reg_17;
+    var reg_41: runtime.Value = runtime.Value.initNull();
+    _ = &reg_41;
+    var reg_61: runtime.Value = runtime.Value.initNull();
+    _ = &reg_61;
+    var reg_30: runtime.Value = runtime.Value.initNull();
+    _ = &reg_30;
+    var reg_31: runtime.Value = runtime.Value.initNull();
+    _ = &reg_31;
+    var reg_23: runtime.Value = runtime.Value.initNull();
+    _ = &reg_23;
+    var reg_63: runtime.Value = runtime.Value.initNull();
+    _ = &reg_63;
+    var reg_4: runtime.Value = runtime.Value.initNull();
+    _ = &reg_4;
+    var reg_18: runtime.Value = runtime.Value.initNull();
+    _ = &reg_18;
+    var reg_72: runtime.Value = runtime.Value.initNull();
+    _ = &reg_72;
+    var reg_68: runtime.Value = runtime.Value.initNull();
+    _ = &reg_68;
+    var reg_52: runtime.Value = runtime.Value.initNull();
+    _ = &reg_52;
+    var reg_16: runtime.Value = runtime.Value.initNull();
+    _ = &reg_16;
+    var reg_48: runtime.Value = runtime.Value.initNull();
+    _ = &reg_48;
+    var reg_28: runtime.Value = runtime.Value.initNull();
+    _ = &reg_28;
+
+    var null_val = runtime.Value.initNull();
+    _ = &null_val;
+
+    // State machine for complex control flow
+    // Control flow state machine
+    var current_block: u32 = 0;
+    var prev_block: u32 = 0;
+    _ = &current_block;
+    _ = &prev_block;
+    while (true) {
+        switch (current_block) {
+            0 => { // entry
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_4 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_5 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_6 = runtime.Value.initBool(reg_4.toBool() and reg_5.toBool());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_7 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_8 = runtime.Value.initBool(reg_6.toBool() and reg_7.toBool());
+                if (reg_8.toBool()) {
+                    prev_block = current_block;
+                    current_block = 1;
+                } else {
+                    prev_block = current_block;
+                    current_block = 2;
+                }
+            },
+            1 => { // params_all_present
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_9 = if (args.len > 0 and !args[0].isMissing()) runtime.Value.initInt(args[0].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_10 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_11 = if (args.len > 2 and !args[2].isMissing()) args[2] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_12 = if (args.len > 3 and !args[3].isMissing()) runtime.Value.initBool(args[3].toBool()) else runtime.Value.initBool(false);
+            reg_26 = reg_9;
+            reg_27 = reg_10;
+            reg_28 = reg_11;
+            reg_29 = reg_12;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            2 => { // params_has_missing
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_13 = if (args.len > 0 and !args[0].isMissing()) runtime.Value.initInt(args[0].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_14 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:20
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    reg_15 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:22
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 22);
+    reg_16 = runtime.Value.initInt(10);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:22
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 22);
+    reg_17.release(runtime.runtime_allocator);
+    if (reg_14.toBool()) {
+        reg_17 = reg_15;
+        _ = reg_17.retain();
+    } else {
+        reg_17 = reg_16;
+        _ = reg_17.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:22
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 22);
+    reg_18 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:22
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 22);
+    reg_19 = if (args.len > 2 and !args[2].isMissing()) args[2] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:23
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 23);
+    reg_20.release(runtime.runtime_allocator);
+    reg_20 = runtime.Value.initString(static_strings[32]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:23
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 23);
+    reg_21.release(runtime.runtime_allocator);
+    if (reg_18.toBool()) {
+        reg_21 = reg_19;
+        _ = reg_21.retain();
+    } else {
+        reg_21 = reg_20;
+        _ = reg_21.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:23
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 23);
+    reg_22 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:23
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 23);
+    reg_23 = if (args.len > 3 and !args[3].isMissing()) runtime.Value.initBool(args[3].toBool()) else runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    reg_24 = runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    reg_25.release(runtime.runtime_allocator);
+    if (reg_22.toBool()) {
+        reg_25 = reg_23;
+        _ = reg_25.retain();
+    } else {
+        reg_25 = reg_24;
+        _ = reg_25.retain();
+    }
+            reg_26 = reg_13;
+            reg_27 = reg_17;
+            reg_28 = reg_21;
+            reg_29 = reg_25;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            3 => { // params_merge
+    switch (prev_block) {
+        1 => {
+            reg_26 = reg_9;
+        },
+        2 => {
+            reg_26 = reg_13;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_26 = reg_9;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    reg_0.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_0, runtime.Value.initInt(reg_26.toInt()));
+    __def_0 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    // PHI: reg_27 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    reg_1.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_1, runtime.Value.initInt(reg_27.toInt()));
+    __def_1 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    // PHI: reg_28 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    reg_2.*.release(runtime.runtime_allocator);
+    _ = reg_28.retain();
+    runtime.val_assign(reg_2, reg_28);
+    __def_2 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    // PHI: reg_29 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:24
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 24);
+    reg_3.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_3, runtime.Value.initBool(reg_29.toBool()));
+    __def_3 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    if (!__def_3) runtime.emitWarning("Undefined variable $verbose");
+    reg_30.release(runtime.runtime_allocator);
+    reg_30 = runtime.val_deref(reg_3).*;
+    _ = reg_30.retain();
+                if (reg_30.toBool()) {
+                    prev_block = current_block;
+                    current_block = 4;
+                } else {
+                    prev_block = current_block;
+                    current_block = 5;
+                }
+            },
+            4 => { // if_then_0
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    reg_31.release(runtime.runtime_allocator);
+    reg_31 = runtime.Value.initString(static_strings[34]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    if (!__def_0) runtime.emitWarning("Undefined variable $x");
+    reg_32.release(runtime.runtime_allocator);
+    reg_32 = runtime.val_deref(reg_0).*;
+    _ = reg_32.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
     reg_33.release(runtime.runtime_allocator);
-    reg_33 = try runtime.php_concat(reg_28, reg_32, runtime.runtime_allocator);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
+    reg_33 = try runtime.php_concat(reg_31, reg_32, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
     reg_34.release(runtime.runtime_allocator);
-    reg_34 = runtime.Value.initString(static_strings[10]);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
+    reg_34 = runtime.Value.initString(static_strings[27]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
     reg_35.release(runtime.runtime_allocator);
     reg_35 = try runtime.php_concat(reg_33, reg_34, runtime.runtime_allocator);
-        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php:16
-    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/test_preg_match_all_simple.php", 16);
-    _ = try runtime.php_echo(reg_35);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    if (!__def_2) runtime.emitWarning("Undefined variable $op");
+    reg_36.release(runtime.runtime_allocator);
+    reg_36 = runtime.val_deref(reg_2).*;
+    _ = reg_36.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    reg_37.release(runtime.runtime_allocator);
+    reg_37 = try runtime.php_concat(reg_35, reg_36, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    reg_38.release(runtime.runtime_allocator);
+    reg_38 = runtime.Value.initString(static_strings[27]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    reg_39.release(runtime.runtime_allocator);
+    reg_39 = try runtime.php_concat(reg_37, reg_38, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    if (!__def_1) runtime.emitWarning("Undefined variable $y");
+    reg_40.release(runtime.runtime_allocator);
+    reg_40 = runtime.val_deref(reg_1).*;
+    _ = reg_40.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    reg_41.release(runtime.runtime_allocator);
+    reg_41 = try runtime.php_concat(reg_39, reg_40, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    reg_42.release(runtime.runtime_allocator);
+    reg_42 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    reg_43.release(runtime.runtime_allocator);
+    reg_43 = try runtime.php_concat(reg_41, reg_42, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:26
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 26);
+    _ = try runtime.php_echo(reg_43);
     if (runtime.hasException()) {
         @branchHint(.unlikely);
         // Cleanup on exception
         reg_33.release(runtime.runtime_allocator);
         reg_33 = runtime.Value.initNull();
-        reg_4.release(runtime.runtime_allocator);
-        reg_4 = runtime.Value.initNull();
-        reg_10.release(runtime.runtime_allocator);
-        reg_10 = runtime.Value.initNull();
-        reg_21.release(runtime.runtime_allocator);
-        reg_21 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
         reg_35.release(runtime.runtime_allocator);
         reg_35 = runtime.Value.initNull();
-        reg_26.release(runtime.runtime_allocator);
-        reg_26 = runtime.Value.initNull();
-        reg_17.release(runtime.runtime_allocator);
-        reg_17 = runtime.Value.initNull();
-        reg_19.release(runtime.runtime_allocator);
-        reg_19 = runtime.Value.initNull();
-        reg_32.release(runtime.runtime_allocator);
-        reg_32 = runtime.Value.initNull();
-        reg_14.release(runtime.runtime_allocator);
-        reg_14 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_67.release(runtime.runtime_allocator);
+        reg_67 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
         return error.RuntimeError;
     }
                 prev_block = current_block;
-                current_block = 4;
+                current_block = 5;
             },
-            4 => { // if_merge_3
+            5 => { // if_merge_1
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:27
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 27);
+    if (!__def_2) runtime.emitWarning("Undefined variable $op");
+    reg_44.release(runtime.runtime_allocator);
+    reg_44 = runtime.val_deref(reg_2).*;
+    _ = reg_44.retain();
+                prev_block = current_block;
+                current_block = 7;
+            },
+            6 => { // match_merge_2
+    switch (prev_block) {
+        12 => {
+            reg_72 = reg_59;
+        },
+        8 => {
+            reg_72 = reg_49;
+        },
+        10 => {
+            reg_72 = reg_54;
+        },
+        15 => {
+            reg_72 = reg_71;
+        },
+        14 => {
+            reg_72 = reg_70;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_72 = reg_49;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:32
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 32);
+    // PHI: reg_72 (handled in terminator)
                 // Cleanup (except return value)
-                reg_8.*.release(runtime.runtime_allocator);
+                reg_1.*.release(runtime.runtime_allocator);
+                reg_0.*.release(runtime.runtime_allocator);
+                reg_2.*.release(runtime.runtime_allocator);
+                reg_3.*.release(runtime.runtime_allocator);
+                return reg_72;
+            },
+            7 => { // match_check_3
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:28
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 28);
+    reg_45.release(runtime.runtime_allocator);
+    reg_45 = runtime.Value.initString(static_strings[32]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:28
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 28);
+    reg_46 = try runtime.php_identical(reg_44, reg_45);
+                if (reg_46.toBool()) {
+                    prev_block = current_block;
+                    current_block = 8;
+                } else {
+                    prev_block = current_block;
+                    current_block = 9;
+                }
+            },
+            8 => { // match_arm_4
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:28
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 28);
+    if (!__def_0) runtime.emitWarning("Undefined variable $x");
+    reg_47.release(runtime.runtime_allocator);
+    reg_47 = runtime.val_deref(reg_0).*;
+    _ = reg_47.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:28
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 28);
+    if (!__def_1) runtime.emitWarning("Undefined variable $y");
+    reg_48.release(runtime.runtime_allocator);
+    reg_48 = runtime.val_deref(reg_1).*;
+    _ = reg_48.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:28
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 28);
+    reg_49 = try runtime.php_add(reg_47, reg_48);
+            reg_72 = reg_49;
+                prev_block = current_block;
+                current_block = 6;
+            },
+            9 => { // match_check_5
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:29
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 29);
+    reg_50.release(runtime.runtime_allocator);
+    reg_50 = runtime.Value.initString(static_strings[36]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:29
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 29);
+    reg_51 = try runtime.php_identical(reg_44, reg_50);
+                if (reg_51.toBool()) {
+                    prev_block = current_block;
+                    current_block = 10;
+                } else {
+                    prev_block = current_block;
+                    current_block = 11;
+                }
+            },
+            10 => { // match_arm_6
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:29
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 29);
+    if (!__def_0) runtime.emitWarning("Undefined variable $x");
+    reg_52.release(runtime.runtime_allocator);
+    reg_52 = runtime.val_deref(reg_0).*;
+    _ = reg_52.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:29
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 29);
+    if (!__def_1) runtime.emitWarning("Undefined variable $y");
+    reg_53.release(runtime.runtime_allocator);
+    reg_53 = runtime.val_deref(reg_1).*;
+    _ = reg_53.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:29
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 29);
+    reg_54 = try runtime.php_sub(reg_52, reg_53);
+            reg_72 = reg_54;
+                prev_block = current_block;
+                current_block = 6;
+            },
+            11 => { // match_check_7
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:30
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 30);
+    reg_55.release(runtime.runtime_allocator);
+    reg_55 = runtime.Value.initString(static_strings[37]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:30
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 30);
+    reg_56 = try runtime.php_identical(reg_44, reg_55);
+                if (reg_56.toBool()) {
+                    prev_block = current_block;
+                    current_block = 12;
+                } else {
+                    prev_block = current_block;
+                    current_block = 13;
+                }
+            },
+            12 => { // match_arm_8
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:30
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 30);
+    if (!__def_0) runtime.emitWarning("Undefined variable $x");
+    reg_57.release(runtime.runtime_allocator);
+    reg_57 = runtime.val_deref(reg_0).*;
+    _ = reg_57.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:30
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 30);
+    if (!__def_1) runtime.emitWarning("Undefined variable $y");
+    reg_58.release(runtime.runtime_allocator);
+    reg_58 = runtime.val_deref(reg_1).*;
+    _ = reg_58.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:30
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 30);
+    reg_59 = try runtime.php_mul(reg_57, reg_58);
+            reg_72 = reg_59;
+                prev_block = current_block;
+                current_block = 6;
+            },
+            13 => { // match_check_9
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    reg_60.release(runtime.runtime_allocator);
+    reg_60 = runtime.Value.initString(static_strings[38]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    reg_61 = try runtime.php_identical(reg_44, reg_60);
+                if (reg_61.toBool()) {
+                    prev_block = current_block;
+                    current_block = 14;
+                } else {
+                    prev_block = current_block;
+                    current_block = 15;
+                }
+            },
+            14 => { // match_arm_10
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    if (!__def_1) runtime.emitWarning("Undefined variable $y");
+    reg_62.release(runtime.runtime_allocator);
+    reg_62 = runtime.val_deref(reg_1).*;
+    _ = reg_62.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    reg_63 = runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    reg_64 = try runtime.php_ne(reg_62, reg_63);
+                if (reg_64.toBool()) {
+                    prev_block = current_block;
+                    current_block = 16;
+                } else {
+                    prev_block = current_block;
+                    current_block = 17;
+                }
+            },
+            15 => { // match_default_11
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:32
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 32);
+    reg_71 = runtime.Value.initInt(0);
+            reg_72 = reg_71;
+                prev_block = current_block;
+                current_block = 6;
+            },
+            16 => { // ternary_then_12
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    if (!__def_0) runtime.emitWarning("Undefined variable $x");
+    reg_65.release(runtime.runtime_allocator);
+    reg_65 = runtime.val_deref(reg_0).*;
+    _ = reg_65.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    if (!__def_1) runtime.emitWarning("Undefined variable $y");
+    reg_66.release(runtime.runtime_allocator);
+    reg_66 = runtime.val_deref(reg_1).*;
+    _ = reg_66.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    reg_67 = try runtime.php_intdiv(reg_65, reg_66);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_33.release(runtime.runtime_allocator);
+        reg_33 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_67.release(runtime.runtime_allocator);
+        reg_67 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+            reg_70 = reg_67;
+                prev_block = current_block;
+                current_block = 18;
+            },
+            17 => { // ternary_else_13
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    reg_68 = runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    reg_69 = reg_68;
+            reg_70 = reg_69;
+                prev_block = current_block;
+                current_block = 18;
+            },
+            18 => { // ternary_merge_14
+    switch (prev_block) {
+        17 => {
+            reg_70 = reg_69;
+        },
+        16 => {
+            reg_70 = reg_67;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_70 = reg_67;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:31
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 31);
+    // PHI: reg_70 (handled in terminator)
+                prev_block = current_block;
+                current_block = 6;
+            },
+            else => unreachable,
+        }
+    }
+}
+
+// MARKER: generateFunction called
+pub fn @"sum"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    _ = &ctx;
+    _ = allocator; // 标记为故意未使用
+    const __prev_call_args = runtime.setCurrentCallArgs(args);
+    defer runtime.restoreCurrentCallArgs(__prev_call_args);
+    runtime.profiler.enterGlobal("sum");
+    defer runtime.profiler.exitGlobal("sum");
+    // Register declarations
+    var reg_20: runtime.Value = runtime.Value.initNull();
+    _ = &reg_20;
+    var reg_12: runtime.Value = runtime.Value.initNull();
+    _ = &reg_12;
+    var reg_21: runtime.Value = runtime.Value.initNull();
+    _ = &reg_21;
+    var reg_35: runtime.Value = runtime.Value.initNull();
+    _ = &reg_35;
+    var reg_32: runtime.Value = runtime.Value.initNull();
+    _ = &reg_32;
+    var reg_9: runtime.Value = runtime.Value.initNull();
+    _ = &reg_9;
+    var reg_19: runtime.Value = runtime.Value.initNull();
+    _ = &reg_19;
+    var reg_2_storage: runtime.Value = runtime.Value.initNull();
+    var reg_2: *runtime.Value = &reg_2_storage;
+    _ = &reg_2;
+    var __def_2: bool = false;
+    _ = &__def_2;
+    var reg_3_storage: runtime.Value = runtime.Value.initNull();
+    var reg_3: *runtime.Value = &reg_3_storage;
+    _ = &reg_3;
+    var __def_3: bool = false;
+    _ = &__def_3;
+    var reg_27: runtime.Value = runtime.Value.initNull();
+    _ = &reg_27;
+    var reg_1_storage: runtime.Value = runtime.Value.initNull();
+    var reg_1: *runtime.Value = &reg_1_storage;
+    _ = &reg_1;
+    var __def_1: bool = false;
+    _ = &__def_1;
+    var reg_22: runtime.Value = runtime.Value.initNull();
+    _ = &reg_22;
+    var reg_25: runtime.Value = runtime.Value.initNull();
+    _ = &reg_25;
+    var reg_15: runtime.Value = runtime.Value.initNull();
+    _ = &reg_15;
+    var reg_13: runtime.Value = runtime.Value.initNull();
+    _ = &reg_13;
+    var reg_11: runtime.Value = runtime.Value.initNull();
+    _ = &reg_11;
+    var reg_37: runtime.Value = runtime.Value.initNull();
+    _ = &reg_37;
+    var reg_7: runtime.Value = runtime.Value.initNull();
+    _ = &reg_7;
+    var reg_8: runtime.Value = runtime.Value.initNull();
+    _ = &reg_8;
+    var reg_10: runtime.Value = runtime.Value.initNull();
+    _ = &reg_10;
+    var reg_34: runtime.Value = runtime.Value.initNull();
+    _ = &reg_34;
+    var reg_26: runtime.Value = runtime.Value.initNull();
+    _ = &reg_26;
+    var reg_17: runtime.Value = runtime.Value.initNull();
+    _ = &reg_17;
+    var reg_14: runtime.Value = runtime.Value.initNull();
+    _ = &reg_14;
+    var reg_30: runtime.Value = runtime.Value.initNull();
+    _ = &reg_30;
+    var reg_31: runtime.Value = runtime.Value.initNull();
+    _ = &reg_31;
+    var reg_23: runtime.Value = runtime.Value.initNull();
+    _ = &reg_23;
+    var reg_0_storage: runtime.Value = runtime.Value.initNull();
+    var reg_0: *runtime.Value = &reg_0_storage;
+    _ = &reg_0;
+    var __def_0: bool = false;
+    _ = &__def_0;
+    var reg_4_storage: runtime.Value = runtime.Value.initNull();
+    var reg_4: *runtime.Value = &reg_4_storage;
+    _ = &reg_4;
+    var __def_4: bool = false;
+    _ = &__def_4;
+    var reg_6: runtime.Value = runtime.Value.initNull();
+    _ = &reg_6;
+    var reg_18: runtime.Value = runtime.Value.initNull();
+    _ = &reg_18;
+    var reg_33: runtime.Value = runtime.Value.initNull();
+    _ = &reg_33;
+    var reg_29: runtime.Value = runtime.Value.initNull();
+    _ = &reg_29;
+    var reg_5: runtime.Value = runtime.Value.initNull();
+    _ = &reg_5;
+    var reg_16: runtime.Value = runtime.Value.initNull();
+    _ = &reg_16;
+    var reg_24: runtime.Value = runtime.Value.initNull();
+    _ = &reg_24;
+    var reg_28: runtime.Value = runtime.Value.initNull();
+    _ = &reg_28;
+    var reg_36: runtime.Value = runtime.Value.initNull();
+    _ = &reg_36;
+
+    var null_val = runtime.Value.initNull();
+    _ = &null_val;
+
+    // State machine for complex control flow
+    // Control flow state machine
+    var current_block: u32 = 0;
+    var prev_block: u32 = 0;
+    _ = &current_block;
+    _ = &prev_block;
+    while (true) {
+        switch (current_block) {
+            0 => { // entry
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_5 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_6 = runtime.Value.initBool((args.len > 4) and !args[4].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_7 = runtime.Value.initBool(reg_5.toBool() and reg_6.toBool());
+                if (reg_7.toBool()) {
+                    prev_block = current_block;
+                    current_block = 1;
+                } else {
+                    prev_block = current_block;
+                    current_block = 2;
+                }
+            },
+            1 => { // params_all_present
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_8 = if (args.len > 0 and !args[0].isMissing()) runtime.Value.initInt(args[0].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_9 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_10 = if (args.len > 2 and !args[2].isMissing()) runtime.Value.initInt(args[2].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_11 = if (args.len > 3 and !args[3].isMissing()) runtime.Value.initInt(args[3].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_12 = if (args.len > 4 and !args[4].isMissing()) runtime.Value.initInt(args[4].toInt()) else runtime.Value.initInt(0);
+            reg_24 = reg_8;
+            reg_25 = reg_9;
+            reg_26 = reg_10;
+            reg_27 = reg_11;
+            reg_28 = reg_12;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            2 => { // params_has_missing
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_13 = if (args.len > 0 and !args[0].isMissing()) runtime.Value.initInt(args[0].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_14 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_15 = if (args.len > 2 and !args[2].isMissing()) runtime.Value.initInt(args[2].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_16 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_17 = if (args.len > 3 and !args[3].isMissing()) runtime.Value.initInt(args[3].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_18 = runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_19.release(runtime.runtime_allocator);
+    if (reg_16.toBool()) {
+        reg_19 = reg_17;
+        _ = reg_19.retain();
+    } else {
+        reg_19 = reg_18;
+        _ = reg_19.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_20 = runtime.Value.initBool((args.len > 4) and !args[4].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_21 = if (args.len > 4 and !args[4].isMissing()) runtime.Value.initInt(args[4].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_22 = runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_23.release(runtime.runtime_allocator);
+    if (reg_20.toBool()) {
+        reg_23 = reg_21;
+        _ = reg_23.retain();
+    } else {
+        reg_23 = reg_22;
+        _ = reg_23.retain();
+    }
+            reg_24 = reg_13;
+            reg_25 = reg_14;
+            reg_26 = reg_15;
+            reg_27 = reg_19;
+            reg_28 = reg_23;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            3 => { // params_merge
+    switch (prev_block) {
+        1 => {
+            reg_24 = reg_8;
+        },
+        2 => {
+            reg_24 = reg_13;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_24 = reg_8;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_0.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_0, runtime.Value.initInt(reg_24.toInt()));
+    __def_0 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    // PHI: reg_25 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_1.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_1, runtime.Value.initInt(reg_25.toInt()));
+    __def_1 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    // PHI: reg_26 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_2.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_2, runtime.Value.initInt(reg_26.toInt()));
+    __def_2 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    // PHI: reg_27 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_3.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_3, runtime.Value.initInt(reg_27.toInt()));
+    __def_3 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    // PHI: reg_28 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:71
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    reg_4.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_4, runtime.Value.initInt(reg_28.toInt()));
+    __def_4 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    if (!__def_0) runtime.emitWarning("Undefined variable $a");
+    reg_29.release(runtime.runtime_allocator);
+    reg_29 = runtime.val_deref(reg_0).*;
+    _ = reg_29.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    if (!__def_1) runtime.emitWarning("Undefined variable $b");
+    reg_30.release(runtime.runtime_allocator);
+    reg_30 = runtime.val_deref(reg_1).*;
+    _ = reg_30.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    reg_31 = try runtime.php_add(reg_29, reg_30);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    if (!__def_2) runtime.emitWarning("Undefined variable $c");
+    reg_32.release(runtime.runtime_allocator);
+    reg_32 = runtime.val_deref(reg_2).*;
+    _ = reg_32.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    reg_33 = try runtime.php_add(reg_31, reg_32);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    if (!__def_3) runtime.emitWarning("Undefined variable $d");
+    reg_34.release(runtime.runtime_allocator);
+    reg_34 = runtime.val_deref(reg_3).*;
+    _ = reg_34.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    reg_35 = try runtime.php_add(reg_33, reg_34);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    if (!__def_4) runtime.emitWarning("Undefined variable $e");
+    reg_36.release(runtime.runtime_allocator);
+    reg_36 = runtime.val_deref(reg_4).*;
+    _ = reg_36.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:72
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 72);
+    reg_37 = try runtime.php_add(reg_35, reg_36);
+                // Cleanup (except return value)
+                reg_1.*.release(runtime.runtime_allocator);
+                reg_0.*.release(runtime.runtime_allocator);
+                reg_4.*.release(runtime.runtime_allocator);
+                reg_2.*.release(runtime.runtime_allocator);
+                reg_3.*.release(runtime.runtime_allocator);
+                return reg_37;
+            },
+            else => unreachable,
+        }
+    }
+}
+
+// MARKER: generateFunction called
+pub fn @"getNumbers"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    _ = &ctx;
+    _ = allocator; // 标记为故意未使用
+    const __prev_call_args = runtime.setCurrentCallArgs(args);
+    defer runtime.restoreCurrentCallArgs(__prev_call_args);
+    runtime.profiler.enterGlobal("getNumbers");
+    defer runtime.profiler.exitGlobal("getNumbers");
+    // Register declarations
+    var reg_1: runtime.Value = runtime.Value.initNull();
+    _ = &reg_1;
+    var reg_0: runtime.Value = runtime.Value.initNull();
+    _ = &reg_0;
+    var reg_2: runtime.Value = runtime.Value.initNull();
+    _ = &reg_2;
+    var reg_3: runtime.Value = runtime.Value.initNull();
+    _ = &reg_3;
+
+    var null_val = runtime.Value.initNull();
+    _ = &null_val;
+
+    // Instructions
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:96
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 96);
+    reg_0.release(runtime.runtime_allocator);
+    reg_0 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:96
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 96);
+    reg_1 = runtime.Value.initInt(100);
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:96
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 96);
+    try reg_0.asArray().push(runtime.runtime_allocator, reg_1);
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:96
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 96);
+    reg_2 = runtime.Value.initInt(200);
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:96
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 96);
+    try reg_0.asArray().push(runtime.runtime_allocator, reg_2);
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:96
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 96);
+    reg_3 = runtime.Value.initInt(300);
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:96
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 96);
+    try reg_0.asArray().push(runtime.runtime_allocator, reg_3);
+    return reg_0;
+}
+
+// MARKER: generateFunction called
+pub fn @"Config::__construct"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    _ = &ctx;
+    _ = allocator; // 标记为故意未使用
+    const __prev_call_args = runtime.setCurrentCallArgs(args);
+    defer runtime.restoreCurrentCallArgs(__prev_call_args);
+    if (runtime.findClass("Config")) |__class_meta| {
+        const __prev_scope = runtime.getCurrentScopeClass();
+        runtime.setCurrentScopeClass(__class_meta);
+        defer runtime.setCurrentScopeClass(__prev_scope);
+        if (runtime.getCurrentCalledClass() == null) {
+            runtime.setCurrentCalledClass(__class_meta);
+        }
+    }
+    runtime.profiler.enterGlobal("Config::__construct");
+    defer runtime.profiler.exitGlobal("Config::__construct");
+    // Register declarations
+    var reg_39: runtime.Value = runtime.Value.initNull();
+    _ = &reg_39;
+    var reg_20: runtime.Value = runtime.Value.initNull();
+    _ = &reg_20;
+    var reg_12: runtime.Value = runtime.Value.initNull();
+    _ = &reg_12;
+    var reg_43: runtime.Value = runtime.Value.initNull();
+    _ = &reg_43;
+    var reg_21: runtime.Value = runtime.Value.initNull();
+    _ = &reg_21;
+    var reg_35: runtime.Value = runtime.Value.initNull();
+    _ = &reg_35;
+    var reg_32: runtime.Value = runtime.Value.initNull();
+    _ = &reg_32;
+    var reg_9: runtime.Value = runtime.Value.initNull();
+    _ = &reg_9;
+    var reg_19: runtime.Value = runtime.Value.initNull();
+    _ = &reg_19;
+    var reg_2_storage: runtime.Value = runtime.Value.initNull();
+    var reg_2: *runtime.Value = &reg_2_storage;
+    _ = &reg_2;
+    var __def_2: bool = false;
+    _ = &__def_2;
+    var reg_3_storage: runtime.Value = runtime.Value.initNull();
+    var reg_3: *runtime.Value = &reg_3_storage;
+    _ = &reg_3;
+    var __def_3: bool = false;
+    _ = &__def_3;
+    var reg_27: runtime.Value = runtime.Value.initNull();
+    _ = &reg_27;
+    var reg_1_storage: runtime.Value = runtime.Value.initNull();
+    var reg_1: *runtime.Value = &reg_1_storage;
+    _ = &reg_1;
+    var __def_1: bool = false;
+    _ = &__def_1;
+    var reg_22: runtime.Value = runtime.Value.initNull();
+    _ = &reg_22;
+    var reg_25: runtime.Value = runtime.Value.initNull();
+    _ = &reg_25;
+    var reg_15: runtime.Value = runtime.Value.initNull();
+    _ = &reg_15;
+    var reg_38: runtime.Value = runtime.Value.initNull();
+    _ = &reg_38;
+    var reg_13: runtime.Value = runtime.Value.initNull();
+    _ = &reg_13;
+    var reg_11: runtime.Value = runtime.Value.initNull();
+    _ = &reg_11;
+    var reg_37: runtime.Value = runtime.Value.initNull();
+    _ = &reg_37;
+    var reg_7: runtime.Value = runtime.Value.initNull();
+    _ = &reg_7;
+    var reg_8: runtime.Value = runtime.Value.initNull();
+    _ = &reg_8;
+    var reg_10: runtime.Value = runtime.Value.initNull();
+    _ = &reg_10;
+    var reg_42: runtime.Value = runtime.Value.initNull();
+    _ = &reg_42;
+    var reg_34: runtime.Value = runtime.Value.initNull();
+    _ = &reg_34;
+    var reg_26: runtime.Value = runtime.Value.initNull();
+    _ = &reg_26;
+    var reg_17: runtime.Value = runtime.Value.initNull();
+    _ = &reg_17;
+    var reg_40: runtime.Value = runtime.Value.initNull();
+    _ = &reg_40;
+    var reg_14: runtime.Value = runtime.Value.initNull();
+    _ = &reg_14;
+    var reg_41: runtime.Value = runtime.Value.initNull();
+    _ = &reg_41;
+    var reg_30: runtime.Value = runtime.Value.initNull();
+    _ = &reg_30;
+    var reg_31: runtime.Value = runtime.Value.initNull();
+    _ = &reg_31;
+    var reg_23: runtime.Value = runtime.Value.initNull();
+    _ = &reg_23;
+    var reg_0: runtime.Value = runtime.Value.initNull();
+    _ = &reg_0;
+    var reg_4_storage: runtime.Value = runtime.Value.initNull();
+    var reg_4: *runtime.Value = &reg_4_storage;
+    _ = &reg_4;
+    var __def_4: bool = false;
+    _ = &__def_4;
+    var reg_6: runtime.Value = runtime.Value.initNull();
+    _ = &reg_6;
+    var reg_18: runtime.Value = runtime.Value.initNull();
+    _ = &reg_18;
+    var reg_33: runtime.Value = runtime.Value.initNull();
+    _ = &reg_33;
+    var reg_29: runtime.Value = runtime.Value.initNull();
+    _ = &reg_29;
+    var reg_5_storage: runtime.Value = runtime.Value.initNull();
+    var reg_5: *runtime.Value = &reg_5_storage;
+    _ = &reg_5;
+    var __def_5: bool = false;
+    _ = &__def_5;
+    var reg_16: runtime.Value = runtime.Value.initNull();
+    _ = &reg_16;
+    var reg_24: runtime.Value = runtime.Value.initNull();
+    _ = &reg_24;
+    var reg_28: runtime.Value = runtime.Value.initNull();
+    _ = &reg_28;
+    var reg_36: runtime.Value = runtime.Value.initNull();
+    _ = &reg_36;
+    var reg_44: runtime.Value = runtime.Value.initNull();
+    _ = &reg_44;
+
+    var null_val = runtime.Value.initNull();
+    _ = &null_val;
+
+    // State machine for complex control flow
+    // Control flow state machine
+    var current_block: u32 = 0;
+    var prev_block: u32 = 0;
+    _ = &current_block;
+    _ = &prev_block;
+    while (true) {
+        switch (current_block) {
+            0 => { // entry
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_0 = ctx;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_1.*.release(runtime.runtime_allocator);
+    _ = reg_0.retain();
+    runtime.val_assign(reg_1, reg_0);
+    __def_1 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_6 = runtime.Value.initBool((args.len > 0) and !args[0].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_7 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_8 = runtime.Value.initBool(reg_6.toBool() and reg_7.toBool());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_9 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_10 = runtime.Value.initBool(reg_8.toBool() and reg_9.toBool());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_11 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_12 = runtime.Value.initBool(reg_10.toBool() and reg_11.toBool());
+                if (reg_12.toBool()) {
+                    prev_block = current_block;
+                    current_block = 1;
+                } else {
+                    prev_block = current_block;
+                    current_block = 2;
+                }
+            },
+            1 => { // params_all_present
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_13 = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_14 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_15 = if (args.len > 2 and !args[2].isMissing()) runtime.Value.initBool(args[2].toBool()) else runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_16 = if (args.len > 3 and !args[3].isMissing()) args[3] else runtime.Value.initNull();
+            reg_33 = reg_13;
+            reg_34 = reg_14;
+            reg_35 = reg_15;
+            reg_36 = reg_16;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            2 => { // params_has_missing
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_17 = runtime.Value.initBool((args.len > 0) and !args[0].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:103
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 103);
+    reg_18 = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:105
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 105);
+    reg_19.release(runtime.runtime_allocator);
+    reg_19 = runtime.Value.initString(static_strings[109]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:105
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 105);
+    reg_20.release(runtime.runtime_allocator);
+    if (reg_17.toBool()) {
+        reg_20 = reg_18;
+        _ = reg_20.retain();
+    } else {
+        reg_20 = reg_19;
+        _ = reg_20.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:105
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 105);
+    reg_21 = runtime.Value.initBool((args.len > 1) and !args[1].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:105
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 105);
+    reg_22 = if (args.len > 1 and !args[1].isMissing()) runtime.Value.initInt(args[1].toInt()) else runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:106
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 106);
+    reg_23 = runtime.Value.initInt(8080);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:106
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 106);
+    reg_24.release(runtime.runtime_allocator);
+    if (reg_21.toBool()) {
+        reg_24 = reg_22;
+        _ = reg_24.retain();
+    } else {
+        reg_24 = reg_23;
+        _ = reg_24.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:106
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 106);
+    reg_25 = runtime.Value.initBool((args.len > 2) and !args[2].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:106
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 106);
+    reg_26 = if (args.len > 2 and !args[2].isMissing()) runtime.Value.initBool(args[2].toBool()) else runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:107
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 107);
+    reg_27 = runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:107
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 107);
+    reg_28.release(runtime.runtime_allocator);
+    if (reg_25.toBool()) {
+        reg_28 = reg_26;
+        _ = reg_28.retain();
+    } else {
+        reg_28 = reg_27;
+        _ = reg_28.retain();
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:107
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 107);
+    reg_29 = runtime.Value.initBool((args.len > 3) and !args[3].isMissing());
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:107
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 107);
+    reg_30 = if (args.len > 3 and !args[3].isMissing()) args[3] else runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    reg_31 = runtime.Value.initNull();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (reg_29.toBool()) {
+        reg_32 = reg_30;
+        _ = reg_32.retain();
+    } else {
+        reg_32 = reg_31;
+        _ = reg_32.retain();
+    }
+            reg_33 = reg_20;
+            reg_34 = reg_24;
+            reg_35 = reg_28;
+            reg_36 = reg_32;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            3 => { // params_merge
+    switch (prev_block) {
+        1 => {
+            reg_33 = reg_13;
+        },
+        2 => {
+            reg_33 = reg_20;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_33 = reg_13;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    reg_2.*.release(runtime.runtime_allocator);
+    _ = reg_33.retain();
+    runtime.val_assign(reg_2, reg_33);
+    __def_2 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    // PHI: reg_34 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    reg_3.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_3, runtime.Value.initInt(reg_34.toInt()));
+    __def_3 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    // PHI: reg_35 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    reg_4.*.release(runtime.runtime_allocator);
+    runtime.val_assign(reg_4, runtime.Value.initBool(reg_35.toBool()));
+    __def_4 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    // PHI: reg_36 (handled in terminator)
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    reg_5.*.release(runtime.runtime_allocator);
+    _ = reg_36.retain();
+    runtime.val_assign(reg_5, reg_36);
+    __def_5 = true;
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_2) runtime.emitWarning("Undefined variable $host");
+    reg_37.release(runtime.runtime_allocator);
+    reg_37 = runtime.val_deref(reg_2).*;
+    _ = reg_37.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_1) runtime.emitWarning("Undefined variable this");
+    reg_38.release(runtime.runtime_allocator);
+    reg_38 = runtime.val_deref(reg_1).*;
+    _ = reg_38.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    _ = try runtime.php_object_set(reg_38, "host", reg_37);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_3) runtime.emitWarning("Undefined variable $port");
+    reg_39.release(runtime.runtime_allocator);
+    reg_39 = runtime.val_deref(reg_3).*;
+    _ = reg_39.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_1) runtime.emitWarning("Undefined variable this");
+    reg_40.release(runtime.runtime_allocator);
+    reg_40 = runtime.val_deref(reg_1).*;
+    _ = reg_40.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    _ = try runtime.php_object_set(reg_40, "port", reg_39);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_4) runtime.emitWarning("Undefined variable $ssl");
+    reg_41.release(runtime.runtime_allocator);
+    reg_41 = runtime.val_deref(reg_4).*;
+    _ = reg_41.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_1) runtime.emitWarning("Undefined variable this");
+    reg_42.release(runtime.runtime_allocator);
+    reg_42 = runtime.val_deref(reg_1).*;
+    _ = reg_42.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    _ = try runtime.php_object_set(reg_42, "ssl", reg_41);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_5) runtime.emitWarning("Undefined variable $username");
+    reg_43.release(runtime.runtime_allocator);
+    reg_43 = runtime.val_deref(reg_5).*;
+    _ = reg_43.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    if (!__def_1) runtime.emitWarning("Undefined variable this");
+    reg_44.release(runtime.runtime_allocator);
+    reg_44 = runtime.val_deref(reg_1).*;
+    _ = reg_44.retain();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:108
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 108);
+    _ = try runtime.php_object_set(reg_44, "username", reg_43);
+                // Cleanup (except return value)
+                reg_1.*.release(runtime.runtime_allocator);
+                reg_5.*.release(runtime.runtime_allocator);
+                reg_4.*.release(runtime.runtime_allocator);
+                reg_2.*.release(runtime.runtime_allocator);
+                reg_3.*.release(runtime.runtime_allocator);
                 return runtime.Value.initNull();
             },
             else => unreachable,
         }
     }
+}
+
+// MARKER: generateFunction called
+pub fn @"__main__"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    _ = &ctx;
+    _ = allocator; // 标记为故意未使用
+    const __prev_call_args = runtime.setCurrentCallArgs(args);
+    defer runtime.restoreCurrentCallArgs(__prev_call_args);
+    runtime.profiler.enterGlobal("__main__");
+    defer runtime.profiler.exitGlobal("__main__");
+    // Register declarations
+    var reg_161: runtime.Value = runtime.Value.initNull();
+    _ = &reg_161;
+    var reg_189: runtime.Value = runtime.Value.initNull();
+    _ = &reg_189;
+    var reg_74: runtime.Value = runtime.Value.initNull();
+    _ = &reg_74;
+    var reg_202: runtime.Value = runtime.Value.initNull();
+    _ = &reg_202;
+    var reg_92: runtime.Value = runtime.Value.initNull();
+    _ = &reg_92;
+    var reg_19: runtime.Value = runtime.Value.initNull();
+    _ = &reg_19;
+    var reg_145: runtime.Value = runtime.Value.initNull();
+    _ = &reg_145;
+    var reg_178: runtime.Value = runtime.Value.initNull();
+    _ = &reg_178;
+    var reg_196: runtime.Value = runtime.Value.initNull();
+    _ = &reg_196;
+    var reg_55: runtime.Value = runtime.Value.initNull();
+    _ = &reg_55;
+    var reg_59: runtime.Value = runtime.Value.initNull();
+    _ = &reg_59;
+    var reg_133: runtime.Value = runtime.Value.initNull();
+    _ = &reg_133;
+    var reg_15: runtime.Value = runtime.Value.initNull();
+    _ = &reg_15;
+    var reg_144: runtime.Value = runtime.Value.initNull();
+    _ = &reg_144;
+    var reg_11: runtime.Value = runtime.Value.initNull();
+    _ = &reg_11;
+    var reg_37: runtime.Value = runtime.Value.initNull();
+    _ = &reg_37;
+    var reg_49: runtime.Value = runtime.Value.initNull();
+    _ = &reg_49;
+    var reg_113: runtime.Value = runtime.Value.initNull();
+    _ = &reg_113;
+    var reg_159: runtime.Value = runtime.Value.initNull();
+    _ = &reg_159;
+    var reg_219: runtime.Value = runtime.Value.initNull();
+    _ = &reg_219;
+    var reg_183: runtime.Value = runtime.Value.initNull();
+    _ = &reg_183;
+    var reg_118: runtime.Value = runtime.Value.initNull();
+    _ = &reg_118;
+    var reg_70: runtime.Value = runtime.Value.initNull();
+    _ = &reg_70;
+    var reg_85: runtime.Value = runtime.Value.initNull();
+    _ = &reg_85;
+    var reg_199: runtime.Value = runtime.Value.initNull();
+    _ = &reg_199;
+    var reg_6: runtime.Value = runtime.Value.initNull();
+    _ = &reg_6;
+    var reg_29: runtime.Value = runtime.Value.initNull();
+    _ = &reg_29;
+    var reg_79: runtime.Value = runtime.Value.initNull();
+    _ = &reg_79;
+    var reg_180: runtime.Value = runtime.Value.initNull();
+    _ = &reg_180;
+    var reg_45: runtime.Value = runtime.Value.initNull();
+    _ = &reg_45;
+    var reg_75: runtime.Value = runtime.Value.initNull();
+    _ = &reg_75;
+    var reg_212: runtime.Value = runtime.Value.initNull();
+    _ = &reg_212;
+    var reg_39: runtime.Value = runtime.Value.initNull();
+    _ = &reg_39;
+    var reg_99: runtime.Value = runtime.Value.initNull();
+    _ = &reg_99;
+    var reg_169: runtime.Value = runtime.Value.initNull();
+    _ = &reg_169;
+    var reg_211: runtime.Value = runtime.Value.initNull();
+    _ = &reg_211;
+    var reg_111: runtime.Value = runtime.Value.initNull();
+    _ = &reg_111;
+    var reg_205: runtime.Value = runtime.Value.initNull();
+    _ = &reg_205;
+    var reg_38: runtime.Value = runtime.Value.initNull();
+    _ = &reg_38;
+    var reg_13: runtime.Value = runtime.Value.initNull();
+    _ = &reg_13;
+    var reg_163: runtime.Value = runtime.Value.initNull();
+    _ = &reg_163;
+    var reg_81: runtime.Value = runtime.Value.initNull();
+    _ = &reg_81;
+    var reg_129: runtime.Value = runtime.Value.initNull();
+    _ = &reg_129;
+    var reg_139: runtime.Value = runtime.Value.initNull();
+    _ = &reg_139;
+    var reg_91: runtime.Value = runtime.Value.initNull();
+    _ = &reg_91;
+    var reg_120: runtime.Value = runtime.Value.initNull();
+    _ = &reg_120;
+    var reg_124: runtime.Value = runtime.Value.initNull();
+    _ = &reg_124;
+    var reg_17: runtime.Value = runtime.Value.initNull();
+    _ = &reg_17;
+    var reg_93: runtime.Value = runtime.Value.initNull();
+    _ = &reg_93;
+    var reg_158: runtime.Value = runtime.Value.initNull();
+    _ = &reg_158;
+    var reg_41: runtime.Value = runtime.Value.initNull();
+    _ = &reg_41;
+    var reg_147: runtime.Value = runtime.Value.initNull();
+    _ = &reg_147;
+    var reg_223: runtime.Value = runtime.Value.initNull();
+    _ = &reg_223;
+    var reg_31: runtime.Value = runtime.Value.initNull();
+    _ = &reg_31;
+    var reg_94: runtime.Value = runtime.Value.initNull();
+    _ = &reg_94;
+    var reg_52: runtime.Value = runtime.Value.initNull();
+    _ = &reg_52;
+    var reg_221: runtime.Value = runtime.Value.initNull();
+    _ = &reg_221;
+    var reg_114: runtime.Value = runtime.Value.initNull();
+    _ = &reg_114;
+    var reg_191: runtime.Value = runtime.Value.initNull();
+    _ = &reg_191;
+    var reg_106: runtime.Value = runtime.Value.initNull();
+    _ = &reg_106;
+    var reg_152: runtime.Value = runtime.Value.initNull();
+    _ = &reg_152;
+    var reg_12: runtime.Value = runtime.Value.initNull();
+    _ = &reg_12;
+    var reg_192: runtime.Value = runtime.Value.initNull();
+    _ = &reg_192;
+    var reg_130: runtime.Value = runtime.Value.initNull();
+    _ = &reg_130;
+    var reg_173: runtime.Value = runtime.Value.initNull();
+    _ = &reg_173;
+    var reg_2: runtime.Value = runtime.Value.initNull();
+    _ = &reg_2;
+    var reg_108: runtime.Value = runtime.Value.initNull();
+    _ = &reg_108;
+    var reg_157: runtime.Value = runtime.Value.initNull();
+    _ = &reg_157;
+    var reg_103: runtime.Value = runtime.Value.initNull();
+    _ = &reg_103;
+    var reg_217: runtime.Value = runtime.Value.initNull();
+    _ = &reg_217;
+    var reg_117: runtime.Value = runtime.Value.initNull();
+    _ = &reg_117;
+    var reg_122: runtime.Value = runtime.Value.initNull();
+    _ = &reg_122;
+    var reg_168: runtime.Value = runtime.Value.initNull();
+    _ = &reg_168;
+    var reg_83: runtime.Value = runtime.Value.initNull();
+    _ = &reg_83;
+    var reg_176: runtime.Value = runtime.Value.initNull();
+    _ = &reg_176;
+    var reg_10: runtime.Value = runtime.Value.initNull();
+    _ = &reg_10;
+    var reg_56: runtime.Value = runtime.Value.initNull();
+    _ = &reg_56;
+    var reg_131: runtime.Value = runtime.Value.initNull();
+    _ = &reg_131;
+    var reg_57: runtime.Value = runtime.Value.initNull();
+    _ = &reg_57;
+    var reg_88: runtime.Value = runtime.Value.initNull();
+    _ = &reg_88;
+    var reg_102: runtime.Value = runtime.Value.initNull();
+    _ = &reg_102;
+    var reg_54: runtime.Value = runtime.Value.initNull();
+    _ = &reg_54;
+    var reg_14: runtime.Value = runtime.Value.initNull();
+    _ = &reg_14;
+    var reg_82: runtime.Value = runtime.Value.initNull();
+    _ = &reg_82;
+    var reg_128: runtime.Value = runtime.Value.initNull();
+    _ = &reg_128;
+    var reg_185: runtime.Value = runtime.Value.initNull();
+    _ = &reg_185;
+    var reg_105: runtime.Value = runtime.Value.initNull();
+    _ = &reg_105;
+    var reg_218: runtime.Value = runtime.Value.initNull();
+    _ = &reg_218;
+    var reg_24: runtime.Value = runtime.Value.initNull();
+    _ = &reg_24;
+    var reg_36: runtime.Value = runtime.Value.initNull();
+    _ = &reg_36;
+    var reg_97: runtime.Value = runtime.Value.initNull();
+    _ = &reg_97;
+    var reg_80: runtime.Value = runtime.Value.initNull();
+    _ = &reg_80;
+    var reg_21: runtime.Value = runtime.Value.initNull();
+    _ = &reg_21;
+    var reg_134: runtime.Value = runtime.Value.initNull();
+    _ = &reg_134;
+    var reg_193: runtime.Value = runtime.Value.initNull();
+    _ = &reg_193;
+    var reg_151: runtime.Value = runtime.Value.initNull();
+    _ = &reg_151;
+    var reg_187: runtime.Value = runtime.Value.initNull();
+    _ = &reg_187;
+    var reg_188: runtime.Value = runtime.Value.initNull();
+    _ = &reg_188;
+    var reg_209: runtime.Value = runtime.Value.initNull();
+    _ = &reg_209;
+    var reg_69: runtime.Value = runtime.Value.initNull();
+    _ = &reg_69;
+    var reg_87: runtime.Value = runtime.Value.initNull();
+    _ = &reg_87;
+    var reg_96: runtime.Value = runtime.Value.initNull();
+    _ = &reg_96;
+    var reg_135: runtime.Value = runtime.Value.initNull();
+    _ = &reg_135;
+    var reg_195: runtime.Value = runtime.Value.initNull();
+    _ = &reg_195;
+    var reg_177: runtime.Value = runtime.Value.initNull();
+    _ = &reg_177;
+    var reg_61: runtime.Value = runtime.Value.initNull();
+    _ = &reg_61;
+    var reg_213: runtime.Value = runtime.Value.initNull();
+    _ = &reg_213;
+    var reg_179: runtime.Value = runtime.Value.initNull();
+    _ = &reg_179;
+    var reg_220: runtime.Value = runtime.Value.initNull();
+    _ = &reg_220;
+    var reg_72: runtime.Value = runtime.Value.initNull();
+    _ = &reg_72;
+    var reg_215: runtime.Value = runtime.Value.initNull();
+    _ = &reg_215;
+    var reg_181: runtime.Value = runtime.Value.initNull();
+    _ = &reg_181;
+    var reg_48: runtime.Value = runtime.Value.initNull();
+    _ = &reg_48;
+    var reg_171: runtime.Value = runtime.Value.initNull();
+    _ = &reg_171;
+    var reg_154: runtime.Value = runtime.Value.initNull();
+    _ = &reg_154;
+    var reg_84: runtime.Value = runtime.Value.initNull();
+    _ = &reg_84;
+    var reg_43: runtime.Value = runtime.Value.initNull();
+    _ = &reg_43;
+    var reg_35: runtime.Value = runtime.Value.initNull();
+    _ = &reg_35;
+    var reg_207: runtime.Value = runtime.Value.initNull();
+    _ = &reg_207;
+    var reg_142: runtime.Value = runtime.Value.initNull();
+    _ = &reg_142;
+    var reg_121: runtime.Value = runtime.Value.initNull();
+    _ = &reg_121;
+    var reg_197: runtime.Value = runtime.Value.initNull();
+    _ = &reg_197;
+    var reg_22: runtime.Value = runtime.Value.initNull();
+    _ = &reg_22;
+    var reg_132: runtime.Value = runtime.Value.initNull();
+    _ = &reg_132;
+    var reg_89: runtime.Value = runtime.Value.initNull();
+    _ = &reg_89;
+    var reg_141: runtime.Value = runtime.Value.initNull();
+    _ = &reg_141;
+    var reg_73: runtime.Value = runtime.Value.initNull();
+    _ = &reg_73;
+    var reg_204: runtime.Value = runtime.Value.initNull();
+    _ = &reg_204;
+    var reg_42: runtime.Value = runtime.Value.initNull();
+    _ = &reg_42;
+    var reg_90: runtime.Value = runtime.Value.initNull();
+    _ = &reg_90;
+    var reg_34: runtime.Value = runtime.Value.initNull();
+    _ = &reg_34;
+    var reg_115: runtime.Value = runtime.Value.initNull();
+    _ = &reg_115;
+    var reg_40: runtime.Value = runtime.Value.initNull();
+    _ = &reg_40;
+    var reg_123: runtime.Value = runtime.Value.initNull();
+    _ = &reg_123;
+    var reg_51: runtime.Value = runtime.Value.initNull();
+    _ = &reg_51;
+    var reg_107: runtime.Value = runtime.Value.initNull();
+    _ = &reg_107;
+    var reg_0_storage: runtime.Value = runtime.Value.initNull();
+    var reg_0: *runtime.Value = &reg_0_storage;
+    _ = &reg_0;
+    var reg_62: runtime.Value = runtime.Value.initNull();
+    _ = &reg_62;
+    var reg_77: runtime.Value = runtime.Value.initNull();
+    _ = &reg_77;
+    var reg_175: runtime.Value = runtime.Value.initNull();
+    _ = &reg_175;
+    var reg_5: runtime.Value = runtime.Value.initNull();
+    _ = &reg_5;
+    var reg_46: runtime.Value = runtime.Value.initNull();
+    _ = &reg_46;
+    var reg_174: runtime.Value = runtime.Value.initNull();
+    _ = &reg_174;
+    var reg_167: runtime.Value = runtime.Value.initNull();
+    _ = &reg_167;
+    var reg_160: runtime.Value = runtime.Value.initNull();
+    _ = &reg_160;
+    var reg_109: runtime.Value = runtime.Value.initNull();
+    _ = &reg_109;
+    var reg_200: runtime.Value = runtime.Value.initNull();
+    _ = &reg_200;
+    var reg_216: runtime.Value = runtime.Value.initNull();
+    _ = &reg_216;
+    var reg_1_storage: runtime.Value = runtime.Value.initNull();
+    var reg_1: *runtime.Value = &reg_1_storage;
+    _ = &reg_1;
+    var reg_208: runtime.Value = runtime.Value.initNull();
+    _ = &reg_208;
+    var reg_58: runtime.Value = runtime.Value.initNull();
+    _ = &reg_58;
+    var reg_66: runtime.Value = runtime.Value.initNull();
+    _ = &reg_66;
+    var reg_143: runtime.Value = runtime.Value.initNull();
+    _ = &reg_143;
+    var reg_182: runtime.Value = runtime.Value.initNull();
+    _ = &reg_182;
+    var reg_86: runtime.Value = runtime.Value.initNull();
+    _ = &reg_86;
+    var reg_116: runtime.Value = runtime.Value.initNull();
+    _ = &reg_116;
+    var reg_194: runtime.Value = runtime.Value.initNull();
+    _ = &reg_194;
+    var reg_150: runtime.Value = runtime.Value.initNull();
+    _ = &reg_150;
+    var reg_206: runtime.Value = runtime.Value.initNull();
+    _ = &reg_206;
+    var reg_7: runtime.Value = runtime.Value.initNull();
+    _ = &reg_7;
+    var reg_162: runtime.Value = runtime.Value.initNull();
+    _ = &reg_162;
+    var reg_76: runtime.Value = runtime.Value.initNull();
+    _ = &reg_76;
+    var reg_149: runtime.Value = runtime.Value.initNull();
+    _ = &reg_149;
+    var reg_136: runtime.Value = runtime.Value.initNull();
+    _ = &reg_136;
+    var reg_104: runtime.Value = runtime.Value.initNull();
+    _ = &reg_104;
+    var reg_23: runtime.Value = runtime.Value.initNull();
+    _ = &reg_23;
+    var reg_63: runtime.Value = runtime.Value.initNull();
+    _ = &reg_63;
+    var reg_4: runtime.Value = runtime.Value.initNull();
+    _ = &reg_4;
+    var reg_119: runtime.Value = runtime.Value.initNull();
+    _ = &reg_119;
+    var reg_170: runtime.Value = runtime.Value.initNull();
+    _ = &reg_170;
+    var reg_110: runtime.Value = runtime.Value.initNull();
+    _ = &reg_110;
+    var reg_112: runtime.Value = runtime.Value.initNull();
+    _ = &reg_112;
+    var reg_140: runtime.Value = runtime.Value.initNull();
+    _ = &reg_140;
+    var reg_137: runtime.Value = runtime.Value.initNull();
+    _ = &reg_137;
+    var reg_20: runtime.Value = runtime.Value.initNull();
+    _ = &reg_20;
+    var reg_201: runtime.Value = runtime.Value.initNull();
+    _ = &reg_201;
+    var reg_101: runtime.Value = runtime.Value.initNull();
+    _ = &reg_101;
+    var reg_32: runtime.Value = runtime.Value.initNull();
+    _ = &reg_32;
+    var reg_47: runtime.Value = runtime.Value.initNull();
+    _ = &reg_47;
+    var reg_3: runtime.Value = runtime.Value.initNull();
+    _ = &reg_3;
+    var reg_165: runtime.Value = runtime.Value.initNull();
+    _ = &reg_165;
+    var reg_210: runtime.Value = runtime.Value.initNull();
+    _ = &reg_210;
+    var reg_67: runtime.Value = runtime.Value.initNull();
+    _ = &reg_67;
+    var reg_65: runtime.Value = runtime.Value.initNull();
+    _ = &reg_65;
+    var reg_50: runtime.Value = runtime.Value.initNull();
+    _ = &reg_50;
+    var reg_100: runtime.Value = runtime.Value.initNull();
+    _ = &reg_100;
+    var reg_126: runtime.Value = runtime.Value.initNull();
+    _ = &reg_126;
+    var reg_95: runtime.Value = runtime.Value.initNull();
+    _ = &reg_95;
+    var reg_148: runtime.Value = runtime.Value.initNull();
+    _ = &reg_148;
+    var reg_203: runtime.Value = runtime.Value.initNull();
+    _ = &reg_203;
+    var reg_33: runtime.Value = runtime.Value.initNull();
+    _ = &reg_33;
+    var reg_190: runtime.Value = runtime.Value.initNull();
+    _ = &reg_190;
+    var reg_64: runtime.Value = runtime.Value.initNull();
+    _ = &reg_64;
+    var reg_98: runtime.Value = runtime.Value.initNull();
+    _ = &reg_98;
+    var reg_71: runtime.Value = runtime.Value.initNull();
+    _ = &reg_71;
+    var reg_153: runtime.Value = runtime.Value.initNull();
+    _ = &reg_153;
+    var reg_127: runtime.Value = runtime.Value.initNull();
+    _ = &reg_127;
+    var reg_44: runtime.Value = runtime.Value.initNull();
+    _ = &reg_44;
+    var reg_53: runtime.Value = runtime.Value.initNull();
+    _ = &reg_53;
+    var reg_214: runtime.Value = runtime.Value.initNull();
+    _ = &reg_214;
+    var reg_138: runtime.Value = runtime.Value.initNull();
+    _ = &reg_138;
+    var reg_60: runtime.Value = runtime.Value.initNull();
+    _ = &reg_60;
+    var reg_146: runtime.Value = runtime.Value.initNull();
+    _ = &reg_146;
+    var reg_9: runtime.Value = runtime.Value.initNull();
+    _ = &reg_9;
+    var reg_225: runtime.Value = runtime.Value.initNull();
+    _ = &reg_225;
+    var reg_27: runtime.Value = runtime.Value.initNull();
+    _ = &reg_27;
+    var reg_78: runtime.Value = runtime.Value.initNull();
+    _ = &reg_78;
+    var reg_166: runtime.Value = runtime.Value.initNull();
+    _ = &reg_166;
+    var reg_25: runtime.Value = runtime.Value.initNull();
+    _ = &reg_25;
+    var reg_222: runtime.Value = runtime.Value.initNull();
+    _ = &reg_222;
+    var reg_155: runtime.Value = runtime.Value.initNull();
+    _ = &reg_155;
+    var reg_8: runtime.Value = runtime.Value.initNull();
+    _ = &reg_8;
+    var reg_184: runtime.Value = runtime.Value.initNull();
+    _ = &reg_184;
+    var reg_172: runtime.Value = runtime.Value.initNull();
+    _ = &reg_172;
+    var reg_224: runtime.Value = runtime.Value.initNull();
+    _ = &reg_224;
+    var reg_26: runtime.Value = runtime.Value.initNull();
+    _ = &reg_26;
+    var reg_186: runtime.Value = runtime.Value.initNull();
+    _ = &reg_186;
+    var reg_30: runtime.Value = runtime.Value.initNull();
+    _ = &reg_30;
+    var reg_156: runtime.Value = runtime.Value.initNull();
+    _ = &reg_156;
+    var reg_18: runtime.Value = runtime.Value.initNull();
+    _ = &reg_18;
+    var reg_68: runtime.Value = runtime.Value.initNull();
+    _ = &reg_68;
+    var reg_125: runtime.Value = runtime.Value.initNull();
+    _ = &reg_125;
+    var reg_198: runtime.Value = runtime.Value.initNull();
+    _ = &reg_198;
+    var reg_16: runtime.Value = runtime.Value.initNull();
+    _ = &reg_16;
+    var reg_164: runtime.Value = runtime.Value.initNull();
+    _ = &reg_164;
+    var reg_28: runtime.Value = runtime.Value.initNull();
+    _ = &reg_28;
+
+    var null_val = runtime.Value.initNull();
+    _ = &null_val;
+
+    // State machine for complex control flow
+    // Control flow state machine
+    var current_block: u32 = 0;
+    var prev_block: u32 = 0;
+    _ = &current_block;
+    _ = &prev_block;
+    while (true) {
+        switch (current_block) {
+            0 => { // entry
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:36
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 36);
+    reg_0.*.release(runtime.runtime_allocator);
+    reg_0.* = try runtime.php_object_new_with_constructor("NamedArgsLab", &[_]runtime.Value{}, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:36
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 36);
+    try setGlobalVar("$lab", reg_0.*);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:38
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 38);
+    reg_1.*.release(runtime.runtime_allocator);
+    reg_1.* = runtime.Value.initString(static_strings[41]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:38
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 38);
+    _ = try runtime.php_echo(reg_1.*);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:39
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 39);
+    reg_2.release(runtime.runtime_allocator);
+    reg_2 = getGlobalVar("$lab");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:39
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 39);
+    reg_3.release(runtime.runtime_allocator);
+    reg_3 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:42
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 42);
+    reg_4.release(runtime.runtime_allocator);
+    reg_4 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:42
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 42);
+    reg_5.release(runtime.runtime_allocator);
+    reg_5 = runtime.Value.initString(static_strings[46]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:42
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 42);
+    try reg_4.asArray().push(runtime.runtime_allocator, reg_5);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:42
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 42);
+    reg_6.release(runtime.runtime_allocator);
+    reg_6 = runtime.Value.initString(static_strings[47]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:42
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 42);
+    try reg_4.asArray().push(runtime.runtime_allocator, reg_6);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:42
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 42);
+    reg_7.release(runtime.runtime_allocator);
+    reg_7 = runtime.Value.initString(static_strings[45]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:42
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 42);
+    if (runtime.Value_isObject(reg_3)) {
+        _ = try runtime.php_object_call(reg_3, "offsetSet", &[_]runtime.Value{reg_7, reg_4});
+    } else {
+        try reg_3.asArray().setByValue(runtime.runtime_allocator, reg_7, reg_4);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:40
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 40);
+    reg_8.release(runtime.runtime_allocator);
+    reg_8 = runtime.Value.initString(static_strings[43]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:40
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 40);
+    reg_9.release(runtime.runtime_allocator);
+    reg_9 = runtime.Value.initString(static_strings[42]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:40
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 40);
+    if (runtime.Value_isObject(reg_3)) {
+        _ = try runtime.php_object_call(reg_3, "offsetSet", &[_]runtime.Value{reg_9, reg_8});
+    } else {
+        try reg_3.asArray().setByValue(runtime.runtime_allocator, reg_9, reg_8);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:41
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 41);
+    reg_10 = runtime.Value.initInt(30);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:41
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 41);
+    reg_11.release(runtime.runtime_allocator);
+    reg_11 = runtime.Value.initString(static_strings[44]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:41
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 41);
+    if (runtime.Value_isObject(reg_3)) {
+        _ = try runtime.php_object_call(reg_3, "offsetSet", &[_]runtime.Value{reg_11, reg_10});
+    } else {
+        try reg_3.asArray().setByValue(runtime.runtime_allocator, reg_11, reg_10);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:41
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 41);
+    reg_12.release(runtime.runtime_allocator);
+    reg_12 = runtime.Value.initString(static_strings[1]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:41
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 41);
+    reg_13.release(runtime.runtime_allocator);
+    reg_13 = try runtime.php_object_call_named_args(reg_2, reg_12, reg_3, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:43
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 43);
+    reg_14.release(runtime.runtime_allocator);
+    reg_14 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:43
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 43);
+    reg_15.release(runtime.runtime_allocator);
+    reg_15 = try runtime.php_concat(reg_13, reg_14, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:43
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 43);
+    _ = try runtime.php_echo(reg_15);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:45
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 45);
+    reg_16.release(runtime.runtime_allocator);
+    reg_16 = getGlobalVar("$lab");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:45
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 45);
+    reg_17.release(runtime.runtime_allocator);
+    reg_17 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:49
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 49);
+    reg_18.release(runtime.runtime_allocator);
+    reg_18 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:49
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 49);
+    reg_19.release(runtime.runtime_allocator);
+    reg_19 = runtime.Value.initString(static_strings[52]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:49
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 49);
+    try reg_18.asArray().push(runtime.runtime_allocator, reg_19);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:49
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 49);
+    reg_20.release(runtime.runtime_allocator);
+    reg_20 = runtime.Value.initString(static_strings[53]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:49
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 49);
+    try reg_18.asArray().push(runtime.runtime_allocator, reg_20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:49
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 49);
+    reg_21.release(runtime.runtime_allocator);
+    reg_21 = runtime.Value.initString(static_strings[45]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:49
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 49);
+    if (runtime.Value_isObject(reg_17)) {
+        _ = try runtime.php_object_call(reg_17, "offsetSet", &[_]runtime.Value{reg_21, reg_18});
+    } else {
+        try reg_17.asArray().setByValue(runtime.runtime_allocator, reg_21, reg_18);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:48
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 48);
+    reg_22 = runtime.Value.initBool(false);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:48
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 48);
+    reg_23.release(runtime.runtime_allocator);
+    reg_23 = runtime.Value.initString(static_strings[51]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:48
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 48);
+    if (runtime.Value_isObject(reg_17)) {
+        _ = try runtime.php_object_call(reg_17, "offsetSet", &[_]runtime.Value{reg_23, reg_22});
+    } else {
+        try reg_17.asArray().setByValue(runtime.runtime_allocator, reg_23, reg_22);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:47
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 47);
+    reg_24.release(runtime.runtime_allocator);
+    reg_24 = runtime.Value.initString(static_strings[50]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:47
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 47);
+    reg_25.release(runtime.runtime_allocator);
+    reg_25 = runtime.Value.initString(static_strings[42]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:47
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 47);
+    if (runtime.Value_isObject(reg_17)) {
+        _ = try runtime.php_object_call(reg_17, "offsetSet", &[_]runtime.Value{reg_25, reg_24});
+    } else {
+        try reg_17.asArray().setByValue(runtime.runtime_allocator, reg_25, reg_24);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:46
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 46);
+    reg_26.release(runtime.runtime_allocator);
+    reg_26 = runtime.Value.initString(static_strings[49]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:46
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 46);
+    reg_27.release(runtime.runtime_allocator);
+    reg_27 = runtime.Value.initString(static_strings[48]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:46
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 46);
+    if (runtime.Value_isObject(reg_17)) {
+        _ = try runtime.php_object_call(reg_17, "offsetSet", &[_]runtime.Value{reg_27, reg_26});
+    } else {
+        try reg_17.asArray().setByValue(runtime.runtime_allocator, reg_27, reg_26);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:46
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 46);
+    reg_28.release(runtime.runtime_allocator);
+    reg_28 = runtime.Value.initString(static_strings[1]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:46
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 46);
+    reg_29.release(runtime.runtime_allocator);
+    reg_29 = try runtime.php_object_call_named_args(reg_16, reg_28, reg_17, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:50
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 50);
+    reg_30.release(runtime.runtime_allocator);
+    reg_30 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:50
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 50);
+    reg_31.release(runtime.runtime_allocator);
+    reg_31 = try runtime.php_concat(reg_29, reg_30, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:50
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 50);
+    _ = try runtime.php_echo(reg_31);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_32.release(runtime.runtime_allocator);
+    reg_32 = getGlobalVar("$lab");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_33.release(runtime.runtime_allocator);
+    reg_33 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_34.release(runtime.runtime_allocator);
+    reg_34 = runtime.Value.initString(static_strings[57]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_35.release(runtime.runtime_allocator);
+    reg_35 = runtime.Value.initString(static_strings[56]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    if (runtime.Value_isObject(reg_33)) {
+        _ = try runtime.php_object_call(reg_33, "offsetSet", &[_]runtime.Value{reg_35, reg_34});
+    } else {
+        try reg_33.asArray().setByValue(runtime.runtime_allocator, reg_35, reg_34);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_36.release(runtime.runtime_allocator);
+    reg_36 = runtime.Value.initString(static_strings[59]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_37.release(runtime.runtime_allocator);
+    reg_37 = runtime.Value.initString(static_strings[58]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    if (runtime.Value_isObject(reg_33)) {
+        _ = try runtime.php_object_call(reg_33, "offsetSet", &[_]runtime.Value{reg_37, reg_36});
+    } else {
+        try reg_33.asArray().setByValue(runtime.runtime_allocator, reg_37, reg_36);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_38.release(runtime.runtime_allocator);
+    reg_38 = runtime.Value.initString(static_strings[55]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_39.release(runtime.runtime_allocator);
+    reg_39 = runtime.Value.initString(static_strings[54]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    if (runtime.Value_isObject(reg_33)) {
+        _ = try runtime.php_object_call(reg_33, "offsetSet", &[_]runtime.Value{reg_39, reg_38});
+    } else {
+        try reg_33.asArray().setByValue(runtime.runtime_allocator, reg_39, reg_38);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_40.release(runtime.runtime_allocator);
+    reg_40 = runtime.Value.initString(static_strings[21]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_41.release(runtime.runtime_allocator);
+    reg_41 = try runtime.php_object_call_named_args(reg_32, reg_40, reg_33, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_42.release(runtime.runtime_allocator);
+    reg_42 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    reg_43.release(runtime.runtime_allocator);
+    reg_43 = try runtime.php_concat(reg_41, reg_42, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:52
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 52);
+    _ = try runtime.php_echo(reg_43);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:54
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 54);
+    reg_44.release(runtime.runtime_allocator);
+    reg_44 = runtime.Value.initString(static_strings[60]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:54
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 54);
+    _ = try runtime.php_echo(reg_44);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    reg_45.release(runtime.runtime_allocator);
+    reg_45 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    reg_46 = runtime.Value.initInt(1);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    try reg_45.asArray().push(runtime.runtime_allocator, reg_46);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    reg_47 = runtime.Value.initInt(2);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    try reg_45.asArray().push(runtime.runtime_allocator, reg_47);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    reg_48 = runtime.Value.initInt(3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    try reg_45.asArray().push(runtime.runtime_allocator, reg_48);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:55
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 55);
+    try setGlobalVar("$base", reg_45);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:56
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 56);
+    reg_49.release(runtime.runtime_allocator);
+    reg_49 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:56
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 56);
+    reg_50 = runtime.Value.initInt(4);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:56
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 56);
+    try reg_49.asArray().push(runtime.runtime_allocator, reg_50);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:56
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 56);
+    reg_51 = runtime.Value.initInt(5);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:56
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 56);
+    try reg_49.asArray().push(runtime.runtime_allocator, reg_51);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:56
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 56);
+    try setGlobalVar("$added", reg_49);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:57
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 57);
+    reg_52.release(runtime.runtime_allocator);
+    reg_52 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:57
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 57);
+    reg_53.release(runtime.runtime_allocator);
+    reg_53 = getGlobalVar("$base");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:57
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 57);
+    _ = try runtime.php_array_merge_into(reg_52, reg_53, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:57
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 57);
+    reg_54.release(runtime.runtime_allocator);
+    reg_54 = getGlobalVar("$added");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:57
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 57);
+    _ = try runtime.php_array_merge_into(reg_52, reg_54, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:57
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 57);
+    try setGlobalVar("$combined", reg_52);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    reg_55.release(runtime.runtime_allocator);
+    reg_55 = runtime.Value.initString(static_strings[64]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    reg_56.release(runtime.runtime_allocator);
+    reg_56 = runtime.Value.initString(static_strings[18]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    reg_57.release(runtime.runtime_allocator);
+    reg_57 = getGlobalVar("$combined");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    reg_58.release(runtime.runtime_allocator);
+    reg_58 = try runtime.php_implode(reg_56, reg_57, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    reg_59.release(runtime.runtime_allocator);
+    reg_59 = try runtime.php_concat(reg_55, reg_58, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    reg_60.release(runtime.runtime_allocator);
+    reg_60 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    reg_61.release(runtime.runtime_allocator);
+    reg_61 = try runtime.php_concat(reg_59, reg_60, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:58
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 58);
+    _ = try runtime.php_echo(reg_61);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:60
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 60);
+    reg_62.release(runtime.runtime_allocator);
+    reg_62 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:60
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 60);
+    reg_63 = runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:60
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 60);
+    try reg_62.asArray().push(runtime.runtime_allocator, reg_63);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:60
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 60);
+    reg_64.release(runtime.runtime_allocator);
+    reg_64 = getGlobalVar("$base");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:60
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 60);
+    _ = try runtime.php_array_merge_into(reg_62, reg_64, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:60
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 60);
+    try setGlobalVar("$head", reg_62);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    reg_65.release(runtime.runtime_allocator);
+    reg_65 = runtime.Value.initString(static_strings[66]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    reg_66.release(runtime.runtime_allocator);
+    reg_66 = runtime.Value.initString(static_strings[18]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    reg_67.release(runtime.runtime_allocator);
+    reg_67 = getGlobalVar("$head");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    reg_68.release(runtime.runtime_allocator);
+    reg_68 = try runtime.php_implode(reg_66, reg_67, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    reg_69.release(runtime.runtime_allocator);
+    reg_69 = try runtime.php_concat(reg_65, reg_68, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    reg_70.release(runtime.runtime_allocator);
+    reg_70 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    reg_71.release(runtime.runtime_allocator);
+    reg_71 = try runtime.php_concat(reg_69, reg_70, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:61
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 61);
+    _ = try runtime.php_echo(reg_71);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:63
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 63);
+    reg_72.release(runtime.runtime_allocator);
+    reg_72 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:63
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 63);
+    reg_73.release(runtime.runtime_allocator);
+    reg_73 = getGlobalVar("$base");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:63
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 63);
+    _ = try runtime.php_array_merge_into(reg_72, reg_73, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:63
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 63);
+    reg_74 = runtime.Value.initInt(6);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:63
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 63);
+    try reg_72.asArray().push(runtime.runtime_allocator, reg_74);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:63
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 63);
+    try setGlobalVar("$tail", reg_72);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    reg_75.release(runtime.runtime_allocator);
+    reg_75 = runtime.Value.initString(static_strings[68]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    reg_76.release(runtime.runtime_allocator);
+    reg_76 = runtime.Value.initString(static_strings[18]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    reg_77.release(runtime.runtime_allocator);
+    reg_77 = getGlobalVar("$tail");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    reg_78.release(runtime.runtime_allocator);
+    reg_78 = try runtime.php_implode(reg_76, reg_77, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    reg_79.release(runtime.runtime_allocator);
+    reg_79 = try runtime.php_concat(reg_75, reg_78, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    reg_80.release(runtime.runtime_allocator);
+    reg_80 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    reg_81.release(runtime.runtime_allocator);
+    reg_81 = try runtime.php_concat(reg_79, reg_80, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:64
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 64);
+    _ = try runtime.php_echo(reg_81);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:66
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 66);
+    reg_82.release(runtime.runtime_allocator);
+    reg_82 = runtime.Value.initString(static_strings[69]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:66
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 66);
+    _ = try runtime.php_echo(reg_82);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    reg_83.release(runtime.runtime_allocator);
+    reg_83 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    reg_84 = runtime.Value.initInt(1);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    try reg_83.asArray().push(runtime.runtime_allocator, reg_84);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    reg_85 = runtime.Value.initInt(2);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    try reg_83.asArray().push(runtime.runtime_allocator, reg_85);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    reg_86 = runtime.Value.initInt(3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    try reg_83.asArray().push(runtime.runtime_allocator, reg_86);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    reg_87 = runtime.Value.initInt(4);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    try reg_83.asArray().push(runtime.runtime_allocator, reg_87);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    reg_88 = runtime.Value.initInt(5);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    try reg_83.asArray().push(runtime.runtime_allocator, reg_88);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:67
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 67);
+    try setGlobalVar("$nums", reg_83);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_89.release(runtime.runtime_allocator);
+    reg_89 = runtime.Value.initString(static_strings[71]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_90.release(runtime.runtime_allocator);
+    reg_90 = runtime.Value.initString(static_strings[72]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_91.release(runtime.runtime_allocator);
+    reg_91 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_92.release(runtime.runtime_allocator);
+    reg_92 = getGlobalVar("$nums");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    _ = try runtime.php_args_append_spread(reg_91, reg_92, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_93.release(runtime.runtime_allocator);
+    reg_93 = try runtime.php_invoke_callable_args_array(reg_90, reg_91, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_94.release(runtime.runtime_allocator);
+    reg_94 = try runtime.php_concat(reg_89, reg_93, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_95.release(runtime.runtime_allocator);
+    reg_95 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    reg_96.release(runtime.runtime_allocator);
+    reg_96 = try runtime.php_concat(reg_94, reg_95, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:68
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 68);
+    _ = try runtime.php_echo(reg_96);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_97.release(runtime.runtime_allocator);
+    reg_97 = runtime.Value.initString(static_strings[73]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_98.release(runtime.runtime_allocator);
+    reg_98 = runtime.Value.initString(static_strings[74]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_99.release(runtime.runtime_allocator);
+    reg_99 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_100.release(runtime.runtime_allocator);
+    reg_100 = getGlobalVar("$nums");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    _ = try runtime.php_args_append_spread(reg_99, reg_100, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_101.release(runtime.runtime_allocator);
+    reg_101 = try runtime.php_invoke_callable_args_array(reg_98, reg_99, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_102.release(runtime.runtime_allocator);
+    reg_102 = try runtime.php_concat(reg_97, reg_101, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_103.release(runtime.runtime_allocator);
+    reg_103 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    reg_104.release(runtime.runtime_allocator);
+    reg_104 = try runtime.php_concat(reg_102, reg_103, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:69
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 69);
+    _ = try runtime.php_echo(reg_104);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    reg_105.release(runtime.runtime_allocator);
+    reg_105 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    reg_106 = runtime.Value.initInt(10);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    try reg_105.asArray().push(runtime.runtime_allocator, reg_106);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    reg_107 = runtime.Value.initInt(20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    try reg_105.asArray().push(runtime.runtime_allocator, reg_107);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    reg_108 = runtime.Value.initInt(30);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    try reg_105.asArray().push(runtime.runtime_allocator, reg_108);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:75
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 75);
+    try setGlobalVar("$numbers", reg_105);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_109.release(runtime.runtime_allocator);
+    reg_109 = runtime.Value.initString(static_strings[82]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_110.release(runtime.runtime_allocator);
+    reg_110 = runtime.Value.initString(static_strings[75]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_111.release(runtime.runtime_allocator);
+    reg_111 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_112 = runtime.Value.initInt(5);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    try reg_111.asArray().push(runtime.runtime_allocator, reg_112);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_113.release(runtime.runtime_allocator);
+    reg_113 = getGlobalVar("$numbers");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    _ = try runtime.php_args_append_spread(reg_111, reg_113, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_114.release(runtime.runtime_allocator);
+    reg_114 = try runtime.php_invoke_callable_args_array(reg_110, reg_111, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_115.release(runtime.runtime_allocator);
+    reg_115 = try runtime.php_concat(reg_109, reg_114, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_116.release(runtime.runtime_allocator);
+    reg_116 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    reg_117.release(runtime.runtime_allocator);
+    reg_117 = try runtime.php_concat(reg_115, reg_116, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:76
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 76);
+    _ = try runtime.php_echo(reg_117);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:78
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 78);
+    reg_118.release(runtime.runtime_allocator);
+    reg_118 = runtime.Value.initString(static_strings[83]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:78
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 78);
+    _ = try runtime.php_echo(reg_118);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    reg_119.release(runtime.runtime_allocator);
+    reg_119 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    reg_120 = runtime.Value.initInt(1);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    try reg_119.asArray().push(runtime.runtime_allocator, reg_120);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    reg_121 = runtime.Value.initInt(2);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    try reg_119.asArray().push(runtime.runtime_allocator, reg_121);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    reg_122 = runtime.Value.initInt(3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    try reg_119.asArray().push(runtime.runtime_allocator, reg_122);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:79
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 79);
+    try setGlobalVar("$a", reg_119);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    reg_123.release(runtime.runtime_allocator);
+    reg_123 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    reg_124 = runtime.Value.initInt(10);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    try reg_123.asArray().push(runtime.runtime_allocator, reg_124);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    reg_125 = runtime.Value.initInt(20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    try reg_123.asArray().push(runtime.runtime_allocator, reg_125);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    reg_126 = runtime.Value.initInt(30);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    try reg_123.asArray().push(runtime.runtime_allocator, reg_126);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:80
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 80);
+    try setGlobalVar("$b", reg_123);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_127.release(runtime.runtime_allocator);
+    reg_127 = runtime.Value.initString(static_strings[85]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_128.release(runtime.runtime_allocator);
+    reg_128 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_129.release(runtime.runtime_allocator);
+    reg_129 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_130.release(runtime.runtime_allocator);
+    reg_130 = runtime.Value.initString(static_strings[124]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_131.release(runtime.runtime_allocator);
+    reg_131 = try runtime.php_create_closure(reg_130, reg_129, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    try reg_128.asArray().push(runtime.runtime_allocator, reg_131);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_132.release(runtime.runtime_allocator);
+    reg_132 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_133.release(runtime.runtime_allocator);
+    reg_133 = getGlobalVar("$a");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    try reg_132.asArray().push(runtime.runtime_allocator, reg_133);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_134.release(runtime.runtime_allocator);
+    reg_134 = getGlobalVar("$b");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    try reg_132.asArray().push(runtime.runtime_allocator, reg_134);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    _ = try runtime.php_args_append_spread(reg_128, reg_132, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_135.release(runtime.runtime_allocator);
+    reg_135 = try runtime.php_invoke_callable_args_array(reg_127, reg_128, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    try setGlobalVar("$summed", reg_135);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    reg_136.release(runtime.runtime_allocator);
+    reg_136 = runtime.Value.initString(static_strings[86]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    reg_137.release(runtime.runtime_allocator);
+    reg_137 = runtime.Value.initString(static_strings[18]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    reg_138.release(runtime.runtime_allocator);
+    reg_138 = getGlobalVar("$summed");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    reg_139.release(runtime.runtime_allocator);
+    reg_139 = try runtime.php_implode(reg_137, reg_138, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    reg_140.release(runtime.runtime_allocator);
+    reg_140 = try runtime.php_concat(reg_136, reg_139, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    reg_141.release(runtime.runtime_allocator);
+    reg_141 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    reg_142.release(runtime.runtime_allocator);
+    reg_142 = try runtime.php_concat(reg_140, reg_141, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:82
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 82);
+    _ = try runtime.php_echo(reg_142);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:84
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 84);
+    reg_143.release(runtime.runtime_allocator);
+    reg_143 = runtime.Value.initString(static_strings[87]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:84
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 84);
+    _ = try runtime.php_echo(reg_143);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    reg_144.release(runtime.runtime_allocator);
+    reg_144 = runtime.Value.initInt(10);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    reg_145.release(runtime.runtime_allocator);
+    reg_145 = runtime.Value.initInt(5);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    reg_146.release(runtime.runtime_allocator);
+    reg_146 = runtime.Value.initString(static_strings[37]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    reg_147.release(runtime.runtime_allocator);
+    reg_147 = runtime.Value.initBool(true);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    reg_148.release(runtime.runtime_allocator);
+    reg_148 = try @"globalProcess"(runtime.Value.initNull(), &[_]runtime.Value{reg_144, reg_145, reg_146, reg_147}, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    reg_149.release(runtime.runtime_allocator);
+    reg_149 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    reg_150.release(runtime.runtime_allocator);
+    reg_150 = try runtime.php_concat(reg_148, reg_149, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:85
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 85);
+    _ = try runtime.php_echo(reg_150);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    reg_151.release(runtime.runtime_allocator);
+    reg_151 = runtime.Value.initInt(100);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    reg_152.release(runtime.runtime_allocator);
+    reg_152 = runtime.Value.initInt(7);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    reg_153.release(runtime.runtime_allocator);
+    reg_153 = runtime.Value.initString(static_strings[38]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    reg_154 = runtime.Value.initMissing();
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    reg_155.release(runtime.runtime_allocator);
+    reg_155 = try @"globalProcess"(runtime.Value.initNull(), &[_]runtime.Value{reg_151, reg_152, reg_153, reg_154}, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    reg_156.release(runtime.runtime_allocator);
+    reg_156 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    reg_157.release(runtime.runtime_allocator);
+    reg_157 = try runtime.php_concat(reg_155, reg_156, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:86
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 86);
+    _ = try runtime.php_echo(reg_157);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:88
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 88);
+    reg_158.release(runtime.runtime_allocator);
+    reg_158 = runtime.Value.initString(static_strings[92]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:88
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 88);
+    _ = try runtime.php_echo(reg_158);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    reg_159.release(runtime.runtime_allocator);
+    reg_159 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    reg_160.release(runtime.runtime_allocator);
+    reg_160 = runtime.Value.initString(static_strings[94]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    reg_161 = runtime.Value.initInt(1);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    if (runtime.Value_isObject(reg_159)) {
+        _ = try runtime.php_object_call(reg_159, "offsetSet", &[_]runtime.Value{reg_160, reg_161});
+    } else {
+        try reg_159.asArray().setByValue(runtime.runtime_allocator, reg_160, reg_161);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    reg_162.release(runtime.runtime_allocator);
+    reg_162 = runtime.Value.initString(static_strings[95]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    reg_163 = runtime.Value.initInt(2);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    if (runtime.Value_isObject(reg_159)) {
+        _ = try runtime.php_object_call(reg_159, "offsetSet", &[_]runtime.Value{reg_162, reg_163});
+    } else {
+        try reg_159.asArray().setByValue(runtime.runtime_allocator, reg_162, reg_163);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    reg_164.release(runtime.runtime_allocator);
+    reg_164 = runtime.Value.initString(static_strings[96]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    reg_165 = runtime.Value.initInt(3);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    if (runtime.Value_isObject(reg_159)) {
+        _ = try runtime.php_object_call(reg_159, "offsetSet", &[_]runtime.Value{reg_164, reg_165});
+    } else {
+        try reg_159.asArray().setByValue(runtime.runtime_allocator, reg_164, reg_165);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:89
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 89);
+    try setGlobalVar("$defaults", reg_159);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    reg_166.release(runtime.runtime_allocator);
+    reg_166 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    reg_167.release(runtime.runtime_allocator);
+    reg_167 = runtime.Value.initString(static_strings[95]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    reg_168 = runtime.Value.initInt(20);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    if (runtime.Value_isObject(reg_166)) {
+        _ = try runtime.php_object_call(reg_166, "offsetSet", &[_]runtime.Value{reg_167, reg_168});
+    } else {
+        try reg_166.asArray().setByValue(runtime.runtime_allocator, reg_167, reg_168);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    reg_169.release(runtime.runtime_allocator);
+    reg_169 = runtime.Value.initString(static_strings[96]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    reg_170 = runtime.Value.initInt(30);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    if (runtime.Value_isObject(reg_166)) {
+        _ = try runtime.php_object_call(reg_166, "offsetSet", &[_]runtime.Value{reg_169, reg_170});
+    } else {
+        try reg_166.asArray().setByValue(runtime.runtime_allocator, reg_169, reg_170);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:90
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 90);
+    try setGlobalVar("$override", reg_166);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    reg_171.release(runtime.runtime_allocator);
+    reg_171 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    reg_172.release(runtime.runtime_allocator);
+    reg_172 = runtime.Value.initString(static_strings[94]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    reg_173 = runtime.Value.initInt(0);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    if (runtime.Value_isObject(reg_171)) {
+        _ = try runtime.php_object_call(reg_171, "offsetSet", &[_]runtime.Value{reg_172, reg_173});
+    } else {
+        try reg_171.asArray().setByValue(runtime.runtime_allocator, reg_172, reg_173);
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    reg_174.release(runtime.runtime_allocator);
+    reg_174 = getGlobalVar("$defaults");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    _ = try runtime.php_array_merge_into(reg_171, reg_174, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    reg_175.release(runtime.runtime_allocator);
+    reg_175 = getGlobalVar("$override");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    _ = try runtime.php_array_merge_into(reg_171, reg_175, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:91
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 91);
+    try setGlobalVar("$merged", reg_171);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:92
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 92);
+    reg_176.release(runtime.runtime_allocator);
+    reg_176 = runtime.Value.initString(static_strings[99]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:92
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 92);
+    reg_177.release(runtime.runtime_allocator);
+    reg_177 = getGlobalVar("$merged");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:92
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 92);
+    reg_178.release(runtime.runtime_allocator);
+    reg_178 = try runtime.php_json_encode(reg_177, runtime.Value.initInt(0), runtime.Value.initInt(512), runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:92
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 92);
+    reg_179.release(runtime.runtime_allocator);
+    reg_179 = try runtime.php_concat(reg_176, reg_178, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:92
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 92);
+    reg_180.release(runtime.runtime_allocator);
+    reg_180 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:92
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 92);
+    reg_181.release(runtime.runtime_allocator);
+    reg_181 = try runtime.php_concat(reg_179, reg_180, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:92
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 92);
+    _ = try runtime.php_echo(reg_181);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:94
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 94);
+    reg_182.release(runtime.runtime_allocator);
+    reg_182 = runtime.Value.initString(static_strings[101]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:94
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 94);
+    _ = try runtime.php_echo(reg_182);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    reg_183.release(runtime.runtime_allocator);
+    reg_183 = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    reg_184.release(runtime.runtime_allocator);
+    reg_184 = try @"getNumbers"(runtime.Value.initNull(), &[_]runtime.Value{}, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    _ = try runtime.php_array_merge_into(reg_183, reg_184, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    reg_185 = runtime.Value.initInt(400);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    try reg_183.asArray().push(runtime.runtime_allocator, reg_185);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    reg_186 = runtime.Value.initInt(500);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    try reg_183.asArray().push(runtime.runtime_allocator, reg_186);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:99
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 99);
+    try setGlobalVar("$withExtra", reg_183);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    reg_187.release(runtime.runtime_allocator);
+    reg_187 = runtime.Value.initString(static_strings[104]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    reg_188.release(runtime.runtime_allocator);
+    reg_188 = runtime.Value.initString(static_strings[18]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    reg_189.release(runtime.runtime_allocator);
+    reg_189 = getGlobalVar("$withExtra");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    reg_190.release(runtime.runtime_allocator);
+    reg_190 = try runtime.php_implode(reg_188, reg_189, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    reg_191.release(runtime.runtime_allocator);
+    reg_191 = try runtime.php_concat(reg_187, reg_190, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    reg_192.release(runtime.runtime_allocator);
+    reg_192 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    reg_193.release(runtime.runtime_allocator);
+    reg_193 = try runtime.php_concat(reg_191, reg_192, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:100
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 100);
+    _ = try runtime.php_echo(reg_193);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:102
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 102);
+    reg_194.release(runtime.runtime_allocator);
+    reg_194 = runtime.Value.initString(static_strings[105]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:102
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 102);
+    _ = try runtime.php_echo(reg_194);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:114
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 114);
+    reg_195.release(runtime.runtime_allocator);
+    reg_195 = runtime.Value.initString(static_strings[117]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:116
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 116);
+    reg_196 = runtime.Value.initInt(443);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:115
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 115);
+    reg_197 = runtime.Value.initBool(true);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:113
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 113);
+    reg_198.release(runtime.runtime_allocator);
+    reg_198 = runtime.Value.initString(static_strings[115]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:113
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 113);
+    reg_199.release(runtime.runtime_allocator);
+    reg_199 = try runtime.php_object_new_with_constructor("Config", &[_]runtime.Value{reg_195, reg_196, reg_197, reg_198}, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:113
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 113);
+    try setGlobalVar("$cfg", reg_199);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_200.release(runtime.runtime_allocator);
+    reg_200 = runtime.Value.initString(static_strings[120]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_201.release(runtime.runtime_allocator);
+    reg_201 = getGlobalVar("$cfg");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_202.release(runtime.runtime_allocator);
+    reg_202 = try runtime.php_object_get(reg_201, "host");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_203.release(runtime.runtime_allocator);
+    reg_203 = try runtime.php_concat(reg_200, reg_202, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_204.release(runtime.runtime_allocator);
+    reg_204 = runtime.Value.initString(static_strings[121]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_205.release(runtime.runtime_allocator);
+    reg_205 = try runtime.php_concat(reg_203, reg_204, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_206.release(runtime.runtime_allocator);
+    reg_206 = getGlobalVar("$cfg");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_207.release(runtime.runtime_allocator);
+    reg_207 = try runtime.php_object_get(reg_206, "port");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_208.release(runtime.runtime_allocator);
+    reg_208 = try runtime.php_concat(reg_205, reg_207, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_209.release(runtime.runtime_allocator);
+    reg_209 = runtime.Value.initString(static_strings[122]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_210.release(runtime.runtime_allocator);
+    reg_210 = try runtime.php_concat(reg_208, reg_209, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_211.release(runtime.runtime_allocator);
+    reg_211 = getGlobalVar("$cfg");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_212.release(runtime.runtime_allocator);
+    reg_212 = try runtime.php_object_get(reg_211, "ssl");
+                if (reg_212.toBool()) {
+                    prev_block = current_block;
+                    current_block = 1;
+                } else {
+                    prev_block = current_block;
+                    current_block = 2;
+                }
+            },
+            1 => { // ternary_then_0
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_213.release(runtime.runtime_allocator);
+    reg_213 = runtime.Value.initString(static_strings[14]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_214 = reg_213;
+            reg_217 = reg_214;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            2 => { // ternary_else_1
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_215.release(runtime.runtime_allocator);
+    reg_215 = runtime.Value.initString(static_strings[15]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_216 = reg_215;
+            reg_217 = reg_216;
+                prev_block = current_block;
+                current_block = 3;
+            },
+            3 => { // ternary_merge_2
+    switch (prev_block) {
+        1 => {
+            reg_217 = reg_214;
+        },
+        2 => {
+            reg_217 = reg_216;
+        },
+        else => {
+            // Fallback: use first incoming value
+            reg_217 = reg_214;
+        },
+    }
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_218.release(runtime.runtime_allocator);
+    reg_218 = try runtime.php_concat(reg_210, reg_217, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_219.release(runtime.runtime_allocator);
+    reg_219 = runtime.Value.initString(static_strings[123]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_220.release(runtime.runtime_allocator);
+    reg_220 = getGlobalVar("$cfg");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_221.release(runtime.runtime_allocator);
+    reg_221 = try runtime.php_object_get(reg_220, "username");
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_222.release(runtime.runtime_allocator);
+    reg_222 = try runtime.php_concat(reg_219, reg_221, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_223.release(runtime.runtime_allocator);
+    reg_223 = runtime.Value.initString(static_strings[35]);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_224.release(runtime.runtime_allocator);
+    reg_224 = try runtime.php_concat(reg_222, reg_223, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    reg_225.release(runtime.runtime_allocator);
+    reg_225 = try runtime.php_concat(reg_218, reg_224, runtime.runtime_allocator);
+        // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:118
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 118);
+    _ = try runtime.php_echo(reg_225);
+    if (runtime.hasException()) {
+        @branchHint(.unlikely);
+        // Cleanup on exception
+        reg_43.release(runtime.runtime_allocator);
+        reg_43 = runtime.Value.initNull();
+        reg_101.release(runtime.runtime_allocator);
+        reg_101 = runtime.Value.initNull();
+        reg_35.release(runtime.runtime_allocator);
+        reg_35 = runtime.Value.initNull();
+        reg_142.release(runtime.runtime_allocator);
+        reg_142 = runtime.Value.initNull();
+        reg_178.release(runtime.runtime_allocator);
+        reg_178 = runtime.Value.initNull();
+        reg_157.release(runtime.runtime_allocator);
+        reg_157 = runtime.Value.initNull();
+        reg_59.release(runtime.runtime_allocator);
+        reg_59 = runtime.Value.initNull();
+        reg_15.release(runtime.runtime_allocator);
+        reg_15 = runtime.Value.initNull();
+        reg_117.release(runtime.runtime_allocator);
+        reg_117 = runtime.Value.initNull();
+        reg_210.release(runtime.runtime_allocator);
+        reg_210 = runtime.Value.initNull();
+        reg_11.release(runtime.runtime_allocator);
+        reg_11 = runtime.Value.initNull();
+        reg_37.release(runtime.runtime_allocator);
+        reg_37 = runtime.Value.initNull();
+        reg_131.release(runtime.runtime_allocator);
+        reg_131 = runtime.Value.initNull();
+        reg_90.release(runtime.runtime_allocator);
+        reg_90 = runtime.Value.initNull();
+        reg_115.release(runtime.runtime_allocator);
+        reg_115 = runtime.Value.initNull();
+        reg_102.release(runtime.runtime_allocator);
+        reg_102 = runtime.Value.initNull();
+        reg_199.release(runtime.runtime_allocator);
+        reg_199 = runtime.Value.initNull();
+        reg_148.release(runtime.runtime_allocator);
+        reg_148 = runtime.Value.initNull();
+        reg_203.release(runtime.runtime_allocator);
+        reg_203 = runtime.Value.initNull();
+        reg_190.release(runtime.runtime_allocator);
+        reg_190 = runtime.Value.initNull();
+        reg_29.release(runtime.runtime_allocator);
+        reg_29 = runtime.Value.initNull();
+        reg_79.release(runtime.runtime_allocator);
+        reg_79 = runtime.Value.initNull();
+        reg_71.release(runtime.runtime_allocator);
+        reg_71 = runtime.Value.initNull();
+        reg_98.release(runtime.runtime_allocator);
+        reg_98 = runtime.Value.initNull();
+        reg_218.release(runtime.runtime_allocator);
+        reg_218 = runtime.Value.initNull();
+        reg_127.release(runtime.runtime_allocator);
+        reg_127 = runtime.Value.initNull();
+        reg_39.release(runtime.runtime_allocator);
+        reg_39 = runtime.Value.initNull();
+        reg_21.release(runtime.runtime_allocator);
+        reg_21 = runtime.Value.initNull();
+        reg_9.release(runtime.runtime_allocator);
+        reg_9 = runtime.Value.initNull();
+        reg_193.release(runtime.runtime_allocator);
+        reg_193 = runtime.Value.initNull();
+        reg_225.release(runtime.runtime_allocator);
+        reg_225 = runtime.Value.initNull();
+        reg_27.release(runtime.runtime_allocator);
+        reg_27 = runtime.Value.initNull();
+        reg_78.release(runtime.runtime_allocator);
+        reg_78 = runtime.Value.initNull();
+        reg_205.release(runtime.runtime_allocator);
+        reg_205 = runtime.Value.initNull();
+        reg_208.release(runtime.runtime_allocator);
+        reg_208 = runtime.Value.initNull();
+        reg_58.release(runtime.runtime_allocator);
+        reg_58 = runtime.Value.initNull();
+        reg_25.release(runtime.runtime_allocator);
+        reg_25 = runtime.Value.initNull();
+        reg_222.release(runtime.runtime_allocator);
+        reg_222 = runtime.Value.initNull();
+        reg_13.release(runtime.runtime_allocator);
+        reg_13 = runtime.Value.initNull();
+        reg_155.release(runtime.runtime_allocator);
+        reg_155 = runtime.Value.initNull();
+        reg_150.release(runtime.runtime_allocator);
+        reg_150 = runtime.Value.initNull();
+        reg_7.release(runtime.runtime_allocator);
+        reg_7 = runtime.Value.initNull();
+        reg_81.release(runtime.runtime_allocator);
+        reg_81 = runtime.Value.initNull();
+        reg_69.release(runtime.runtime_allocator);
+        reg_69 = runtime.Value.initNull();
+        reg_139.release(runtime.runtime_allocator);
+        reg_139 = runtime.Value.initNull();
+        reg_96.release(runtime.runtime_allocator);
+        reg_96 = runtime.Value.initNull();
+        reg_184.release(runtime.runtime_allocator);
+        reg_184 = runtime.Value.initNull();
+        reg_135.release(runtime.runtime_allocator);
+        reg_135 = runtime.Value.initNull();
+        reg_224.release(runtime.runtime_allocator);
+        reg_224 = runtime.Value.initNull();
+        reg_93.release(runtime.runtime_allocator);
+        reg_93 = runtime.Value.initNull();
+        reg_41.release(runtime.runtime_allocator);
+        reg_41 = runtime.Value.initNull();
+        reg_61.release(runtime.runtime_allocator);
+        reg_61 = runtime.Value.initNull();
+        reg_104.release(runtime.runtime_allocator);
+        reg_104 = runtime.Value.initNull();
+        reg_31.release(runtime.runtime_allocator);
+        reg_31 = runtime.Value.initNull();
+        reg_23.release(runtime.runtime_allocator);
+        reg_23 = runtime.Value.initNull();
+        reg_94.release(runtime.runtime_allocator);
+        reg_94 = runtime.Value.initNull();
+        reg_179.release(runtime.runtime_allocator);
+        reg_179 = runtime.Value.initNull();
+        reg_68.release(runtime.runtime_allocator);
+        reg_68 = runtime.Value.initNull();
+        reg_110.release(runtime.runtime_allocator);
+        reg_110 = runtime.Value.initNull();
+        reg_114.release(runtime.runtime_allocator);
+        reg_114 = runtime.Value.initNull();
+        reg_140.release(runtime.runtime_allocator);
+        reg_140 = runtime.Value.initNull();
+        reg_181.release(runtime.runtime_allocator);
+        reg_181 = runtime.Value.initNull();
+        reg_191.release(runtime.runtime_allocator);
+        reg_191 = runtime.Value.initNull();
+        return error.RuntimeError;
+    }
+                // Cleanup (except return value)
+                reg_0.*.release(runtime.runtime_allocator);
+                reg_1.*.release(runtime.runtime_allocator);
+                return runtime.Value.initNull();
+            },
+            else => unreachable,
+        }
+    }
+}
+
+// MARKER: generateFunction called
+pub fn @"__arrow_7"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    _ = &ctx;
+    _ = allocator; // 标记为故意未使用
+    const __prev_call_args = runtime.setCurrentCallArgs(args);
+    defer runtime.restoreCurrentCallArgs(__prev_call_args);
+    runtime.profiler.enterGlobal("__arrow_7");
+    defer runtime.profiler.exitGlobal("__arrow_7");
+    // Register declarations
+    var reg_1: runtime.Value = runtime.Value.initNull();
+    _ = &reg_1;
+    var __def_1: bool = false;
+    _ = &__def_1;
+    var reg_0: runtime.Value = runtime.Value.initNull();
+    _ = &reg_0;
+    var __def_0: bool = false;
+    _ = &__def_0;
+    var reg_4: runtime.Value = runtime.Value.initNull();
+    _ = &reg_4;
+    var reg_6: runtime.Value = runtime.Value.initNull();
+    _ = &reg_6;
+    var reg_5: runtime.Value = runtime.Value.initNull();
+    _ = &reg_5;
+    var reg_2: runtime.Value = runtime.Value.initNull();
+    _ = &reg_2;
+    var reg_3: runtime.Value = runtime.Value.initNull();
+    _ = &reg_3;
+
+    var null_val = runtime.Value.initNull();
+    _ = &null_val;
+
+    // Instructions
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_2 = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    _ = (reg_2).retain();
+    reg_0.release(runtime.runtime_allocator);
+    reg_0 = reg_2;
+    __def_0 = true;
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_3 = if (args.len > 1 and !args[1].isMissing()) args[1] else runtime.Value.initNull();
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    _ = (reg_3).retain();
+    reg_1.release(runtime.runtime_allocator);
+    reg_1 = reg_3;
+    __def_1 = true;
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    if (!__def_0) runtime.emitWarning("Undefined variable $x");
+    reg_4 = reg_0;
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    if (!__def_1) runtime.emitWarning("Undefined variable $y");
+    reg_5 = reg_1;
+    // /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php:81
+    runtime.setSourceLocation("/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    reg_6 = try runtime.php_add(reg_4, reg_5);
+    return reg_6;
 }
 
 pub fn @"select"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
@@ -636,9 +11394,51 @@ pub fn @"forward_static_call_array"(ctx: runtime.Value, args: []const runtime.Va
 
 fn registerAllClasses(allocator: std.mem.Allocator) !void {
     try runtime.ClassMeta.registerExceptionClass(allocator);
+    const NamedArgsLab_meta = try runtime.ClassMeta.init(allocator, "NamedArgsLab");
+    try NamedArgsLab_meta.addMethod(.{ .name = "process", .func = @"NamedArgsLab::process", .is_static = false, .is_public = true, .is_protected = false, .is_private = false, .param_count = 6, .required_params = 2 });
+    try NamedArgsLab_meta.addMethod(.{ .name = "combine", .func = @"NamedArgsLab::combine", .is_static = false, .is_public = true, .is_protected = false, .is_private = false, .param_count = 4, .required_params = 1 });
+    if (NamedArgsLab_meta.methods.get("__toString")) |m| NamedArgsLab_meta.magic_toString = m.func;
+    try runtime.registerClass(NamedArgsLab_meta);
+    const Config_meta = try runtime.ClassMeta.init(allocator, "Config");
+    try Config_meta.addProperty(.{ .name = "host", .default_value = runtime.Value.initNull(), .is_static = false, .is_public = true, .is_readonly = false });
+    try Config_meta.addProperty(.{ .name = "port", .default_value = runtime.Value.initNull(), .is_static = false, .is_public = true, .is_readonly = false });
+    try Config_meta.addProperty(.{ .name = "ssl", .default_value = runtime.Value.initNull(), .is_static = false, .is_public = true, .is_readonly = false });
+    try Config_meta.addProperty(.{ .name = "username", .default_value = runtime.Value.initNull(), .is_static = false, .is_public = true, .is_readonly = false });
+    try Config_meta.addMethod(.{ .name = "__construct", .func = @"Config::__construct", .is_static = false, .is_public = true, .is_protected = false, .is_private = false, .param_count = 5, .required_params = 1 });
+    if (Config_meta.methods.get("__toString")) |m| Config_meta.magic_toString = m.func;
+    try runtime.registerClass(Config_meta);
+    if (NamedArgsLab_meta.findMethod("__construct")) |m| { NamedArgsLab_meta.magic_construct = m.func; }
+    if (NamedArgsLab_meta.findMethod("__destruct")) |m| { NamedArgsLab_meta.magic_destruct = m.func; }
+    if (NamedArgsLab_meta.findMethod("__get")) |m| { NamedArgsLab_meta.magic_get = m.func; }
+    if (NamedArgsLab_meta.findMethod("__set")) |m| { NamedArgsLab_meta.magic_set = m.func; }
+    if (NamedArgsLab_meta.findMethod("__call")) |m| { NamedArgsLab_meta.magic_call = m.func; }
+    if (NamedArgsLab_meta.findMethod("__callStatic")) |m| { NamedArgsLab_meta.magic_callStatic = m.func; }
+    if (NamedArgsLab_meta.findMethod("__sleep")) |m| { NamedArgsLab_meta.magic_sleep = m.func; }
+    if (NamedArgsLab_meta.findMethod("__wakeup")) |m| { NamedArgsLab_meta.magic_wakeup = m.func; }
+    if (NamedArgsLab_meta.findMethod("__serialize")) |m| { NamedArgsLab_meta.magic_serialize = m.func; }
+    if (NamedArgsLab_meta.findMethod("__unserialize")) |m| { NamedArgsLab_meta.magic_unserialize = m.func; }
+    if (Config_meta.findMethod("__construct")) |m| { Config_meta.magic_construct = m.func; }
+    if (Config_meta.findMethod("__destruct")) |m| { Config_meta.magic_destruct = m.func; }
+    if (Config_meta.findMethod("__get")) |m| { Config_meta.magic_get = m.func; }
+    if (Config_meta.findMethod("__set")) |m| { Config_meta.magic_set = m.func; }
+    if (Config_meta.findMethod("__call")) |m| { Config_meta.magic_call = m.func; }
+    if (Config_meta.findMethod("__callStatic")) |m| { Config_meta.magic_callStatic = m.func; }
+    if (Config_meta.findMethod("__sleep")) |m| { Config_meta.magic_sleep = m.func; }
+    if (Config_meta.findMethod("__wakeup")) |m| { Config_meta.magic_wakeup = m.func; }
+    if (Config_meta.findMethod("__serialize")) |m| { Config_meta.magic_serialize = m.func; }
+    if (Config_meta.findMethod("__unserialize")) |m| { Config_meta.magic_unserialize = m.func; }
 }
 
 fn registerAllFunctions() !void {
+    try runtime.registerUserFunctionWithLocation("globalProcess", @"globalProcess", "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 20);
+    runtime.registerFunctionMeta("globalProcess", 4, 1);
+    try runtime.registerUserFunctionWithLocation("sum", @"sum", "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 71);
+    runtime.registerFunctionMeta("sum", 5, 3);
+    try runtime.registerUserFunctionWithLocation("getNumbers", @"getNumbers", "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 95);
+    runtime.registerFunctionMeta("getNumbers", 0, 0);
+    try runtime.registerUserFunctionWithLocation("__arrow_7", @"__arrow_7", "/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts_27/failed/test_018_named_args.php", 81);
+    runtime.registerFunctionMeta("__arrow_7", 2, 2);
+    runtime.registerFunctionMeta("__arrow_7", 2, 2);
     // 注册AOT callable hook
     runtime.aot_callable_hook = &aot_dispatch_callable;
 }
@@ -677,20 +11477,20 @@ fn aot_dispatch_callable(name: []const u8, args: []const runtime.Value, allocato
         if (args.len > 0) return try runtime.php_is_dir(args[0]);
         return runtime.Value.initNull();
     }
-    if (std.mem.eql(u8, name, "is_file")) {
-        if (args.len > 0) return try runtime.php_is_file(args[0]);
-        return runtime.Value.initNull();
-    }
     if (std.mem.eql(u8, name, "is_null")) {
         if (args.len > 0) return try runtime.php_is_null(args[0]);
         return runtime.Value.initNull();
     }
-    if (std.mem.eql(u8, name, "is_bool")) {
-        if (args.len > 0) return try runtime.php_is_bool(args[0]);
+    if (std.mem.eql(u8, name, "is_file")) {
+        if (args.len > 0) return try runtime.php_is_file(args[0]);
         return runtime.Value.initNull();
     }
     if (std.mem.eql(u8, name, "is_file")) {
         if (args.len > 0) return try runtime.php_is_file(args[0]);
+        return runtime.Value.initNull();
+    }
+    if (std.mem.eql(u8, name, "is_bool")) {
+        if (args.len > 0) return try runtime.php_is_bool(args[0]);
         return runtime.Value.initNull();
     }
     if (std.mem.eql(u8, name, "is_float")) {
@@ -705,12 +11505,12 @@ fn aot_dispatch_callable(name: []const u8, args: []const runtime.Value, allocato
         if (args.len > 0) return try runtime.php_is_finite(args[0]);
         return runtime.Value.initNull();
     }
-    if (std.mem.eql(u8, name, "is_object")) {
-        if (args.len > 0) return try runtime.php_is_object(args[0]);
-        return runtime.Value.initNull();
-    }
     if (std.mem.eql(u8, name, "is_scalar")) {
         if (args.len > 0) return try runtime.php_is_scalar(args[0]);
+        return runtime.Value.initNull();
+    }
+    if (std.mem.eql(u8, name, "is_object")) {
+        if (args.len > 0) return try runtime.php_is_object(args[0]);
         return runtime.Value.initNull();
     }
     if (std.mem.eql(u8, name, "is_string")) {
@@ -725,28 +11525,28 @@ fn aot_dispatch_callable(name: []const u8, args: []const runtime.Value, allocato
         if (args.len > 0) return try runtime.php_is_resource(args[0]);
         return runtime.Value.initNull();
     }
-    if (std.mem.eql(u8, name, "is_writable")) {
-        if (args.len > 0) return try runtime.php_is_writable(args[0]);
-        return runtime.Value.initNull();
-    }
     if (std.mem.eql(u8, name, "is_readable")) {
         if (args.len > 0) return try runtime.php_is_readable(args[0]);
         return runtime.Value.initNull();
     }
-    if (std.mem.eql(u8, name, "is_callable")) {
-        if (args.len > 0) return try runtime.php_is_callable(args[0]);
+    if (std.mem.eql(u8, name, "is_writable")) {
+        if (args.len > 0) return try runtime.php_is_writable(args[0]);
         return runtime.Value.initNull();
     }
-    if (std.mem.eql(u8, name, "is_resource")) {
-        if (args.len > 0) return try runtime.php_is_resource(args[0]);
+    if (std.mem.eql(u8, name, "is_iterable")) {
+        if (args.len > 0) return try runtime.php_is_iterable(args[0]);
         return runtime.Value.initNull();
     }
     if (std.mem.eql(u8, name, "is_infinite")) {
         if (args.len > 0) return try runtime.php_is_infinite(args[0]);
         return runtime.Value.initNull();
     }
-    if (std.mem.eql(u8, name, "is_iterable")) {
-        if (args.len > 0) return try runtime.php_is_iterable(args[0]);
+    if (std.mem.eql(u8, name, "is_resource")) {
+        if (args.len > 0) return try runtime.php_is_resource(args[0]);
+        return runtime.Value.initNull();
+    }
+    if (std.mem.eql(u8, name, "is_callable")) {
+        if (args.len > 0) return try runtime.php_is_callable(args[0]);
         return runtime.Value.initNull();
     }
     if (std.mem.eql(u8, name, "is_countable")) {
@@ -763,8 +11563,20 @@ fn aot_dispatch_callable(name: []const u8, args: []const runtime.Value, allocato
 
 // 分发用户定义的函数调用
 fn aot_dispatch_user_function(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+    if (std.mem.eql(u8, name, "globalProcess")) {
+        return @"globalProcess"(runtime.Value.initNull(), args, allocator);
+    }
+    if (std.mem.eql(u8, name, "sum")) {
+        return @"sum"(runtime.Value.initNull(), args, allocator);
+    }
+    if (std.mem.eql(u8, name, "getNumbers")) {
+        return @"getNumbers"(runtime.Value.initNull(), args, allocator);
+    }
     if (std.mem.eql(u8, name, "__main__")) {
         return @"__main__"(runtime.Value.initNull(), args, allocator);
+    }
+    if (std.mem.eql(u8, name, "__arrow_7")) {
+        return @"__arrow_7"(runtime.Value.initNull(), args, allocator);
     }
     return error.UnknownFunction;
 }
@@ -780,337 +11592,408 @@ fn aot_dispatch_static_method(class_name: []const u8, method_name: []const u8, a
 
 // AOT已注册函数名列表（用于function_exists）
 const aot_registered_functions = std.StaticStringMap(void).initComptime(.{
-    .{ "pi", {} },
     .{ "go", {} },
-    .{ "abs", {} },
-    .{ "exp", {} },
-    .{ "log", {} },
-    .{ "tan", {} },
+    .{ "pi", {} },
+    .{ "chr", {} },
     .{ "cos", {} },
+    .{ "die", {} },
+    .{ "exp", {} },
+    .{ "end", {} },
+    .{ "key", {} },
+    .{ "log", {} },
+    .{ "abs", {} },
     .{ "sin", {} },
+    .{ "ord", {} },
+    .{ "tan", {} },
+    .{ "md5", {} },
     .{ "pow", {} },
     .{ "max", {} },
     .{ "min", {} },
-    .{ "md5", {} },
-    .{ "ord", {} },
-    .{ "die", {} },
-    .{ "chr", {} },
-    .{ "end", {} },
-    .{ "key", {} },
-    .{ "atan", {} },
+    .{ "time", {} },
     .{ "rand", {} },
+    .{ "glob", {} },
+    .{ "file", {} },
+    .{ "sqrt", {} },
+    .{ "next", {} },
+    .{ "sha1", {} },
+    .{ "echo", {} },
+    .{ "asin", {} },
+    .{ "copy", {} },
+    .{ "exec", {} },
+    .{ "ceil", {} },
+    .{ "hash", {} },
+    .{ "atan", {} },
+    .{ "exit", {} },
+    .{ "ftok", {} },
+    .{ "join", {} },
+    .{ "prev", {} },
+    .{ "log2", {} },
+    .{ "fmod", {} },
+    .{ "fdiv", {} },
+    .{ "sort", {} },
+    .{ "acos", {} },
     .{ "each", {} },
     .{ "date", {} },
-    .{ "copy", {} },
-    .{ "time", {} },
-    .{ "exit", {} },
-    .{ "echo", {} },
-    .{ "sha1", {} },
-    .{ "prev", {} },
-    .{ "sqrt", {} },
-    .{ "fmod", {} },
-    .{ "exec", {} },
-    .{ "ftok", {} },
-    .{ "ceil", {} },
     .{ "trim", {} },
-    .{ "sort", {} },
-    .{ "join", {} },
-    .{ "next", {} },
-    .{ "file", {} },
-    .{ "acos", {} },
-    .{ "asin", {} },
-    .{ "floor", {} },
-    .{ "isset", {} },
     .{ "nl2br", {} },
-    .{ "count", {} },
-    .{ "ksort", {} },
-    .{ "asort", {} },
-    .{ "fread", {} },
-    .{ "range", {} },
-    .{ "rsort", {} },
-    .{ "unset", {} },
+    .{ "reset", {} },
     .{ "atan2", {} },
+    .{ "mkdir", {} },
+    .{ "print", {} },
     .{ "log10", {} },
-    .{ "fopen", {} },
-    .{ "usort", {} },
+    .{ "rsort", {} },
+    .{ "rmdir", {} },
+    .{ "unset", {} },
+    .{ "asort", {} },
+    .{ "empty", {} },
     .{ "fgets", {} },
     .{ "fseek", {} },
-    .{ "empty", {} },
+    .{ "ksort", {} },
+    .{ "isset", {} },
+    .{ "usort", {} },
     .{ "round", {} },
+    .{ "crc32", {} },
+    .{ "floor", {} },
+    .{ "fopen", {} },
     .{ "hypot", {} },
-    .{ "print", {} },
-    .{ "rmdir", {} },
-    .{ "mkdir", {} },
-    .{ "reset", {} },
+    .{ "touch", {} },
+    .{ "fread", {} },
     .{ "sleep", {} },
-    .{ "rtrim", {} },
+    .{ "count", {} },
     .{ "ltrim", {} },
+    .{ "rtrim", {} },
+    .{ "range", {} },
     .{ "srand", {} },
     .{ "is_nan", {} },
-    .{ "getcwd", {} },
-    .{ "strpos", {} },
-    .{ "usleep", {} },
-    .{ "substr", {} },
-    .{ "uniqid", {} },
-    .{ "strval", {} },
     .{ "strstr", {} },
+    .{ "sscanf", {} },
     .{ "strchr", {} },
     .{ "strrev", {} },
-    .{ "strlen", {} },
-    .{ "unlink", {} },
+    .{ "getcwd", {} },
+    .{ "header", {} },
+    .{ "usleep", {} },
     .{ "mktime", {} },
-    .{ "decbin", {} },
-    .{ "system", {} },
-    .{ "intval", {} },
-    .{ "krsort", {} },
-    .{ "rename", {} },
-    .{ "sizeof", {} },
-    .{ "fwrite", {} },
     .{ "fclose", {} },
-    .{ "printf", {} },
-    .{ "is_int", {} },
-    .{ "unlink", {} },
-    .{ "is_dir", {} },
-    .{ "uksort", {} },
-    .{ "sscanf", {} },
-    .{ "uasort", {} },
     .{ "define", {} },
+    .{ "uksort", {} },
+    .{ "is_int", {} },
+    .{ "uniqid", {} },
+    .{ "strpos", {} },
+    .{ "substr", {} },
+    .{ "strlen", {} },
     .{ "strcmp", {} },
-    .{ "arsort", {} },
+    .{ "intdiv", {} },
+    .{ "decbin", {} },
+    .{ "uasort", {} },
+    .{ "krsort", {} },
+    .{ "fwrite", {} },
+    .{ "printf", {} },
+    .{ "intval", {} },
     .{ "is_dir", {} },
-    .{ "dirname", {} },
-    .{ "deg2rad", {} },
-    .{ "stripos", {} },
+    .{ "system", {} },
+    .{ "is_dir", {} },
+    .{ "strval", {} },
+    .{ "arsort", {} },
+    .{ "sizeof", {} },
+    .{ "rename", {} },
+    .{ "unlink", {} },
+    .{ "unlink", {} },
+    .{ "str_pad", {} },
+    .{ "is_null", {} },
+    .{ "compact", {} },
     .{ "strrpos", {} },
-    .{ "explode", {} },
-    .{ "sprintf", {} },
-    .{ "ucwords", {} },
-    .{ "lcfirst", {} },
-    .{ "sem_get", {} },
+    .{ "stripos", {} },
+    .{ "extract", {} },
     .{ "is_file", {} },
-    .{ "defined", {} },
+    .{ "natsort", {} },
+    .{ "implode", {} },
+    .{ "dirname", {} },
+    .{ "is_file", {} },
+    .{ "explode", {} },
+    .{ "ucwords", {} },
+    .{ "ip2long", {} },
+    .{ "boolval", {} },
+    .{ "long2ip", {} },
+    .{ "lcfirst", {} },
+    .{ "bin2hex", {} },
+    .{ "ucfirst", {} },
+    .{ "hex2bin", {} },
+    .{ "settype", {} },
+    .{ "deg2rad", {} },
     .{ "scandir", {} },
+    .{ "ini_get", {} },
+    .{ "rad2deg", {} },
+    .{ "sprintf", {} },
+    .{ "is_bool", {} },
+    .{ "defined", {} },
+    .{ "mt_rand", {} },
+    .{ "tempnam", {} },
+    .{ "shuffle", {} },
+    .{ "gettype", {} },
     .{ "current", {} },
     .{ "print_r", {} },
-    .{ "implode", {} },
-    .{ "natsort", {} },
-    .{ "ucfirst", {} },
-    .{ "is_null", {} },
-    .{ "rad2deg", {} },
-    .{ "is_bool", {} },
-    .{ "mt_rand", {} },
-    .{ "ini_get", {} },
-    .{ "extract", {} },
-    .{ "bin2hex", {} },
-    .{ "hex2bin", {} },
-    .{ "compact", {} },
-    .{ "str_pad", {} },
-    .{ "boolval", {} },
-    .{ "gettype", {} },
-    .{ "shuffle", {} },
-    .{ "settype", {} },
-    .{ "is_file", {} },
-    .{ "wordwrap", {} },
-    .{ "filesize", {} },
+    .{ "sem_get", {} },
     .{ "mt_srand", {} },
-    .{ "filesize", {} },
-    .{ "var_dump", {} },
-    .{ "floatval", {} },
     .{ "in_array", {} },
+    .{ "ob_start", {} },
+    .{ "ob_flush", {} },
     .{ "is_float", {} },
-    .{ "strripos", {} },
-    .{ "basename", {} },
+    .{ "realpath", {} },
     .{ "is_array", {} },
-    .{ "is_finite", {} },
-    .{ "php_uname", {} },
-    .{ "array_pop", {} },
-    .{ "is_object", {} },
-    .{ "urldecode", {} },
-    .{ "is_scalar", {} },
-    .{ "array_map", {} },
-    .{ "str_split", {} },
-    .{ "php_deref", {} },
-    .{ "is_string", {} },
+    .{ "var_dump", {} },
+    .{ "pathinfo", {} },
+    .{ "wordwrap", {} },
+    .{ "floatval", {} },
+    .{ "getmypid", {} },
+    .{ "filesize", {} },
+    .{ "basename", {} },
+    .{ "filesize", {} },
+    .{ "strripos", {} },
+    .{ "strnatcmp", {} },
+    .{ "filemtime", {} },
+    .{ "fileatime", {} },
     .{ "get_class", {} },
-    .{ "array_sum", {} },
-    .{ "gc_enable", {} },
-    .{ "serialize", {} },
-    .{ "preg_grep", {} },
+    .{ "php_uname", {} },
     .{ "array_pad", {} },
     .{ "urlencode", {} },
+    .{ "is_finite", {} },
+    .{ "serialize", {} },
+    .{ "urldecode", {} },
+    .{ "mb_substr", {} },
+    .{ "parse_str", {} },
+    .{ "mb_strlen", {} },
+    .{ "php_deref", {} },
+    .{ "str_split", {} },
+    .{ "gc_enable", {} },
+    .{ "is_scalar", {} },
+    .{ "array_pop", {} },
+    .{ "parse_url", {} },
+    .{ "preg_grep", {} },
+    .{ "is_object", {} },
+    .{ "array_map", {} },
+    .{ "is_string", {} },
+    .{ "microtime", {} },
+    .{ "array_sum", {} },
+    .{ "strtotime", {} },
     .{ "getrusage", {} },
     .{ "array_pad", {} },
-    .{ "microtime", {} },
-    .{ "strtotime", {} },
-    .{ "array_walk", {} },
-    .{ "array_push", {} },
-    .{ "shmop_open", {} },
-    .{ "sem_remove", {} },
-    .{ "var_export", {} },
+    .{ "array_diff", {} },
     .{ "posix_kill", {} },
-    .{ "array_rand", {} },
-    .{ "pcntl_wait", {} },
-    .{ "pcntl_fork", {} },
-    .{ "php_concat", {} },
-    .{ "array_flip", {} },
-    .{ "shell_exec", {} },
-    .{ "is_numeric", {} },
-    .{ "array_rand", {} },
-    .{ "strtoupper", {} },
-    .{ "array_fill", {} },
-    .{ "array_diff", {} },
-    .{ "random_int", {} },
-    .{ "array_flip", {} },
+    .{ "array_walk", {} },
     .{ "strtolower", {} },
+    .{ "random_int", {} },
     .{ "array_fill", {} },
+    .{ "filter_var", {} },
     .{ "str_repeat", {} },
+    .{ "php_concat", {} },
+    .{ "preg_match", {} },
+    .{ "pcntl_fork", {} },
+    .{ "pcntl_wait", {} },
+    .{ "preg_split", {} },
+    .{ "array_rand", {} },
+    .{ "is_numeric", {} },
+    .{ "preg_quote", {} },
+    .{ "array_flip", {} },
+    .{ "addslashes", {} },
+    .{ "str_getcsv", {} },
+    .{ "strtoupper", {} },
+    .{ "array_rand", {} },
+    .{ "array_push", {} },
+    .{ "strcasecmp", {} },
+    .{ "var_export", {} },
+    .{ "array_keys", {} },
     .{ "array_walk", {} },
     .{ "preg_match", {} },
-    .{ "preg_split", {} },
-    .{ "preg_quote", {} },
+    .{ "sem_remove", {} },
     .{ "array_diff", {} },
-    .{ "str_getcsv", {} },
-    .{ "strcasecmp", {} },
-    .{ "preg_match", {} },
+    .{ "shmop_open", {} },
+    .{ "user_error", {} },
+    .{ "array_fill", {} },
+    .{ "array_flip", {} },
+    .{ "gc_enabled", {} },
     .{ "preg_split", {} },
-    .{ "filter_var", {} },
+    .{ "shell_exec", {} },
     .{ "strip_tags", {} },
-    .{ "array_keys", {} },
-    .{ "preg_filter", {} },
-    .{ "is_resource", {} },
-    .{ "file_exists", {} },
-    .{ "array_merge", {} },
-    .{ "is_writable", {} },
-    .{ "array_slice", {} },
-    .{ "is_readable", {} },
-    .{ "shmop_close", {} },
-    .{ "array_chunk", {} },
-    .{ "array_shift", {} },
-    .{ "is_callable", {} },
-    .{ "is_resource", {} },
-    .{ "json_decode", {} },
-    .{ "is_infinite", {} },
-    .{ "is_iterable", {} },
-    .{ "pcntl_alarm", {} },
-    .{ "chunk_split", {} },
-    .{ "file_exists", {} },
     .{ "str_replace", {} },
+    .{ "pcntl_alarm", {} },
+    .{ "json_decode", {} },
+    .{ "chunk_split", {} },
     .{ "json_encode", {} },
+    .{ "php_bool_or", {} },
+    .{ "file_exists", {} },
+    .{ "ctype_alnum", {} },
+    .{ "ctype_alpha", {} },
+    .{ "ctype_digit", {} },
+    .{ "ctype_lower", {} },
+    .{ "ctype_upper", {} },
+    .{ "array_shift", {} },
     .{ "unserialize", {} },
-    .{ "trait_exists", {} },
+    .{ "ctype_space", {} },
+    .{ "is_resource", {} },
+    .{ "array_slice", {} },
+    .{ "array_merge", {} },
+    .{ "file_exists", {} },
+    .{ "is_readable", {} },
+    .{ "gethostname", {} },
+    .{ "preg_filter", {} },
+    .{ "is_writable", {} },
+    .{ "ctype_graph", {} },
+    .{ "ctype_print", {} },
+    .{ "ctype_cntrl", {} },
+    .{ "array_chunk", {} },
+    .{ "ctype_punct", {} },
+    .{ "is_iterable", {} },
+    .{ "shmop_close", {} },
+    .{ "is_infinite", {} },
+    .{ "is_resource", {} },
+    .{ "is_callable", {} },
+    .{ "array_splice", {} },
+    .{ "str_contains", {} },
     .{ "htmlentities", {} },
-    .{ "class_exists", {} },
-    .{ "rawurlencode", {} },
-    .{ "pcntl_signal", {} },
-    .{ "array_search", {} },
-    .{ "func_get_arg", {} },
-    .{ "rawurldecode", {} },
-    .{ "preg_replace", {} },
-    .{ "is_countable", {} },
-    .{ "array_reduce", {} },
-    .{ "array_unique", {} },
-    .{ "posix_getpid", {} },
-    .{ "array_column", {} },
-    .{ "posix_mkfifo", {} },
-    .{ "array_values", {} },
-    .{ "socket_close", {} },
-    .{ "array_splice", {} },
-    .{ "array_filter", {} },
-    .{ "array_splice", {} },
-    .{ "preg_replace", {} },
     .{ "setStaticVar", {} },
+    .{ "array_column", {} },
+    .{ "array_column", {} },
+    .{ "array_search", {} },
+    .{ "ctype_xdigit", {} },
+    .{ "pcntl_signal", {} },
     .{ "getStaticVar", {} },
     .{ "random_bytes", {} },
-    .{ "str_contains", {} },
-    .{ "array_column", {} },
+    .{ "array_splice", {} },
+    .{ "posix_getpid", {} },
     .{ "str_ireplace", {} },
-    .{ "str_ends_with", {} },
+    .{ "posix_mkfifo", {} },
+    .{ "class_exists", {} },
+    .{ "is_countable", {} },
+    .{ "headers_list", {} },
+    .{ "ob_get_level", {} },
+    .{ "ob_end_flush", {} },
+    .{ "array_reduce", {} },
+    .{ "preg_replace", {} },
+    .{ "array_filter", {} },
+    .{ "socket_close", {} },
+    .{ "ob_get_clean", {} },
+    .{ "substr_count", {} },
+    .{ "ob_end_clean", {} },
+    .{ "array_values", {} },
+    .{ "trait_exists", {} },
+    .{ "rawurldecode", {} },
+    .{ "rawurlencode", {} },
+    .{ "preg_replace", {} },
+    .{ "stripslashes", {} },
+    .{ "base_convert", {} },
+    .{ "array_unique", {} },
+    .{ "func_get_arg", {} },
     .{ "php_sapi_name", {} },
-    .{ "array_reverse", {} },
     .{ "array_combine", {} },
-    .{ "array_unshift", {} },
-    .{ "func_get_args", {} },
-    .{ "array_product", {} },
-    .{ "msg_get_queue", {} },
     .{ "base64_encode", {} },
-    .{ "array_is_list", {} },
-    .{ "number_format", {} },
-    .{ "pcntl_waitpid", {} },
-    .{ "method_exists", {} },
+    .{ "func_get_args", {} },
     .{ "array_combine", {} },
     .{ "base64_decode", {} },
+    .{ "msg_get_queue", {} },
+    .{ "trigger_error", {} },
+    .{ "mb_strtolower", {} },
+    .{ "mb_strtoupper", {} },
+    .{ "array_product", {} },
+    .{ "pcntl_waitpid", {} },
+    .{ "strnatcasecmp", {} },
+    .{ "str_ends_with", {} },
+    .{ "method_exists", {} },
+    .{ "array_is_list", {} },
+    .{ "array_reverse", {} },
+    .{ "ob_get_status", {} },
+    .{ "ob_get_length", {} },
+    .{ "number_format", {} },
+    .{ "array_unshift", {} },
     .{ "func_num_args", {} },
+    .{ "gethostbyname", {} },
+    .{ "preg_match_all", {} },
     .{ "php_ref_assign", {} },
-    .{ "str_word_count", {} },
-    .{ "php_go_builtin", {} },
+    .{ "call_user_func", {} },
     .{ "array_key_last", {} },
-    .{ "is_subclass_of", {} },
-    .{ "preg_match_all", {} },
-    .{ "array_key_last", {} },
-    .{ "php_object_new", {} },
     .{ "substr_replace", {} },
-    .{ "escapeshellcmd", {} },
-    .{ "escapeshellarg", {} },
+    .{ "str_word_count", {} },
+    .{ "is_subclass_of", {} },
+    .{ "php_go_builtin", {} },
     .{ "preg_match_all", {} },
+    .{ "array_key_last", {} },
+    .{ "escapeshellcmd", {} },
+    .{ "php_object_new", {} },
+    .{ "escapeshellarg", {} },
+    .{ "get_debug_type", {} },
     .{ "array_diff_key", {} },
     .{ "throwThrowable", {} },
-    .{ "php_json_encode", {} },
-    .{ "array_fill_keys", {} },
-    .{ "array_multisort", {} },
-    .{ "array_intersect", {} },
-    .{ "array_key_first", {} },
-    .{ "array_fill_keys", {} },
-    .{ "function_exists", {} },
-    .{ "array_key_first", {} },
-    .{ "str_starts_with", {} },
+    .{ "ob_get_contents", {} },
     .{ "property_exists", {} },
+    .{ "get_resource_id", {} },
+    .{ "function_exists", {} },
     .{ "array_intersect", {} },
+    .{ "array_fill_keys", {} },
+    .{ "array_intersect", {} },
+    .{ "json_last_error", {} },
+    .{ "php_json_encode", {} },
+    .{ "array_key_first", {} },
+    .{ "array_fill_keys", {} },
+    .{ "str_starts_with", {} },
+    .{ "array_multisort", {} },
+    .{ "debug_zval_dump", {} },
     .{ "array_multisort", {} },
     .{ "preg_last_error", {} },
-    .{ "php_object_unset", {} },
-    .{ "msg_remove_queue", {} },
-    .{ "htmlspecialchars", {} },
-    .{ "get_parent_class", {} },
-    .{ "array_key_exists", {} },
+    .{ "array_key_first", {} },
+    .{ "http_build_query", {} },
     .{ "interface_exists", {} },
-    .{ "sys_get_temp_dir", {} },
+    .{ "array_key_exists", {} },
+    .{ "msg_remove_queue", {} },
     .{ "php_constant_get", {} },
     .{ "memory_get_usage", {} },
-    .{ "pcntl_sigprocmask", {} },
+    .{ "get_parent_class", {} },
+    .{ "sys_get_temp_dir", {} },
+    .{ "php_object_unset", {} },
+    .{ "htmlspecialchars", {} },
+    .{ "file_put_contents", {} },
     .{ "gc_collect_cycles", {} },
     .{ "file_get_contents", {} },
     .{ "file_put_contents", {} },
-    .{ "file_get_contents", {} },
-    .{ "file_put_contents", {} },
+    .{ "pcntl_sigprocmask", {} },
     .{ "pcntl_wexitstatus", {} },
-    .{ "php_array_iter_key", {} },
+    .{ "set_error_handler", {} },
+    .{ "file_get_contents", {} },
+    .{ "ob_implicit_flush", {} },
     .{ "socket_create_pair", {} },
+    .{ "http_response_code", {} },
     .{ "array_count_values", {} },
-    .{ "php_create_closure", {} },
+    .{ "php_array_iter_key", {} },
+    .{ "array_count_values", {} },
     .{ "php_ref_assign_ptr", {} },
-    .{ "array_count_values", {} },
-    .{ "json_last_error_msg", {} },
+    .{ "php_create_closure", {} },
     .{ "php_array_iter_free", {} },
+    .{ "json_last_error_msg", {} },
     .{ "php_array_iter_init", {} },
     .{ "array_walk_recursive", {} },
-    .{ "php_array_merge_into", {} },
     .{ "array_walk_recursive", {} },
-    .{ "pcntl_signal_dispatch", {} },
+    .{ "php_array_merge_into", {} },
+    .{ "call_user_func_array", {} },
     .{ "preg_replace_callback", {} },
     .{ "preg_replace_callback", {} },
+    .{ "restore_error_handler", {} },
+    .{ "set_exception_handler", {} },
     .{ "memory_get_peak_usage", {} },
+    .{ "pcntl_signal_dispatch", {} },
     .{ "php_args_append_spread", {} },
-    .{ "php_array_iter_free_ref", {} },
+    .{ "preg_match_with_matches", {} },
     .{ "php_array_iter_init_ref", {} },
     .{ "htmlspecialchars_decode", {} },
-    .{ "preg_match_with_matches", {} },
     .{ "php_array_iter_next_ref", {} },
+    .{ "php_array_iter_free_ref", {} },
     .{ "php_array_iter_valid_ref", {} },
+    .{ "restore_exception_handler", {} },
+    .{ "php_object_call_named_args", {} },
     .{ "php_object_call_args_array", {} },
-    .{ "php_array_iter_value_ref_reuse", {} },
     .{ "php_invoke_callable_args_array", {} },
+    .{ "php_array_iter_value_ref_reuse", {} },
+    .{ "php_property_array_set_with_obj", {} },
     .{ "php_object_new_with_constructor", {} },
     .{ "php_object_call_safe_args_array", {} },
+    .{ "php_property_array_push_with_obj", {} },
 });
 
 pub fn aot_function_exists(name: []const u8) runtime.Value {

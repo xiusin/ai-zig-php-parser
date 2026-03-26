@@ -2768,6 +2768,10 @@ pub const NativeLinker = struct {
         .{ "ob_get_level", bi(.{ .runtime_name = "php_ob_get_level", .needs_allocator = false, .may_raise = false }) },
         .{ "ob_flush", bi(.{ .runtime_name = "php_ob_flush", .needs_allocator = false }) },
         .{ "ob_end_flush", bi(.{ .runtime_name = "php_ob_end_flush", .needs_allocator = false }) },
+        .{ "ob_get_length", bi(.{ .runtime_name = "php_ob_get_length", .needs_allocator = false, .may_raise = false }) },
+        .{ "ob_get_status", bi(.{ .runtime_name = "php_ob_get_status", .needs_allocator = true }) },
+        .{ "ob_implicit_flush", bi(.{ .runtime_name = "php_ob_implicit_flush", .needs_allocator = false, .may_raise = false }) },
+        .{ "get_resource_id", bi(.{ .runtime_name = "php_get_resource_id", .needs_allocator = false }) },
 
         // 临时文件/调试
         .{ "tempnam", bi(.{ .runtime_name = "php_tempnam", .needs_allocator = true }) },
@@ -2793,6 +2797,7 @@ pub const NativeLinker = struct {
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
         .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
+        .{ "php_object_call_named_args", bi(.{ .runtime_name = "php_object_call_named_args", .needs_allocator = true }) },
         .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },

@@ -3297,6 +3297,9 @@ pub const Parser = struct {
             .double_question => 8, // Null coalescing
             .question => 7, // Ternary
             .equal, .plus_equal, .minus_equal, .asterisk_equal, .slash_equal, .percent_equal, .dot_equal, .star_star_equal, .less_less_equal, .greater_greater_equal, .and_equal, .or_equal, .caret_equal, .double_question_equal => 5,
+            .k_and => 4, // PHP low-precedence logical AND
+            .k_xor => 3, // PHP low-precedence logical XOR
+            .k_or => 2, // PHP low-precedence logical OR
             .comma => 1, // Comma operator (lowest precedence)
             else => 0,
         };

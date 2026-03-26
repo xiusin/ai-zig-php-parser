@@ -4649,6 +4649,9 @@ pub const IRGenerator = struct {
             // instanceof operator
             .k_instanceof => try self.generateInstanceOf(lhs_reg, bin_data.rhs),
 
+            // Logical XOR (low-precedence): treated same as bitwise XOR on truthiness
+            .k_xor => self.emitWithResult(.{ .bit_xor = .{ .lhs = lhs_reg, .rhs = rhs_reg } }, .php_value),
+
             // Comma operator: evaluate both, return right
             .comma => rhs_reg,
 

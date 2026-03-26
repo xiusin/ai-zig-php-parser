@@ -4252,8 +4252,8 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
     if (Value_isObject(actual_cb)) {
         const obj_ptr = Value_asObject(actual_cb);
         return obj_ptr.callMethod("__invoke", args) catch |err| switch (err) {
-            error.MethodNotFound => error.InvalidCallback,
-            else => err,
+            error.MethodNotFound => return Value.initBool(false),
+            else => return Value.initBool(false),
         };
     }
     if (actual_cb.isString()) {
@@ -4454,13 +4454,14 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
     }
 
     // 获取方法参数名（从函数元数据）
-    const func_meta = function_meta_registry orelse .{};
     const full_method_name = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ meta.name, method_name });
     defer allocator.free(full_method_name);
     
     // 尝试获取参数信息
-    const fm = func_meta.get(full_method_name);
-    const param_count = if (fm) |m| m.param_count else 0;
+    const param_count: u16 = if (function_meta_registry) |meta_reg|
+        (if (meta_reg.get(full_method_name)) |m| m.param_count else 0)
+    else
+        0;
 
     // 构建最终参数列表
     const final_args = try allocator.alloc(Value, @max(param_count, positional.items.len));
@@ -5217,6 +5218,11 @@ pub fn php_xor(lhs: Value, rhs: Value) !Value {
 /// 逻辑非运算
 pub fn php_not(val: Value) !Value {
     return Value.initBool(!val.toBool());
+}
+
+/// 逻辑异或运算 (xor)
+pub fn php_logical_xor(lhs: Value, rhs: Value) !Value {
+    return Value.initBool(lhs.toBool() != rhs.toBool());
 }
 
 // ============================================================================
@@ -10953,7 +10959,7 @@ pub const ClassMeta = struct {
 
         try registerClass(meta);
 
-        // Register standard PHP exception subclasses
+        // Register standard PHP exception subclasses (flat: extends Exception)
         const exception_subclasses = [_][]const u8{
             "RuntimeException",
             "LogicException",
@@ -10967,12 +10973,6 @@ pub const ClassMeta = struct {
             "RangeException",
             "UnderflowException",
             "UnexpectedValueException",
-            "TypeError",
-            "ValueError",
-            "Error",
-            "ArithmeticError",
-            "DivisionByZeroError",
-            "UnhandledMatchError",
         };
         for (exception_subclasses) |name| {
             const child = try ClassMeta.init(allocator, name);
@@ -10982,6 +10982,40 @@ pub const ClassMeta = struct {
             try registerClass(child);
         }
 
+        // Register Error hierarchy (separate from Exception in PHP)
+        // Error extends Exception in our implementation for simplicity
+        const error_meta = try ClassMeta.init(allocator, "Error");
+        error_meta.parent = meta;
+        error_meta.magic_construct = meta.magic_construct;
+        error_meta.magic_toString = meta.magic_toString;
+        try registerClass(error_meta);
+
+        // TypeError, ValueError extend Error
+        const error_subclasses = [_][]const u8{ "TypeError", "ValueError", "UnhandledMatchError" };
+        for (error_subclasses) |name| {
+            const child = try ClassMeta.init(allocator, name);
+            child.parent = error_meta;
+            child.magic_construct = meta.magic_construct;
+            child.magic_toString = meta.magic_toString;
+            try registerClass(child);
+        }
+
+        // ArithmeticError extends Error
+        const arith_meta = try ClassMeta.init(allocator, "ArithmeticError");
+        arith_meta.parent = error_meta;
+        arith_meta.magic_construct = meta.magic_construct;
+        arith_meta.magic_toString = meta.magic_toString;
+        try registerClass(arith_meta);
+
+        // DivisionByZeroError extends ArithmeticError
+        const divzero_meta = try ClassMeta.init(allocator, "DivisionByZeroError");
+        divzero_meta.parent = arith_meta;
+        divzero_meta.magic_construct = meta.magic_construct;
+        divzero_meta.magic_toString = meta.magic_toString;
+        try registerClass(divzero_meta);
+
+        // Register Closure class (Closure::bind, Closure::fromCallable)
+        try registerClosureClass(allocator);
         // Register WeakReference class
         try registerWeakReferenceClass(allocator);
         // Register WeakMap class
@@ -10990,6 +11024,118 @@ pub const ClassMeta = struct {
         try registerGeneratorClass(allocator);
         // Register Reflection classes
         try registerReflectionClasses(allocator);
+    }
+
+    /// ============================================================================
+    /// Closure Class Implementation
+    /// ============================================================================
+    /// PHP Closure class: Closure::bind(), Closure::fromCallable(), bindTo()
+
+    fn registerClosureClass(allocator: Allocator) !void {
+        const meta = try ClassMeta.init(allocator, "Closure");
+
+        // Closure::bind($closure, $newThis, $newScope = "static") — static method
+        try meta.addMethod(.{
+            .name = "bind",
+            .func = struct {
+                fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    // args[0] = closure, args[1] = newThis, args[2] = newScope (optional)
+                    if (args.len < 2) return Value.initNull();
+                    const closure_val = args[0];
+                    const new_this = args[1];
+
+                    if (!closure_val.isFunction()) return Value.initNull();
+                    const orig_closure = closure_val.asFunction();
+
+                    // 创建新闭包，复制原闭包的函数指针和捕获列表
+                    var new_captures = try alloc.alloc(Value, orig_closure.captures.len + 1);
+                    // 复制原有的捕获变量
+                    for (orig_closure.captures, 0..) |cap, i| {
+                        _ = cap.retain();
+                        new_captures[i] = cap;
+                    }
+                    // 最后一个捕获变量是绑定的 $this
+                    _ = new_this.retain();
+                    new_captures[orig_closure.captures.len] = new_this;
+
+                    const new_closure = try allocPHPClosure(alloc);
+                    new_closure.* = .{
+                        .func = orig_closure.func,
+                        .captures = new_captures,
+                        .ref_count = 1,
+                        .gc_info = .{},
+                        .allocator = alloc,
+                        .param_count = orig_closure.param_count,
+                        .required_params = orig_closure.required_params,
+                    };
+
+                    alloc_counters.php_closure_objects += 1;
+                    alloc_counters.php_closure_live_objects += 1;
+                    if (alloc_counters.php_closure_live_objects > alloc_counters.php_closure_peak_live_objects) {
+                        alloc_counters.php_closure_peak_live_objects = alloc_counters.php_closure_live_objects;
+                    }
+
+                    return Value.initFunction(new_closure);
+                }
+            }.call,
+            .is_static = true,
+        });
+
+        // Closure::fromCallable($callback) — static method
+        try meta.addMethod(.{
+            .name = "fromCallable",
+            .func = struct {
+                fn call(_: Value, args: []const Value, _: Allocator) anyerror!Value {
+                    if (args.len == 0) return Value.initNull();
+                    // 如果已经是闭包，直接返回
+                    if (args[0].isFunction()) {
+                        _ = args[0].retain();
+                        return args[0];
+                    }
+                    // 其他 callable 类型暂时原样返回
+                    _ = args[0].retain();
+                    return args[0];
+                }
+            }.call,
+            .is_static = true,
+        });
+
+        // bindTo($newThis, $newScope = "static") — instance method
+        try meta.addMethod(.{
+            .name = "bindTo",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    // 将 bindTo 转为 bind(self, newThis, newScope)
+                    if (args.len == 0) return Value.initNull();
+                    const bind_args = [_]Value{ ctx, args[0], if (args.len > 1) args[1] else Value.initNull() };
+                    // 直接调用 Closure 类的 bind 静态方法逻辑
+                    if (findClass("Closure")) |closure_meta| {
+                        if (closure_meta.findMethod("bind")) |bind_method| {
+                            return bind_method.func(ctx, &bind_args, alloc);
+                        }
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // call($newThis, ...$args) — instance method
+        try meta.addMethod(.{
+            .name = "call",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!ctx.isFunction()) return Value.initNull();
+                    if (args.len == 0) return Value.initNull();
+                    // args[0] = newThis, args[1..] = call args
+                    const closure = ctx.asFunction();
+                    return closure.func(ctx, args[1..], alloc);
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        try registerClass(meta);
     }
 
     /// ============================================================================
@@ -14297,19 +14443,29 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
 pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
-            break :blk getCurrentScopeClass() orelse return error.ClassNotFound;
+            break :blk getCurrentScopeClass() orelse {
+                return throwException("Cannot access self:: when no class scope is active", allocator);
+            };
         }
         if (std.mem.eql(u8, class_name, "parent")) {
-            const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
-            if (scope.parent == null) {
-                std.debug.print("ERROR: Class {s} has no parent\n", .{scope.name});
-            }
-            break :blk scope.parent orelse return error.ClassNotFound;
+            const scope = getCurrentScopeClass() orelse {
+                return throwException("Cannot access parent:: when no class scope is active", allocator);
+            };
+            break :blk scope.parent orelse {
+                return throwException("Cannot access parent:: when current class has no parent", allocator);
+            };
         }
         if (std.mem.eql(u8, class_name, "static")) {
-            break :blk getCurrentCalledClass() orelse return error.ClassNotFound;
+            // static:: 回退：先查 called class，再查 scope class
+            break :blk getCurrentCalledClass() orelse getCurrentScopeClass() orelse {
+                return throwException("Cannot access static:: when no class scope is active", allocator);
+            };
         }
-        break :blk findClass(class_name) orelse return error.ClassNotFound;
+        break :blk findClass(class_name) orelse {
+            const msg = std.fmt.allocPrint(allocator, "Class \"{s}\" not found", .{class_name}) catch return Value.initNull();
+            defer allocator.free(msg);
+            return throwException(msg, allocator);
+        };
     };
 
     const called_meta = blk: {
@@ -14317,7 +14473,8 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
             std.mem.eql(u8, class_name, "parent") or
             std.mem.eql(u8, class_name, "static"))
         {
-            break :blk getCurrentCalledClass() orelse return error.ClassNotFound;
+            // 与 lookup_meta 同步回退逻辑
+            break :blk getCurrentCalledClass() orelse getCurrentScopeClass() orelse lookup_meta;
         }
         break :blk lookup_meta;
     };
@@ -17453,6 +17610,51 @@ pub fn php_ob_end_flush() !Value {
     return Value.initBool(true);
 }
 
+/// ob_get_length - 返回输出缓冲区内容的长度
+pub fn php_ob_get_length() Value {
+    ensureObInit();
+    if (ob_stack.items.len == 0) return Value.initBool(false);
+    const level = &ob_stack.items[ob_stack.items.len - 1];
+    return Value.initInt(@intCast(level.buffer.items.len));
+}
+
+/// ob_get_status - 获取输出缓冲区的状态
+pub fn php_ob_get_status(full_status: Value, allocator: Allocator) !Value {
+    ensureObInit();
+    if (full_status.toBool()) {
+        // 返回所有级别的状态数组
+        const result = try PHPArray.init(allocator);
+        for (ob_stack.items, 0..) |_, i| {
+            const level_arr = try PHPArray.init(allocator);
+            try level_arr.setByString(allocator, "level", Value.initInt(@intCast(i + 1)));
+            try level_arr.setByString(allocator, "name", Value.initString(try PHPString.init(allocator, "default output handler")));
+            try level_arr.setByString(allocator, "buffer_size", Value.initInt(0));
+            try result.push(allocator, Value.initArray(level_arr));
+        }
+        return Value.initArray(result);
+    }
+    // 返回当前级别的状态
+    if (ob_stack.items.len == 0) return Value.initArray(try PHPArray.init(allocator));
+    const level_arr = try PHPArray.init(allocator);
+    try level_arr.setByString(allocator, "level", Value.initInt(@intCast(ob_stack.items.len)));
+    try level_arr.setByString(allocator, "name", Value.initString(try PHPString.init(allocator, "default output handler")));
+    try level_arr.setByString(allocator, "buffer_size", Value.initInt(0));
+    return Value.initArray(level_arr);
+}
+
+/// ob_implicit_flush - 打开/关闭隐式刷新
+pub fn php_ob_implicit_flush(flag: Value) Value {
+    _ = flag;
+    return Value.initNull();
+}
+
+/// get_resource_id - 返回资源的整数标识符
+pub fn php_get_resource_id(val: Value) !Value {
+    // AOT 中没有真正的资源类型，返回 0
+    _ = val;
+    return Value.initInt(0);
+}
+
 // ============================================================================
 // JSON函数
 // ============================================================================
@@ -19455,18 +19657,55 @@ pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
 
     const algo = algorithm.asString().data;
 
+    const input = data.asString().data;
+
     if (std.mem.eql(u8, algo, "md5")) {
         return php_md5(data, Value.initBool(false), allocator);
     } else if (std.mem.eql(u8, algo, "sha1")) {
         return php_sha1(data, Value.initBool(false), allocator);
     } else if (std.mem.eql(u8, algo, "sha256")) {
         return php_sha256(data, allocator);
+    } else if (std.mem.eql(u8, algo, "sha224")) {
+        var hash: [28]u8 = undefined;
+        std.crypto.hash.sha2.Sha224.hash(input, &hash, .{});
+        var hex_str: [56]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
+    } else if (std.mem.eql(u8, algo, "sha384")) {
+        var hash: [48]u8 = undefined;
+        std.crypto.hash.sha2.Sha384.hash(input, &hash, .{});
+        var hex_str: [96]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
+    } else if (std.mem.eql(u8, algo, "sha512")) {
+        var hash: [64]u8 = undefined;
+        std.crypto.hash.sha2.Sha512.hash(input, &hash, .{});
+        var hex_str: [128]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
+    } else if (std.mem.eql(u8, algo, "sha512/256") or std.mem.eql(u8, algo, "sha512256")) {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha512256.hash(input, &hash, .{});
+        var hex_str: [64]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
     } else if (std.mem.eql(u8, algo, "crc32") or std.mem.eql(u8, algo, "crc32b")) {
-        // crc32b 返回 8 位十六进制
-        const input = data.asString().data;
         const crc = std.hash.crc.Crc32.hash(input);
         var hex_buf: [8]u8 = undefined;
         _ = std.fmt.bufPrint(&hex_buf, "{x:0>8}", .{crc}) catch return Value.initBool(false);
+        return Value.initString(try PHPString.init(allocator, &hex_buf));
+    } else if (std.mem.eql(u8, algo, "adler32")) {
+        const adler = std.hash.Adler32.hash(input);
+        var hex_buf: [8]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buf, "{x:0>8}", .{adler}) catch return Value.initBool(false);
         return Value.initString(try PHPString.init(allocator, &hex_buf));
     }
 
