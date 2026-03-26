@@ -2756,6 +2756,18 @@ pub const NativeLinker = struct {
 
         // 文件系统
         .{ "glob", bi(.{ .runtime_name = "php_glob", .needs_allocator = true }) },
+        .{ "touch", bi(.{ .runtime_name = "php_touch", .needs_allocator = false }) },
+        .{ "pathinfo", bi(.{ .runtime_name = "php_pathinfo", .needs_allocator = false }) },
+        .{ "realpath", bi(.{ .runtime_name = "php_realpath", .needs_allocator = true }) },
+
+        // 输出缓冲
+        .{ "ob_start", bi(.{ .runtime_name = "php_ob_start", .needs_allocator = false }) },
+        .{ "ob_get_contents", bi(.{ .runtime_name = "php_ob_get_contents", .needs_allocator = true }) },
+        .{ "ob_end_clean", bi(.{ .runtime_name = "php_ob_end_clean", .needs_allocator = false }) },
+        .{ "ob_get_clean", bi(.{ .runtime_name = "php_ob_get_clean", .needs_allocator = true }) },
+        .{ "ob_get_level", bi(.{ .runtime_name = "php_ob_get_level", .needs_allocator = false, .may_raise = false }) },
+        .{ "ob_flush", bi(.{ .runtime_name = "php_ob_flush", .needs_allocator = false }) },
+        .{ "ob_end_flush", bi(.{ .runtime_name = "php_ob_end_flush", .needs_allocator = false }) },
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
@@ -8486,6 +8498,25 @@ pub const NativeLinker = struct {
                                     }
                                 }
                                 try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_ob_start")) {
+                                // ob_start(callback = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_pathinfo")) {
+                                // pathinfo(path, option = -1)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(-1)");
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_mb_substr")) {
                                 // mb_substr(str, start, length = null, encoding = null)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});

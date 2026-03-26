@@ -17204,6 +17204,159 @@ pub fn php_getmypid() Value {
     return Value.initInt(@intCast(pid));
 }
 
+/// touch - 设置文件的访问和修改时间
+pub fn php_touch(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const path = filename.asString().data;
+
+    // 如果文件不存在，创建空文件
+    const file = std.fs.cwd().createFile(path, .{ .exclusive = false, .truncate = false }) catch {
+        return Value.initBool(false);
+    };
+    file.close();
+    return Value.initBool(true);
+}
+
+/// pathinfo - 返回文件路径的信息
+pub fn php_pathinfo(path_val: Value, option: Value, allocator: Allocator) !Value {
+    if (!path_val.isString()) return Value.initString(try PHPString.init(allocator, ""));
+
+    const path = path_val.asString().data;
+    const opt = option.toInt();
+
+    // PATHINFO_DIRNAME = 1, PATHINFO_BASENAME = 2, PATHINFO_EXTENSION = 4, PATHINFO_FILENAME = 8
+    const dir = std.fs.path.dirname(path) orelse ".";
+    const base = std.fs.path.basename(path);
+    const ext_with_dot = std.fs.path.extension(path);
+    const ext = if (ext_with_dot.len > 0) ext_with_dot[1..] else "";
+    const filename = if (ext_with_dot.len > 0) base[0 .. base.len - ext_with_dot.len] else base;
+
+    if (opt == 1) return Value.initString(try PHPString.init(allocator, dir));
+    if (opt == 2) return Value.initString(try PHPString.init(allocator, base));
+    if (opt == 4) return Value.initString(try PHPString.init(allocator, ext));
+    if (opt == 8) return Value.initString(try PHPString.init(allocator, filename));
+
+    // 默认返回关联数组
+    const arr = try PHPArray.init(allocator);
+    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "dirname") }, Value.initString(try PHPString.init(allocator, dir)));
+    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "basename") }, Value.initString(try PHPString.init(allocator, base)));
+    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "extension") }, Value.initString(try PHPString.init(allocator, ext)));
+    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "filename") }, Value.initString(try PHPString.init(allocator, filename)));
+    return Value.initArray(arr);
+}
+
+/// realpath - 返回规范化的绝对路径名
+pub fn php_realpath(path_val: Value, allocator: Allocator) !Value {
+    if (!path_val.isString()) return Value.initBool(false);
+    const path = path_val.asString().data;
+
+    const c_path = try allocator.dupeZ(u8, path);
+    defer allocator.free(c_path);
+
+    const resolved = std.c.realpath(c_path.ptr, null);
+    if (resolved == null) return Value.initBool(false);
+    defer std.c.free(resolved);
+
+    const result_str = std.mem.span(resolved.?);
+    return Value.initString(try PHPString.init(allocator, result_str));
+}
+
+// ============================================================================
+// 输出缓冲系统
+// ============================================================================
+
+/// 输出缓冲栈
+const OBLevel = struct {
+    buffer: std.ArrayListUnmanaged(u8) = .{},
+    callback: ?Value = null,
+};
+
+threadlocal var ob_stack: std.ArrayListUnmanaged(OBLevel) = .{};
+threadlocal var ob_initialized: bool = false;
+
+fn ensureObInit() void {
+    if (!ob_initialized) {
+        ob_stack = .{};
+        ob_initialized = true;
+    }
+}
+
+/// ob_start - 打开输出缓冲
+pub fn php_ob_start(callback: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    ensureObInit();
+    var level = OBLevel{};
+    if (!callback.isNull()) {
+        _ = callback.retain();
+        level.callback = callback;
+    }
+    try ob_stack.append(runtime_allocator, level);
+    return Value.initBool(true);
+}
+
+/// ob_get_contents - 返回输出缓冲区的内容
+pub fn php_ob_get_contents(allocator: Allocator) !Value {
+    ensureObInit();
+    if (ob_stack.items.len == 0) return Value.initBool(false);
+    const level = &ob_stack.items[ob_stack.items.len - 1];
+    return Value.initString(try PHPString.init(allocator, level.buffer.items));
+}
+
+/// ob_end_clean - 清除并关闭输出缓冲区
+pub fn php_ob_end_clean() !Value {
+    ensureObInit();
+    if (ob_stack.items.len == 0) return Value.initBool(false);
+    var level = ob_stack.pop();
+    level.buffer.deinit(runtime_allocator);
+    if (level.callback) |cb| cb.release(runtime_allocator);
+    return Value.initBool(true);
+}
+
+/// ob_get_clean - 获取缓冲区内容并关闭
+pub fn php_ob_get_clean(allocator: Allocator) !Value {
+    ensureObInit();
+    if (ob_stack.items.len == 0) return Value.initBool(false);
+    const contents = try PHPString.init(allocator, ob_stack.items[ob_stack.items.len - 1].buffer.items);
+    var level = ob_stack.pop();
+    level.buffer.deinit(runtime_allocator);
+    if (level.callback) |cb| cb.release(runtime_allocator);
+    return Value.initString(contents);
+}
+
+/// ob_get_level - 返回输出缓冲区嵌套级别
+pub fn php_ob_get_level() Value {
+    ensureObInit();
+    return Value.initInt(@intCast(ob_stack.items.len));
+}
+
+/// ob_flush - 刷新输出缓冲区
+pub fn php_ob_flush() !Value {
+    ensureObInit();
+    if (ob_stack.items.len == 0) return Value.initBool(false);
+    const level = &ob_stack.items[ob_stack.items.len - 1];
+    // 将缓冲区内容输出到 stdout
+    if (level.buffer.items.len > 0) {
+        const stdout = std.io.getStdOut().writer();
+        stdout.writeAll(level.buffer.items) catch {};
+        level.buffer.clearRetainingCapacity();
+    }
+    return Value.initBool(true);
+}
+
+/// ob_end_flush - 刷新并关闭输出缓冲区
+pub fn php_ob_end_flush() !Value {
+    ensureObInit();
+    if (ob_stack.items.len == 0) return Value.initBool(false);
+    var level = ob_stack.pop();
+    if (level.buffer.items.len > 0) {
+        const stdout = std.io.getStdOut().writer();
+        stdout.writeAll(level.buffer.items) catch {};
+    }
+    level.buffer.deinit(runtime_allocator);
+    if (level.callback) |cb| cb.release(runtime_allocator);
+    return Value.initBool(true);
+}
+
 // ============================================================================
 // JSON函数
 // ============================================================================
