@@ -2714,8 +2714,8 @@ pub const NativeLinker = struct {
         // 多字节字符串函数
         .{ "mb_strlen", bi(.{ .runtime_name = "php_mb_strlen", .needs_allocator = false }) },
         .{ "mb_substr", bi(.{ .runtime_name = "php_mb_substr", .needs_allocator = false }) },
-        .{ "mb_strtoupper", bi(.{ .runtime_name = "php_mb_strtoupper", .needs_allocator = true }) },
-        .{ "mb_strtolower", bi(.{ .runtime_name = "php_mb_strtolower", .needs_allocator = true }) },
+        .{ "mb_strtoupper", bi(.{ .runtime_name = "php_mb_strtoupper", .needs_allocator = false }) },
+        .{ "mb_strtolower", bi(.{ .runtime_name = "php_mb_strtolower", .needs_allocator = false }) },
 
         // 错误处理（特殊处理参数）
         .{ "set_error_handler", bi(.{ .runtime_name = "php_set_error_handler", .needs_allocator = false }) },
@@ -2742,8 +2742,8 @@ pub const NativeLinker = struct {
         .{ "long2ip", bi(.{ .runtime_name = "php_long2ip", .needs_allocator = true }) },
 
         // 错误处理
-        .{ "trigger_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = true }) },
-        .{ "user_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = true }) },
+        .{ "trigger_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = false }) },
+        .{ "user_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = false }) },
         .{ "set_exception_handler", bi(.{ .runtime_name = "php_set_exception_handler", .needs_allocator = true }) },
         .{ "restore_exception_handler", bi(.{ .runtime_name = "php_restore_exception_handler", .needs_allocator = false }) },
 
@@ -8555,6 +8555,26 @@ pub const NativeLinker = struct {
                                     try self.writeValueArgs(writer, op.args);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initInt(-1)");
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_trigger_error")) {
+                                // trigger_error(message, error_type = E_USER_NOTICE)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(1024)"); // E_USER_NOTICE
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_mb_strtoupper") or std.mem.eql(u8, runtime_name, "php_mb_strtolower")) {
+                                // mb_strtoupper/mb_strtolower(str, encoding = "UTF-8")
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
                                     }
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
