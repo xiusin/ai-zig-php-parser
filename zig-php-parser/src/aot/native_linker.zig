@@ -257,6 +257,20 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// 写入转义后的 Zig 字符串字面量内容（处理反斜杠等特殊字符）
+    fn writeEscapedZigString(writer: anytype, str: []const u8) !void {
+        for (str) |c| {
+            switch (c) {
+                '\\' => try writer.writeAll("\\\\"),
+                '"' => try writer.writeAll("\\\""),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => try writer.writeByte(c),
+            }
+        }
+    }
+
     /// 类型推断统计（用于诊断和质量门禁）
     var type_infer_hit_count: usize = 0;
     var type_infer_fallback_count: usize = 0;
@@ -1095,14 +1109,22 @@ pub const NativeLinker = struct {
             if (!func.register_at_startup) continue;
 
             // 直接注册函数，因为函数签名已经统一
-            try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ func.name, func.name, func.location.file, func.location.line });
+            try writer.writeAll("    try runtime.registerUserFunctionWithLocation(\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\", @\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\", \"");
+            try writeEscapedZigString(writer, func.location.file);
+            try writer.print("\", {d});\n", .{func.location.line});
             // 注册函数元数据（参数计数，用于反射 API）
             const param_count = func.params.items.len;
             var required_count: usize = 0;
             for (func.params.items) |p| {
                 if (!p.has_default and !p.is_variadic) required_count += 1;
             }
-            try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ func.name, param_count, required_count });
+            try writer.writeAll("    runtime.registerFunctionMeta(\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.print("\", {d}, {d});\n", .{ param_count, required_count });
         }
 
         // 为闭包函数也注册元数据（闭包不走 register_at_startup 但需要反射元数据）
@@ -1113,7 +1135,9 @@ pub const NativeLinker = struct {
                 for (func.params.items) |p| {
                     if (!p.has_default and !p.is_variadic) crc += 1;
                 }
-                try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ func.name, cpc, crc });
+                try writer.writeAll("    runtime.registerFunctionMeta(\"");
+                try writeEscapedZigString(writer, func.name);
+                try writer.print("\", {d}, {d});\n", .{ cpc, crc });
             }
         }
 
@@ -1178,8 +1202,12 @@ pub const NativeLinker = struct {
             if (func.is_method) continue; // 跳过方法，只处理全局函数
             
             has_user_functions = true;
-            try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{func.name});
-            try writer.print("        return @\"{s}\"(runtime.Value.initNull(), args, allocator);\n", .{func.name});
+            try writer.writeAll("    if (std.mem.eql(u8, name, \"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\")) {\n");
+            try writer.writeAll("        return @\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\"(runtime.Value.initNull(), args, allocator);\n");
             try writer.writeAll("    }\n");
         }
 
@@ -1217,14 +1245,22 @@ pub const NativeLinker = struct {
             if (!class_has_static_methods) continue;
             
             has_static_methods = true;
-            try writer.print("    if (std.mem.eql(u8, class_name, \"{s}\")) {{\n", .{type_def.name});
+            try writer.writeAll("    if (std.mem.eql(u8, class_name, \"");
+            try writeEscapedZigString(writer, type_def.name);
+            try writer.writeAll("\")) {\n");
             
             for (type_def.methods) |method| {
                 if (!method.is_static) continue;
                 
-                try writer.print("        if (std.mem.eql(u8, method_name, \"{s}\")) {{\n", .{method.name});
+                try writer.writeAll("        if (std.mem.eql(u8, method_name, \"");
+                try writeEscapedZigString(writer, method.name);
+                try writer.writeAll("\")) {\n");
                 // 静态方法的完整名称是 "ClassName::methodName"
-                try writer.print("            return @\"{s}::{s}\"(runtime.Value.initNull(), args, allocator);\n", .{type_def.name, method.name});
+                try writer.writeAll("            return @\"");
+                try writeEscapedZigString(writer, type_def.name);
+                try writer.writeAll("::");
+                try writeEscapedZigString(writer, method.name);
+                try writer.writeAll("\"(runtime.Value.initNull(), args, allocator);\n");
                 try writer.writeAll("        }\n");
             }
             
@@ -1473,8 +1509,9 @@ pub const NativeLinker = struct {
                 return;
             }
             
-            // 两个都是具体实现，或两个都是抽象方法 -> 冲突
-            return error.TraitMethodConflict;
+            // 两个都是具体实现 -> 后来者覆盖（PHP在有alias时允许这种行为）
+            list.items[idx] = method;
+            return;
         }
         try list.append(self.allocator, method);
     }
@@ -7572,10 +7609,9 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    const deref = if (self.isPointerReg(reg.id)) ".*" else "";
 
-                    // 所有寄存器都声明为runtime.Value，所以总是生成返回Value的代码
-                    // 不再根据type_tag判断，因为会导致类型不匹配
-                    try writer.print("    reg_{d} = try runtime.php_identical(", .{reg.id});
+                    try writer.print("    reg_{d}{s} = try runtime.php_identical(", .{ reg.id, deref });
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
                     try writer.writeAll(", ");
                     try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
@@ -7586,10 +7622,9 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    const deref = if (self.isPointerReg(reg.id)) ".*" else "";
 
-                    // 所有寄存器都声明为runtime.Value，所以总是生成返回Value的代码
-                    // 不再根据type_tag判断，因为会导致类型不匹配
-                    try writer.print("    reg_{d} = try runtime.php_not_identical(", .{reg.id});
+                    try writer.print("    reg_{d}{s} = try runtime.php_not_identical(", .{ reg.id, deref });
                     try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
                     try writer.writeAll(", ");
                     try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
