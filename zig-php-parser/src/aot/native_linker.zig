@@ -958,12 +958,7 @@ pub const NativeLinker = struct {
         // 初始化PHP预定义常量
         try writer.writeAll(
             \\    // 初始化PHP预定义常量
-            \\    {
-            \\        const key1 = try allocator.dupeZ(u8, "COUNT_RECURSIVE");
-            \\        try runtime.constants.put(key1, runtime.Value.initInt(1));
-            \\        const key2 = try allocator.dupeZ(u8, "COUNT_NORMAL");
-            \\        try runtime.constants.put(key2, runtime.Value.initInt(0));
-            \\    }
+            \\    try runtime.registerPHPPredefinedConstants(allocator);
             \\
         );
 

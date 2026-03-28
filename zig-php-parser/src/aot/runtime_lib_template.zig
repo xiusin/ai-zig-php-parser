@@ -5601,13 +5601,8 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
         return;
     }
     if (value.isFloat()) {
-        const f = value.asFloat();
-        // PHP格式化浮点数
-        if (@floor(f) == f and f >= -1e15 and f <= 1e15) {
-            try writer.print("{d}", .{@as(i64, @intFromFloat(f))});
-        } else {
-            try writer.print("{d}", .{f});
-        }
+        var buf: [64]u8 = undefined;
+        try writer.writeAll(phpFormatFloat(&buf, value.asFloat()));
         return;
     }
     if (value.isString()) {
@@ -5746,7 +5741,20 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
         return;
     }
     if (value.isFloat()) {
-        try writer.print("{d}", .{value.asFloat()});
+        const f = value.asFloat();
+        if (std.math.isNan(f)) {
+            try writer.writeAll("NAN");
+        } else if (std.math.isInf(f)) {
+            try writer.writeAll(if (f > 0) "INF" else "-INF");
+        } else {
+            var buf: [64]u8 = undefined;
+            const str = phpFormatFloat(&buf, f);
+            try writer.writeAll(str);
+            // var_export 浮点数必须含小数点
+            if (std.mem.indexOf(u8, str, ".") == null and std.mem.indexOf(u8, str, "E") == null) {
+                try writer.writeAll(".0");
+            }
+        }
         return;
     }
     if (value.isString()) {
@@ -5824,6 +5832,190 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
 // ============================================================================
 // 常量函数
 // ============================================================================
+
+/// 注册所有PHP预定义常量
+pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
+    const IntConst = struct { name: []const u8, value: i64 };
+    const FloatConst = struct { name: []const u8, value: f64 };
+    const StrConst = struct { name: []const u8, value: []const u8 };
+    const BoolConst = struct { name: []const u8, value: bool };
+
+    // 整数常量
+    const int_consts = [_]IntConst{
+        // 数组
+        .{ .name = "COUNT_NORMAL", .value = 0 },
+        .{ .name = "COUNT_RECURSIVE", .value = 1 },
+        .{ .name = "ARRAY_FILTER_USE_BOTH", .value = 1 },
+        .{ .name = "ARRAY_FILTER_USE_KEY", .value = 2 },
+        .{ .name = "ARRAY_UNIQUE_REGULAR", .value = 0 },
+        .{ .name = "SORT_REGULAR", .value = 0 },
+        .{ .name = "SORT_NUMERIC", .value = 1 },
+        .{ .name = "SORT_STRING", .value = 2 },
+        .{ .name = "SORT_ASC", .value = 4 },
+        .{ .name = "SORT_DESC", .value = 3 },
+        .{ .name = "SORT_NATURAL", .value = 6 },
+        .{ .name = "SORT_FLAG_CASE", .value = 8 },
+        // JSON
+        .{ .name = "JSON_PRETTY_PRINT", .value = 128 },
+        .{ .name = "JSON_UNESCAPED_UNICODE", .value = 256 },
+        .{ .name = "JSON_UNESCAPED_SLASHES", .value = 64 },
+        .{ .name = "JSON_THROW_ON_ERROR", .value = 4194304 },
+        .{ .name = "JSON_FORCE_OBJECT", .value = 16 },
+        .{ .name = "JSON_HEX_TAG", .value = 1 },
+        .{ .name = "JSON_HEX_AMP", .value = 2 },
+        .{ .name = "JSON_HEX_APOS", .value = 4 },
+        .{ .name = "JSON_HEX_QUOT", .value = 8 },
+        .{ .name = "JSON_NUMERIC_CHECK", .value = 32 },
+        .{ .name = "JSON_BIGINT_AS_STRING", .value = 512 },
+        .{ .name = "JSON_PARTIAL_OUTPUT_ON_ERROR", .value = 1024 },
+        .{ .name = "JSON_INVALID_UTF8_IGNORE", .value = 1048576 },
+        .{ .name = "JSON_INVALID_UTF8_SUBSTITUTE", .value = 2097152 },
+        // 错误级别
+        .{ .name = "E_ERROR", .value = 1 },
+        .{ .name = "E_WARNING", .value = 2 },
+        .{ .name = "E_PARSE", .value = 4 },
+        .{ .name = "E_NOTICE", .value = 8 },
+        .{ .name = "E_CORE_ERROR", .value = 16 },
+        .{ .name = "E_CORE_WARNING", .value = 32 },
+        .{ .name = "E_COMPILE_ERROR", .value = 64 },
+        .{ .name = "E_COMPILE_WARNING", .value = 128 },
+        .{ .name = "E_USER_ERROR", .value = 256 },
+        .{ .name = "E_USER_WARNING", .value = 512 },
+        .{ .name = "E_USER_NOTICE", .value = 1024 },
+        .{ .name = "E_STRICT", .value = 2048 },
+        .{ .name = "E_RECOVERABLE_ERROR", .value = 4096 },
+        .{ .name = "E_DEPRECATED", .value = 8192 },
+        .{ .name = "E_USER_DEPRECATED", .value = 16384 },
+        .{ .name = "E_ALL", .value = 32767 },
+        // 正则
+        .{ .name = "PREG_OFFSET_CAPTURE", .value = 256 },
+        .{ .name = "PREG_UNMATCHED_AS_NULL", .value = 512 },
+        .{ .name = "PREG_SET_ORDER", .value = 2 },
+        .{ .name = "PREG_PATTERN_ORDER", .value = 1 },
+        .{ .name = "PREG_SPLIT_NO_EMPTY", .value = 1 },
+        .{ .name = "PREG_SPLIT_DELIM_CAPTURE", .value = 2 },
+        // 文件
+        .{ .name = "FILE_APPEND", .value = 8 },
+        .{ .name = "FILE_IGNORE_NEW_LINES", .value = 2 },
+        .{ .name = "FILE_SKIP_EMPTY_LINES", .value = 4 },
+        .{ .name = "LOCK_EX", .value = 2 },
+        .{ .name = "LOCK_SH", .value = 1 },
+        .{ .name = "LOCK_UN", .value = 3 },
+        .{ .name = "SEEK_SET", .value = 0 },
+        .{ .name = "SEEK_CUR", .value = 1 },
+        .{ .name = "SEEK_END", .value = 2 },
+        .{ .name = "GLOB_MARK", .value = 1 },
+        .{ .name = "GLOB_NOSORT", .value = 2 },
+        .{ .name = "GLOB_NOCHECK", .value = 16 },
+        .{ .name = "GLOB_BRACE", .value = 1024 },
+        .{ .name = "SCANDIR_SORT_ASCENDING", .value = 0 },
+        .{ .name = "SCANDIR_SORT_DESCENDING", .value = 1 },
+        .{ .name = "SCANDIR_SORT_NONE", .value = 2 },
+        .{ .name = "PATHINFO_DIRNAME", .value = 1 },
+        .{ .name = "PATHINFO_BASENAME", .value = 2 },
+        .{ .name = "PATHINFO_EXTENSION", .value = 4 },
+        .{ .name = "PATHINFO_FILENAME", .value = 8 },
+        // 字符串
+        .{ .name = "STR_PAD_RIGHT", .value = 1 },
+        .{ .name = "STR_PAD_LEFT", .value = 0 },
+        .{ .name = "STR_PAD_BOTH", .value = 2 },
+        .{ .name = "CASE_UPPER", .value = 1 },
+        .{ .name = "CASE_LOWER", .value = 0 },
+        // 数学
+        .{ .name = "PHP_ROUND_HALF_UP", .value = 0 },
+        .{ .name = "PHP_ROUND_HALF_DOWN", .value = 1 },
+        .{ .name = "PHP_ROUND_HALF_EVEN", .value = 2 },
+        .{ .name = "PHP_ROUND_HALF_ODD", .value = 3 },
+        // PHP 整数限制
+        .{ .name = "PHP_INT_MAX", .value = 9223372036854775807 },
+        .{ .name = "PHP_INT_MIN", .value = -9223372036854775808 },
+        .{ .name = "PHP_INT_SIZE", .value = 8 },
+        .{ .name = "PHP_MAJOR_VERSION", .value = 8 },
+        .{ .name = "PHP_MINOR_VERSION", .value = 3 },
+        .{ .name = "PHP_RELEASE_VERSION", .value = 0 },
+        // 密码
+        .{ .name = "PASSWORD_DEFAULT", .value = 1 },
+        .{ .name = "PASSWORD_BCRYPT", .value = 1 },
+        // 输出缓冲
+        .{ .name = "PHP_OUTPUT_HANDLER_START", .value = 1 },
+        .{ .name = "PHP_OUTPUT_HANDLER_WRITE", .value = 0 },
+        .{ .name = "PHP_OUTPUT_HANDLER_FLUSH", .value = 4 },
+        .{ .name = "PHP_OUTPUT_HANDLER_CLEAN", .value = 2 },
+        .{ .name = "PHP_OUTPUT_HANDLER_FINAL", .value = 8 },
+        // 杂项
+        .{ .name = "PHP_MAXPATHLEN", .value = 4096 },
+        .{ .name = "PHP_PREFIX_SEPARATOR", .value = 95 },
+        .{ .name = "EXTR_OVERWRITE", .value = 0 },
+        .{ .name = "EXTR_SKIP", .value = 1 },
+        .{ .name = "EXTR_PREFIX_SAME", .value = 2 },
+        .{ .name = "EXTR_PREFIX_ALL", .value = 3 },
+    };
+
+    // 浮点常量
+    const float_consts = [_]FloatConst{
+        .{ .name = "M_PI", .value = 3.14159265358979323846 },
+        .{ .name = "M_E", .value = 2.71828182845904523536 },
+        .{ .name = "M_LOG2E", .value = 1.44269504088896340736 },
+        .{ .name = "M_LOG10E", .value = 0.43429448190325182765 },
+        .{ .name = "M_LN2", .value = 0.69314718055994530942 },
+        .{ .name = "M_LN10", .value = 2.30258509299404568402 },
+        .{ .name = "M_PI_2", .value = 1.57079632679489661923 },
+        .{ .name = "M_PI_4", .value = 0.78539816339744830962 },
+        .{ .name = "M_1_PI", .value = 0.31830988618379067154 },
+        .{ .name = "M_2_PI", .value = 0.63661977236758134308 },
+        .{ .name = "M_SQRT2", .value = 1.41421356237309504880 },
+        .{ .name = "M_SQRT3", .value = 1.73205080756887729353 },
+        .{ .name = "M_2_SQRTPI", .value = 1.12837916709551257390 },
+        .{ .name = "M_SQRT1_2", .value = 0.70710678118654752440 },
+        .{ .name = "PHP_FLOAT_MAX", .value = 1.7976931348623158e+308 },
+        .{ .name = "PHP_FLOAT_MIN", .value = 2.2250738585072014e-308 },
+        .{ .name = "PHP_FLOAT_EPSILON", .value = 2.2204460492503131e-16 },
+        .{ .name = "INF", .value = std.math.inf(f64) },
+        .{ .name = "NAN", .value = std.math.nan(f64) },
+    };
+
+    // 字符串常量
+    const str_consts = [_]StrConst{
+        .{ .name = "PHP_EOL", .value = "\n" },
+        .{ .name = "PHP_SAPI", .value = "cli" },
+        .{ .name = "PHP_OS", .value = "Darwin" },
+        .{ .name = "PHP_OS_FAMILY", .value = "Darwin" },
+        .{ .name = "PHP_VERSION", .value = "8.3.0" },
+        .{ .name = "PHP_VERSION_ID", .value = "80300" },
+        .{ .name = "DIRECTORY_SEPARATOR", .value = "/" },
+        .{ .name = "PATH_SEPARATOR", .value = ":" },
+        .{ .name = "PHP_EXTENSION_DIR", .value = "" },
+        .{ .name = "PHP_BINDIR", .value = "/usr/local/bin" },
+    };
+
+    // 布尔常量
+    const bool_consts = [_]BoolConst{
+        .{ .name = "TRUE", .value = true },
+        .{ .name = "FALSE", .value = false },
+    };
+
+    for (int_consts) |c| {
+        const key = try allocator.dupe(u8, c.name);
+        try constants.put(key, Value.initInt(c.value));
+    }
+    for (float_consts) |c| {
+        const key = try allocator.dupe(u8, c.name);
+        try constants.put(key, Value.initFloat(c.value));
+    }
+    for (str_consts) |c| {
+        const key = try allocator.dupe(u8, c.name);
+        const str = try PHPString.init(allocator, c.value);
+        try constants.put(key, Value.initString(str));
+    }
+    for (bool_consts) |c| {
+        const key = try allocator.dupe(u8, c.name);
+        try constants.put(key, Value.initBool(c.value));
+    }
+
+    // NULL 常量
+    const null_key = try allocator.dupe(u8, "NULL");
+    try constants.put(null_key, Value.initNull());
+}
 
 pub fn php_define(name_val: Value, value_val: Value, allocator: Allocator) !Value {
     if (!name_val.isString()) return Value.initBool(false);
@@ -10309,24 +10501,37 @@ pub const ClassMeta = struct {
                 const s = if (this.getProperty("s")) |v| v.toInt() else 0;
                 const invert = if (this.getProperty("invert")) |v| v.toInt() else 0;
 
-                for (format_str) |c| {
-                    switch (c) {
-                        '%' => {},
-                        'Y' => try writer.print("{d:0>2}", .{y}),
-                        'y' => try writer.print("{d}", .{y}),
-                        'M' => try writer.print("{d:0>2}", .{m}),
-                        'm' => try writer.print("{d}", .{m}),
-                        'D' => try writer.print("{d:0>2}", .{d}),
-                        'd' => try writer.print("{d}", .{d}),
-                        'H' => try writer.print("{d:0>2}", .{h}),
-                        'h' => try writer.print("{d}", .{h}),
-                        'I' => try writer.print("{d:0>2}", .{i}),
-                        'i' => try writer.print("{d}", .{i}),
-                        'S' => try writer.print("{d:0>2}", .{s}),
-                        's' => try writer.print("{d}", .{s}),
-                        'R' => try writer.writeAll(if (invert == 1) "-" else "+"),
-                        'r' => try writer.writeAll(if (invert == 1) "-" else ""),
-                        else => try result.append(alloc, c),
+                var fi: usize = 0;
+                while (fi < format_str.len) : (fi += 1) {
+                    if (format_str[fi] == '%' and fi + 1 < format_str.len) {
+                        fi += 1;
+                        switch (format_str[fi]) {
+                            'Y' => try writer.print("{d:0>2}", .{y}),
+                            'y' => try writer.print("{d}", .{y}),
+                            'M' => try writer.print("{d:0>2}", .{m}),
+                            'm' => try writer.print("{d}", .{m}),
+                            'D' => try writer.print("{d:0>2}", .{d}),
+                            'd' => try writer.print("{d}", .{d}),
+                            'H' => try writer.print("{d:0>2}", .{h}),
+                            'h' => try writer.print("{d}", .{h}),
+                            'I' => try writer.print("{d:0>2}", .{i}),
+                            'i' => try writer.print("{d}", .{i}),
+                            'S' => try writer.print("{d:0>2}", .{s}),
+                            's' => try writer.print("{d}", .{s}),
+                            'R' => try writer.writeAll(if (invert == 1) "-" else "+"),
+                            'r' => try writer.writeAll(if (invert == 1) "-" else ""),
+                            '%' => try result.append(alloc, '%'),
+                            'a' => {
+                                const days_val = if (this.getProperty("days")) |v| v.toInt() else 0;
+                                try writer.print("{d}", .{days_val});
+                            },
+                            else => {
+                                try result.append(alloc, '%');
+                                try result.append(alloc, format_str[fi]);
+                            },
+                        }
+                    } else {
+                        try result.append(alloc, format_str[fi]);
                     }
                 }
                 return Value.initString(try PHPString.init(alloc, result.items));
@@ -13239,7 +13444,15 @@ pub const ClassMeta = struct {
             return val;
         }
         if (self.parent) |parent| {
-            return parent.getStaticProperty(name);
+            if (parent.getStaticProperty(name)) |val| return val;
+        }
+        // 查找实现的接口中的常量
+        for (self.interfaces) |iface| {
+            if (class_registry) |reg| {
+                if (reg.get(iface)) |iface_meta| {
+                    if (iface_meta.getStaticProperty(name)) |val| return val;
+                }
+            }
         }
         return null;
     }
@@ -13248,6 +13461,12 @@ pub const ClassMeta = struct {
     pub fn implementsInterface(self: *const ClassMeta, interface_name: []const u8) bool {
         for (self.interfaces) |iface| {
             if (std.mem.eql(u8, iface, interface_name)) return true;
+            // 递归检查接口的父接口（interface C extends A, B）
+            if (class_registry) |reg| {
+                if (reg.get(iface)) |iface_meta| {
+                    if (iface_meta.implementsInterface(interface_name)) return true;
+                }
+            }
         }
         if (self.parent) |parent| {
             return parent.implementsInterface(interface_name);
@@ -19725,7 +19944,9 @@ pub fn php_crc32(str: Value) !Value {
 
     const input = str.asString().data;
     const crc = std.hash.Crc32.hash(input);
-    return Value.initInt(@intCast(crc));
+    // PHP crc32() 返回有符号32位整数（与C的crc32行为一致）
+    const signed: i32 = @bitCast(crc);
+    return Value.initInt(@intCast(signed));
 }
 
 /// base64_encode - 使用MIME base64编码数据

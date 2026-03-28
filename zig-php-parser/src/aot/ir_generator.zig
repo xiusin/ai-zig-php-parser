@@ -1361,20 +1361,9 @@ pub const IRGenerator = struct {
                     const const_data = member.data.const_decl;
                     const const_name = self.getString(const_data.name);
 
-                    // 提取常量值（仅支持简单字面量）
+                    // 提取常量值（支持简单字面量和常量表达式求值）
                     const value_node = self.getNode(const_data.value) orelse continue;
-                    const const_value: ?TypeDef.ConstantValue = switch (value_node.tag) {
-                        .literal_int => .{ .int = value_node.data.literal_int.value },
-                        .literal_float => .{ .float = value_node.data.literal_float.value },
-                        .literal_string => .{ .string = self.getString(value_node.data.literal_string.value) },
-                        .literal_bool => blk: {
-                            // 从 main_token 判断是 true 还是 false
-                            const is_true = value_node.main_token.tag == .k_true;
-                            break :blk .{ .bool = is_true };
-                        },
-                        .literal_null => .{ .null = {} },
-                        else => null, // 跳过复杂表达式
-                    };
+                    const const_value = self.evalConstantExprToTypeDef(value_node);
 
                     if (const_value) |cv| {
                         try constants.append(self.allocator, .{
@@ -1549,12 +1538,35 @@ pub const IRGenerator = struct {
                             try parent_interfaces.append(self.allocator, parent_name);
                         }
                     },
+                    .binary_expr => {
+                        // 多个父接口被解析为 binary comma: A, B
+                        try self.collectCommaNames(ext_idx, &parent_interfaces);
+                    },
                     else => {},
                 }
             }
         }
         
         const interfaces_slice = try parent_interfaces.toOwnedSlice(self.allocator);
+
+        // 收集接口常量（接口方法是抽象的，不生成函数体）
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
+        for (iface_data.members) |member_idx| {
+            const member = self.getNode(member_idx) orelse continue;
+            if (member.tag == .const_decl) {
+                const const_data = member.data.const_decl;
+                const const_name = self.getString(const_data.name);
+                const value_node = self.getNode(const_data.value) orelse continue;
+                const const_value = self.evalConstantExprToTypeDef(value_node);
+                if (const_value) |cv| {
+                    try constants.append(self.allocator, .{
+                        .name = const_name,
+                        .value = cv,
+                        .visibility = .public,
+                    });
+                }
+            }
+        }
 
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
@@ -1566,13 +1578,40 @@ pub const IRGenerator = struct {
             .trait_adaptations = &.{},
             .properties = &.{},
             .methods = &.{},
-            .constants = &.{},
+            .constants = try self.allocator.dupe(TypeDef.Constant, constants.items),
             .location = self.current_location,
         };
 
         if (self.module) |module| {
             try module.addTypeDef(type_def);
         }
+    }
+
+    /// 递归收集逗号分隔的名称（处理 binary comma 表达式树）
+    fn collectCommaNames(self: *Self, idx: Node.Index, list: *std.ArrayList([]const u8)) !void {
+        const node = self.getNode(idx) orelse return;
+        switch (node.tag) {
+            .binary_expr => {
+                const bin = node.data.binary_expr;
+                if (bin.op == .comma) {
+                    try self.collectCommaNames(bin.lhs, list);
+                    try self.collectCommaNames(bin.rhs, list);
+                } else {
+                    try self.appendNameFromNode(node, list);
+                }
+            },
+            else => try self.appendNameFromNode(node, list),
+        }
+    }
+
+    fn appendNameFromNode(self: *Self, node: *const Node, list: *std.ArrayList([]const u8)) !void {
+        const name: ?[]const u8 = switch (node.tag) {
+            .named_type => self.getString(node.data.named_type.name),
+            .variable => self.getString(node.data.variable.name),
+            .literal_string => self.getString(node.data.literal_string.value),
+            else => null,
+        };
+        if (name) |n| try list.append(self.allocator, n);
     }
 
     /// Generate IR for enum declaration
@@ -1685,17 +1724,7 @@ pub const IRGenerator = struct {
                     const const_data = member.data.const_decl;
                     const const_name = self.getString(const_data.name);
                     const value_node = self.getNode(const_data.value) orelse continue;
-                    const const_value: ?TypeDef.ConstantValue = switch (value_node.tag) {
-                        .literal_int => .{ .int = value_node.data.literal_int.value },
-                        .literal_float => .{ .float = value_node.data.literal_float.value },
-                        .literal_string => .{ .string = self.getString(value_node.data.literal_string.value) },
-                        .literal_bool => blk: {
-                            const is_true = value_node.main_token.tag == .k_true;
-                            break :blk .{ .bool = is_true };
-                        },
-                        .literal_null => .{ .null = {} },
-                        else => null,
-                    };
+                    const const_value = self.evalConstantExprToTypeDef(value_node);
                     if (const_value) |cv| {
                         try constants.append(self.allocator, .{
                             .name = const_name,
@@ -1793,21 +1822,7 @@ pub const IRGenerator = struct {
                     const const_data = member.data.const_decl;
                     const const_name = self.getString(const_data.name);
                     const value_node = self.getNode(const_data.value) orelse continue;
-                    const const_value: ?TypeDef.ConstantValue = switch (value_node.tag) {
-                        .literal_int => .{ .int = value_node.data.literal_int.value },
-                        .literal_float => .{ .float = value_node.data.literal_float.value },
-                        .literal_string => .{
-                            .string = self.getString(
-                                value_node.data.literal_string.value,
-                            ),
-                        },
-                        .literal_bool => blk: {
-                            const is_true = value_node.main_token.tag == .k_true;
-                            break :blk .{ .bool = is_true };
-                        },
-                        .literal_null => .{ .null = {} },
-                        else => null,
-                    };
+                    const const_value = self.evalConstantExprToTypeDef(value_node);
 
                     if (const_value) |cv| {
                         try constants.append(self.allocator, .{
@@ -7367,6 +7382,27 @@ pub const IRGenerator = struct {
         return null;
     }
 
+    /// 将 AST 节点求值为 TypeDef.ConstantValue（支持常量表达式如 1+2+3）
+    fn evalConstantExprToTypeDef(self: *const Self, node: *const Node) ?TypeDef.ConstantValue {
+        // 先尝试简单字面量
+        switch (node.tag) {
+            .literal_int => return .{ .int = node.data.literal_int.value },
+            .literal_float => return .{ .float = node.data.literal_float.value },
+            .literal_string => return .{ .string = self.getString(node.data.literal_string.value) },
+            .literal_bool => return .{ .bool = node.main_token.tag == .k_true },
+            .literal_null => return .{ .null = {} },
+            else => {},
+        }
+        // 尝试常量折叠（支持 1+2+3, "a"."b", true && false 等）
+        const cv = self.getConstantValue(node) orelse return null;
+        if (cv.int_val) |v| return .{ .int = v };
+        if (cv.float_val) |v| return .{ .float = v };
+        if (cv.string_val) |v| return .{ .string = v };
+        if (cv.bool_val) |v| return .{ .bool = v };
+        if (cv.is_null) return .{ .null = {} };
+        return null;
+    }
+
     /// Constant value representation for folding
     const ConstantValue = struct {
         int_val: ?i64 = null,
@@ -7436,6 +7472,89 @@ pub const IRGenerator = struct {
                     };
                 }
                 break :blk null;
+            },
+            .binary_expr => blk_bin: {
+                const bin = node.data.binary_expr;
+                const lhs_node = self.getNode(bin.lhs) orelse break :blk_bin null;
+                const rhs_node = self.getNode(bin.rhs) orelse break :blk_bin null;
+                const lhs = self.getConstantValue(lhs_node) orelse break :blk_bin null;
+                const rhs = self.getConstantValue(rhs_node) orelse break :blk_bin null;
+
+                // 整数运算
+                if (lhs.int_val != null and rhs.int_val != null) {
+                    const l = lhs.int_val.?;
+                    const r = rhs.int_val.?;
+                    break :blk_bin switch (bin.op) {
+                        .plus => ConstantValue{ .int_val = l +% r },
+                        .minus => ConstantValue{ .int_val = l -% r },
+                        .asterisk => ConstantValue{ .int_val = l *% r },
+                        .slash => if (r != 0) ConstantValue{ .int_val = @divTrunc(l, r) } else null,
+                        .percent => if (r != 0) ConstantValue{ .int_val = @mod(l, r) } else null,
+                        .star_star => ConstantValue{ .int_val = std.math.powi(i64, l, r) catch 0 },
+                        .ampersand => ConstantValue{ .int_val = l & r },
+                        .pipe => ConstantValue{ .int_val = l | r },
+                        .caret => ConstantValue{ .int_val = l ^ r },
+                        .less_less => ConstantValue{ .int_val = l << @intCast(@min(r, 63)) },
+                        .greater_greater => ConstantValue{ .int_val = l >> @intCast(@min(r, 63)) },
+                        .less => ConstantValue{ .bool_val = l < r },
+                        .greater => ConstantValue{ .bool_val = l > r },
+                        .less_equal => ConstantValue{ .bool_val = l <= r },
+                        .greater_equal => ConstantValue{ .bool_val = l >= r },
+                        .equal_equal, .equal_equal_equal => ConstantValue{ .bool_val = l == r },
+                        .bang_equal, .bang_equal_equal => ConstantValue{ .bool_val = l != r },
+                        .spaceship => ConstantValue{ .int_val = if (l < r) @as(i64, -1) else if (l > r) @as(i64, 1) else 0 },
+                        else => null,
+                    };
+                }
+                // 浮点运算
+                if ((lhs.int_val != null or lhs.float_val != null) and (rhs.int_val != null or rhs.float_val != null)) {
+                    const l: f64 = if (lhs.float_val) |f| f else @floatFromInt(lhs.int_val.?);
+                    const r: f64 = if (rhs.float_val) |f| f else @floatFromInt(rhs.int_val.?);
+                    break :blk_bin switch (bin.op) {
+                        .plus => ConstantValue{ .float_val = l + r },
+                        .minus => ConstantValue{ .float_val = l - r },
+                        .asterisk => ConstantValue{ .float_val = l * r },
+                        .slash => if (r != 0) ConstantValue{ .float_val = l / r } else null,
+                        .star_star => ConstantValue{ .float_val = std.math.pow(f64, l, r) },
+                        else => null,
+                    };
+                }
+                // 字符串连接
+                if (lhs.string_val != null and rhs.string_val != null and bin.op == .dot) {
+                    const result = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ lhs.string_val.?, rhs.string_val.? }) catch break :blk_bin null;
+                    break :blk_bin ConstantValue{ .string_val = result };
+                }
+                // 布尔运算
+                if (lhs.bool_val != null and rhs.bool_val != null) {
+                    break :blk_bin switch (bin.op) {
+                        .double_ampersand, .k_and => ConstantValue{ .bool_val = lhs.bool_val.? and rhs.bool_val.? },
+                        .double_pipe, .k_or => ConstantValue{ .bool_val = lhs.bool_val.? or rhs.bool_val.? },
+                        else => null,
+                    };
+                }
+                break :blk_bin null;
+            },
+            .unary_expr => blk_un: {
+                const un = node.data.unary_expr;
+                const operand_node = self.getNode(un.expr) orelse break :blk_un null;
+                const operand = self.getConstantValue(operand_node) orelse break :blk_un null;
+                break :blk_un switch (un.op) {
+                    .minus => if (operand.int_val) |v| ConstantValue{ .int_val = -%v } else if (operand.float_val) |v| ConstantValue{ .float_val = -v } else null,
+                    .bang => if (operand.bool_val) |v| ConstantValue{ .bool_val = !v } else null,
+                    .tilde => if (operand.int_val) |v| ConstantValue{ .int_val = ~v } else null,
+                    else => null,
+                };
+            },
+            .variable => blk_var: {
+                // 支持全局预定义常量 (不带 $ 前缀的变量被当作常量处理)
+                const var_name = self.getString(node.data.variable.name);
+                if (var_name.len > 0 and var_name[0] != '$') {
+                    // 可能是预定义常量
+                    if (std.mem.eql(u8, var_name, "true")) break :blk_var ConstantValue{ .bool_val = true };
+                    if (std.mem.eql(u8, var_name, "false")) break :blk_var ConstantValue{ .bool_val = false };
+                    if (std.mem.eql(u8, var_name, "null")) break :blk_var ConstantValue{ .is_null = true };
+                }
+                break :blk_var null;
             },
             else => null,
         };

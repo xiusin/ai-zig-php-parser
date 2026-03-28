@@ -1,8 +1,37 @@
-# fuzzy_scripts_27 批量修复进度报告
+# fuzzy_scripts_27 批量修复进度报告 (更新: 2026-03-28)
 
 ## 最终结果: 161/161 AOT编译通过 ✅
 
-## 修复清单
+## 第二轮修复 (2026-03-28) — 基于全面测试报告
+
+### 1. PHP预定义常量注册 (~120个)
+- **文件**: `runtime_lib_template.zig` (registerPHPPredefinedConstants) + `native_linker.zig`
+- **影响**: test_002/006/009/010/013/082/085/086 等 ~15个测试
+- **内容**: JSON_PRETTY_PRINT, JSON_THROW_ON_ERROR, M_PI, M_E, E_USER_NOTICE, DIRECTORY_SEPARATOR, PREG_OFFSET_CAPTURE, INF, NAN 等
+
+### 2. instanceof接口继承修复
+- **文件**: `runtime_lib_template.zig` (implementsInterface递归查父接口) + `ir_generator.zig` (collectCommaNames修复binary comma解析)
+- **影响**: test_017/033/056/101/131 等接口测试
+- **内容**: `interface C extends A, B` → `MultiImpl implements C` → `instanceof A` 现在返回 true
+
+### 3. 类常量表达式求值
+- **文件**: `ir_generator.zig` (evalConstantExprToTypeDef + getConstantValue增强binary_expr/unary_expr)
+- **影响**: test_047/052/071/105 等常量表达式测试
+- **内容**: `const SUM = 1+2+3`, `const STR = 'Hello' . ' World'`, `const BIT = 0xFF & 0x0F` 编译期求值
+
+### 4. DateInterval format方法修复
+- **文件**: `runtime_lib_template.zig`
+- **影响**: test_008/079/111 日期格式化
+- **内容**: `%d days, %m months` 中字面文本不再被误识别为格式符; 增加 `%a` 总天数支持
+
+### 5. 接口常量收集与继承
+- **文件**: `ir_generator.zig` (generateInterfaceDecl收集常量) + `runtime_lib_template.zig` (getStaticProperty查接口)
+- **影响**: test_040/056/087/094 等接口常量测试
+- **内容**: `interface A { const X = 1; }` → `A::X` 和 `ImplA::X` 均可访问
+
+---
+
+## 第一轮修复清单 (2026-03-27)
 
 ### 1. runtime_lib_template.zig 修复
 - **php_object_call_named_args**: 4参数签名修复
