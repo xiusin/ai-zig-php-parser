@@ -1407,6 +1407,7 @@ pub const NativeLinker = struct {
                 .null => true,
                 else => false,
             },
+            .array => false, // 数组常量不做深度比较
         };
     }
 
@@ -2101,6 +2102,7 @@ pub const NativeLinker = struct {
                                 },
                                 .bool => |b| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initBool({s}));\n", .{if (b) "true" else "false"}),
                                 .null => try writer.writeAll("        try enum_obj.setProperty(\"value\", runtime.Value.initNull());\n"),
+                                .array => {}, // enum case不支持数组值
                             }
                         }
                         try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", enum_val);\n", .{ short_cname, escaped_case });
@@ -2205,22 +2207,28 @@ pub const NativeLinker = struct {
                 const escaped_full_cname = try escapeBackslashes(self.allocator, full_cname);
                 defer self.allocator.free(escaped_full_cname);
 
-                for (td.constants) |const_info| {
-                    try self.writeConstantValueCode(writer, const_info.value, "const_val");
+                for (td.constants, 0..) |const_info, const_idx| {
+                    // 使用块作用域隔离每个常量
+                    try writer.writeAll("    {\n");
+                    try self.writeConstantValueCode(writer, const_info.value, "cv");
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
+                    _ = const_idx;
 
                     // ✅ 使用完整类名设置静态属性
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", const_val);\n", .{ escaped_full_cname, escaped_name });
+                    try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", cv);\n", .{ escaped_full_cname, escaped_name });
+                    try writer.writeAll("    }\n");
                 }
 
                 for (trait_constants.items) |trait_const_info| {
                     const const_info = trait_const_info.constant;
-                    try self.writeConstantValueCode(writer, const_info.value, "const_val");
+                    try writer.writeAll("    {\n");
+                    try self.writeConstantValueCode(writer, const_info.value, "cv");
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
 
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", const_val);\n", .{ escaped_full_cname, escaped_name });
+                    try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", cv);\n", .{ escaped_full_cname, escaped_name });
+                    try writer.writeAll("    }\n");
                 }
             }
         }
@@ -15615,36 +15623,34 @@ pub const NativeLinker = struct {
     /// 生成常量值的代码，将结果赋值给指定变量名
     fn writeConstantValueCode(self: *Self, writer: anytype, value: IR.TypeDef.ConstantValue, var_name: []const u8) !void {
         switch (value) {
-            .int => |v| try writer.print("    const {s} = runtime.Value.initInt({d});\n", .{ var_name, v }),
-            .float => |v| try writer.print("    const {s} = runtime.Value.initFloat({d});\n", .{ var_name, v }),
+            .int => |v| try writer.print("        const {s} = runtime.Value.initInt({d});\n", .{ var_name, v }),
+            .float => |v| try writer.print("        const {s} = runtime.Value.initFloat({d});\n", .{ var_name, v }),
             .string => |s| {
                 const escaped = try self.escapeString(s);
                 defer self.allocator.free(escaped);
-                try writer.print("    const {s} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"));\n", .{ var_name, escaped });
+                try writer.print("        const {s} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"));\n", .{ var_name, escaped });
             },
-            .bool => |b| try writer.print("    const {s} = runtime.Value.initBool({s});\n", .{ var_name, if (b) "true" else "false" }),
-            .null => try writer.print("    const {s} = runtime.Value.initNull();\n", .{var_name}),
+            .bool => |b| try writer.print("        const {s} = runtime.Value.initBool({s});\n", .{ var_name, if (b) "true" else "false" }),
+            .null => try writer.print("        const {s} = runtime.Value.initNull();\n", .{var_name}),
             .array => |elements| {
                 // 生成数组常量：创建数组并填充元素
-                try writer.print("    const {s} = blk_arr: {{\n", .{var_name});
-                try writer.writeAll("        const arr = try runtime.PHPArray.init(runtime.runtime_allocator);\n");
+                try writer.print("        const {s} = blk_arr: {{\n", .{var_name});
+                try writer.writeAll("            const arr = try runtime.PHPArray.init(runtime.runtime_allocator);\n");
                 for (elements) |elem| {
                     if (elem.key) |key| {
-                        // 有键的元素：使用setByValue
-                        try writer.writeAll("        try arr.setByValue(runtime.runtime_allocator, ");
+                        try writer.writeAll("            try arr.setByValue(runtime.runtime_allocator, ");
                         try self.writeConstantValueInline(writer, key);
                         try writer.writeAll(", ");
                         try self.writeConstantValueInline(writer, elem.value);
                         try writer.writeAll(");\n");
                     } else {
-                        // 无键的元素（自动索引）
-                        try writer.writeAll("        try arr.push(runtime.runtime_allocator, ");
+                        try writer.writeAll("            try arr.push(runtime.runtime_allocator, ");
                         try self.writeConstantValueInline(writer, elem.value);
                         try writer.writeAll(");\n");
                     }
                 }
-                try writer.writeAll("        break :blk_arr runtime.Value.initArray(arr);\n");
-                try writer.writeAll("    };\n");
+                try writer.writeAll("            break :blk_arr runtime.Value.initArray(arr);\n");
+                try writer.writeAll("        };\n");
             },
         }
     }
@@ -15666,7 +15672,7 @@ pub const NativeLinker = struct {
                 try writer.writeAll("            const inner_arr = try runtime.PHPArray.init(runtime.runtime_allocator);\n");
                 for (elements) |elem| {
                     if (elem.key) |key| {
-                        try writer.writeAll("            try inner_arr.set(runtime.runtime_allocator, ");
+                        try writer.writeAll("            try inner_arr.setByValue(runtime.runtime_allocator, ");
                         try self.writeConstantValueInline(writer, key);
                         try writer.writeAll(", ");
                         try self.writeConstantValueInline(writer, elem.value);

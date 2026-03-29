@@ -6672,6 +6672,13 @@ pub const IRGenerator = struct {
                 },
                 .bool => |b| self.emitWithResult(.{ .const_bool = b }, .bool),
                 .null => self.emitWithResult(.{ .const_null = {} }, .php_value),
+                .array => {
+                    // 数组常量不能内联，回退到运行时查找
+                    return self.emitWithResult(.{ .static_property_get = .{
+                        .class_name = class_name,
+                        .property_name = const_name,
+                    } }, .php_value);
+                },
             };
         }
 
@@ -7404,24 +7411,22 @@ pub const IRGenerator = struct {
             .literal_string => return .{ .string = self.getString(node.data.literal_string.value) },
             .literal_bool => return .{ .bool = node.main_token.tag == .k_true },
             .literal_null => return .{ .null = {} },
-            .array_literal => {
+            .array_init => {
                 // 处理数组常量
-                const elements = node.data.array_literal.elements;
+                const elements = node.data.array_init.elements;
                 var arr_elements = self.allocator.alloc(TypeDef.ArrayConstElement, elements.len) catch return null;
                 for (elements, 0..) |elem_idx, i| {
                     const elem_node = self.getNode(elem_idx) orelse return null;
-                    if (elem_node.tag == .array_element) {
-                        const val_node = self.getNode(elem_node.data.array_element.value) orelse return null;
+                    if (elem_node.tag == .array_pair) {
+                        const key_node = self.getNode(elem_node.data.array_pair.key) orelse return null;
+                        const val_node = self.getNode(elem_node.data.array_pair.value) orelse return null;
+                        const key = self.evalConstantExprToTypeDef(key_node) orelse return null;
                         const val = self.evalConstantExprToTypeDef(val_node) orelse return null;
-                        if (elem_node.data.array_element.key) |key_idx| {
-                            const key_node = self.getNode(key_idx) orelse return null;
-                            const key = self.evalConstantExprToTypeDef(key_node) orelse return null;
-                            arr_elements[i] = .{ .key = key, .value = val };
-                        } else {
-                            arr_elements[i] = .{ .key = null, .value = val };
-                        }
+                        arr_elements[i] = .{ .key = key, .value = val };
                     } else {
-                        return null;
+                        // 无key的元素
+                        const val = self.evalConstantExprToTypeDef(elem_node) orelse return null;
+                        arr_elements[i] = .{ .key = null, .value = val };
                     }
                 }
                 return .{ .array = arr_elements };
@@ -7504,6 +7509,7 @@ pub const IRGenerator = struct {
                         .string => |s| ConstantValue{ .string_val = s },
                         .bool => |b| ConstantValue{ .bool_val = b },
                         .null => ConstantValue{ .is_null = true },
+                        .array => null, // 数组常量不能折叠
                     };
                 }
                 break :blk null;

@@ -19180,6 +19180,31 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                         try result.append(allocator, @intCast(val));
                     }
                 },
+                'u' => {
+                    const val = arg.toInt();
+                    const uval: u64 = @bitCast(val);
+                    const str = try std.fmt.allocPrint(allocator, "{d}", .{uval});
+                    defer allocator.free(str);
+                    try result.appendSlice(allocator, str);
+                },
+                'o' => {
+                    const val = arg.toInt();
+                    const str = try std.fmt.allocPrint(allocator, "{o}", .{@as(u64, @bitCast(val))});
+                    defer allocator.free(str);
+                    try result.appendSlice(allocator, str);
+                },
+                'b' => {
+                    const val = arg.toInt();
+                    const str = try std.fmt.allocPrint(allocator, "{b}", .{@as(u64, @bitCast(val))});
+                    defer allocator.free(str);
+                    try result.appendSlice(allocator, str);
+                },
+                'e', 'E' => {
+                    const val = arg.toFloat();
+                    const str = try std.fmt.allocPrint(allocator, "{e}", .{val});
+                    defer allocator.free(str);
+                    try result.appendSlice(allocator, str);
+                },
                 else => {
                     try result.append(allocator, '%');
                     try result.append(allocator, specifier);
