@@ -8398,6 +8398,27 @@ pub const NativeLinker = struct {
                                 } else {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.Value.initNull(), runtime.runtime_allocator);\n", .{runtime_name});
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_filter")) {
+                                // array_filter(arr, callback = null, mode = 0)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "preg_split")) {
+                                // preg_split(pattern, subject, allocator) - 只接受3个参数
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len >= 2) {
+                                    try self.writeValueArgs(writer, op.args[0..2]);
+                                } else {
+                                    try self.writeValueArgs(writer, op.args);
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (op.args.len > 0) {
                                 // 特殊处理：file_put_contents只接受2个参数+allocator
                                 if (std.mem.eql(u8, runtime_name, "php_file_put_contents")) {
@@ -8967,6 +8988,16 @@ pub const NativeLinker = struct {
                 try writer.writeAll(", ");
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll("});\n");
+                try writer.writeAll("    } else if (");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(".isString()) {\n");
+                try writer.writeAll("        try runtime.php_string_offset_set(&");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.value.id);
+                try writer.writeAll(", runtime.runtime_allocator);\n");
                 try writer.writeAll("    } else {\n");
                 try writer.writeAll("        try ");
                 try self.writeRegRef(writer, op.array.id);
@@ -9057,13 +9088,26 @@ pub const NativeLinker = struct {
                 }
             },
             .array_push => |op| {
+                // 检查是否是对象（ArrayAccess），调用offsetSet(null, value)
+                try writer.print("    if (runtime.Value_isObject(reg_{d})) {{\n", .{op.array.id});
+                try writer.writeAll("        _ = try runtime.php_object_call(");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", \"offsetSet\", &[_]runtime.Value{runtime.Value.initNull(), ");
                 // 检查value是否是alloca指针
-                const val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
-                if (val_is_alloca) {
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                const push_val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                if (push_val_is_alloca) {
+                    try writer.print("reg_{d}.*", .{op.value.id});
                 } else {
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    try self.writeRegRef(writer, op.value.id);
                 }
+                try writer.writeAll("});\n");
+                try writer.writeAll("    } else {\n");
+                if (push_val_is_alloca) {
+                    try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                } else {
+                    try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                }
+                try writer.writeAll("    }\n");
             },
             .array_count => |op| {
                 if (inst.result) |reg| {
@@ -9080,11 +9124,22 @@ pub const NativeLinker = struct {
                 }
             },
             .array_unset => |op| {
-                // 简化：所有寄存器都是 Value 类型，使用 unsetByValue
+                // 检查是否是对象（ArrayAccess），调用offsetUnset
                 try writer.print(
-                    "    _ = reg_{d}.asArray().unsetByValue(runtime.runtime_allocator, reg_{d});\n",
+                    "    if (runtime.Value_isObject(reg_{d})) {{\n",
+                    .{op.array.id},
+                );
+                try writer.writeAll("        _ = try runtime.php_object_call(");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", \"offsetUnset\", &[_]runtime.Value{");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll("});\n");
+                try writer.writeAll("    } else {\n");
+                try writer.print(
+                    "        _ = reg_{d}.asArray().unsetByValue(runtime.runtime_allocator, reg_{d});\n",
                     .{ op.array.id, op.key.id },
                 );
+                try writer.writeAll("    }\n");
             },
             .interpolate => |op| {
                 // 字符串插值：将多个部分连接成一个字符串
@@ -15336,13 +15391,25 @@ pub const NativeLinker = struct {
                 try writer.print("        {s} = try runtime.php_array_get({s}, {s}, runtime.runtime_allocator);\n", .{ result_reg.?, array, key });
             },
             .array_set => |op| {
-                try writer.writeAll("        try ");
+                try writer.writeAll("        if (");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(".isString()) {\n");
+                try writer.writeAll("            try runtime.php_string_offset_set(&");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.value.id);
+                try writer.writeAll(", runtime.runtime_allocator);\n");
+                try writer.writeAll("        } else {\n");
+                try writer.writeAll("            try ");
                 try self.writeRegRef(writer, op.array.id);
                 try writer.writeAll(".asArray().setByValue(runtime.runtime_allocator, ");
                 try self.writeRegRef(writer, op.key.id);
                 try writer.writeAll(", ");
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll(");\n");
+                try writer.writeAll("        }\n");
             },
             .array_set_nested => |op| {
                 // 嵌套数组赋值，支持 auto-vivification

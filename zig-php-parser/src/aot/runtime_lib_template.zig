@@ -7898,6 +7898,37 @@ pub fn php_strrev(str: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
+/// 字符串索引赋值 - PHP: $str[$i] = 'x'
+/// 修改字符串中指定位置的字符，返回修改后的新字符串
+pub fn php_string_offset_set(str_val: *Value, index_val: Value, char_val: Value, allocator: Allocator) !void {
+    if (!str_val.isString()) return;
+    const php_str = str_val.asString();
+    const idx = index_val.toInt();
+    if (idx < 0 or idx >= @as(i64, @intCast(php_str.length))) return;
+    const pos: usize = @intCast(idx);
+
+    // 获取要设置的字符
+    var new_char: u8 = 0;
+    if (char_val.isString()) {
+        const char_str = char_val.asString();
+        if (char_str.length > 0) {
+            new_char = char_str.data[0];
+        }
+    } else {
+        new_char = @as(u8, @intCast(char_val.toInt() & 0xFF));
+    }
+
+    // 创建新字符串（COW语义）
+    const new_data = try allocator.alloc(u8, php_str.length);
+    @memcpy(new_data, php_str.data[0..php_str.length]);
+    new_data[pos] = new_char;
+
+    const new_str = try PHPString.init(allocator, new_data);
+    allocator.free(new_data);
+    str_val.release(allocator);
+    str_val.* = Value.initString(new_str);
+}
+
 /// str_contains - 检查字符串是否包含子串 (PHP 8.0+)
 pub fn php_str_contains(haystack: Value, needle: Value) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
