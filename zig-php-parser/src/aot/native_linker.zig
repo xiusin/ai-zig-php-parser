@@ -2135,12 +2135,12 @@ pub const NativeLinker = struct {
             if (!has_static) continue;
 
             const tname = td.name;
-            try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ tname, tname });
+            try writer.print("    const trait_{s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ tname, tname });
 
             for (td.properties) |prop| {
                 if (!prop.is_static) continue;
                 const is_public = prop.visibility == .public;
-                try writer.print("    try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ tname, prop.name });
+                try writer.print("    try trait_{s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ tname, prop.name });
                 if (prop.default_value) |dv| {
                     switch (dv.op) {
                         .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
@@ -2159,7 +2159,7 @@ pub const NativeLinker = struct {
                 }
                 try writer.print(", .is_static = true, .is_public = {}, .is_readonly = false }});\n", .{is_public});
 
-                try writer.print("    try {s}_meta.setStaticProperty(\"{s}\", ", .{ tname, prop.name });
+                try writer.print("    try trait_{s}_meta.setStaticProperty(\"{s}\", ", .{ tname, prop.name });
                 if (prop.default_value) |dv| {
                     switch (dv.op) {
                         .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
@@ -2206,45 +2206,21 @@ pub const NativeLinker = struct {
                 defer self.allocator.free(escaped_full_cname);
 
                 for (td.constants) |const_info| {
-                    const value_code = switch (const_info.value) {
-                        .int => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt({d})", .{v}),
-                        .float => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat({d})", .{v}),
-                        .string => |s| blk: {
-                            const escaped = try self.escapeString(s);
-                            defer self.allocator.free(escaped);
-                            break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", .{escaped});
-                        },
-                        .bool => |b| try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
-                        .null => try std.fmt.allocPrint(self.allocator, "runtime.Value.initNull()", .{}),
-                    };
-                    defer self.allocator.free(value_code);
-
+                    try self.writeConstantValueCode(writer, const_info.value, "const_val");
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
 
                     // ✅ 使用完整类名设置静态属性
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ escaped_full_cname, escaped_name, value_code });
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", const_val);\n", .{ escaped_full_cname, escaped_name });
                 }
 
                 for (trait_constants.items) |trait_const_info| {
                     const const_info = trait_const_info.constant;
-                    const value_code = switch (const_info.value) {
-                        .int => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt({d})", .{v}),
-                        .float => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat({d})", .{v}),
-                        .string => |s| blk: {
-                            const escaped = try self.escapeString(s);
-                            defer self.allocator.free(escaped);
-                            break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", .{escaped});
-                        },
-                        .bool => |b| try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
-                        .null => try std.fmt.allocPrint(self.allocator, "runtime.Value.initNull()", .{}),
-                    };
-                    defer self.allocator.free(value_code);
-
+                    try self.writeConstantValueCode(writer, const_info.value, "const_val");
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
 
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ escaped_full_cname, escaped_name, value_code });
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", const_val);\n", .{ escaped_full_cname, escaped_name });
                 }
             }
         }
@@ -15634,6 +15610,77 @@ pub const NativeLinker = struct {
 
         // 使用 self 避免编译器警告
         _ = self.config.verbose;
+    }
+
+    /// 生成常量值的代码，将结果赋值给指定变量名
+    fn writeConstantValueCode(self: *Self, writer: anytype, value: IR.TypeDef.ConstantValue, var_name: []const u8) !void {
+        switch (value) {
+            .int => |v| try writer.print("    const {s} = runtime.Value.initInt({d});\n", .{ var_name, v }),
+            .float => |v| try writer.print("    const {s} = runtime.Value.initFloat({d});\n", .{ var_name, v }),
+            .string => |s| {
+                const escaped = try self.escapeString(s);
+                defer self.allocator.free(escaped);
+                try writer.print("    const {s} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"));\n", .{ var_name, escaped });
+            },
+            .bool => |b| try writer.print("    const {s} = runtime.Value.initBool({s});\n", .{ var_name, if (b) "true" else "false" }),
+            .null => try writer.print("    const {s} = runtime.Value.initNull();\n", .{var_name}),
+            .array => |elements| {
+                // 生成数组常量：创建数组并填充元素
+                try writer.print("    const {s} = blk_arr: {{\n", .{var_name});
+                try writer.writeAll("        const arr = try runtime.PHPArray.init(runtime.runtime_allocator);\n");
+                for (elements) |elem| {
+                    if (elem.key) |key| {
+                        // 有键的元素：使用setByValue
+                        try writer.writeAll("        try arr.setByValue(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, key);
+                        try writer.writeAll(", ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    } else {
+                        // 无键的元素（自动索引）
+                        try writer.writeAll("        try arr.push(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    }
+                }
+                try writer.writeAll("        break :blk_arr runtime.Value.initArray(arr);\n");
+                try writer.writeAll("    };\n");
+            },
+        }
+    }
+
+    /// 生成常量值的内联代码（用于数组元素的键和值）
+    fn writeConstantValueInline(self: *Self, writer: anytype, value: IR.TypeDef.ConstantValue) !void {
+        switch (value) {
+            .int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+            .float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+            .string => |s| {
+                const escaped = try self.escapeString(s);
+                defer self.allocator.free(escaped);
+                try writer.print("runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", .{escaped});
+            },
+            .bool => |b| try writer.print("runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
+            .null => try writer.writeAll("runtime.Value.initNull()"),
+            .array => |elements| {
+                try writer.writeAll("blk_inner: {\n");
+                try writer.writeAll("            const inner_arr = try runtime.PHPArray.init(runtime.runtime_allocator);\n");
+                for (elements) |elem| {
+                    if (elem.key) |key| {
+                        try writer.writeAll("            try inner_arr.set(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, key);
+                        try writer.writeAll(", ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    } else {
+                        try writer.writeAll("            try inner_arr.push(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    }
+                }
+                try writer.writeAll("            break :blk_inner runtime.Value.initArray(inner_arr);\n");
+                try writer.writeAll("        }");
+            },
+        }
     }
 
     /// Escape a string for use in Zig source code

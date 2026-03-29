@@ -222,6 +222,12 @@ pub const TypeDef = struct {
         string: []const u8,
         bool: bool,
         null: void,
+        array: []const ArrayConstElement,
+    };
+
+    pub const ArrayConstElement = struct {
+        key: ?ConstantValue = null,
+        value: ConstantValue,
     };
 
     pub const Visibility = enum {

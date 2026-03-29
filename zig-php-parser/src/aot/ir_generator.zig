@@ -7404,6 +7404,28 @@ pub const IRGenerator = struct {
             .literal_string => return .{ .string = self.getString(node.data.literal_string.value) },
             .literal_bool => return .{ .bool = node.main_token.tag == .k_true },
             .literal_null => return .{ .null = {} },
+            .array_literal => {
+                // 处理数组常量
+                const elements = node.data.array_literal.elements;
+                var arr_elements = self.allocator.alloc(TypeDef.ArrayConstElement, elements.len) catch return null;
+                for (elements, 0..) |elem_idx, i| {
+                    const elem_node = self.getNode(elem_idx) orelse return null;
+                    if (elem_node.tag == .array_element) {
+                        const val_node = self.getNode(elem_node.data.array_element.value) orelse return null;
+                        const val = self.evalConstantExprToTypeDef(val_node) orelse return null;
+                        if (elem_node.data.array_element.key) |key_idx| {
+                            const key_node = self.getNode(key_idx) orelse return null;
+                            const key = self.evalConstantExprToTypeDef(key_node) orelse return null;
+                            arr_elements[i] = .{ .key = key, .value = val };
+                        } else {
+                            arr_elements[i] = .{ .key = null, .value = val };
+                        }
+                    } else {
+                        return null;
+                    }
+                }
+                return .{ .array = arr_elements };
+            },
             else => {},
         }
         // 尝试常量折叠（支持 1+2+3, "a"."b", true && false 等）
