@@ -883,10 +883,14 @@ pub const IRGenerator = struct {
 
             // 为引用参数创建no_optimize alloca
             const alloca_reg = if (param_data.is_reference) blk: {
-                const alloca_type = param_type;
+                // 引用参数：alloca存储的是指针，所以alloca_type应该是指针类型
+                const ptr_base = try self.allocator.create(Type);
+                ptr_base.* = param_type;
+                const alloca_type = Type{ .ptr = ptr_base }; // alloca存储*Value
+                
                 const type_ptr = try self.allocator.create(Type);
                 type_ptr.* = alloca_type;
-                const ptr_type = Type{ .ptr = type_ptr };
+                const ptr_type = Type{ .ptr = type_ptr }; // alloca返回**Value
                 const reg = func.newRegister(ptr_type);
 
                 const alloca_inst = try self.allocator.create(Instruction);
@@ -6018,6 +6022,14 @@ pub const IRGenerator = struct {
                     args = padded;
                 }
             }
+        }
+        
+        // 特殊处理：iterator_to_array 第二个参数可选，默认为true
+        if (std.mem.eql(u8, func_name, "iterator_to_array") and args.len == 1) {
+            const padded = try self.allocator.alloc(Register, 2);
+            padded[0] = args[0];
+            padded[1] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
+            args = padded;
         }
 
         if (indirect_callee) |callee_reg| {

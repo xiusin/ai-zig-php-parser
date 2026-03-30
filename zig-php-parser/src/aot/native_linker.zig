@@ -2281,7 +2281,6 @@ pub const NativeLinker = struct {
 
     /// IR类型转Zig类型字符串
     fn irTypeToZigTypeString(self: *const Self, ir_type: IR.Type) []const u8 {
-        _ = self;
         return switch (ir_type) {
             .void => "void",
             .i64 => "i64",
@@ -2290,7 +2289,20 @@ pub const NativeLinker = struct {
             .php_value => "runtime.Value",
             .php_string => "runtime.Value",
             .php_array => "runtime.Value",
-            .ptr => "runtime.Value",
+            .ptr => |inner| {
+                // 递归处理指针类型
+                const inner_type_str = self.irTypeToZigTypeString(inner.*);
+                // 需要动态分配字符串，但这里简化处理
+                // 对于常见情况：*Value -> "*runtime.Value", **Value -> "**runtime.Value"
+                if (std.mem.eql(u8, inner_type_str, "runtime.Value")) {
+                    return "*runtime.Value";
+                } else if (std.mem.eql(u8, inner_type_str, "*runtime.Value")) {
+                    return "**runtime.Value";
+                } else {
+                    // 其他情况，返回指针类型
+                    return "*runtime.Value"; // fallback
+                }
+            },
             else => "runtime.Value",
         };
     }
@@ -2515,6 +2527,8 @@ pub const NativeLinker = struct {
         .{ "base64_decode", bi(.{ .runtime_name = "php_base64_decode", .needs_allocator = true }) },
         .{ "md5", bi(.{ .runtime_name = "php_md5", .needs_allocator = true }) },
         .{ "sha1", bi(.{ .runtime_name = "php_sha1", .needs_allocator = true }) },
+        .{ "password_hash", bi(.{ .runtime_name = "php_password_hash", .needs_allocator = true }) },
+        .{ "password_verify", bi(.{ .runtime_name = "php_password_verify", .needs_allocator = true }) },
         .{ "uniqid", bi(.{ .runtime_name = "php_uniqid", .needs_allocator = true }) },
         .{ "ord", bi(.{ .runtime_name = "php_ord", .needs_allocator = false }) },
         .{ "chr", bi(.{ .runtime_name = "php_chr", .needs_allocator = true }) },
@@ -2557,6 +2571,7 @@ pub const NativeLinker = struct {
         .{ "array_diff_key", bi(.{ .runtime_name = "php_array_diff_key", .needs_allocator = true }) },
         .{ "array_walk", bi(.{ .runtime_name = "php_array_walk", .needs_allocator = true }) },
         .{ "array_walk_recursive", bi(.{ .runtime_name = "php_array_walk_recursive", .needs_allocator = true }) },
+        .{ "iterator_to_array", bi(.{ .runtime_name = "php_iterator_to_array", .needs_allocator = true }) },
         .{ "array_count_values", bi(.{ .runtime_name = "php_array_count_values", .needs_allocator = true }) },
         .{ "array_rand", bi(.{ .runtime_name = "php_array_rand", .needs_allocator = true }) },
         .{ "array_key_first", bi(.{ .runtime_name = "php_array_key_first", .needs_allocator = false }) },
@@ -3519,7 +3534,7 @@ pub const NativeLinker = struct {
             var reg_iter = all_registers.iterator();
             while (reg_iter.next()) |entry| {
                 const reg_id = entry.key_ptr.*;
-                _ = entry.value_ptr.*;
+                const reg_type = entry.value_ptr.*;
 
                 // if (self.config.verbose and reg_id == 16) {
                 //     std.debug.print("  reg_16 type: {s}\n", .{@tagName(@as(std.meta.Tag(IR.Type), reg_type))});
@@ -3532,10 +3547,13 @@ pub const NativeLinker = struct {
                 if (is_alloca) {
                     // 检查是否是引用参数的alloca
                     if (ref_param_alloca_map.get(reg_id)) |_| {
-                        // 引用参数的alloca：声明为undefined，稍后在param后初始化
+                        // 引用参数的alloca：根据类型声明
+                        const type_str = self.irTypeToZigTypeString(reg_type);
                         try code.appendSlice(self.allocator, "    var reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
-                        try code.appendSlice(self.allocator, ": *runtime.Value = undefined;\n");
+                        try code.appendSlice(self.allocator, ": ");
+                        try code.appendSlice(self.allocator, type_str);
+                        try code.appendSlice(self.allocator, " = undefined;\n");
                         try code.appendSlice(self.allocator, "    _ = &reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
                         try code.appendSlice(self.allocator, ";\n");

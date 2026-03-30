@@ -6360,6 +6360,51 @@ pub fn php_iterator_next(iter_val: Value) !Value {
     return iter_val;
 }
 
+/// iterator_to_array - 将迭代器转换为数组
+/// @param iterator Iterator对象
+/// @param preserve_keys 是否保留键（默认true）
+pub fn php_iterator_to_array(iterator: Value, preserve_keys: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(iterator)) {
+        return error.InvalidArgument;
+    }
+
+    // 处理默认参数：如果preserve_keys是null或missing，默认为true
+    const use_keys = if (preserve_keys.isNull() or preserve_keys.isMissing()) true else preserve_keys.toBool();
+    const result = try PHPArray.init(allocator);
+    
+    // 调用rewind()重置迭代器
+    _ = try php_object_call(iterator, "rewind", &[_]Value{});
+    
+    var index: i64 = 0;
+    while (true) {
+        // 检查valid()
+        const valid_result = try php_object_call(iterator, "valid", &[_]Value{});
+        defer valid_result.release(allocator);
+        if (!valid_result.toBool()) break;
+        
+        // 获取current()
+        const current = try php_object_call(iterator, "current", &[_]Value{});
+        
+        if (use_keys) {
+            // 获取key()并保留键
+            const key = try php_object_call(iterator, "key", &[_]Value{});
+            try result.setByValue(allocator, key, current);
+            key.release(allocator);
+        } else {
+            // 使用数字索引
+            try result.setByValue(allocator, Value.initInt(index), current);
+            index += 1;
+        }
+        
+        current.release(allocator);
+        
+        // 调用next()
+        _ = try php_object_call(iterator, "next", &[_]Value{});
+    }
+    
+    return Value.initArray(result);
+}
+
 pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
     // Iterator对象不需要释放（由GC管理）
     if (Value_isObject(iter_val)) {
@@ -15267,8 +15312,11 @@ pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
     const hours: i64 = @intCast(day_seconds.getHoursIntoDay());
     const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
     const seconds_val: i64 = @intCast(day_seconds.getSecondsIntoMinute());
-    const wday: i64 = @intCast(@intFromEnum(epoch_day.calculateDayOfWeek()));
-    const yday: i64 = @intCast(year_day.calculateOrdinalDay());
+    
+    // 计算星期几 (0=Sunday, 6=Saturday)
+    // epoch_day.day 是从1970-01-01开始的天数，1970-01-01是星期四(4)
+    const wday: i64 = @intCast(@mod(epoch_day.day + 4, 7));
+    const yday: i64 = @intCast(year_day.day);
 
     const arr = try PHPArray.init(allocator);
     try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "seconds")), Value.initInt(seconds_val));
@@ -19977,6 +20025,66 @@ pub fn php_sha1(str: Value, raw_output: Value, allocator: Allocator) !Value {
 
     const php_str = try PHPString.init(allocator, &hex_str);
     return Value.initString(php_str);
+}
+
+/// password_hash - 创建密码哈希
+/// 使用bcrypt算法 (PASSWORD_DEFAULT = PASSWORD_BCRYPT = 1)
+pub fn php_password_hash(password: Value, algo: Value, options: Value, allocator: Allocator) !Value {
+    if (!password.isString()) return error.InvalidArgument;
+    
+    const pwd = password.asString().data;
+    const algo_val = algo.toInt();
+    
+    // 获取cost参数（默认12）
+    var cost: u6 = 12;
+    if (options.isArray()) {
+        const cost_key = Value.initString(try PHPString.init(allocator, "cost"));
+        defer cost_key.release(allocator);
+        const cost_val = try options.asArray().getByValue(allocator, cost_key);
+        defer cost_val.release(allocator);
+        if (!cost_val.isNull()) {
+            const c = cost_val.toInt();
+            if (c >= 4 and c <= 31) {
+                cost = @intCast(c);
+            }
+        }
+    }
+    
+    // 使用bcrypt (algo=1 是 PASSWORD_BCRYPT)
+    if (algo_val == 1 or algo_val == 0) { // 0 = PASSWORD_DEFAULT
+        var hash_buf: [128]u8 = undefined;
+        const hash_result = try std.crypto.pwhash.bcrypt.strHash(pwd, .{
+            .allocator = allocator,
+            .params = .{ .rounds_log = cost },
+            .encoding = .phc,
+        }, &hash_buf);
+        
+        const php_str = try PHPString.init(allocator, hash_result);
+        return Value.initString(php_str);
+    }
+    
+    return error.InvalidArgument;
+}
+
+/// password_verify - 验证密码是否匹配哈希
+pub fn php_password_verify(password: Value, hash: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!password.isString() or !hash.isString()) {
+        return Value.initBool(false);
+    }
+    
+    const pwd = password.asString().data;
+    const hash_str = hash.asString().data;
+    
+    // 使用bcrypt验证
+    const result = std.crypto.pwhash.bcrypt.strVerify(hash_str, pwd, .{
+        .allocator = runtime_allocator,
+        .encoding = .phc,
+    }) catch {
+        return Value.initBool(false);
+    };
+    
+    return Value.initBool(result == .ok);
 }
 
 pub fn php_uniqid(prefix: Value, more_entropy: Value, allocator: Allocator) !Value {
