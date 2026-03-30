@@ -4706,6 +4706,9 @@ fn checkArithmeticOperand(v: Value) bool {
 
 /// 输出 PHP Warning 到 stdout 和 stderr
 pub fn emitWarning(msg: []const u8) void {
+    // @操作符：错误抑制时不输出警告
+    if (isErrorSuppressed()) return;
+
     const stdout = std.fs.File{ .handle = 1 };
     const stderr = std.fs.File{ .handle = 2 };
     // PHP 输出顺序：先 stderr（PHP Warning:），再 stdout（Warning:）
@@ -14553,6 +14556,15 @@ pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
         if (meta.implementsInterface(name)) return Value.initBool(true);
     }
 
+    // PHP: Throwable 是所有 Exception 和 Error 的基接口
+    if (std.mem.eql(u8, name, "Throwable")) {
+        if (obj.class_meta) |meta| {
+            // 检查是否是Exception或Error的子类
+            if (meta.isSubclassOf("Exception") or std.mem.eql(u8, obj.class_name, "Exception")) return Value.initBool(true);
+            if (meta.isSubclassOf("Error") or std.mem.eql(u8, obj.class_name, "Error")) return Value.initBool(true);
+        }
+    }
+
     // PHP 8.0+: 实现了 __toString() 的类自动实现 Stringable 接口
     if (std.mem.eql(u8, name, "Stringable")) {
         if (obj.class_meta) |meta| {
@@ -14608,6 +14620,16 @@ pub fn php_property_exists(obj_val: Value, property_name: Value) !Value {
         const obj = Value_asObject(obj_val);
         return Value.initBool(obj.hasProperty(name));
     }
+
+    // 支持字符串类名: property_exists('ClassName', 'prop')
+    if (obj_val.isString()) {
+        const class_name = obj_val.asString().data;
+        if (findClass(class_name)) |meta| {
+            // 检查类元数据中是否有该属性
+            if (meta.properties.get(name) != null) return Value.initBool(true);
+        }
+    }
+
     return Value.initBool(false);
 }
 
@@ -15228,6 +15250,37 @@ pub fn hasException() bool {
 pub fn php_time() Value {
     const timestamp = std.time.timestamp();
     return Value.initInt(timestamp);
+}
+
+/// getdate - 获取日期/时间信息
+pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
+    const timestamp = if (ts_val.isNull()) std.time.timestamp() else ts_val.toInt();
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @bitCast(timestamp))) };
+    const day_seconds = epoch.getDaySeconds();
+    const epoch_day = epoch.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+
+    const year = year_day.year;
+    const month: i64 = @intCast(@intFromEnum(month_day.month));
+    const day: i64 = @intCast(month_day.day_index + 1);
+    const hours: i64 = @intCast(day_seconds.getHoursIntoDay());
+    const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
+    const seconds_val: i64 = @intCast(day_seconds.getSecondsIntoMinute());
+    const wday: i64 = @intCast(@intFromEnum(epoch_day.calculateDayOfWeek()));
+    const yday: i64 = @intCast(year_day.calculateOrdinalDay());
+
+    const arr = try PHPArray.init(allocator);
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "seconds")), Value.initInt(seconds_val));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "minutes")), Value.initInt(minutes));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "hours")), Value.initInt(hours));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "mday")), Value.initInt(day));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "wday")), Value.initInt(wday));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "mon")), Value.initInt(month));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "year")), Value.initInt(@intCast(@as(i32, year))));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "yday")), Value.initInt(yday));
+    try arr.setByValue(allocator, Value.initInt(0), Value.initInt(timestamp));
+    return Value.initArray(arr);
 }
 
 pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: Value, year: Value) !Value {
@@ -18906,6 +18959,23 @@ pub fn php_array_reduce(arr: Value, callback: Value, initial: Value, allocator: 
     return carry;
 }
 
+/// array_find - 查找数组中第一个满足回调条件的元素 (PHP 8.4+)
+pub fn php_array_find(arr: Value, callback: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+
+    const php_arr = arr.asArray();
+    var iter = php_arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const args = [_]Value{entry.value_ptr.*};
+        const result = try php_invoke_callable(callback, &args, allocator);
+        defer result.release(allocator);
+        if (result.toBool()) {
+            return entry.value_ptr.*.retain();
+        }
+    }
+    return Value.initNull();
+}
+
 /// array_chunk - 将数组分割成指定大小的块
 /// array_chunk - 将数组分割成指定大小的块
 pub fn php_array_chunk(arr: Value, size: Value, preserve_keys: Value, allocator: Allocator) !Value {
@@ -19218,6 +19288,28 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
 
     const php_str = try PHPString.init(allocator, result.items);
     return Value.initString(php_str);
+}
+
+/// vsprintf - 格式化字符串（参数为数组）
+pub fn php_vsprintf(format: Value, args_arr: Value, allocator: Allocator) !Value {
+    if (!format.isString()) return error.InvalidArgument;
+    // 将数组参数展开为切片
+    if (args_arr.isArray()) {
+        const arr = args_arr.asArray();
+        const count = arr.count();
+        const args = try allocator.alloc(Value, count);
+        defer allocator.free(args);
+        var iter = arr.elements.iterator();
+        var i: usize = 0;
+        while (iter.next()) |entry| {
+            if (i < count) {
+                args[i] = entry.value_ptr.*;
+                i += 1;
+            }
+        }
+        return php_sprintf(format, args[0..i], allocator);
+    }
+    return php_sprintf(format, &[_]Value{}, allocator);
 }
 
 pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
@@ -20003,6 +20095,19 @@ pub fn php_crc32(str: Value) !Value {
     // PHP crc32() 返回有符号32位整数（与C的crc32行为一致）
     const signed: i32 = @bitCast(crc);
     return Value.initInt(@intCast(signed));
+}
+
+/// hash_algos - 返回支持的哈希算法列表
+pub fn php_hash_algos(allocator: Allocator) !Value {
+    const algos = [_][]const u8{
+        "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
+        "sha512/256", "crc32", "crc32b", "adler32",
+    };
+    const arr = try PHPArray.init(allocator);
+    for (algos) |algo| {
+        try arr.push(allocator, Value.initString(try PHPString.init(allocator, algo)));
+    }
+    return Value.initArray(arr);
 }
 
 /// base64_encode - 使用MIME base64编码数据

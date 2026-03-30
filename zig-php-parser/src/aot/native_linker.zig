@@ -2491,6 +2491,7 @@ pub const NativeLinker = struct {
         .{ "strrpos", bi(.{ .runtime_name = "php_strrpos", .needs_allocator = false }) },
         .{ "strripos", bi(.{ .runtime_name = "php_strripos", .needs_allocator = false }) },
         .{ "sprintf", bi(.{ .runtime_name = "php_sprintf", .needs_allocator = true }) },
+        .{ "vsprintf", bi(.{ .runtime_name = "php_vsprintf", .needs_allocator = true }) },
         .{ "sscanf", .{ .runtime_name = "php_sscanf", .needs_allocator = true } },
         .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
         .{ "preg_match_all", .{ .runtime_name = "php_preg_match_all", .needs_allocator = true } },
@@ -2538,6 +2539,7 @@ pub const NativeLinker = struct {
         .{ "array_map", bi(.{ .runtime_name = "php_array_map", .needs_allocator = true }) },
         .{ "array_filter", bi(.{ .runtime_name = "php_array_filter", .needs_allocator = true }) },
         .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true }) },
+        .{ "array_find", bi(.{ .runtime_name = "php_array_find", .needs_allocator = true }) },
         .{ "array_chunk", bi(.{ .runtime_name = "php_array_chunk", .needs_allocator = true }) },
         .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
         .{ "array_sum", bi(.{ .runtime_name = "php_array_sum", .needs_allocator = false }) },
@@ -2634,6 +2636,7 @@ pub const NativeLinker = struct {
         .{ "mt_rand", .{ .runtime_name = "php_mt_rand", .needs_allocator = false } },
 
         .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
+        .{ "getdate", bi(.{ .runtime_name = "php_getdate", .needs_allocator = true }) },
         .{ "mktime", .{ .runtime_name = "php_mktime", .needs_allocator = false } },
         .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
         .{ "date", bi(.{ .runtime_name = "php_date", .needs_allocator = true }) },
@@ -2742,6 +2745,7 @@ pub const NativeLinker = struct {
 
         // 哈希
         .{ "hash", bi(.{ .runtime_name = "php_hash", .needs_allocator = true }) },
+        .{ "hash_algos", bi(.{ .runtime_name = "php_hash_algos", .needs_allocator = true }) },
 
         // 文件系统
         .{ "filemtime", bi(.{ .runtime_name = "php_filemtime", .needs_allocator = false }) },
@@ -8256,6 +8260,15 @@ pub const NativeLinker = struct {
                                     try self.writeValueArgsArray(writer, op.args[1..]);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_getdate")) {
+                                // getdate(timestamp = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_microtime")) {
                                 // microtime(get_as_float = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -9072,13 +9085,13 @@ pub const NativeLinker = struct {
                 }
             },
             .array_push => |op| {
-                // 检查是否是对象（ArrayAccess），调用offsetSet(null, value)
-                try writer.print("    if (runtime.Value_isObject(reg_{d})) {{\n", .{op.array.id});
-                try writer.writeAll("        _ = try runtime.php_object_call(");
-                try self.writeRegRef(writer, op.array.id);
-                try writer.writeAll(", \"offsetSet\", &[_]runtime.Value{runtime.Value.initNull(), ");
-                // 检查value是否是alloca指针
+                // 检查array和value是否是alloca指针
+                const push_arr_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.array.id) else false;
                 const push_val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                const arr_deref = if (push_arr_is_alloca) ".*" else "";
+                // 检查是否是对象（ArrayAccess），调用offsetSet(null, value)
+                try writer.print("    if (runtime.Value_isObject(reg_{d}{s})) {{\n", .{ op.array.id, arr_deref });
+                try writer.print("        _ = try runtime.php_object_call(reg_{d}{s}, \"offsetSet\", &[_]runtime.Value{{runtime.Value.initNull(), ", .{ op.array.id, arr_deref });
                 if (push_val_is_alloca) {
                     try writer.print("reg_{d}.*", .{op.value.id});
                 } else {
@@ -9086,10 +9099,18 @@ pub const NativeLinker = struct {
                 }
                 try writer.writeAll("});\n");
                 try writer.writeAll("    } else {\n");
-                if (push_val_is_alloca) {
-                    try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                if (push_arr_is_alloca) {
+                    if (push_val_is_alloca) {
+                        try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                    } else {
+                        try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    }
                 } else {
-                    try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    if (push_val_is_alloca) {
+                        try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                    } else {
+                        try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    }
                 }
                 try writer.writeAll("    }\n");
             },
