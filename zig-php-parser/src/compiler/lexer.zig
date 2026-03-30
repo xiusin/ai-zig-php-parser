@@ -103,7 +103,7 @@ pub const Lexer = struct {
             '%' => if (self.match('=')) .{ .tag = .percent_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .percent, .loc = .{ .start = start, .end = self.pos } },
             '^' => if (self.match('=')) .{ .tag = .caret_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .caret, .loc = .{ .start = start, .end = self.pos } },
             '~' => .{ .tag = .tilde, .loc = .{ .start = start, .end = self.pos } },
-            '?' => if (self.match('>')) .{ .tag = .t_close_tag, .loc = .{ .start = start, .end = self.pos } } else if (self.match('?')) .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } } else if (self.match('-')) {
+            '?' => if (self.match('>')) .{ .tag = .t_close_tag, .loc = .{ .start = start, .end = self.pos } } else if (self.match('?')) (if (self.match('=')) .{ .tag = .double_question_equal, .loc = .{ .start = start, .end = self.pos } } else .{ .tag = .double_question, .loc = .{ .start = start, .end = self.pos } }) else if (self.match('-')) {
                 // Check for ?-> (safe arrow in PHP mode)
                 if (self.match('>')) {
                     return .{ .tag = .safe_arrow, .loc = .{ .start = start, .end = self.pos } };
@@ -138,6 +138,7 @@ pub const Lexer = struct {
             '\'' => self.lexSingleQuoteString(start),
             '"' => self.lexDoubleQuoteString(start),
             '`' => self.lexBacktickString(start),
+            '@' => .{ .tag = .at_sign, .loc = .{ .start = start, .end = self.pos } },
             else => .{ .tag = .invalid, .loc = .{ .start = start, .end = self.pos } },
         };
     }
@@ -168,6 +169,9 @@ pub const Lexer = struct {
                 if (std.ascii.isAlphabetic(self.buffer[self.pos + 1]) or self.buffer[self.pos + 1] == '_') {
                     return self.lexVariableInInterpolation(start);
                 }
+                // $$ or $<non-var-char>: treat $ as literal text
+                self.pos += 1;
+                // fall through to text scanning below
             }
         }
 
@@ -177,6 +181,7 @@ pub const Lexer = struct {
             return .{ .tag = .t_curly_open, .loc = .{ .start = start, .end = self.pos } };
         }
 
+        var at_heredoc_label = false;
         while (self.pos < self.buffer.len) {
             const c = self.buffer[self.pos];
             if (c == end_char and end_char != 0) break;
@@ -187,11 +192,24 @@ pub const Lexer = struct {
             }
             if (c == '$' or (c == '{' and self.pos + 1 < self.buffer.len and self.buffer[self.pos + 1] == '$')) break;
             if (self.heredoc_label) |label| {
-                if (std.mem.startsWith(u8, self.buffer[self.pos..], label)) break;
+                if (std.mem.startsWith(u8, self.buffer[self.pos..], label)) {
+                    at_heredoc_label = true;
+                    break;
+                }
             }
             self.pos += 1;
         }
-        return .{ .tag = .t_encapsed_and_whitespace, .loc = .{ .start = start, .end = self.pos } };
+        // PHP strips the newline before heredoc closing label (only when we're actually at the label)
+        var end_pos = self.pos;
+        if (at_heredoc_label and end_pos > start) {
+            if (self.buffer[end_pos - 1] == '\n') {
+                end_pos -= 1;
+                if (end_pos > start and self.buffer[end_pos - 1] == '\r') {
+                    end_pos -= 1;
+                }
+            }
+        }
+        return .{ .tag = .t_encapsed_and_whitespace, .loc = .{ .start = start, .end = end_pos } };
     }
 
     fn lexNowdoc(self: *Lexer, start: usize) Token {
@@ -204,20 +222,30 @@ pub const Lexer = struct {
                 return .{ .tag = .t_heredoc_end, .loc = .{ .start = start, .end = self.pos } };
             }
         }
+        var at_nowdoc_label = false;
         while (self.pos < self.buffer.len) {
             if (self.heredoc_label) |label| {
                 // Check for label at start of new line
                 if (self.buffer[self.pos] == '\n') {
                     const next_pos = self.pos + 1;
                     if (next_pos < self.buffer.len and std.mem.startsWith(u8, self.buffer[next_pos..], label)) {
-                        self.pos += 1; // include the newline in content
+                        at_nowdoc_label = true;
+                        // Advance past the newline so next call starts at the label
+                        self.pos += 1;
                         break;
                     }
                 }
             }
             self.pos += 1;
         }
-        return .{ .tag = .t_encapsed_and_whitespace, .loc = .{ .start = start, .end = self.pos } };
+        // PHP strips the newline before nowdoc closing label
+        // Content excludes the trailing newline
+        var end_pos = if (at_nowdoc_label) self.pos - 1 else self.pos;
+        // Also strip any preceding \r
+        if (end_pos > start and self.buffer[end_pos - 1] == '\r') {
+            end_pos -= 1;
+        }
+        return .{ .tag = .t_encapsed_and_whitespace, .loc = .{ .start = start, .end = end_pos } };
     }
 
     fn isAtLineStart(self: *Lexer, pos: usize) bool {
@@ -356,26 +384,26 @@ pub const Lexer = struct {
         var has_dot = false;
         var has_exp = false;
 
-        // Handle different number formats
-        if (self.buffer[self.pos] == '0' and self.pos + 1 < self.buffer.len) {
-            const next_char = self.buffer[self.pos + 1];
+        // Handle different number formats (self.pos is already at start+1 due to pos+=1 in next())
+        if (self.buffer[start] == '0' and self.pos < self.buffer.len) {
+            const next_char = self.buffer[self.pos];
             if (next_char == 'x' or next_char == 'X') {
                 // Hexadecimal
-                self.pos += 2;
+                self.pos += 1;
                 while (self.pos < self.buffer.len and (std.ascii.isHex(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) {
                     self.pos += 1;
                 }
                 return .{ .tag = .t_lnumber, .loc = .{ .start = start, .end = self.pos } };
             } else if (next_char == 'b' or next_char == 'B') {
                 // Binary
-                self.pos += 2;
+                self.pos += 1;
                 while (self.pos < self.buffer.len and (self.buffer[self.pos] == '0' or self.buffer[self.pos] == '1' or self.buffer[self.pos] == '_')) {
                     self.pos += 1;
                 }
                 return .{ .tag = .t_lnumber, .loc = .{ .start = start, .end = self.pos } };
             } else if (next_char == 'o' or next_char == 'O') {
-                // Octal
-                self.pos += 2;
+                // Octal (PHP 8.1+)
+                self.pos += 1;
                 while (self.pos < self.buffer.len and (self.buffer[self.pos] >= '0' and self.buffer[self.pos] <= '7' or self.buffer[self.pos] == '_')) {
                     self.pos += 1;
                 }

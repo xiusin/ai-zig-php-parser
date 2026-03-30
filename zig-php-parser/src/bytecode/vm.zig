@@ -116,8 +116,58 @@ pub const Value = union(enum) {
             .null_val => 0,
             .bool_val => |b| if (b) 1 else 0,
             .int_val => |i| i,
-            .float_val => |f| @intFromFloat(f),
-            .string_val => |s| std.fmt.parseInt(i64, s.data, 10) catch 0,
+            .float_val => |f| blk: {
+                // 使用saturating转换避免panic
+                if (std.math.isNan(f)) break :blk 0;
+                if (f >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) break :blk std.math.maxInt(i64);
+                if (f <= @as(f64, @floatFromInt(std.math.minInt(i64)))) break :blk std.math.minInt(i64);
+                break :blk @intFromFloat(f);
+            },
+            .string_val => |s| blk: {
+                if (s.data.len == 0) break :blk 0;
+
+                // PHP行为：解析前导数字，遇到非数字停止
+                var result: i64 = 0;
+                var i: usize = 0;
+                var negative = false;
+
+                // 跳过前导空格
+                while (i < s.data.len and std.ascii.isWhitespace(s.data[i])) : (i += 1) {}
+
+                // 处理符号
+                if (i < s.data.len and (s.data[i] == '+' or s.data[i] == '-')) {
+                    negative = (s.data[i] == '-');
+                    i += 1;
+                }
+
+                // 解析数字（遇到非数字停止）
+                var has_digits = false;
+                while (i < s.data.len and std.ascii.isDigit(s.data[i])) : (i += 1) {
+                    has_digits = true;
+                    const digit: i64 = s.data[i] - '0';
+                    
+                    // 使用saturating算术避免溢出panic
+                    const mul_result = @mulWithOverflow(result, 10);
+                    if (mul_result[1] != 0) {
+                        // 溢出：返回最大/最小值
+                        break :blk if (negative) std.math.minInt(i64) else std.math.maxInt(i64);
+                    }
+                    
+                    const add_result = @addWithOverflow(mul_result[0], digit);
+                    if (add_result[1] != 0) {
+                        // 溢出：返回最大/最小值
+                        break :blk if (negative) std.math.minInt(i64) else std.math.maxInt(i64);
+                    }
+                    
+                    result = add_result[0];
+                }
+
+                // 如果没有数字，返回0
+                if (!has_digits) break :blk 0;
+
+                break :blk if (negative) -result else result;
+            },
+            .array_val => |a| if (a.elements.items.len > 0) 1 else 0,
             else => 0,
         };
     }
@@ -129,7 +179,49 @@ pub const Value = union(enum) {
             .bool_val => |b| if (b) 1.0 else 0.0,
             .int_val => |i| @floatFromInt(i),
             .float_val => |f| f,
-            .string_val => |s| std.fmt.parseFloat(f64, s.data) catch 0.0,
+            .string_val => |s| blk: {
+                if (s.data.len == 0) break :blk 0.0;
+
+                // PHP行为：解析前导数字（支持浮点数）
+                var result: f64 = 0.0;
+                var i: usize = 0;
+                var negative = false;
+
+                // 跳过前导空格
+                while (i < s.data.len and std.ascii.isWhitespace(s.data[i])) : (i += 1) {}
+
+                // 处理符号
+                if (i < s.data.len and (s.data[i] == '+' or s.data[i] == '-')) {
+                    negative = (s.data[i] == '-');
+                    i += 1;
+                }
+
+                // 解析整数部分
+                var has_digits = false;
+                while (i < s.data.len and std.ascii.isDigit(s.data[i])) : (i += 1) {
+                    has_digits = true;
+                    const digit = s.data[i] - '0';
+                    result = result * 10.0 + @as(f64, @floatFromInt(digit));
+                }
+
+                // 解析小数部分
+                if (i < s.data.len and s.data[i] == '.') {
+                    i += 1;
+                    var decimal_place: f64 = 0.1;
+                    while (i < s.data.len and std.ascii.isDigit(s.data[i])) : (i += 1) {
+                        has_digits = true;
+                        const digit = s.data[i] - '0';
+                        result += @as(f64, @floatFromInt(digit)) * decimal_place;
+                        decimal_place *= 0.1;
+                    }
+                }
+
+                // 如果没有数字，返回0
+                if (!has_digits) break :blk 0.0;
+
+                break :blk if (negative) -result else result;
+            },
+            .array_val => |a| if (a.elements.items.len > 0) 1.0 else 0.0,
             else => 0.0,
         };
     }
@@ -149,6 +241,73 @@ pub const Value = union(enum) {
             .resource_val => .resource_type,
             .iterator_val => .iterator_type,
         };
+    }
+};
+
+/// 类元数据 - 存储类的静态信息
+pub const ClassMetadata = struct {
+    name: []const u8,
+    /// 静态方法表：方法名 -> CompiledFunction
+    static_methods: std.StringHashMapUnmanaged(*CompiledFunction),
+    /// 实例方法表：方法名 -> CompiledFunction
+    instance_methods: std.StringHashMapUnmanaged(*CompiledFunction),
+    /// 静态属性表：属性名 -> Value
+    static_properties: std.StringHashMapUnmanaged(Value),
+    /// 实例属性默认值：属性名 -> Value
+    instance_property_defaults: std.StringHashMapUnmanaged(Value),
+    /// 类常量表：常量名 -> Value
+    constants: std.StringHashMapUnmanaged(Value),
+    /// 父类（继承）
+    parent: ?*ClassMetadata,
+    /// 类ID（用于快速查找）
+    class_id: u16,
+    /// 引用计数
+    ref_count: u32,
+    
+    pub fn init(allocator: std.mem.Allocator, name: []const u8, class_id: u16) !*ClassMetadata {
+        const meta = try allocator.create(ClassMetadata);
+        meta.* = .{
+            .name = try allocator.dupe(u8, name),
+            .static_methods = .{},
+            .instance_methods = .{},
+            .static_properties = .{},
+            .instance_property_defaults = .{},
+            .constants = .{},
+            .parent = null,
+            .class_id = class_id,
+            .ref_count = 1,
+        };
+        return meta;
+    }
+    
+    pub fn deinit(self: *ClassMetadata, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        self.static_methods.deinit(allocator);
+        self.instance_methods.deinit(allocator);
+        
+        // 释放静态属性值
+        var static_iter = self.static_properties.iterator();
+        while (static_iter.next()) |entry| {
+            // 值的释放由GC管理
+            _ = entry;
+        }
+        self.static_properties.deinit(allocator);
+        
+        // 释放实例属性默认值
+        var inst_iter = self.instance_property_defaults.iterator();
+        while (inst_iter.next()) |entry| {
+            _ = entry;
+        }
+        self.instance_property_defaults.deinit(allocator);
+        
+        // 释放常量值
+        var const_iter = self.constants.iterator();
+        while (const_iter.next()) |entry| {
+            _ = entry;
+        }
+        self.constants.deinit(allocator);
+        
+        allocator.destroy(self);
     }
 };
 
@@ -202,6 +361,10 @@ pub const BytecodeVM = struct {
     functions: std.StringHashMapUnmanaged(*CompiledFunction),
     /// 函数表 - 按索引查找函数（用于func_ref）
     function_table: std.ArrayListUnmanaged(*CompiledFunction),
+    /// 类元数据表 - 类名 -> ClassMetadata
+    classes: std.StringHashMapUnmanaged(*ClassMetadata),
+    /// 类ID计数器
+    next_class_id: u16,
     builtins: std.StringHashMapUnmanaged(BuiltinFn),
     /// OPT-005: 内置函数快速访问数组 - O(1) 索引访问
     builtin_array: std.ArrayListUnmanaged(BuiltinFn),
@@ -264,6 +427,7 @@ pub const BytecodeVM = struct {
         InvalidArrayIndex,
         NullPointerAccess,
         OutOfMemory,
+        UncaughtException,
     };
 
     pub fn init(allocator: std.mem.Allocator) !*BytecodeVM {
@@ -278,6 +442,8 @@ pub const BytecodeVM = struct {
             .global_names = .{},
             .functions = .{},
             .function_table = .{},
+            .classes = .{},
+            .next_class_id = 0,
             .builtins = .{},
             .builtin_array = .{},
             .string_pool = .{},
@@ -370,6 +536,7 @@ pub const BytecodeVM = struct {
             .{ .name = "is_int", .func = builtinIsInt },
             .{ .name = "is_string", .func = builtinIsString },
             .{ .name = "is_array", .func = builtinIsArray },
+            .{ .name = "gettype", .func = builtinGettype },
             .{ .name = "abs", .func = builtinAbs },
             .{ .name = "intval", .func = builtinIntval },
             .{ .name = "ceil", .func = builtinCeil },
@@ -428,6 +595,13 @@ pub const BytecodeVM = struct {
         }
         self.closure_pool.deinit(self.allocator);
 
+        // 释放类元数据
+        var class_iter = self.classes.iterator();
+        while (class_iter.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
+        }
+        self.classes.deinit(self.allocator);
+
         // 释放类型反馈收集器
         self.type_feedback_collector.deinit();
 
@@ -456,6 +630,46 @@ pub const BytecodeVM = struct {
         try self.functions.put(self.allocator, name, func);
         // 同时添加到函数表，返回索引
         try self.function_table.append(self.allocator, func);
+    }
+
+    /// 注册类元数据
+    /// @pre name 必须是有效的类名
+    /// @post 类被注册到类表中，返回类元数据指针
+    pub fn registerClass(self: *BytecodeVM, name: []const u8) !*ClassMetadata {
+        const class_id = self.next_class_id;
+        self.next_class_id += 1;
+        
+        const meta = try ClassMetadata.init(self.allocator, name, class_id);
+        try self.classes.put(self.allocator, name, meta);
+        return meta;
+    }
+
+    /// 获取类元数据
+    /// @pre name 必须是有效的类名
+    /// @post 返回类元数据指针，如果不存在返回null
+    pub fn getClass(self: *BytecodeVM, name: []const u8) ?*ClassMetadata {
+        return self.classes.get(name);
+    }
+
+    /// 注册静态方法到类
+    /// @pre class_meta 必须是有效的类元数据指针
+    /// @pre method_name 必须是有效的方法名
+    /// @pre func 必须是有效的编译后函数指针
+    pub fn registerStaticMethod(self: *BytecodeVM, class_meta: *ClassMetadata, method_name: []const u8, func: *CompiledFunction) !void {
+        try class_meta.static_methods.put(self.allocator, method_name, func);
+        
+        // 同时注册到全局函数表，使用 ClassName::methodName 格式
+        const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_meta.name, method_name });
+        defer self.allocator.free(full_name);
+        try self.functions.put(self.allocator, full_name, func);
+    }
+
+    /// 注册实例方法到类
+    /// @pre class_meta 必须是有效的类元数据指针
+    /// @pre method_name 必须是有效的方法名
+    /// @pre func 必须是有效的编译后函数指针
+    pub fn registerInstanceMethod(self: *BytecodeVM, class_meta: *ClassMetadata, method_name: []const u8, func: *CompiledFunction) !void {
+        try class_meta.instance_methods.put(self.allocator, method_name, func);
     }
 
     /// 通过索引获取函数
@@ -820,19 +1034,13 @@ pub const BytecodeVM = struct {
     /// 主执行循环 - 使用计算跳转表优化
     /// 通过函数指针数组替代switch语句，减少分支预测失败
     fn runOptimized(self: *BytecodeVM) VMError!Value {
-        std.debug.print("DEBUG: BytecodeVM runOptimized started\n", .{});
         var frame = &self.frames[self.frame_count - 1];
-        std.debug.print("DEBUG: bytecode length = {}\n", .{frame.function.bytecode.len});
 
         var instruction_count: usize = 0;
         while (true) {
             instruction_count += 1;
-            if (instruction_count % 1000 == 0) {
-                std.debug.print("DEBUG: executed {} instructions, ip={}\n", .{ instruction_count, frame.ip });
-            }
             
             if (frame.ip >= frame.function.bytecode.len) {
-                std.debug.print("DEBUG: ip out of bounds: {} >= {}\n", .{ frame.ip, frame.function.bytecode.len });
                 return .null_val;
             }
             
@@ -1187,6 +1395,8 @@ pub const BytecodeVM = struct {
 
                     self.stack_top = frame.base_pointer;
                     frame = &self.frames[self.frame_count - 1];
+                    // void 函数也需要压入返回值（null），这样调用者可以正确 pop
+                    try self.push(.null_val);
                 },
 
                 .loop_start, .loop_end => {
@@ -1776,6 +1986,35 @@ pub const BytecodeVM = struct {
                     }
                 },
 
+                // ========== 异常处理 ==========
+                .try_begin => {
+                    // try块开始 - 在字节码VM中，我们暂时不实现完整的异常处理
+                    // 只是标记，让指令能够执行
+                    // operand1 = catch块的跳转目标
+                },
+
+                .try_end => {
+                    // try块结束
+                },
+
+                .catch_begin => {
+                    // catch块开始
+                    // 在完整实现中，这里应该从异常栈中弹出异常对象并压入栈
+                    // 暂时我们压入一个null值作为占位
+                    try self.push(.null_val);
+                },
+
+                .catch_end => {
+                    // catch块结束
+                },
+
+                .throw => {
+                    // 抛出异常
+                    // 在完整实现中，这里应该查找最近的catch块并跳转
+                    // 暂时我们返回一个错误
+                    return BytecodeVM.VMError.UncaughtException;
+                },
+
                 else => {
                     // 未实现的指令
                     return BytecodeVM.VMError.InvalidOpcode;
@@ -1808,11 +2047,19 @@ pub const BytecodeVM = struct {
 
     /// OPT-003: 无检查的快速栈操作 - 用于热点路径
     inline fn pushFast(self: *BytecodeVM, value: Value) void {
+        // ReleaseSafe模式下添加边界检查避免panic
+        if (self.stack_top >= self.stack.len) {
+            @panic("Stack overflow in pushFast");
+        }
         self.stack[self.stack_top] = value;
         self.stack_top += 1;
     }
 
     inline fn popFast(self: *BytecodeVM) Value {
+        // ReleaseSafe模式下添加边界检查避免panic
+        if (self.stack_top == 0) {
+            @panic("Stack underflow in popFast");
+        }
         self.stack_top -= 1;
         return self.stack[self.stack_top];
     }
@@ -2529,6 +2776,34 @@ fn builtinIsString(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 fn builtinIsArray(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .bool_val = false };
     return .{ .bool_val = args[0] == .array_val };
+}
+
+/// gettype - 获取变量类型
+fn builtinGettype(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const type_name = switch (args[0]) {
+        .null_val => "NULL",
+        .bool_val => "boolean",
+        .int_val => "integer",
+        .float_val => "double",
+        .string_val => "string",
+        .array_val => "array",
+        .object_val => "object",
+        .struct_val => "object",
+        .closure_val => "object",
+        .resource_val => "resource",
+        else => "unknown type",
+    };
+    
+    const str = vm.allocator.create(Value.String) catch return BytecodeVM.VMError.OutOfMemory;
+    const data = vm.allocator.dupe(u8, type_name) catch return BytecodeVM.VMError.OutOfMemory;
+    str.* = .{
+        .data = data,
+        .ref_count = 1,
+        .marked = false,
+    };
+    vm.string_pool.append(vm.allocator, str) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str };
 }
 
 fn builtinEmpty(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
@@ -3949,7 +4224,8 @@ fn valueToString(vm: *BytecodeVM, value: Value) ![]const u8 {
             // 优化：小数值直接返回静态字符串
             if (i >= 0 and i <= 9) {
                 const static_digits = "0123456789";
-                break :blk static_digits[@intCast(i)..@intCast(i + 1)];
+                const idx: usize = @intCast(i);
+                break :blk static_digits[idx..idx + 1];
             }
 
             const arena_alloc = vm.temp_arena.allocator();
@@ -4085,6 +4361,7 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.jnz)] = handleJnz;
     table[@intFromEnum(OpCode.call)] = handleCall;
     table[@intFromEnum(OpCode.call_method)] = handleCallMethod;
+    table[@intFromEnum(OpCode.call_static)] = handleCallStatic;
     table[@intFromEnum(OpCode.call_builtin)] = handleCallBuiltin;
     table[@intFromEnum(OpCode.ret)] = handleRet;
     table[@intFromEnum(OpCode.ret_void)] = handleRetVoid;
@@ -4163,6 +4440,13 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.concat)] = handleConcat;
     table[@intFromEnum(OpCode.strlen)] = handleStrlen;
 
+    // 异常处理
+    table[@intFromEnum(OpCode.try_begin)] = handleTryBegin;
+    table[@intFromEnum(OpCode.try_end)] = handleTryEnd;
+    table[@intFromEnum(OpCode.catch_begin)] = handleCatchBegin;
+    table[@intFromEnum(OpCode.catch_end)] = handleCatchEnd;
+    table[@intFromEnum(OpCode.throw)] = handleThrow;
+
     return table;
 }
 
@@ -4212,6 +4496,50 @@ fn handleInvalidOpcode(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) By
 /// NOP - 空操作
 fn handleNop(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
     return .continue_execution;
+}
+
+/// try_begin - try块开始
+fn handleTryBegin(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    // 暂时不实现完整的异常处理，只是标记让指令能够执行
+    return .continue_execution;
+}
+
+/// try_end - try块结束
+fn handleTryEnd(_: *BytecodeVM, frame: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    // try块正常结束，需要跳过catch块
+    // 查找下一个catch_end指令
+    const bytecode = frame.function.bytecode;
+    var ip = frame.ip;
+    while (ip < bytecode.len) : (ip += 1) {
+        if (bytecode[ip].opcode == .catch_end) {
+            // 跳转到catch_end之后
+            frame.ip = ip + 1;
+            return .continue_execution;
+        }
+    }
+    // 如果没有找到catch_end，继续正常执行
+    return .continue_execution;
+}
+
+/// catch_begin - catch块开始
+fn handleCatchBegin(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    // catch块开始
+    // 在完整实现中，这里应该从异常栈中弹出异常对象并压入栈
+    // 由于我们暂时不支持异常，这个块不应该被执行（try_end会跳过）
+    // 如果执行到这里，说明有异常发生，但我们暂时不处理
+    return .continue_execution;
+}
+
+/// catch_end - catch块结束
+fn handleCatchEnd(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    return .continue_execution;
+}
+
+/// throw - 抛出异常
+fn handleThrow(_: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    // 在完整实现中，这里应该查找最近的catch块并跳转
+    // 暂时我们返回一个错误
+    return BytecodeVM.VMError.UncaughtException;
 }
 
 fn handleCaptureVar(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
@@ -4904,6 +5232,168 @@ fn handleCallBuiltin(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byte
     return .continue_execution;
 }
 
+/// 静态方法调用处理函数
+/// operand1 = 参数数量
+/// 栈布局: [class_name, method_name, arg1, arg2, ...] -> [result]
+/// @complexity O(1) 内联缓存命中时，O(log n) 缓存未命中时
+/// @thread-safety ISOLATED
+fn handleCallStatic(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    _ = frame;
+    const arg_count = inst.operand1;
+
+    // 栈布局验证：至少需要 class_name + method_name + args
+    // stack_top 指向下一个可用位置，所以需要 >= arg_count + 2 个元素
+    const required_elements = arg_count + 2;
+    if (vm.stack_top < required_elements) {
+        return BytecodeVM.VMError.StackUnderflow;
+    }
+
+    // 获取类名（在栈底）
+    const class_name_idx = vm.stack_top - arg_count - 2;
+    const class_name_val = vm.stack[class_name_idx];
+    if (class_name_val != .string_val) {
+        return BytecodeVM.VMError.TypeMismatch;
+    }
+    const class_name = class_name_val.string_val.data;
+
+    // 获取方法名（在类名之上）
+    const method_name_idx = vm.stack_top - arg_count - 1;
+    const method_name_val = vm.stack[method_name_idx];
+    if (method_name_val != .string_val) {
+        return BytecodeVM.VMError.TypeMismatch;
+    }
+    const method_name = method_name_val.string_val.data;
+
+    // 类型反馈：记录静态方法调用点
+    if (vm.enable_type_feedback) {
+        const call_site_id = @as(u32, vm.frames[vm.frame_count - 1].ip - 1) | 0x40000000; // 高位标记为静态方法调用
+        vm.type_feedback_collector.record(call_site_id, .object_type) catch {};
+    }
+
+    // 构造缓存键（类名 + 方法名）
+    const cache_key = computeStaticMethodCacheKey(class_name, method_name);
+
+    // 1. 尝试从内联缓存中查找静态方法
+    var cached_method: ?*CompiledFunction = null;
+    if (vm.enable_inline_cache) {
+        if (vm.method_cache.lookupMethod(method_name, cache_key)) |method_ptr| {
+            cached_method = @ptrCast(@alignCast(method_ptr));
+            vm.stats.cache_hits += 1;
+        } else {
+            vm.stats.cache_misses += 1;
+        }
+    }
+
+    // 2. 如果缓存未命中，查找静态方法
+    // 注意：在完整实现中，这里应该从类的静态方法表中查找
+    // 目前简化为查找全局函数表中的 "ClassName::methodName" 格式
+    var method_func: ?*CompiledFunction = cached_method;
+    if (method_func == null) {
+        // 构造完整方法名：ClassName::methodName
+        const full_method_name = std.fmt.allocPrint(
+            vm.allocator,
+            "{s}::{s}",
+            .{ class_name, method_name }
+        ) catch {
+            return BytecodeVM.VMError.OutOfMemory;
+        };
+        defer vm.allocator.free(full_method_name);
+
+        // 查找函数
+        method_func = vm.functions.get(full_method_name);
+
+        // 如果未找到，尝试不带命名空间前缀的查找
+        if (method_func == null and class_name.len > 0 and class_name[0] == '\\') {
+            const short_class_name = class_name[1..];
+            const short_full_name = std.fmt.allocPrint(
+                vm.allocator,
+                "{s}::{s}",
+                .{ short_class_name, method_name }
+            ) catch {
+                return BytecodeVM.VMError.OutOfMemory;
+            };
+            defer vm.allocator.free(short_full_name);
+            method_func = vm.functions.get(short_full_name);
+        }
+
+        // 3. 缓存找到的方法
+        if (vm.enable_inline_cache and method_func != null) {
+            vm.method_cache.cacheMethod(
+                method_name,
+                cache_key,
+                @ptrCast(method_func.?)
+            ) catch {};
+        }
+    }
+
+    // 4. 执行静态方法调用
+    if (method_func) |func| {
+        // 收集参数
+        var args = std.ArrayList(Value).initCapacity(vm.allocator, arg_count) catch {
+            return BytecodeVM.VMError.OutOfMemory;
+        };
+        defer args.deinit(vm.allocator);
+
+        // 弹出参数（逆序）
+        var i: u16 = 0;
+        while (i < arg_count) : (i += 1) {
+            const arg = try vm.pop();
+            try args.insert(vm.allocator, 0, arg); // 插入到开头以保持正确顺序
+        }
+
+        // 弹出方法名和类名
+        _ = try vm.pop(); // method_name
+        _ = try vm.pop(); // class_name
+
+        // 5. 创建新的调用帧
+        if (vm.frame_count >= BytecodeVM.FRAMES_MAX) {
+            return BytecodeVM.VMError.StackOverflow;
+        }
+
+        const new_frame_idx = vm.frame_count;
+        vm.frame_count += 1;
+
+        vm.frames[new_frame_idx] = CallFrame{
+            .function = func,
+            .ip = 0,
+            .base_pointer = vm.stack_top,
+            .return_address = vm.frames[new_frame_idx - 1].ip,
+        };
+
+        // 6. 压入参数
+        for (args.items) |arg| {
+            try vm.push(arg);
+        }
+
+        // 7. 分配局部变量空间
+        var j: u32 = 0;
+        while (j < func.local_count) : (j += 1) {
+            try vm.push(.null_val);
+        }
+
+        return .frame_changed;
+    } else {
+        // 静态方法未找到 - 弹出所有参数并返回 null
+        var i: u16 = 0;
+        while (i < arg_count + 2) : (i += 1) {
+            _ = try vm.pop();
+        }
+        try vm.push(.null_val);
+        return .continue_execution;
+    }
+}
+
+/// 计算静态方法缓存键
+/// @pre class_name 和 method_name 必须有效
+/// @post 返回唯一的缓存键
+fn computeStaticMethodCacheKey(class_name: []const u8, method_name: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(class_name);
+    hasher.update("::");
+    hasher.update(method_name);
+    return hasher.final();
+}
+
 /// 方法调用处理函数 - 使用内联缓存优化
 /// 方法调用指令处理（完整实现）
 /// operand1 = 方法名在常量池中的索引
@@ -5100,6 +5590,8 @@ fn handleRetVoid(vm: *BytecodeVM, frame: *CallFrame, _: Instruction) BytecodeVM.
         return .{ .return_value = .null_val };
     }
     vm.stack_top = frame.base_pointer;
+    // void 函数也需要压入返回值（null），这样调用者可以正确 pop
+    try vm.push(.null_val);
     return .frame_changed;
 }
 
@@ -5856,7 +6348,21 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
     if (a == .string_val and b == .string_val) {
         const str_a = a.string_val.data;
         const str_b = b.string_val.data;
-        const result_len = str_a.len + str_b.len;
+        
+        // 检查长度相加是否溢出
+        const add_result = @addWithOverflow(str_a.len, str_b.len);
+        if (add_result[1] != 0) {
+            // 溢出：字符串太长，返回空字符串
+            const empty_str = vm.allocator.create(Value.String) catch
+                return BytecodeVM.VMError.OutOfMemory;
+            empty_str.* = .{ .data = &[_]u8{}, .ref_count = 1, .marked = false };
+            vm.string_pool.append(vm.allocator, empty_str) catch
+                return BytecodeVM.VMError.OutOfMemory;
+            vm.pushFast(.{ .string_val = empty_str });
+            return .continue_execution;
+        }
+        
+        const result_len = add_result[0];
 
         // OPT-009: 小字符串使用栈上缓冲区避免堆分配
         var stack_buffer: [SMALL_STRING_BUFFER_SIZE]u8 = undefined;
@@ -5877,7 +6383,7 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
 
         // 尝试复用空闲String对象
         const result_str = if (vm.free_strings.items.len > 0) blk: {
-            const s = vm.free_strings.getLast();
+            const s = vm.free_strings.items[vm.free_strings.items.len - 1];
             vm.free_strings.items.len -= 1;
             if (s.data.len > 0) {
                 vm.allocator.free(s.data);
@@ -5898,7 +6404,21 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
     // 慢路径：需要类型转换
     const str_a = valueToString(vm, a) catch return BytecodeVM.VMError.OutOfMemory;
     const str_b = valueToString(vm, b) catch return BytecodeVM.VMError.OutOfMemory;
-    const result_len = str_a.len + str_b.len;
+    
+    // 检查长度相加是否溢出
+    const add_result = @addWithOverflow(str_a.len, str_b.len);
+    if (add_result[1] != 0) {
+        // 溢出：字符串太长，返回空字符串
+        const empty_str = vm.allocator.create(Value.String) catch
+            return BytecodeVM.VMError.OutOfMemory;
+        empty_str.* = .{ .data = &[_]u8{}, .ref_count = 1, .marked = false };
+        vm.string_pool.append(vm.allocator, empty_str) catch
+            return BytecodeVM.VMError.OutOfMemory;
+        vm.pushFast(.{ .string_val = empty_str });
+        return .continue_execution;
+    }
+    
+    const result_len = add_result[0];
     const result_data = vm.allocator.alloc(u8, result_len) catch
         return BytecodeVM.VMError.OutOfMemory;
     @memcpy(result_data[0..str_a.len], str_a);
@@ -5906,7 +6426,7 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
 
     // 尝试复用空闲String对象
     const result_str = if (vm.free_strings.items.len > 0) blk: {
-        const s = vm.free_strings.getLast();
+        const s = vm.free_strings.items[vm.free_strings.items.len - 1];
         vm.free_strings.items.len -= 1;
         if (s.data.len > 0) {
             vm.allocator.free(s.data);

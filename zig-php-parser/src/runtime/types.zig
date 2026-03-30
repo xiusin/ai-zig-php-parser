@@ -3405,12 +3405,50 @@ pub const Closure = struct {
         const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
         try self.function.validateArguments(args);
 
-        // Set parameters in current call frame
+        // 检查是否有可变参数
+        var has_variadic = false;
+        var variadic_param_idx: usize = 0;
         for (self.function.parameters, 0..) |param, i| {
-            if (i < args.len) {
-                try vm_instance.setVariable(param.name.data, args[i]);
-            } else if (param.default_value) |default| {
-                try vm_instance.setVariable(param.name.data, default);
+            if (param.is_variadic) {
+                has_variadic = true;
+                variadic_param_idx = i;
+                break;
+            }
+        }
+
+        if (has_variadic) {
+            // 可变参数处理：将所有参数收集到一个数组中
+            const required_params = variadic_param_idx;
+            
+            // 绑定普通参数
+            for (self.function.parameters[0..required_params], 0..) |param, i| {
+                if (i < args.len) {
+                    try vm_instance.setVariable(param.name.data, args[i]);
+                } else if (param.default_value) |default| {
+                    try vm_instance.setVariable(param.name.data, default);
+                }
+            }
+
+            // 将剩余参数收集到可变参数数组中
+            const variadic_param = self.function.parameters[variadic_param_idx];
+            const variadic_args = if (args.len > required_params) args[required_params..] else &[_]Value{};
+            
+            // 创建数组来存储可变参数
+            const arr = try vm_instance.memory_manager.allocArray();
+            for (variadic_args) |arg| {
+                _ = arg.retain();
+                try arr.data.push(vm_instance.allocator, arg);
+            }
+            const arr_value = Value.fromBox(arr, Value.TYPE_ARRAY);
+            try vm_instance.setVariable(variadic_param.name.data, arr_value);
+        } else {
+            // 普通参数处理
+            for (self.function.parameters, 0..) |param, i| {
+                if (i < args.len) {
+                    try vm_instance.setVariable(param.name.data, args[i]);
+                } else if (param.default_value) |default| {
+                    try vm_instance.setVariable(param.name.data, default);
+                }
             }
         }
 
@@ -3682,19 +3720,59 @@ pub const ArrowFunction = struct {
         const VM = @import("vm.zig").VM;
         const vm_instance = @as(*VM, @ptrCast(@alignCast(vm)));
 
-        // Validate arguments
-        if (args.len != self.parameters.len) {
-            return error.ArgumentCountMismatch;
+        // 检查是否有可变参数
+        var has_variadic = false;
+        var variadic_param_idx: usize = 0;
+        for (self.parameters, 0..) |param, i| {
+            if (param.is_variadic) {
+                has_variadic = true;
+                variadic_param_idx = i;
+                break;
+            }
         }
 
-        // Type check arguments
-        for (self.parameters, args) |param, arg| {
-            try param.validateType(arg);
-        }
+        if (has_variadic) {
+            // 可变参数处理：将所有参数收集到一个数组中
+            const required_params = variadic_param_idx;
+            
+            // 检查最少参数数量
+            if (args.len < required_params) {
+                return error.TooFewArguments;
+            }
 
-        // Set parameters in current call frame
-        for (self.parameters, args) |param, arg| {
-            try vm_instance.setVariable(param.name.data, arg);
+            // 绑定普通参数
+            for (self.parameters[0..required_params], args[0..required_params]) |param, arg| {
+                try param.validateType(arg);
+                try vm_instance.setVariable(param.name.data, arg);
+            }
+
+            // 将剩余参数收集到可变参数数组中
+            const variadic_param = self.parameters[variadic_param_idx];
+            const variadic_args = args[required_params..];
+            
+            // 创建数组来存储可变参数
+            const arr = try vm_instance.memory_manager.allocArray();
+            for (variadic_args) |arg| {
+                _ = arg.retain();
+                try arr.data.push(vm_instance.allocator, arg);
+            }
+            const arr_value = Value.fromBox(arr, Value.TYPE_ARRAY);
+            try vm_instance.setVariable(variadic_param.name.data, arr_value);
+        } else {
+            // 普通参数处理：参数数量必须完全匹配
+            if (args.len != self.parameters.len) {
+                return error.ArgumentCountMismatch;
+            }
+
+            // Type check arguments
+            for (self.parameters, args) |param, arg| {
+                try param.validateType(arg);
+            }
+
+            // Set parameters in current call frame
+            for (self.parameters, args) |param, arg| {
+                try vm_instance.setVariable(param.name.data, arg);
+            }
         }
 
         // Set captured variables in current call frame

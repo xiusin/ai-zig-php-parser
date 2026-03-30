@@ -207,6 +207,7 @@ pub const TypeDef = struct {
         name: []const u8,
         visibility: Visibility,
         is_static: bool,
+        is_abstract: bool = false,
     };
 
     pub const Constant = struct {
@@ -221,6 +222,12 @@ pub const TypeDef = struct {
         string: []const u8,
         bool: bool,
         null: void,
+        array: []const ArrayConstElement,
+    };
+
+    pub const ArrayConstElement = struct {
+        key: ?ConstantValue = null,
+        value: ConstantValue,
     };
 
     pub const Visibility = enum {
@@ -807,6 +814,8 @@ pub const Instruction = struct {
         global_get_dynamic: struct { name_reg: Register },
         /// Set global variable dynamically (variable variable)
         global_set_dynamic: struct { name_reg: Register, value: Register },
+        /// Bind global variable reference: $target = &$source
+        global_ref_bind: struct { target: []const u8, source: []const u8 },
 
         // ============ PHP Array Operations ============
         /// Create new array
@@ -1146,6 +1155,7 @@ pub const Instruction = struct {
         func_ptr: Register,
         captures: []const Register,
         param_count: u8,
+        required_params: u8 = 0,
     };
 
     /// Bind closure to object
@@ -1520,6 +1530,7 @@ pub const IRPrinter = struct {
             },
             .global_get_dynamic => |op| try self.print("global.get_dynamic {any}", .{op.name_reg}),
             .global_set_dynamic => |op| try self.print("global.set_dynamic {any} = {any}", .{ op.name_reg, op.value }),
+            .global_ref_bind => |op| try self.print("global.ref_bind {s} = &{s}", .{ op.target, op.source }),
             .global_unset => |op| try self.print("global.unset {any}", .{op.name}),
 
             // Array operations

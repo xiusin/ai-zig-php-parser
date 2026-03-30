@@ -21,6 +21,7 @@ const reflection = @import("reflection.zig");
 const builtin_classes = @import("builtin_classes.zig");
 const builtin_registry = @import("builtin_registry.zig");
 const BuiltinRegistry = builtin_registry.BuiltinRegistry;
+const builtin_vars = @import("builtin_vars.zig");
 const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
 const string_utils = @import("string_utils.zig");
@@ -2316,6 +2317,9 @@ pub const VM = struct {
         // Register HTTP classes (HttpServer, HttpClient, Router)
         try builtin_http.registerHttpClasses(vm);
 
+        // Register reflection classes (ReflectionFunction, ReflectionClass)
+        try vm.registerReflectionClasses();
+
         // Initialize predefined constants
         try vm.initializePredefinedConstants();
 
@@ -2840,6 +2844,455 @@ pub const VM = struct {
 
         const end_time = std.time.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
+    }
+
+    /// Register reflection classes (ReflectionFunction, ReflectionClass)
+    pub fn registerReflectionClasses(self: *VM) !void {
+        // Create ReflectionFunction class
+        const rf_name = try types.PHPString.init(self.allocator, "ReflectionFunction");
+        const rf_class = try self.allocator.create(types.PHPClass);
+        rf_class.* = try types.PHPClass.init(self.allocator, rf_name);
+        rf_name.release(self.allocator);
+        try self.classes.put("ReflectionFunction", rf_class);
+
+        // Create ReflectionClass class
+        const rc_name = try types.PHPString.init(self.allocator, "ReflectionClass");
+        const rc_class = try self.allocator.create(types.PHPClass);
+        rc_class.* = try types.PHPClass.init(self.allocator, rc_name);
+        rc_name.release(self.allocator);
+        try self.classes.put("ReflectionClass", rc_class);
+
+        // Create ReflectionMethod class
+        const rm_name = try types.PHPString.init(self.allocator, "ReflectionMethod");
+        const rm_class = try self.allocator.create(types.PHPClass);
+        rm_class.* = try types.PHPClass.init(self.allocator, rm_name);
+        rm_name.release(self.allocator);
+        try self.classes.put("ReflectionMethod", rm_class);
+
+        // Create ReflectionParameter class
+        const rp_name = try types.PHPString.init(self.allocator, "ReflectionParameter");
+        const rp_class = try self.allocator.create(types.PHPClass);
+        rp_class.* = try types.PHPClass.init(self.allocator, rp_name);
+        rp_name.release(self.allocator);
+        try self.classes.put("ReflectionParameter", rp_class);
+    }
+
+    /// Construct a ReflectionFunction object
+    fn constructReflectionFunction(self: *VM, arg_indices: []const u32) !Value {
+        if (arg_indices.len == 0) {
+            const exception = try ExceptionFactory.createArgumentCountError(self.allocator, 1, 0, "ReflectionFunction::__construct", "builtin", 0);
+            return self.throwException(exception);
+        }
+
+        const arg_value = try self.eval(arg_indices[0]);
+        defer self.releaseValue(arg_value);
+
+        const rf_class = self.getClass("ReflectionFunction") orelse return error.ClassNotFound;
+        const value = try Value.initObjectWithManager(&self.memory_manager, rf_class);
+        const object = value.getAsObject().data;
+
+        if (arg_value.getTag() == .closure or arg_value.getTag() == .user_function) {
+            // Closure or user function value
+            try object.setProperty(self.allocator, "__rf_name", try Value.initString(self.allocator, "{closure}"));
+            try object.setProperty(self.allocator, "__rf_func", arg_value.retain());
+            // Get param info from UserFunction or Closure
+            if (arg_value.getTag() == .user_function) {
+                const uf = arg_value.getAsUserFunc().data;
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(@intCast(uf.parameters.len)));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(@intCast(uf.min_args)));
+            } else if (arg_value.getTag() == .closure) {
+                const closure = arg_value.getAsClosure().data;
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(@intCast(closure.function.parameters.len)));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(@intCast(closure.function.min_args)));
+            } else {
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+            }
+        } else if (arg_value.isString()) {
+            // Function name string
+            const func_name = arg_value.getAsString().data.data;
+            try object.setProperty(self.allocator, "__rf_name", try Value.initString(self.allocator, func_name));
+            // Look up user function from global scope
+            if (self.global.get(func_name)) |func_val| {
+                if (func_val.getTag() == .user_function) {
+                    const uf = func_val.getAsUserFunc().data;
+                    try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(@intCast(uf.parameters.len)));
+                    try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(@intCast(uf.min_args)));
+                    try object.setProperty(self.allocator, "__rf_func", func_val.retain());
+                } else {
+                    try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+                    try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+                }
+            } else {
+                try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+                try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+            }
+        } else {
+            try object.setProperty(self.allocator, "__rf_name", try Value.initString(self.allocator, ""));
+            try object.setProperty(self.allocator, "__rf_param_count", Value.initInt(0));
+            try object.setProperty(self.allocator, "__rf_required_params", Value.initInt(0));
+        }
+
+        return value;
+    }
+
+    /// Construct a ReflectionClass object
+    fn constructReflectionClass(self: *VM, arg_indices: []const u32) !Value {
+        if (arg_indices.len == 0) {
+            const exception = try ExceptionFactory.createArgumentCountError(self.allocator, 1, 0, "ReflectionClass::__construct", "builtin", 0);
+            return self.throwException(exception);
+        }
+
+        const arg_value = try self.eval(arg_indices[0]);
+        defer self.releaseValue(arg_value);
+
+        const rc_class = self.getClass("ReflectionClass") orelse return error.ClassNotFound;
+        const value = try Value.initObjectWithManager(&self.memory_manager, rc_class);
+        const object = value.getAsObject().data;
+
+        if (arg_value.isString()) {
+            const class_name = arg_value.getAsString().data.data;
+            try object.setProperty(self.allocator, "__rc_name", try Value.initString(self.allocator, class_name));
+        }
+
+        return value;
+    }
+
+    /// Handle method calls on ReflectionFunction objects
+    fn callReflectionFunctionMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getName")) {
+            if (obj.getProperty("__rf_name")) |name_val| {
+                return name_val.retain();
+            } else |_| {}
+            return Value.initString(self.allocator, "") catch Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getNumberOfParameters")) {
+            if (obj.getProperty("__rf_param_count")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "getNumberOfRequiredParameters")) {
+            if (obj.getProperty("__rf_required_params")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "invoke")) {
+            // invoke($arg1, $arg2, ...) — 支持 user_function 和 closure
+            if (obj.getProperty("__rf_func")) |func_val| {
+                if (func_val.getTag() == .user_function) {
+                    return self.callUserFunction(func_val.getAsUserFunc().data, args);
+                } else if (func_val.getTag() == .closure) {
+                    return self.callClosure(func_val.getAsClosure().data, args);
+                } else if (func_val.getTag() == .arrow_function) {
+                    return self.callArrowFunction(func_val.getAsArrowFunc().data, args);
+                }
+            } else |_| {}
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "invokeArgs")) {
+            // invokeArgs(array $args) — 从数组中提取参数
+            if (args.len > 0 and args[0].isArray()) {
+                const arr = args[0].getAsArray().data;
+                const count = arr.count();
+                const real_args = try self.allocator.alloc(Value, count);
+                defer self.allocator.free(real_args);
+                var idx: usize = 0;
+                while (idx < count) : (idx += 1) {
+                    real_args[idx] = arr.get(types.ArrayKey{ .integer = @intCast(idx) }) orelse Value.initNull();
+                }
+                if (obj.getProperty("__rf_func")) |func_val| {
+                    if (func_val.getTag() == .user_function) {
+                        return self.callUserFunction(func_val.getAsUserFunc().data, real_args);
+                    } else if (func_val.getTag() == .closure) {
+                        return self.callClosure(func_val.getAsClosure().data, real_args);
+                    }
+                } else |_| {}
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "isClosure")) {
+            if (obj.getProperty("__rf_func")) |func_val| {
+                return Value.initBool(func_val.getTag() == .closure);
+            } else |_| {}
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isInternal")) {
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isUserDefined")) {
+            return Value.initBool(true);
+        } else if (std.mem.eql(u8, method_name, "getParameters")) {
+            // 返回 ReflectionParameter 对象数组
+            const pc_val = obj.getProperty("__rf_param_count") catch Value.initInt(0);
+            const pc = pc_val.asInt();
+            const result = try Value.initArrayWithManager(&self.memory_manager);
+            const result_arr = result.getAsArray().data;
+            var i: i64 = 0;
+            while (i < pc) : (i += 1) {
+                const rp_class = self.getClass("ReflectionParameter") orelse break;
+                const rp_val = try Value.initObjectWithManager(&self.memory_manager, rp_class);
+                const rp_obj = rp_val.getAsObject().data;
+                try rp_obj.setProperty(self.allocator, "__position", Value.initInt(i));
+                const pname = try std.fmt.allocPrint(self.allocator, "param{d}", .{i});
+                try rp_obj.setProperty(self.allocator, "__name", try Value.initString(self.allocator, pname));
+                try result_arr.push(self.allocator, rp_val);
+            }
+            return result;
+        } else if (std.mem.eql(u8, method_name, "getReturnType")) {
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "hasReturnType")) {
+            return Value.initBool(false);
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionFunction::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// Handle method calls on ReflectionClass objects
+    fn callReflectionClassMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        // Helper: resolve class name from stored property
+        const rc_name_val = obj.getProperty("__rc_name") catch null;
+        const rc_name: ?[]const u8 = if (rc_name_val) |v| (if (v.isString()) v.getAsString().data.data else null) else null;
+
+        if (std.mem.eql(u8, method_name, "getName")) {
+            if (rc_name_val) |v| return v.retain();
+            return Value.initString(self.allocator, "") catch Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "isAbstract")) {
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| return Value.initBool(cls.modifiers.is_abstract);
+            }
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isFinal")) {
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| return Value.initBool(cls.modifiers.is_final);
+            }
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isInstantiable")) {
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| return Value.initBool(!cls.modifiers.is_abstract);
+            }
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "hasMethod")) {
+            if (rc_name) |cn| {
+                if (args.len > 0 and args[0].isString()) {
+                    if (self.getClass(cn)) |cls| {
+                        return Value.initBool(cls.hasMethod(args[0].getAsString().data.data));
+                    }
+                }
+            }
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "hasProperty")) {
+            if (rc_name) |cn| {
+                if (args.len > 0 and args[0].isString()) {
+                    if (self.getClass(cn)) |cls| {
+                        return Value.initBool(cls.hasProperty(args[0].getAsString().data.data));
+                    }
+                }
+            }
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "getMethod")) {
+            if (rc_name) |cn| {
+                if (args.len > 0 and args[0].isString()) {
+                    const mname = args[0].getAsString().data.data;
+                    if (self.getClass(cn)) |cls| {
+                        if (cls.hasMethod(mname)) {
+                            const rm_class = self.getClass("ReflectionMethod") orelse return Value.initNull();
+                            const rm_val = try Value.initObjectWithManager(&self.memory_manager, rm_class);
+                            const rm_obj = rm_val.getAsObject().data;
+                            try rm_obj.setProperty(self.allocator, "__class_name", try Value.initString(self.allocator, cn));
+                            try rm_obj.setProperty(self.allocator, "__method_name", try Value.initString(self.allocator, mname));
+                            return rm_val;
+                        }
+                    }
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getMethods")) {
+            const result = try Value.initArrayWithManager(&self.memory_manager);
+            const result_arr = result.getAsArray().data;
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| {
+                    var iter = cls.methods.iterator();
+                    while (iter.next()) |entry| {
+                        const rm_class = self.getClass("ReflectionMethod") orelse break;
+                        const rm_val = try Value.initObjectWithManager(&self.memory_manager, rm_class);
+                        const rm_obj = rm_val.getAsObject().data;
+                        try rm_obj.setProperty(self.allocator, "__class_name", try Value.initString(self.allocator, cn));
+                        try rm_obj.setProperty(self.allocator, "__method_name", try Value.initString(self.allocator, entry.key_ptr.*));
+                        try result_arr.push(self.allocator, rm_val);
+                    }
+                }
+            }
+            return result;
+        } else if (std.mem.eql(u8, method_name, "getProperties")) {
+            const result = try Value.initArrayWithManager(&self.memory_manager);
+            const result_arr = result.getAsArray().data;
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| {
+                    var iter = cls.properties.iterator();
+                    while (iter.next()) |entry| {
+                        try result_arr.push(self.allocator, try Value.initString(self.allocator, entry.key_ptr.*));
+                    }
+                }
+            }
+            return result;
+        } else if (std.mem.eql(u8, method_name, "newInstance")) {
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| {
+                    if (cls.modifiers.is_abstract) return Value.initNull();
+                    const value = try Value.initObjectWithManager(&self.memory_manager, cls);
+                    if (cls.hasMethod("__construct")) {
+                        const ctor_result = self.callObjectMethod(value, "__construct", args) catch {
+                            self.releaseValue(value);
+                            return Value.initNull();
+                        };
+                        self.releaseValue(ctor_result);
+                    }
+                    return value;
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "newInstanceArgs")) {
+            if (rc_name) |cn| {
+                if (args.len > 0 and args[0].isArray()) {
+                    if (self.getClass(cn)) |cls| {
+                        if (cls.modifiers.is_abstract) return Value.initNull();
+                        const value = try Value.initObjectWithManager(&self.memory_manager, cls);
+                        if (cls.hasMethod("__construct")) {
+                            const arr = args[0].getAsArray().data;
+                            const count = arr.count();
+                            const real_args = try self.allocator.alloc(Value, count);
+                            defer self.allocator.free(real_args);
+                            var idx: usize = 0;
+                            while (idx < count) : (idx += 1) {
+                                real_args[idx] = arr.get(types.ArrayKey{ .integer = @intCast(idx) }) orelse Value.initNull();
+                            }
+                            const ctor_result = self.callObjectMethod(value, "__construct", real_args) catch {
+                                self.releaseValue(value);
+                                return Value.initNull();
+                            };
+                            self.releaseValue(ctor_result);
+                        }
+                        return value;
+                    }
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getParentClass")) {
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| {
+                    if (cls.parent) |parent| {
+                        const prc_class = self.getClass("ReflectionClass") orelse return Value.initBool(false);
+                        const prc_val = try Value.initObjectWithManager(&self.memory_manager, prc_class);
+                        const prc_obj = prc_val.getAsObject().data;
+                        try prc_obj.setProperty(self.allocator, "__rc_name", try Value.initString(self.allocator, parent.name.data));
+                        return prc_val;
+                    }
+                }
+            }
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "getAttributes")) {
+            return Value.initArrayWithManager(&self.memory_manager);
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionClass::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// Handle method calls on ReflectionMethod objects
+    fn callReflectionMethodMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getName")) {
+            if (obj.getProperty("__method_name")) |v| {
+                return v.retain();
+            } else |_| {}
+            return try Value.initString(self.allocator, "");
+        } else if (std.mem.eql(u8, method_name, "getDeclaringClass")) {
+            if (obj.getProperty("__class_name")) |cname_val| {
+                const prc_class = self.getClass("ReflectionClass") orelse return Value.initNull();
+                const prc_val = try Value.initObjectWithManager(&self.memory_manager, prc_class);
+                const prc_obj = prc_val.getAsObject().data;
+                try prc_obj.setProperty(self.allocator, "__rc_name", cname_val.retain());
+                return prc_val;
+            } else |_| {}
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "isPublic")) {
+            return Value.initBool(true);
+        } else if (std.mem.eql(u8, method_name, "isStatic")) {
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isConstructor")) {
+            if (obj.getProperty("__method_name")) |v| {
+                if (v.isString()) return Value.initBool(std.mem.eql(u8, v.getAsString().data.data, "__construct"));
+            } else |_| {}
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "getNumberOfParameters")) {
+            return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "getNumberOfRequiredParameters")) {
+            return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "invoke")) {
+            // invoke($object, ...$args) - call method on object
+            if (args.len > 0 and args[0].isObject()) {
+                const mname_val = obj.getProperty("__method_name") catch return Value.initNull();
+                if (mname_val.isString()) {
+                    return self.callObjectMethod(args[0], mname_val.getAsString().data.data, args[1..]);
+                }
+            }
+            return Value.initNull();
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionMethod::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// Handle method calls on ReflectionParameter objects
+    fn callReflectionParameterMethod(self: *VM, obj_value: Value, method_name: []const u8) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getName")) {
+            if (obj.getProperty("__name")) |v| {
+                return v.retain();
+            } else |_| {}
+            // Fallback from position
+            const pos_val = obj.getProperty("__position") catch return try Value.initString(self.allocator, "param0");
+            const pos = pos_val.asInt();
+            const name = try std.fmt.allocPrint(self.allocator, "param{d}", .{pos});
+            return try Value.initString(self.allocator, name);
+        } else if (std.mem.eql(u8, method_name, "getPosition")) {
+            if (obj.getProperty("__position")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "isOptional")) {
+            if (obj.getProperty("__is_optional")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "hasDefaultValue")) {
+            if (obj.getProperty("__has_default")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isVariadic")) {
+            if (obj.getProperty("__is_variadic")) |v| {
+                return v;
+            } else |_| {}
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "allowsNull")) {
+            return Value.initBool(true);
+        } else if (std.mem.eql(u8, method_name, "hasType")) {
+            return Value.initBool(false);
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionParameter::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
     }
 
     /// Initialize predefined constants
@@ -4992,6 +5445,49 @@ pub const VM = struct {
     }
 
     pub fn callUserFunc(self: *VM, function_name: []const u8, args: []const Value) !Value {
+        // Check if it's a static method call: "ClassName::methodName"
+        if (std.mem.indexOf(u8, function_name, "::")) |sep_pos| {
+            const class_name = function_name[0..sep_pos];
+            const method_name = function_name[sep_pos + 2 ..];
+            
+            // Get the class
+            const class = self.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            // Get the method
+            const method_lookup = class.getMethodLookup(method_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedMethodError(self.allocator, class_name, method_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            const method = method_lookup.method;
+            
+            // Call the static method
+            const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+            defer self.allocator.free(full_method_name);
+            try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
+            defer self.popCallFrame();
+            
+            // Bind arguments to parameters
+            for (method.parameters, 0..) |param, i| {
+                if (i < args.len) {
+                    try self.setVariable(param.name.data, args[i]);
+                } else if (param.default_value) |default| {
+                    try self.setVariable(param.name.data, default);
+                }
+            }
+            
+            // Execute method body
+            if (method.body) |body| {
+                const body_node_idx: u32 = @intCast(@intFromPtr(body));
+                return self.eval(body_node_idx);
+            }
+            
+            return Value.initNull();
+        }
+        
         if (try StandardLibrary.callBuiltinFast(self, function_name, args)) |v| return v;
 
         // Second, check extension functions (Requirements: 9.2)
@@ -5209,31 +5705,21 @@ pub const VM = struct {
     /// 使用字节码VM执行AST
     /// 字节码生成器类型问题已修复，现在可以正常使用字节码执行
     fn runBytecode(self: *VM, node: ast.Node.Index) !Value {
-        std.debug.print("DEBUG: runBytecode called\n", .{});
         // 初始化字节码VM
         const bvm = self.ensureBytecodeVM() catch |err| {
             std.debug.print("Bytecode VM init failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
-        std.debug.print("DEBUG: BytecodeVM initialized\n", .{});
 
         // 创建字节码生成器并编译AST
         var generator = BytecodeGenerator.init(self.allocator, self.context);
         defer generator.deinit();
 
-        std.debug.print("DEBUG: About to compile AST to bytecode\n", .{});
         const compiled_func = generator.compile(node) catch |err| {
             std.debug.print("Bytecode compilation failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
         defer compiled_func.deinit(self.allocator);
-        std.debug.print("DEBUG: Bytecode compilation successful\n", .{});
-
-        // 打印生成的字节码
-        std.debug.print("DEBUG: Generated bytecode ({} instructions):\n", .{compiled_func.bytecode.len});
-        for (compiled_func.bytecode, 0..) |inst, i| {
-            std.debug.print("  [{}] {s} (op1={}, op2={})\n", .{ i, @tagName(inst.opcode), inst.operand1, inst.operand2 });
-        }
 
         // 注册用户定义的函数到BytecodeVM
         const user_funcs = generator.getUserFunctions();
@@ -5245,12 +5731,10 @@ pub const VM = struct {
         }
 
         // 执行字节码
-        std.debug.print("DEBUG: About to execute bytecode\n", .{});
         const result = bvm.execute(compiled_func) catch |err| {
             std.debug.print("Bytecode execution failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
             return self.runTreeWalking(node);
         };
-        std.debug.print("DEBUG: Bytecode execution completed\n", .{});
 
         // 输出 BytecodeVM 的 echo/print 结果
         const output = bvm.getOutput();
@@ -5273,7 +5757,6 @@ pub const VM = struct {
 
     /// 使用树遍历解释器执行AST
     fn runTreeWalking(self: *VM, node: ast.Node.Index) !Value {
-        std.debug.print("DEBUG: runTreeWalking called\n", .{});
         return self.eval(node);
     }
 
@@ -5371,7 +5854,6 @@ pub const VM = struct {
 
     /// 主执行入口 - 支持执行模式切换
     pub fn run(self: *VM, node: ast.Node.Index) !Value {
-        std.debug.print("DEBUG: run() called, execution_mode={s}\n", .{@tagName(self.execution_mode)});
         defer _ = self.request_arena.reset(.retain_capacity);
 
         const result = switch (self.execution_mode) {
@@ -6775,6 +7257,64 @@ pub const VM = struct {
     pub fn callFunctionByNameWithRefs(self: *VM, name: []const u8, args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
         if (try StandardLibrary.callBuiltinFast(self, name, args)) |v| return v;
 
+        // Check if it's a static method call: "ClassName::methodName"
+        if (std.mem.indexOf(u8, name, "::")) |sep_pos| {
+            const class_name = name[0..sep_pos];
+            const method_name = name[sep_pos + 2 ..];
+            
+            // Get the class
+            const class = self.getClass(class_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            // Get the method
+            const method_lookup = class.getMethodLookup(method_name) orelse {
+                const exception = try ExceptionFactory.createUndefinedMethodError(self.allocator, class_name, method_name, self.current_file, self.current_line);
+                return self.throwException(exception);
+            };
+            
+            const method = method_lookup.method;
+            
+            // Build full method name for call stack
+            var full_method_name_buf: [256]u8 = undefined;
+            const full_method_name = std.fmt.bufPrint(&full_method_name_buf, "{s}::{s}", .{ class_name, method_name }) catch name;
+            
+            // Push call frame
+            try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
+            defer self.popCallFrame();
+            
+            // Bind parameters
+            for (method.parameters, 0..) |param, i| {
+                if (i < args.len) {
+                    try self.setVariable(param.name.data, args[i]);
+                } else if (param.default_value) |default| {
+                    try self.setVariable(param.name.data, default);
+                } else {
+                    const exception = try ExceptionFactory.createArgumentCountError(self.allocator, @intCast(method.parameters.len), @intCast(args.len), method_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+            }
+            
+            // Execute method body
+            if (method.body) |body| {
+                const body_node_idx: u32 = @truncate(@intFromPtr(body));
+                return self.eval(body_node_idx) catch |err| {
+                    if (err == error.Return) {
+                        if (self.return_value) |val| {
+                            const ret = val;
+                            self.return_value = null;
+                            return ret;
+                        }
+                        return Value.initNull();
+                    }
+                    return err;
+                };
+            }
+            
+            return Value.initNull();
+        }
+
         // Then check global functions
         const function_val = self.global.get(name) orelse {
             const exception = try ExceptionFactory.createUndefinedFunctionError(self.allocator, name, self.current_file, self.current_line);
@@ -7020,6 +7560,13 @@ pub const VM = struct {
             return self.evaluateStructInstantiation(struct_data);
         }
 
+        // Special handling for Reflection classes
+        if (std.mem.eql(u8, name, "ReflectionFunction")) {
+            return self.constructReflectionFunction(instantiation_data.args);
+        } else if (std.mem.eql(u8, name, "ReflectionClass")) {
+            return self.constructReflectionClass(instantiation_data.args);
+        }
+
         // Check if there's a builtin constructor (for concurrency classes)
         if (std.mem.eql(u8, name, "Mutex") or std.mem.eql(u8, name, "Atomic") or
             std.mem.eql(u8, name, "RWLock") or std.mem.eql(u8, name, "SharedData") or
@@ -7260,7 +7807,27 @@ pub const VM = struct {
         }
 
         for (method_data.args) |arg_node_idx| {
-            try args.append(self.allocator, try self.eval(arg_node_idx));
+            const arg_node = self.context.nodes.items[arg_node_idx];
+            
+            // 处理 unpacking_expr: ...$array
+            if (arg_node.tag == .unpacking_expr) {
+                const array_val = try self.eval(arg_node.data.unpacking_expr.expr);
+                defer self.releaseValue(array_val);
+                
+                if (array_val.isArray()) {
+                    const arr = array_val.getAsArray().data;
+                    var i: usize = 0;
+                    while (i < arr.next_index) : (i += 1) {
+                        const key = types.ArrayKey{ .integer = @intCast(i) };
+                        if (arr.get(key)) |elem| {
+                            _ = elem.retain();
+                            try args.append(self.allocator, elem);
+                        }
+                    }
+                }
+            } else {
+                try args.append(self.allocator, try self.eval(arg_node_idx));
+            }
         }
 
         // 处理数字类型的内置方法（NumberWrapper）
@@ -7408,6 +7975,20 @@ pub const VM = struct {
                 return builtin_methods.ArrayMethods.count(self, target_value);
             } else if (std.mem.eql(u8, method_name, "isEmpty")) {
                 return builtin_methods.ArrayMethods.isEmpty(self, target_value);
+            }
+        }
+
+        // Special handling for Reflection objects
+        if (target_value.isObject()) {
+            const rf_class_name = target_value.getAsObject().data.class.name.data;
+            if (std.mem.eql(u8, rf_class_name, "ReflectionFunction")) {
+                return self.callReflectionFunctionMethod(target_value, method_name, args.items);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionClass")) {
+                return self.callReflectionClassMethod(target_value, method_name, args.items);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionMethod")) {
+                return self.callReflectionMethodMethod(target_value, method_name, args.items);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionParameter")) {
+                return self.callReflectionParameterMethod(target_value, method_name);
             }
         }
 
@@ -10741,6 +11322,27 @@ pub const VM = struct {
     fn evaluateStaticMethodCall(self: *VM, static_call_data: anytype) !Value {
         const class_name = self.context.string_pool.keys()[static_call_data.class_name];
         const method_name = self.context.string_pool.keys()[static_call_data.method_name];
+
+        // Special handling for Closure::fromCallable
+        if (std.mem.eql(u8, class_name, "Closure") and std.mem.eql(u8, method_name, "fromCallable")) {
+            // Evaluate arguments
+            var args = std.ArrayList(Value){};
+            try args.ensureTotalCapacity(self.allocator, static_call_data.args.len);
+            defer {
+                for (args.items) |arg| {
+                    self.releaseValue(arg);
+                }
+                args.deinit(self.allocator);
+            }
+
+            for (static_call_data.args) |arg_node_idx| {
+                const arg_value = try self.eval(arg_node_idx);
+                try args.append(self.allocator, arg_value);
+            }
+
+            // Call the builtin function
+            return builtin_vars.closureFromCallableFn(self, args.items);
+        }
 
         // 解析类引用：self、parent、static、具体类名或变量（$obj::method()）
         var called_class: *types.PHPClass = undefined;

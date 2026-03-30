@@ -341,6 +341,7 @@ pub const BytecodeGenerator = struct {
             .variable => try self.visitVariable(index),
             .function_call => try self.visitFunctionCall(index),
             .method_call => try self.visitMethodCall(index),
+            .static_method_call => try self.visitStaticMethodCall(index),
             .array_init => try self.visitArrayInit(index),
             .array_access => try self.visitArrayAccess(index),
             .property_access => try self.visitPropertyAccess(index),
@@ -351,8 +352,12 @@ pub const BytecodeGenerator = struct {
             .closure => try self.visitClosure(index),
             .arrow_function => try self.visitArrowFunction(index),
             .function_decl => try self.visitFunctionDecl(index),
+            .class_decl => try self.visitClassDecl(index),
+            .interface_decl => try self.visitClassDecl(index), // 接口也用同样的处理
+            .trait_decl => try self.visitClassDecl(index), // Trait也用同样的处理
             .postfix_expr => try self.visitPostfixExpr(index),
             .match_expr => try self.visitMatchExpr(index),
+            .cast_expr => try self.visitCastExpr(index),
             else => {},
         }
     }
@@ -1282,6 +1287,41 @@ pub const BytecodeGenerator = struct {
         self.pushStack();
     }
 
+    /// 访问静态方法调用 (ClassName::methodName())
+    fn visitStaticMethodCall(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const static_data = node.data.static_method_call;
+
+        // 压入类名
+        const class_name = self.getString(static_data.class_name);
+        const class_const = try self.addConstant(.{ .string_val = class_name });
+        try self.emit(.push_const, class_const, 0);
+        self.pushStack();
+
+        // 压入方法名
+        const method_name = self.getString(static_data.method_name);
+        const method_const = try self.addConstant(.{ .string_val = method_name });
+        try self.emit(.push_const, method_const, 0);
+        self.pushStack();
+
+        // 压入参数
+        for (static_data.args) |arg_idx| {
+            try self.visitNode(arg_idx);
+        }
+
+        // 调用静态方法
+        const arg_count: u16 = @intCast(static_data.args.len);
+        try self.emit(.call_static, arg_count, 0);
+
+        // 类名、方法名、参数弹出，结果压入
+        self.popStack(); // 类名
+        self.popStack(); // 方法名
+        for (static_data.args) |_| {
+            self.popStack();
+        }
+        self.pushStack();
+    }
+
     /// 访问数组初始化
     fn visitArrayInit(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
@@ -1588,6 +1628,31 @@ pub const BytecodeGenerator = struct {
         self.popStack();
     }
 
+    /// 访问类型转换表达式 (int), (float), (string), (bool), (array), (object)
+    fn visitCastExpr(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const cast_data = node.data.cast_expr;
+
+        // 先计算被转换的表达式
+        try self.visitNode(cast_data.expr);
+
+        // 根据转换类型发射对应的指令
+        const opcode: OpCode = switch (cast_data.cast_type) {
+            .cast_int => .to_int,
+            .cast_float => .to_float,
+            .cast_string => .to_string,
+            .cast_bool => .to_bool,
+            .k_array => .to_array,
+            .k_object => .to_object,
+            else => .nop,
+        };
+
+        if (opcode != .nop) {
+            try self.emit(opcode, 0, 0);
+            // 类型转换指令：pop 1个值，push 1个值，栈深度不变
+        }
+    }
+
     /// 访问闭包
     fn visitClosure(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
@@ -1842,6 +1907,132 @@ pub const BytecodeGenerator = struct {
             self.popStack();
         }
         self.pushStack();
+    }
+
+    /// 访问类/接口/Trait定义 (class_decl/interface_decl/trait_decl)
+    /// 完整实现类系统的字节码编译
+    fn visitClassDecl(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const container_data = node.data.container_decl;
+        
+        // 获取类名
+        const class_name = self.getString(container_data.name);
+        
+        // 类定义不生成字节码指令，而是在编译时注册类元数据
+        // 这样在运行时可以通过类名查找类信息
+        
+        // 遍历类成员，编译方法
+        for (container_data.members) |member_idx| {
+            const member_node = self.getNode(member_idx);
+            
+            switch (member_node.tag) {
+                .method_decl => {
+                    const method_data = member_node.data.method_decl;
+                    const method_name = self.getString(method_data.name);
+                    
+                    // 保存当前状态
+                    const saved_locals = self.locals;
+                    const saved_local_count = self.local_count;
+                    const saved_instructions = self.instructions;
+                    const saved_constants = self.constants;
+                    const saved_max_stack = self.max_stack;
+                    const saved_current_stack = self.current_stack;
+                    const saved_label_counter = self.label_counter;
+                    const saved_labels = self.labels;
+                    const saved_pending_jumps = self.pending_jumps;
+                    const saved_loop_stack = self.loop_stack;
+
+                    // 重置状态
+                    self.locals = .{};
+                    self.local_count = 0;
+                    self.instructions = .{};
+                    self.constants = .{};
+                    self.max_stack = 0;
+                    self.current_stack = 0;
+                    self.label_counter = 0;
+                    self.labels = .{};
+                    self.pending_jumps = .{};
+                    self.loop_stack = .{};
+
+                    // 如果是实例方法，第一个参数是 $this
+                    if (!method_data.modifiers.is_static) {
+                        _ = try self.getOrCreateLocal("$this");
+                    }
+
+                    // 处理方法参数
+                    for (method_data.params) |param_idx| {
+                        const param_node = self.getNode(param_idx);
+                        const param_name = self.getString(param_node.data.parameter.name);
+                        _ = try self.getOrCreateLocal(param_name);
+                    }
+
+                    // 编译方法体（如果有）
+                    if (method_data.body) |body_idx| {
+                        try self.visitNode(body_idx);
+                    }
+                    
+                    try self.emit(.ret_void, 0, 0);
+                    try self.resolveJumps();
+
+                    // 创建编译后的方法
+                    const compiled = try self.allocator.create(CompiledFunction);
+                    compiled.* = CompiledFunction{
+                        .name = method_name,
+                        .bytecode = try self.instructions.toOwnedSlice(self.allocator),
+                        .constants = try self.constants.toOwnedSlice(self.allocator),
+                        .local_count = self.local_count,
+                        .arg_count = @intCast(method_data.params.len),
+                        .max_stack = self.max_stack,
+                        .flags = .{},
+                        .line_table = &[_]CompiledFunction.LineInfo{},
+                        .exception_table = &[_]CompiledFunction.ExceptionEntry{},
+                    };
+
+                    // 注册方法到函数表
+                    // 静态方法：ClassName::methodName
+                    // 实例方法：ClassName->methodName
+                    const separator = if (method_data.modifiers.is_static) "::" else "->";
+                    const full_method_name = try std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}{s}{s}",
+                        .{ class_name, separator, method_name }
+                    );
+                    // 注意：不要释放 full_method_name，它被用作 HashMap 的 key
+                    // HashMap 不会复制 key，所以我们需要保持它的生命周期
+                    
+                    try self.functions.put(self.allocator, full_method_name, compiled);
+
+                    // 恢复状态
+                    self.locals.deinit(self.allocator);
+                    self.locals = saved_locals;
+                    self.local_count = saved_local_count;
+                    self.instructions.deinit(self.allocator);
+                    self.instructions = saved_instructions;
+                    self.constants.deinit(self.allocator);
+                    self.constants = saved_constants;
+                    self.max_stack = saved_max_stack;
+                    self.current_stack = saved_current_stack;
+                    self.labels.deinit(self.allocator);
+                    self.labels = saved_labels;
+                    self.pending_jumps.deinit(self.allocator);
+                    self.pending_jumps = saved_pending_jumps;
+                    self.loop_stack.deinit(self.allocator);
+                    self.loop_stack = saved_loop_stack;
+                    self.label_counter = saved_label_counter;
+                },
+                .property_decl => {
+                    // 属性定义暂时跳过，属性在对象实例化时处理
+                    // TODO: 实现属性默认值的编译
+                },
+                .const_decl => {
+                    // 类常量定义暂时跳过
+                    // TODO: 实现类常量的编译
+                },
+                else => {
+                    // 其他成员类型暂时跳过
+                },
+            }
+        }
     }
 
     /// 访问函数声明

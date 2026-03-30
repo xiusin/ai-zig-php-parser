@@ -354,8 +354,8 @@ pub const MultiFileCompiler = struct {
         // 生成 Zig 代码
         const zig_code = linker.generateZigCode(self.merged_module.?) catch |err| {
             const linker_message = switch (err) {
-                error.TraitMethodConflict =>
-                    "trait method conflict: colliding methods require insteadof/as resolution",
+                //error.TraitMethodConflict =>
+                //    "trait method conflict: colliding methods require insteadof/as resolution",
                 error.TraitPropertyConflict =>
                     "trait property conflict: imported properties are not definition-compatible",
                 error.TraitConstantConflict =>

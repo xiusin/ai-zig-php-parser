@@ -900,6 +900,225 @@ pub fn pregQuoteFn(vm: *VM, args: []const Value) !Value {
     return try createStringValue(vm.allocator, result);
 }
 
+/// preg_filter 实现 - 类似 preg_replace，但只返回匹配的元素
+/// 对于数组输入，只返回发生替换的元素
+pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
+    const min_args: usize = 3;
+    if (args.len < min_args) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, min_args, @as(u32, @intCast(args.len)), "preg_filter", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const pattern_val = args[0];
+    const replacement_val = args[1];
+    const subject_val = args[2];
+    const limit_val = if (args.len > 3) args[3] else null;
+
+    const limit: usize = if (limit_val != null and limit_val.?.getTag() == .integer) @as(usize, @intCast(limit_val.?.asInt())) else std.math.maxInt(usize);
+
+    // 处理数组输入
+    if (subject_val.getTag() == .array) {
+        const subject_box = subject_val.getAsArray();
+        const subject_arr = subject_box.data;
+        
+        const result_box = try vm.allocator.create(gc.Box(*PHPArray));
+        const result_arr = try vm.allocator.create(PHPArray);
+        result_arr.* = PHPArray.init(vm.allocator);
+        result_box.* = .{
+            .ref_count = 1,
+            .gc_info = .{},
+            .data = result_arr,
+        };
+
+        // 遍历数组，只保留匹配的元素
+        var iter = subject_arr.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value.getTag() == .string) {
+                const subject = entry.value.getAsString().data.data;
+                
+                if (pattern_val.getTag() == .string and replacement_val.getTag() == .string) {
+                    const pattern = pattern_val.getAsString().data.data;
+                    const replacement = replacement_val.getAsString().data.data;
+
+                    const parsed = parsePHPRegexPattern(pattern);
+                    var pcre_pattern = PCRE2Pattern.compile(vm.allocator, parsed.pattern, parsed.options) catch continue;
+                    defer pcre_pattern.deinit();
+
+                    // 检查是否有匹配
+                    const rc = pcre2_match_8(
+                        pcre_pattern.re,
+                        subject.ptr,
+                        subject.len,
+                        0,
+                        0,
+                        pcre_pattern.match_data,
+                        null,
+                    );
+
+                    // 只有匹配时才进行替换并添加到结果
+                    if (rc >= 0) {
+                        // 执行替换（复用 preg_replace 逻辑）
+                        const output_len: usize = subject.len * 2;
+                        var buffer = try vm.allocator.alloc(u8, output_len);
+                        errdefer vm.allocator.free(buffer);
+
+                        var subject_offset: usize = 0;
+                        var output_offset: usize = 0;
+                        var replace_count: usize = 0;
+
+                        while (subject_offset < subject.len and replace_count < limit) {
+                            const rc2 = pcre2_match_8(
+                                pcre_pattern.re,
+                                subject.ptr,
+                                subject.len,
+                                @as(c_int, @intCast(subject_offset)),
+                                PCRE2_SUBSTITUTE_OVERFLOW_LENGTH,
+                                pcre_pattern.match_data,
+                                null,
+                            );
+
+                            if (rc2 == PCRE2_ERROR_NOMATCH) break;
+                            if (rc2 < 0) break;
+
+                            const ovec = pcre_pattern.getOvector();
+                            const match_start = ovec[0];
+                            const match_end = ovec[1];
+
+                            const before_len = match_start;
+                            if (before_len > subject_offset) {
+                                const copy_len = before_len - subject_offset;
+                                if (output_offset + copy_len > buffer.len) {
+                                    buffer = try vm.allocator.realloc(buffer, buffer.len * 2);
+                                }
+                                @memcpy(buffer[output_offset..][0..copy_len], subject[subject_offset..before_len]);
+                                output_offset += copy_len;
+                            }
+
+                            if (output_offset + replacement.len > buffer.len) {
+                                buffer = try vm.allocator.realloc(buffer, buffer.len * 2);
+                            }
+                            @memcpy(buffer[output_offset..][0..replacement.len], replacement);
+                            output_offset += replacement.len;
+
+                            subject_offset = @as(usize, @intCast(match_end));
+                            replace_count += 1;
+                        }
+
+                        if (subject_offset < subject.len) {
+                            const remaining = subject.len - subject_offset;
+                            if (output_offset + remaining > buffer.len) {
+                                buffer = try vm.allocator.realloc(buffer, buffer.len + remaining);
+                            }
+                            @memcpy(buffer[output_offset..output_offset + remaining], subject[subject_offset..]);
+                            output_offset += remaining;
+                        }
+
+                        const result = try vm.allocator.realloc(buffer, output_offset);
+                        const result_val = try createStringValue(vm.allocator, result);
+                        
+                        // 保持原始键
+                        switch (entry.key) {
+                            .integer => try result_arr.set(vm.allocator, entry.key, result_val),
+                            .string => try result_arr.push(vm.allocator, result_val),
+                        }
+                    }
+                }
+            }
+        }
+
+        return Value.fromBox(result_box, Value.TYPE_ARRAY);
+    }
+
+    // 处理字符串输入（与 preg_replace 相同）
+    if (pattern_val.getTag() == .string and replacement_val.getTag() == .string and subject_val.getTag() == .string) {
+        const pattern = pattern_val.getAsString().data.data;
+        const replacement = replacement_val.getAsString().data.data;
+        const subject = subject_val.getAsString().data.data;
+
+        const parsed = parsePHPRegexPattern(pattern);
+        var pcre_pattern = try PCRE2Pattern.compile(vm.allocator, parsed.pattern, parsed.options);
+        defer pcre_pattern.deinit();
+
+        // 检查是否有匹配
+        const rc_check = pcre2_match_8(
+            pcre_pattern.re,
+            subject.ptr,
+            subject.len,
+            0,
+            0,
+            pcre_pattern.match_data,
+            null,
+        );
+
+        // 如果没有匹配，返回 null（preg_filter 的特性）
+        if (rc_check == PCRE2_ERROR_NOMATCH or rc_check < 0) {
+            return Value.initNull();
+        }
+
+        // 有匹配，执行替换
+        const output_len: usize = subject.len * 2;
+        var buffer = try vm.allocator.alloc(u8, output_len);
+        errdefer vm.allocator.free(buffer);
+
+        var subject_offset: usize = 0;
+        var output_offset: usize = 0;
+        var replace_count: usize = 0;
+
+        while (subject_offset < subject.len and replace_count < limit) {
+            const rc = pcre2_match_8(
+                pcre_pattern.re,
+                subject.ptr,
+                subject.len,
+                @as(c_int, @intCast(subject_offset)),
+                PCRE2_SUBSTITUTE_OVERFLOW_LENGTH,
+                pcre_pattern.match_data,
+                null,
+            );
+
+            if (rc == PCRE2_ERROR_NOMATCH) break;
+            if (rc < 0) return error.MatchFailed;
+
+            const ovec = pcre_pattern.getOvector();
+            const match_start = ovec[0];
+            const match_end = ovec[1];
+
+            const before_len = match_start;
+            if (before_len > subject_offset) {
+                const copy_len = before_len - subject_offset;
+                if (output_offset + copy_len > buffer.len) {
+                    buffer = try vm.allocator.realloc(buffer, buffer.len * 2);
+                }
+                @memcpy(buffer[output_offset..][0..copy_len], subject[subject_offset..before_len]);
+                output_offset += copy_len;
+            }
+
+            if (output_offset + replacement.len > buffer.len) {
+                buffer = try vm.allocator.realloc(buffer, buffer.len * 2);
+            }
+            @memcpy(buffer[output_offset..][0..replacement.len], replacement);
+            output_offset += replacement.len;
+
+            subject_offset = @as(usize, @intCast(match_end));
+            replace_count += 1;
+        }
+
+        if (subject_offset < subject.len) {
+            const remaining = subject.len - subject_offset;
+            if (output_offset + remaining > buffer.len) {
+                buffer = try vm.allocator.realloc(buffer, buffer.len + remaining);
+            }
+            @memcpy(buffer[output_offset..output_offset + remaining], subject[subject_offset..]);
+            output_offset += remaining;
+        }
+
+        const result = try vm.allocator.realloc(buffer, output_offset);
+        return try createStringValue(vm.allocator, result);
+    }
+
+    return Value.initNull();
+}
+
 /// preg_last_error 实现 - 返回当前协程的错误状态
 pub fn pregLastErrorFn(vm: *VM, _: []const Value) !Value {
     return Value.initInt(vm.preg_last_error);

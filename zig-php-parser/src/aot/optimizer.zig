@@ -2845,6 +2845,9 @@ pub const IROptimizer = struct {
                 try self.used_registers.put(op.name_reg.id, {});
                 try self.used_registers.put(op.value.id, {});
             },
+            .global_ref_bind => {
+                // No registers used - only string names
+            },
             .global_unset => |op| {
                 try self.used_registers.put(op.name.id, {});
             },
@@ -2933,6 +2936,7 @@ pub const IROptimizer = struct {
             .global_unset => true,
             .global_get_dynamic => false,
             .global_set_dynamic => true,
+            .global_ref_bind => true,
 
             // Operations with side effects
             .store => true,

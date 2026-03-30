@@ -579,11 +579,47 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 
     // 检测是否需要多文件编译
     const needs_multi_file = blk: {
-        // 简单检测：查找 require/include 关键字
-        if (std.mem.indexOf(u8, source, "require") != null or
-            std.mem.indexOf(u8, source, "include") != null)
-        {
-            break :blk true;
+        // 检测 require/include 关键字（排除字符串内的误匹配）
+        const keywords = [_][]const u8{ "require_once", "include_once", "require", "include" };
+        for (keywords) |kw| {
+            var pos: usize = 0;
+            while (std.mem.indexOfPos(u8, source, pos, kw)) |idx| {
+                // 关键字后必须跟非字母数字下划线字符
+                const after = idx + kw.len;
+                if (after < source.len) {
+                    const ch = source[after];
+                    if (std.ascii.isAlphanumeric(ch) or ch == '_') {
+                        pos = after;
+                        continue;
+                    }
+                }
+                // 关键字前必须是行首、空白、分号或PHP标签
+                if (idx > 0) {
+                    const prev = source[idx - 1];
+                    if (std.ascii.isAlphanumeric(prev) or prev == '_' or prev == '$' or prev == '\'' or prev == '"' or prev == '/' or prev == '*') {
+                        pos = idx + kw.len;
+                        continue;
+                    }
+                }
+                // 检查是否在 // 注释中
+                var in_comment = false;
+                if (idx >= 2) {
+                    var scan = idx - 1;
+                    while (scan > 0) : (scan -= 1) {
+                        if (source[scan] == '\n') break;
+                        if (scan + 1 < source.len and source[scan] == '/' and source[scan + 1] == '/') {
+                            in_comment = true;
+                            break;
+                        }
+                        if (scan == 0) break;
+                    }
+                }
+                if (in_comment) {
+                    pos = idx + kw.len;
+                    continue;
+                }
+                break :blk true;
+            }
         }
         break :blk false;
     };

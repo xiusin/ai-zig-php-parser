@@ -126,6 +126,8 @@ pub const StandardLibrary = struct {
         const b_array_reduce: BuiltinFunction = .{ .name = "array_reduce", .min_args = 2, .max_args = 3, .handler = arrayReduceFn };
         const b_json_encode: BuiltinFunction = .{ .name = "json_encode", .min_args = 1, .max_args = 3, .handler = jsonEncodeFn };
         const b_json_decode: BuiltinFunction = .{ .name = "json_decode", .min_args = 1, .max_args = 4, .handler = jsonDecodeFn };
+        const b_json_last_error: BuiltinFunction = .{ .name = "json_last_error", .min_args = 0, .max_args = 0, .handler = jsonLastErrorFn };
+        const b_json_last_error_msg: BuiltinFunction = .{ .name = "json_last_error_msg", .min_args = 0, .max_args = 0, .handler = jsonLastErrorMsgFn };
         const b_echo: BuiltinFunction = .{ .name = "echo", .min_args = 1, .max_args = 255, .handler = echoFn };
 
         const result = switch (id) {
@@ -145,6 +147,8 @@ pub const StandardLibrary = struct {
             .array_reduce => try b_array_reduce.call(vm, args),
             .json_encode => try b_json_encode.call(vm, args),
             .json_decode => try b_json_decode.call(vm, args),
+            .json_last_error => try b_json_last_error.call(vm, args),
+            .json_last_error_msg => try b_json_last_error_msg.call(vm, args),
             .echo => try b_echo.call(vm, args),
             else => return null,
         };
@@ -333,6 +337,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "tan", .min_args = 1, .max_args = 1, .handler = tanFn },
             &.{ .name = "log", .min_args = 1, .max_args = 2, .handler = logFn },
             &.{ .name = "log10", .min_args = 1, .max_args = 1, .handler = log10Fn },
+            &.{ .name = "log2", .min_args = 1, .max_args = 1, .handler = log2Fn },
             &.{ .name = "exp", .min_args = 1, .max_args = 1, .handler = expFn },
             &.{ .name = "pi", .min_args = 0, .max_args = 0, .handler = piFn },
             &.{ .name = "deg2rad", .min_args = 1, .max_args = 1, .handler = deg2radFn },
@@ -343,6 +348,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "atan2", .min_args = 2, .max_args = 2, .handler = atan2Fn },
             &.{ .name = "hypot", .min_args = 2, .max_args = 2, .handler = hypotFn },
             &.{ .name = "fmod", .min_args = 2, .max_args = 2, .handler = fmodFn },
+            &.{ .name = "intdiv", .min_args = 2, .max_args = 2, .handler = intdivFn },
         };
 
         for (math_functions) |func| {
@@ -479,6 +485,7 @@ pub const StandardLibrary = struct {
             &.{ .name = "preg_match", .min_args = 2, .max_args = 5, .handler = pcre2.pregMatchFn },
             &.{ .name = "preg_match_all", .min_args = 2, .max_args = 5, .handler = pcre2.pregMatchAllFn },
             &.{ .name = "preg_replace", .min_args = 3, .max_args = 5, .handler = pcre2.pregReplaceFn },
+            &.{ .name = "preg_filter", .min_args = 3, .max_args = 5, .handler = pcre2.pregFilterFn },
             &.{ .name = "preg_split", .min_args = 2, .max_args = 4, .handler = pcre2.pregSplitFn },
             &.{ .name = "preg_grep", .min_args = 2, .max_args = 3, .handler = pcre2.pregGrepFn },
             &.{ .name = "preg_quote", .min_args = 1, .max_args = 2, .handler = pcre2.pregQuoteFn },
@@ -4738,6 +4745,11 @@ fn log10Fn(vm: *VM, args: []const Value) !Value {
     return Value.initFloat(@log10(num));
 }
 
+fn log2Fn(vm: *VM, args: []const Value) !Value {
+    const num = try toFloat(vm, args[0]);
+    return Value.initFloat(@log2(num));
+}
+
 fn deg2radFn(vm: *VM, args: []const Value) !Value {
     const degrees = try toFloat(vm, args[0]);
     return Value.initFloat(degrees * std.math.pi / 180.0);
@@ -4779,6 +4791,16 @@ fn fmodFn(vm: *VM, args: []const Value) !Value {
     const x = try toFloat(vm, args[0]);
     const y = try toFloat(vm, args[1]);
     return Value.initFloat(@mod(x, y));
+}
+
+fn intdivFn(vm: *VM, args: []const Value) !Value {
+    _ = vm;
+    const dividend = args[0].toInt();
+    const divisor = args[1].toInt();
+    if (divisor == 0) {
+        return error.DivisionByZero;
+    }
+    return Value.initInt(@divTrunc(dividend, divisor));
 }
 
 // 辅助函数：将 Value 转换为整数

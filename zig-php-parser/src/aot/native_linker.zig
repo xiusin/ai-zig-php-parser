@@ -149,6 +149,7 @@ pub const NativeLinker = struct {
         original_name: []const u8,
         visibility: IR.TypeDef.Visibility,
         is_static: bool,
+        is_abstract: bool = false,
     };
 
     const ComposedTraitProperty = struct {
@@ -176,6 +177,7 @@ pub const NativeLinker = struct {
     current_switch_value_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_global_get_names: ?*const std.AutoHashMap(usize, []const u8) = null,
     current_concat_operand_regs: ?*const std.AutoHashMap(usize, void) = null,
+    current_coalesce_nowarn_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_unset_regs: ?*std.AutoHashMap(usize, void) = null,
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
@@ -186,6 +188,7 @@ pub const NativeLinker = struct {
     current_inferred_types: ?*const std.AutoHashMap(usize, IR.Type) = null, // 类型推断结果
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
     ir_module: ?*const IR.Module = null, // 当前IR模块（用于查找函数）
+    current_ref_ptr_regs: ?*const std.AutoHashMap(usize, void) = null, // 非alloca的指针寄存器（PHI/select合并引用参数）
     param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
     current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
 
@@ -233,6 +236,39 @@ pub const NativeLinker = struct {
 
         // 无法获知类型时，保守：允许（保持旧行为）
         return true;
+    }
+
+    /// 检查寄存器是否是指针类型（alloca 或 ref_ptr）
+    fn isPointerReg(self: *Self, reg_id: usize) bool {
+        // 检查是否是 alloca 寄存器
+        if (self.current_alloca_regs) |alloca_regs| {
+            if (alloca_regs.contains(reg_id)) {
+                return true;
+            }
+        }
+        
+        // 检查是否是 ref_ptr 寄存器（PHI/select 合并引用参数）
+        if (self.current_ref_ptr_regs) |ref_ptr_regs| {
+            if (ref_ptr_regs.contains(reg_id)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    /// 写入转义后的 Zig 字符串字面量内容（处理反斜杠等特殊字符）
+    fn writeEscapedZigString(writer: anytype, str: []const u8) !void {
+        for (str) |c| {
+            switch (c) {
+                '\\' => try writer.writeAll("\\\\"),
+                '"' => try writer.writeAll("\\\""),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => try writer.writeByte(c),
+            }
+        }
     }
 
     /// 类型推断统计（用于诊断和质量门禁）
@@ -601,6 +637,38 @@ pub const NativeLinker = struct {
         // 生成函数注册函数
         try self.generateFunctionRegistration(writer, ir_module);
 
+        // 生成AOT function_exists（覆盖runtime版本）
+        try writer.writeAll(
+            \\
+            \\// AOT已注册函数名列表（用于function_exists）
+            \\const aot_registered_functions = std.StaticStringMap(void).initComptime(.{
+            \\
+        );
+        // 遍历builtin_map生成函数名列表
+        for (builtin_map.keys()) |key| {
+            try writer.print("    .{{ \"{s}\", {{}} }},\n", .{key});
+        }
+        try writer.writeAll(
+            \\});
+            \\
+            \\pub fn aot_function_exists(name: []const u8) runtime.Value {
+            \\    if (aot_registered_functions.has(name)) return runtime.Value.initBool(true);
+            \\    if (runtime.user_function_registry) |reg| {
+            \\        if (reg.contains(name)) return runtime.Value.initBool(true);
+            \\    }
+            \\    return runtime.Value.initBool(false);
+            \\}
+            \\
+            \\// AOT变量函数调用：覆盖runtime的invoke_callable，支持AOT注册函数
+            \\pub fn aot_call_named_function(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+            \\    _ = name;
+            \\    _ = args;
+            \\    _ = allocator;
+            \\    return error.UnknownFunction;
+            \\}
+            \\
+        );
+
         // 生成主入口
         const has_strings = ir_module.string_table.items.len > 0;
 
@@ -610,7 +678,88 @@ pub const NativeLinker = struct {
             \\var global_vars: std.StringHashMap(runtime.Value) = undefined;
             \\var global_vars_initialized: bool = false;
             \\
+            \\// 全局变量引用绑定表: target -> source (e.g., $b = &$a means $b -> $a)
+            \\var global_ref_bindings: std.StringHashMap([]const u8) = undefined;
+            \\var global_ref_bindings_initialized: bool = false;
+            \\
+            \\// 创建全局变量引用绑定: $target = &$source
+            \\pub fn bindGlobalRef(target: []const u8, source: []const u8) !void {
+            \\    if (!global_ref_bindings_initialized) {
+            \\        global_ref_bindings = std.StringHashMap([]const u8).init(runtime.runtime_allocator);
+            \\        global_ref_bindings_initialized = true;
+            \\    }
+            \\    // 解析 source 的引用链，找到真正的源变量
+            \\    const resolved_source = resolveRefSource(source);
+            \\    // 复制 target 和 resolved_source 字符串
+            \\    const target_copy = try runtime.runtime_allocator.dupe(u8, target);
+            \\    const source_copy = try runtime.runtime_allocator.dupe(u8, resolved_source);
+            \\    // 如果已存在旧绑定，释放旧的字符串
+            \\    if (try global_ref_bindings.fetchPut(target_copy, source_copy)) |old| {
+            \\        runtime.runtime_allocator.free(old.key);
+            \\        runtime.runtime_allocator.free(old.value);
+            \\    }
+            \\    // 同步当前值: $target 应该和 resolved_source 指向相同的值
+            \\    if (global_vars_initialized) {
+            \\        if (global_vars.get(resolved_source)) |src_val| {
+            \\            const gop = try global_vars.getOrPut(target);
+            \\            if (!gop.found_existing) {
+            \\                gop.key_ptr.* = try runtime.runtime_allocator.dupe(u8, target);
+            \\            }
+            \\            if (gop.found_existing) {
+            \\                gop.value_ptr.release(runtime.runtime_allocator);
+            \\            }
+            \\            _ = src_val.retain();
+            \\            gop.value_ptr.* = src_val;
+            \\        }
+            \\    }
+            \\}
+            \\
+            \\// 获取变量的引用源（如果是引用则返回源变量名，否则返回自身）
+            \\fn resolveRefSource(name: []const u8) []const u8 {
+            \\    if (!global_ref_bindings_initialized) return name;
+            \\    // 循环解析引用链
+            \\    var current = name;
+            \\    var depth: usize = 0;
+            \\    while (depth < 10) : (depth += 1) {
+            \\        if (global_ref_bindings.get(current)) |source| {
+            \\            current = source;
+            \\        } else {
+            \\            break;
+            \\        }
+            \\    }
+            \\    return current;
+            \\}
+            \\
+            \\// 查找所有引用同一源的变量
+            \\fn findAllRefsToSource(source: []const u8, out_buf: *[32][]const u8) usize {
+            \\    if (!global_ref_bindings_initialized) return 0;
+            \\    var count: usize = 0;
+            \\    var it = global_ref_bindings.iterator();
+            \\    while (it.next()) |entry| {
+            \\        if (count >= 32) break;
+            \\        const resolved = resolveRefSource(entry.key_ptr.*);
+            \\        if (std.mem.eql(u8, resolved, source)) {
+            \\            out_buf[count] = entry.key_ptr.*;
+            \\            count += 1;
+            \\        }
+            \\    }
+            \\    return count;
+            \\}
+            \\
             \\pub fn getGlobalVar(name: []const u8) runtime.Value {
+            \\    // 超全局变量直接从global_vars读取
+            \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
+            \\    if (std.mem.eql(u8, name, "$GLOBALS") and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
             \\    // 先查找常量表
             \\    if (runtime.constants.get(name)) |const_val| {
             \\        _ = const_val.retain();
@@ -634,6 +783,18 @@ pub const NativeLinker = struct {
             \\}
             \\
             \\pub fn getGlobalVarNoWarn(name: []const u8) runtime.Value {
+            \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
+            \\    if (std.mem.eql(u8, name, "$GLOBALS") and global_vars_initialized) {
+            \\        if (global_vars.get(name)) |value| {
+            \\            _ = value.retain();
+            \\            return value;
+            \\        }
+            \\    }
             \\    if (runtime.constants.get(name)) |const_val| {
             \\        _ = const_val.retain();
             \\        return const_val;
@@ -654,17 +815,38 @@ pub const NativeLinker = struct {
             \\
             \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
             \\    if (!global_vars_initialized) return;
-            \\    // Check if key already exists
+            \\    
+            \\    // 解析引用链：找到真正的源变量
+            \\    const source = resolveRefSource(name);
+            \\    
+            \\    // 设置源变量的值
+            \\    try setGlobalVarDirect(source, value);
+            \\    
+            \\    // 如果设置的是引用变量，也同步更新源变量
+            \\    if (!std.mem.eql(u8, name, source)) {
+            \\        try setGlobalVarDirect(name, value);
+            \\    }
+            \\    
+            \\    // 查找所有引用同一源的其他变量并同步更新
+            \\    var refs_buf: [32][]const u8 = undefined;
+            \\    const ref_count = findAllRefsToSource(source, &refs_buf);
+            \\    for (refs_buf[0..ref_count]) |ref_name| {
+            \\        if (!std.mem.eql(u8, ref_name, name)) {
+            \\            try setGlobalVarDirect(ref_name, value);
+            \\        }
+            \\    }
+            \\}
+            \\
+            \\// 直接设置全局变量值，不处理引用传播
+            \\fn setGlobalVarDirect(name: []const u8, value: runtime.Value) !void {
+            \\    if (!global_vars_initialized) return;
             \\    const gop = try global_vars.getOrPut(name);
             \\    if (!gop.found_existing) {
-            \\        // Need to duplicate the key for new entries
             \\        const key_copy = try runtime.runtime_allocator.dupe(u8, name);
             \\        gop.key_ptr.* = key_copy;
-            \\        // Retain the new value
             \\        _ = value.retain();
             \\        gop.value_ptr.* = value;
             \\    } else {
-            \\        // Release old value and retain new value
             \\        gop.value_ptr.release(runtime.runtime_allocator);
             \\        _ = value.retain();
             \\        gop.value_ptr.* = value;
@@ -716,6 +898,38 @@ pub const NativeLinker = struct {
             \\    // 初始化全局变量表
             \\    global_vars = std.StringHashMap(runtime.Value).init(allocator);
             \\    global_vars_initialized = true;
+            \\
+            \\    // 初始化超全局变量
+            \\    {
+            \\        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_SESSION", "$_ENV", "$_FILES", "$GLOBALS" };
+            \\        for (superglobal_names) |name| {
+            \\            const key = try allocator.dupe(u8, name);
+            \\            const arr = try runtime.PHPArray.init(allocator);
+            \\            try global_vars.put(key, runtime.Value.initArray(arr));
+            \\        }
+            \\        // $_SERVER with basic info
+            \\        const server_key = try allocator.dupe(u8, "$_SERVER");
+            \\        const server_arr = try runtime.PHPArray.init(allocator);
+            \\        const argv_arr = try runtime.PHPArray.init(allocator);
+            \\        for (std.os.argv, 0..) |arg_ptr, i| {
+            \\            const arg = std.mem.span(arg_ptr);
+            \\            const arg_str = try runtime.PHPString.init(allocator, arg);
+            \\            try argv_arr.push(allocator, runtime.Value.initString(arg_str));
+            \\            if (i == 0) {
+            \\                const script_str = try runtime.PHPString.init(allocator, "SCRIPT_FILENAME");
+            \\                try server_arr.setByValue(allocator, runtime.Value.initString(script_str), runtime.Value.initString(arg_str));
+            \\            }
+            \\        }
+            \\        const argc_str = try runtime.PHPString.init(allocator, "argc");
+            \\        try server_arr.setByValue(allocator, runtime.Value.initString(argc_str), runtime.Value.initInt(@intCast(std.os.argv.len)));
+            \\        const argv_str = try runtime.PHPString.init(allocator, "argv");
+            \\        try server_arr.setByValue(allocator, runtime.Value.initString(argv_str), runtime.Value.initArray(argv_arr));
+            \\        const sapi_str = try runtime.PHPString.init(allocator, "PHP_SAPI");
+            \\        const sapi_val = try runtime.PHPString.init(allocator, "cli");
+            \\        try server_arr.setByValue(allocator, runtime.Value.initString(sapi_str), runtime.Value.initString(sapi_val));
+            \\        try global_vars.put(server_key, runtime.Value.initArray(server_arr));
+            \\    }
+            \\
             \\    // 注意：cleanupAllClasses 必须在 global_vars 清理之后执行
             \\    // 因为 global_vars 中的对象可能需要调用 __destruct，
             \\    // 而 __destruct 依赖 class_registry（由 cleanupAllClasses 清除）
@@ -744,12 +958,7 @@ pub const NativeLinker = struct {
         // 初始化PHP预定义常量
         try writer.writeAll(
             \\    // 初始化PHP预定义常量
-            \\    {
-            \\        const key1 = try allocator.dupeZ(u8, "COUNT_RECURSIVE");
-            \\        try runtime.constants.put(key1, runtime.Value.initInt(1));
-            \\        const key2 = try allocator.dupeZ(u8, "COUNT_NORMAL");
-            \\        try runtime.constants.put(key2, runtime.Value.initInt(0));
-            \\    }
+            \\    try runtime.registerPHPPredefinedConstants(allocator);
             \\
         );
 
@@ -895,10 +1104,174 @@ pub const NativeLinker = struct {
             if (!func.register_at_startup) continue;
 
             // 直接注册函数，因为函数签名已经统一
-            try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ func.name, func.name, func.location.file, func.location.line });
+            try writer.writeAll("    try runtime.registerUserFunctionWithLocation(\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\", @\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\", \"");
+            try writeEscapedZigString(writer, func.location.file);
+            try writer.print("\", {d});\n", .{func.location.line});
+            // 注册函数元数据（参数计数，用于反射 API）
+            const param_count = func.params.items.len;
+            var required_count: usize = 0;
+            for (func.params.items) |p| {
+                if (!p.has_default and !p.is_variadic) required_count += 1;
+            }
+            try writer.writeAll("    runtime.registerFunctionMeta(\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.print("\", {d}, {d});\n", .{ param_count, required_count });
+        }
+
+        // 为闭包函数也注册元数据（闭包不走 register_at_startup 但需要反射元数据）
+        for (ir_module.functions.items) |func| {
+            if (std.mem.startsWith(u8, func.name, "__closure_") or std.mem.startsWith(u8, func.name, "__arrow_")) {
+                const cpc = func.params.items.len;
+                var crc: usize = 0;
+                for (func.params.items) |p| {
+                    if (!p.has_default and !p.is_variadic) crc += 1;
+                }
+                try writer.writeAll("    runtime.registerFunctionMeta(\"");
+                try writeEscapedZigString(writer, func.name);
+                try writer.print("\", {d}, {d});\n", .{ cpc, crc });
+            }
         }
 
         try writer.writeAll(
+            \\    // 注册AOT callable hook
+            \\    runtime.aot_callable_hook = &aot_dispatch_callable;
+            \\}
+            \\
+            \\// AOT变量函数dispatch：支持所有AOT注册的builtin函数、用户函数和静态方法
+            \\fn aot_dispatch_callable(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {
+            \\    // 1. 检查是否是静态方法调用: "ClassName::methodName"
+            \\    if (std.mem.indexOf(u8, name, "::")) |sep_pos| {
+            \\        const class_name = name[0..sep_pos];
+            \\        const method_name = name[sep_pos + 2..];
+            \\        return aot_dispatch_static_method(class_name, method_name, args, allocator);
+            \\    }
+            \\
+            \\    // 2. 检查是否是用户定义的函数
+            \\    const user_func_result = aot_dispatch_user_function(name, args, allocator);
+            \\    if (user_func_result) |result| {
+            \\        return result;
+            \\    } else |err| {
+            \\        if (err != error.UnknownFunction) return err;
+            \\    }
+            \\
+            \\    // 3. 检查是否是 builtin 函数
+            \\
+        );
+
+        // 生成每个builtin函数的dispatch分支
+        for (builtin_map.keys(), builtin_map.values()) |key, info| {
+            // 只处理is_*类型检查函数（单参数，无allocator）
+            if (!std.mem.startsWith(u8, key, "is_")) continue;
+            if (info.needs_allocator) continue;
+            
+            // is_subclass_of 需要 2 个参数，特殊处理
+            if (std.mem.eql(u8, key, "is_subclass_of")) {
+                try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{key});
+                try writer.print("        if (args.len >= 2) return try runtime.{s}(args[0], args[1]);\n", .{info.runtime_name});
+                try writer.print("        return runtime.Value.initNull();\n    }}\n", .{});
+                continue;
+            }
+            
+            try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{key});
+            try writer.print("        if (args.len > 0) return try runtime.{s}(args[0]);\n", .{info.runtime_name});
+            try writer.print("        return runtime.Value.initNull();\n    }}\n", .{});
+        }
+
+        try writer.writeAll(
+            \\
+            \\    return error.UnknownFunction;
+            \\}
+            \\
+            \\// 分发用户定义的函数调用
+            \\fn aot_dispatch_user_function(name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+            \\
+        );
+
+        // 生成用户函数的dispatch分支
+        var has_user_functions = false;
+        for (ir_module.functions.items) |func| {
+            if (func.is_method) continue; // 跳过方法，只处理全局函数
+            
+            has_user_functions = true;
+            try writer.writeAll("    if (std.mem.eql(u8, name, \"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\")) {\n");
+            try writer.writeAll("        return @\"");
+            try writeEscapedZigString(writer, func.name);
+            try writer.writeAll("\"(runtime.Value.initNull(), args, allocator);\n");
+            try writer.writeAll("    }\n");
+        }
+
+        // Note: 如果没有用户函数，标记参数为故意未使用
+        if (!has_user_functions) {
+            try writer.writeAll("    _ = name;\n");
+            try writer.writeAll("    _ = args;\n");
+            try writer.writeAll("    _ = allocator;\n");
+        }
+
+        try writer.writeAll(
+            \\    return error.UnknownFunction;
+            \\}
+            \\
+            \\// 分发静态方法调用
+            \\fn aot_dispatch_static_method(class_name: []const u8, method_name: []const u8, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {
+            \\
+        );
+
+        // 生成静态方法的dispatch分支
+        var has_static_methods = false;
+        for (ir_module.types.items) |type_def| {
+            if (type_def.kind != .class) continue;
+            
+            // 先检查这个类是否有静态方法
+            var class_has_static_methods = false;
+            for (type_def.methods) |method| {
+                if (method.is_static) {
+                    class_has_static_methods = true;
+                    break;
+                }
+            }
+            
+            // 只为有静态方法的类生成分支
+            if (!class_has_static_methods) continue;
+            
+            has_static_methods = true;
+            try writer.writeAll("    if (std.mem.eql(u8, class_name, \"");
+            try writeEscapedZigString(writer, type_def.name);
+            try writer.writeAll("\")) {\n");
+            
+            for (type_def.methods) |method| {
+                if (!method.is_static) continue;
+                
+                try writer.writeAll("        if (std.mem.eql(u8, method_name, \"");
+                try writeEscapedZigString(writer, method.name);
+                try writer.writeAll("\")) {\n");
+                // 静态方法的完整名称是 "ClassName::methodName"
+                try writer.writeAll("            return @\"");
+                try writeEscapedZigString(writer, type_def.name);
+                try writer.writeAll("::");
+                try writeEscapedZigString(writer, method.name);
+                try writer.writeAll("\"(runtime.Value.initNull(), args, allocator);\n");
+                try writer.writeAll("        }\n");
+            }
+            
+            try writer.writeAll("    }\n");
+        }
+
+        // 只有在完全没有任何静态方法时才标记参数未使用
+        if (!has_static_methods) {
+            try writer.writeAll("    _ = class_name;\n");
+            try writer.writeAll("    _ = method_name;\n");
+            try writer.writeAll("    _ = args;\n");
+            try writer.writeAll("    _ = allocator;\n");
+        }
+
+        try writer.writeAll(
+            \\    return error.UnknownFunction;
             \\}
             \\
         );
@@ -1034,6 +1407,7 @@ pub const NativeLinker = struct {
                 .null => true,
                 else => false,
             },
+            .array => false, // 数组常量不做深度比较
         };
     }
 
@@ -1068,6 +1442,11 @@ pub const NativeLinker = struct {
             std.mem.eql(u8, lhs.original_name, rhs.original_name) and
             lhs.visibility == rhs.visibility and
             lhs.is_static == rhs.is_static;
+    }
+
+    fn isAbstractTraitMethod(self: *Self, method: ComposedTraitMethod) bool {
+        _ = self;
+        return method.is_abstract;
     }
 
     fn appendTraitProperty(
@@ -1105,12 +1484,30 @@ pub const NativeLinker = struct {
         list: *std.ArrayListUnmanaged(ComposedTraitMethod),
         method: ComposedTraitMethod,
     ) !void {
-        for (list.items) |existing| {
+        for (list.items, 0..) |existing, idx| {
             if (!std.mem.eql(u8, existing.exposed_name, method.exposed_name)) {
                 continue;
             }
+            
+            // 如果方法完全等价，跳过
             if (self.traitMethodsEquivalent(existing, method)) return;
-            return error.TraitMethodConflict;
+            
+            // 检查是否是抽象方法与具体实现的组合
+            const existing_is_abstract = self.isAbstractTraitMethod(existing);
+            const method_is_abstract = self.isAbstractTraitMethod(method);
+            
+            if (existing_is_abstract and !method_is_abstract) {
+                // 现有方法是抽象的，新方法是具体的 -> 用具体实现替换抽象方法
+                list.items[idx] = method;
+                return;
+            } else if (!existing_is_abstract and method_is_abstract) {
+                // 现有方法是具体的，新方法是抽象的 -> 保留具体实现，忽略抽象方法
+                return;
+            }
+            
+            // 两个都是具体实现 -> 后来者覆盖（PHP在有alias时允许这种行为）
+            list.items[idx] = method;
+            return;
         }
         try list.append(self.allocator, method);
     }
@@ -1252,10 +1649,20 @@ pub const NativeLinker = struct {
 
         try self.applyTraitAdaptations(trait_td, &imported_methods);
 
-        for (imported_methods.items) |method| {
-            if (self.findTypeMethod(trait_td, method.exposed_name) != null) {
-                continue;
+        // 如果trait自己定义了某个方法，移除所有同名的导入方法
+        // 这样trait自己的方法会覆盖导入的方法，避免冲突
+        for (trait_td.methods) |own_method| {
+            var i: usize = 0;
+            while (i < imported_methods.items.len) {
+                if (std.mem.eql(u8, imported_methods.items[i].exposed_name, own_method.name)) {
+                    _ = imported_methods.swapRemove(i);
+                } else {
+                    i += 1;
+                }
             }
+        }
+
+        for (imported_methods.items) |method| {
             try self.appendUniqueTraitMethod(&resolved_methods, method);
         }
 
@@ -1267,6 +1674,7 @@ pub const NativeLinker = struct {
                 .original_name = method.name,
                 .visibility = method.visibility,
                 .is_static = method.is_static,
+                .is_abstract = method.is_abstract,
             });
         }
 
@@ -1388,8 +1796,19 @@ pub const NativeLinker = struct {
             full_method_name,
         );
         defer self.allocator.free(escaped_method_name);
+        // 从IR函数定义获取参数计数
+        var pc: usize = 0;
+        var rp: usize = 0;
+        if (self.ir_module) |ir_mod| {
+            if (self.findFunction(ir_mod, full_method_name)) |func| {
+                pc = func.params.items.len;
+                for (func.params.items) |p| {
+                    if (!p.has_default and !p.is_variadic) rp += 1;
+                }
+            }
+        }
         try writer.print(
-            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {} }});\n",
+            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .param_count = {d}, .required_params = {d} }});\n",
             .{
                 meta_name,
                 exposed_name,
@@ -1398,6 +1817,8 @@ pub const NativeLinker = struct {
                 visibility == .public,
                 visibility == .protected,
                 visibility == .private,
+                pc,
+                rp,
             },
         );
     }
@@ -1439,7 +1860,8 @@ pub const NativeLinker = struct {
 
         for (ir_module.types.items, 0..) |td_ptr, idx| {
             const td = td_ptr.*;
-            if (td.kind != .class and td.kind != .@"enum") continue;
+            // 收集所有类型：class, interface, trait, enum
+            if (td.kind != .class and td.kind != .@"enum" and td.kind != .interface and td.kind != .trait) continue;
             if (class_count >= 64) break;
             class_names[class_count] = td.name;
             class_short_names[class_count] = getLastPartOfClassName(td.name);
@@ -1473,6 +1895,17 @@ pub const NativeLinker = struct {
             defer self.allocator.free(escaped_full_cname);
             // ✅ 使用短名作为变量名，但注册时使用完整类名
             try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ short_cname, escaped_full_cname });
+
+            if (type_def_idx[ci]) |tdi| {
+                const td_ptr = ir_module.types.items[tdi];
+                const td = td_ptr.*;
+                // 设置 is_interface 和 is_trait 标志
+                if (td.kind == .interface) {
+                    try writer.print("    {s}_meta.is_interface = true;\n", .{short_cname});
+                } else if (td.kind == .trait) {
+                    try writer.print("    {s}_meta.is_trait = true;\n", .{short_cname});
+                }
+            }
 
             if (type_def_idx[ci]) |tdi| {
                 const td_ptr = ir_module.types.items[tdi];
@@ -1610,38 +2043,6 @@ pub const NativeLinker = struct {
                 }
             }
 
-            // Register enum cases as static properties
-            if (type_def_idx[ci]) |tdi2| {
-                const td2 = ir_module.types.items[tdi2].*;
-                if (td2.kind == .@"enum") {
-                    for (td2.enum_cases) |ec| {
-                        const escaped_case = try self.escapeString(ec.name);
-                        defer self.allocator.free(escaped_case);
-                        const escaped_enum = try escapeBackslashes(self.allocator, td2.name);
-                        defer self.allocator.free(escaped_enum);
-                        try writer.writeAll("    {\n");
-                        try writer.print("        const enum_val = try runtime.php_object_new(\"{s}\", allocator);\n", .{escaped_enum});
-                        try writer.print("        const enum_obj = runtime.Value_asObject(enum_val);\n", .{});
-                        try writer.print("        try enum_obj.setProperty(\"name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_case});
-                        if (ec.value) |cv| {
-                            switch (cv) {
-                                .int => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initInt({d}));\n", .{v}),
-                                .float => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initFloat({d}));\n", .{v}),
-                                .string => |s| {
-                                    const escaped_val = try self.escapeString(s);
-                                    defer self.allocator.free(escaped_val);
-                                    try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_val});
-                                },
-                                .bool => |b| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initBool({s}));\n", .{if (b) "true" else "false"}),
-                                .null => try writer.writeAll("        try enum_obj.setProperty(\"value\", runtime.Value.initNull());\n"),
-                            }
-                        }
-                        try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", enum_val);\n", .{ short_cname, escaped_case });
-                        try writer.writeAll("    }\n");
-                    }
-                }
-            }
-
             // 注册类上的 PHP attributes (#[...])
             if (type_def_idx[ci]) |tdi3| {
                 const td3 = ir_module.types.items[tdi3].*;
@@ -1674,7 +2075,51 @@ pub const NativeLinker = struct {
             // 设置魔术方法指针
             try writer.print("    if ({s}_meta.methods.get(\"__toString\")) |m| {s}_meta.magic_toString = m.func;\n", .{ short_cname, short_cname });
 
+            // 先注册类，使 enum case 的 php_object_new 能找到 ClassMeta
             try writer.print("    try runtime.registerClass({s}_meta);\n", .{short_cname});
+
+            // Register enum cases as static properties（必须在 registerClass 之后）
+            if (type_def_idx[ci]) |tdi2| {
+                const td2 = ir_module.types.items[tdi2].*;
+                if (td2.kind == .@"enum") {
+                    for (td2.enum_cases) |ec| {
+                        const escaped_case = try self.escapeString(ec.name);
+                        defer self.allocator.free(escaped_case);
+                        const escaped_enum = try escapeBackslashes(self.allocator, td2.name);
+                        defer self.allocator.free(escaped_enum);
+                        try writer.writeAll("    {\n");
+                        try writer.print("        const enum_val = try runtime.php_object_new(\"{s}\", allocator);\n", .{escaped_enum});
+                        try writer.print("        const enum_obj = runtime.Value_asObject(enum_val);\n", .{});
+                        try writer.print("        try enum_obj.setProperty(\"name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_case});
+                        if (ec.value) |cv| {
+                            switch (cv) {
+                                .int => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initInt({d}));\n", .{v}),
+                                .float => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initFloat({d}));\n", .{v}),
+                                .string => |s| {
+                                    const escaped_val = try self.escapeString(s);
+                                    defer self.allocator.free(escaped_val);
+                                    try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_val});
+                                },
+                                .bool => |b| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initBool({s}));\n", .{if (b) "true" else "false"}),
+                                .null => try writer.writeAll("        try enum_obj.setProperty(\"value\", runtime.Value.initNull());\n"),
+                                .array => {}, // enum case不支持数组值
+                            }
+                        }
+                        try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", enum_val);\n", .{ short_cname, escaped_case });
+                        try writer.writeAll("    }\n");
+                    }
+                    // 存储有序的 case 名称列表
+                    try writer.writeAll("    {\n");
+                    try writer.print("        const case_arr = try runtime.PHPArray.init(allocator);\n", .{});
+                    for (td2.enum_cases) |ec| {
+                        const escaped_cn = try self.escapeString(ec.name);
+                        defer self.allocator.free(escaped_cn);
+                        try writer.print("        try case_arr.push(allocator, runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_cn});
+                    }
+                    try writer.print("        try {s}_meta.setStaticProperty(\"__enum_cases\", runtime.Value.initArray(case_arr));\n", .{short_cname});
+                    try writer.writeAll("    }\n");
+                }
+            }
         }
 
         // 注册含静态属性的 trait（使 self::$prop 在 trait 方法中可用）
@@ -1692,12 +2137,12 @@ pub const NativeLinker = struct {
             if (!has_static) continue;
 
             const tname = td.name;
-            try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ tname, tname });
+            try writer.print("    const trait_{s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ tname, tname });
 
             for (td.properties) |prop| {
                 if (!prop.is_static) continue;
                 const is_public = prop.visibility == .public;
-                try writer.print("    try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ tname, prop.name });
+                try writer.print("    try trait_{s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ tname, prop.name });
                 if (prop.default_value) |dv| {
                     switch (dv.op) {
                         .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
@@ -1716,7 +2161,7 @@ pub const NativeLinker = struct {
                 }
                 try writer.print(", .is_static = true, .is_public = {}, .is_readonly = false }});\n", .{is_public});
 
-                try writer.print("    try {s}_meta.setStaticProperty(\"{s}\", ", .{ tname, prop.name });
+                try writer.print("    try trait_{s}_meta.setStaticProperty(\"{s}\", ", .{ tname, prop.name });
                 if (prop.default_value) |dv| {
                     switch (dv.op) {
                         .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
@@ -1762,46 +2207,28 @@ pub const NativeLinker = struct {
                 const escaped_full_cname = try escapeBackslashes(self.allocator, full_cname);
                 defer self.allocator.free(escaped_full_cname);
 
-                for (td.constants) |const_info| {
-                    const value_code = switch (const_info.value) {
-                        .int => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt({d})", .{v}),
-                        .float => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat({d})", .{v}),
-                        .string => |s| blk: {
-                            const escaped = try self.escapeString(s);
-                            defer self.allocator.free(escaped);
-                            break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", .{escaped});
-                        },
-                        .bool => |b| try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
-                        .null => try std.fmt.allocPrint(self.allocator, "runtime.Value.initNull()", .{}),
-                    };
-                    defer self.allocator.free(value_code);
-
+                for (td.constants, 0..) |const_info, const_idx| {
+                    // 使用块作用域隔离每个常量
+                    try writer.writeAll("    {\n");
+                    try self.writeConstantValueCode(writer, const_info.value, "cv");
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
+                    _ = const_idx;
 
                     // ✅ 使用完整类名设置静态属性
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ escaped_full_cname, escaped_name, value_code });
+                    try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", cv);\n", .{ escaped_full_cname, escaped_name });
+                    try writer.writeAll("    }\n");
                 }
 
                 for (trait_constants.items) |trait_const_info| {
                     const const_info = trait_const_info.constant;
-                    const value_code = switch (const_info.value) {
-                        .int => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initInt({d})", .{v}),
-                        .float => |v| try std.fmt.allocPrint(self.allocator, "runtime.Value.initFloat({d})", .{v}),
-                        .string => |s| blk: {
-                            const escaped = try self.escapeString(s);
-                            defer self.allocator.free(escaped);
-                            break :blk try std.fmt.allocPrint(self.allocator, "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", .{escaped});
-                        },
-                        .bool => |b| try std.fmt.allocPrint(self.allocator, "runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
-                        .null => try std.fmt.allocPrint(self.allocator, "runtime.Value.initNull()", .{}),
-                    };
-                    defer self.allocator.free(value_code);
-
+                    try writer.writeAll("    {\n");
+                    try self.writeConstantValueCode(writer, const_info.value, "cv");
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
 
-                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", {s});\n", .{ escaped_full_cname, escaped_name, value_code });
+                    try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", cv);\n", .{ escaped_full_cname, escaped_name });
+                    try writer.writeAll("    }\n");
                 }
             }
         }
@@ -1938,10 +2365,17 @@ pub const NativeLinker = struct {
         runtime_name: []const u8,
         needs_allocator: bool,
         may_raise: bool = true,
+        ref_params: []const u8 = &[_]u8{}, // indices of reference parameters (1-based for optional params)
     };
 
     fn builtinInfo(func_name: []const u8) ?BuiltinInfo {
         return builtin_map.get(func_name);
+    }
+
+    /// Get reference parameter indices for a builtin function (public for IR Generator)
+    pub fn getBuiltinRefParams(func_name: []const u8) []const u8 {
+        if (builtinInfo(func_name)) |info| return info.ref_params;
+        return &[_]u8{};
     }
 
     const builtin_map = std.StaticStringMap(BuiltinInfo).initComptime(@as([]const struct { []const u8, BuiltinInfo }, &.{
@@ -1960,13 +2394,57 @@ pub const NativeLinker = struct {
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
 
         .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },
+        .{ "interface_exists", bi(.{ .runtime_name = "php_interface_exists", .needs_allocator = true }) },
+        .{ "trait_exists", bi(.{ .runtime_name = "php_trait_exists", .needs_allocator = true }) },
         .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
         .{ "property_exists", bi(.{ .runtime_name = "php_property_exists", .needs_allocator = false }) },
+        .{ "is_subclass_of", bi(.{ .runtime_name = "php_is_subclass_of", .needs_allocator = false }) },
         .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
+        .{ "get_parent_class", .{ .runtime_name = "php_get_parent_class", .needs_allocator = true } },
         .{ "serialize", bi(.{ .runtime_name = "php_serialize", .needs_allocator = true }) },
         .{ "unserialize", bi(.{ .runtime_name = "php_unserialize", .needs_allocator = true }) },
         .{ "json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
         .{ "json_decode", bi(.{ .runtime_name = "php_json_decode", .needs_allocator = true }) },
+        .{ "json_last_error", bi(.{ .runtime_name = "php_json_last_error", .needs_allocator = false, .may_raise = false }) },
+        .{ "json_last_error_msg", bi(.{ .runtime_name = "php_json_last_error_msg", .needs_allocator = true, .may_raise = false }) },
+        .{ "func_get_args", bi(.{ .runtime_name = "php_func_get_args", .needs_allocator = true }) },
+        .{ "func_get_arg", bi(.{ .runtime_name = "php_func_get_arg", .needs_allocator = false }) },
+        .{ "func_num_args", bi(.{ .runtime_name = "php_func_num_args", .needs_allocator = false, .may_raise = false }) },
+        .{ "memory_get_usage", bi(.{ .runtime_name = "php_memory_get_usage", .needs_allocator = true, .may_raise = false }) },
+        .{ "memory_get_peak_usage", bi(.{ .runtime_name = "php_memory_get_peak_usage", .needs_allocator = true, .may_raise = false }) },
+        .{ "shell_exec", bi(.{ .runtime_name = "php_shell_exec", .needs_allocator = true, .may_raise = false }) },
+        .{ "exec", bi(.{ .runtime_name = "php_exec", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{ 1, 2 } }) },
+        .{ "system", bi(.{ .runtime_name = "php_system", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{1} }) },
+        .{ "escapeshellarg", bi(.{ .runtime_name = "php_escapeshellarg", .needs_allocator = true, .may_raise = false }) },
+        .{ "escapeshellcmd", bi(.{ .runtime_name = "php_escapeshellcmd", .needs_allocator = true, .may_raise = false }) },
+        .{ "substr_replace", bi(.{ .runtime_name = "php_substr_replace", .needs_allocator = true, .may_raise = false }) },
+        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
+        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
+        .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = true } },
+        .{ "fwrite", .{ .runtime_name = "php_fwrite", .needs_allocator = true } },
+        .{ "fread", .{ .runtime_name = "php_fread", .needs_allocator = true } },
+        .{ "fclose", .{ .runtime_name = "php_fclose", .needs_allocator = false } },
+        .{ "is_resource", .{ .runtime_name = "php_is_resource", .needs_allocator = false } },
+        .{ "getcwd", .{ .runtime_name = "php_getcwd", .needs_allocator = true } },
+        .{ "php_sapi_name", .{ .runtime_name = "php_sapi_name", .needs_allocator = true } },
+        .{ "php_uname", .{ .runtime_name = "php_uname", .needs_allocator = true } },
+        .{ "unlink", .{ .runtime_name = "php_unlink", .needs_allocator = false } },
+        .{ "filesize", .{ .runtime_name = "php_filesize", .needs_allocator = false } },
+        .{ "is_file", .{ .runtime_name = "php_is_file", .needs_allocator = false } },
+        .{ "is_dir", .{ .runtime_name = "php_is_dir", .needs_allocator = false } },
+        .{ "is_readable", .{ .runtime_name = "php_is_readable", .needs_allocator = false } },
+        .{ "is_writable", .{ .runtime_name = "php_is_writable", .needs_allocator = false } },
+        .{ "sys_get_temp_dir", .{ .runtime_name = "php_sys_get_temp_dir", .needs_allocator = true } },
+        .{ "file", .{ .runtime_name = "php_file", .needs_allocator = true } },
+        .{ "file_exists", .{ .runtime_name = "php_file_exists", .needs_allocator = false } },
+        .{ "fgets", .{ .runtime_name = "php_fgets", .needs_allocator = false } },
+        .{ "fseek", .{ .runtime_name = "php_fseek", .needs_allocator = false } },
+        .{ "scandir", .{ .runtime_name = "php_scandir", .needs_allocator = true } },
+        .{ "function_exists", bi(.{ .runtime_name = "aot_function_exists", .needs_allocator = false, .may_raise = false }) },
+        .{ "gc_enable", bi(.{ .runtime_name = "php_gc_enable", .needs_allocator = true, .may_raise = false }) },
+        .{ "gc_collect_cycles", bi(.{ .runtime_name = "php_gc_collect_cycles", .needs_allocator = true, .may_raise = false }) },
+        .{ "ini_get", bi(.{ .runtime_name = "php_ini_get", .needs_allocator = true, .may_raise = false }) },
+        .{ "getrusage", bi(.{ .runtime_name = "php_getrusage", .needs_allocator = true, .may_raise = false }) },
 
         .{ "strlen", bi(.{ .runtime_name = "php_strlen", .needs_allocator = false }) },
         .{ "substr", bi(.{ .runtime_name = "php_substr", .needs_allocator = true }) },
@@ -1981,14 +2459,19 @@ pub const NativeLinker = struct {
         .{ "str_repeat", bi(.{ .runtime_name = "php_str_repeat", .needs_allocator = true }) },
         .{ "str_pad", bi(.{ .runtime_name = "php_str_pad", .needs_allocator = true }) },
         .{ "strstr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) },
+        .{ "strchr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) }, // strchr是strstr的别名
         .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
         .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
         .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
         .{ "preg_match_all", bi(.{ .runtime_name = "preg_match_all", .needs_allocator = true }) },
         .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
+        .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true }) },
+        .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true }) },
         .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
         .{ "preg_grep", bi(.{ .runtime_name = "preg_grep", .needs_allocator = true }) },
+        .{ "preg_quote", bi(.{ .runtime_name = "preg_quote", .needs_allocator = true }) },
+        .{ "preg_last_error", bi(.{ .runtime_name = "preg_last_error", .needs_allocator = false, .may_raise = false }) },
         .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
         .{ "str_word_count", bi(.{ .runtime_name = "php_str_word_count", .needs_allocator = false }) },
         .{ "str_ends_with", bi(.{ .runtime_name = "php_str_ends_with", .needs_allocator = false }) },
@@ -2002,10 +2485,20 @@ pub const NativeLinker = struct {
         .{ "str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
         .{ "strcmp", bi(.{ .runtime_name = "php_strcmp", .needs_allocator = false }) },
         .{ "strcasecmp", bi(.{ .runtime_name = "php_strcasecmp", .needs_allocator = true }) },
+        .{ "strnatcmp", bi(.{ .runtime_name = "php_strnatcmp", .needs_allocator = false }) },
+        .{ "strnatcasecmp", bi(.{ .runtime_name = "php_strnatcasecmp", .needs_allocator = false }) },
         .{ "stripos", bi(.{ .runtime_name = "php_stripos", .needs_allocator = false }) },
         .{ "strrpos", bi(.{ .runtime_name = "php_strrpos", .needs_allocator = false }) },
         .{ "strripos", bi(.{ .runtime_name = "php_strripos", .needs_allocator = false }) },
         .{ "sprintf", bi(.{ .runtime_name = "php_sprintf", .needs_allocator = true }) },
+        .{ "vsprintf", bi(.{ .runtime_name = "php_vsprintf", .needs_allocator = true }) },
+        .{ "sscanf", .{ .runtime_name = "php_sscanf", .needs_allocator = true } },
+        .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
+        .{ "preg_match_all", .{ .runtime_name = "php_preg_match_all", .needs_allocator = true } },
+        .{ "preg_replace", .{ .runtime_name = "php_preg_replace", .needs_allocator = true } },
+        .{ "preg_replace_callback", .{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true } },
+        .{ "preg_split", .{ .runtime_name = "php_preg_split", .needs_allocator = true } },
+        .{ "filter_var", bi(.{ .runtime_name = "php_filter_var", .needs_allocator = true }) },
         .{ "printf", bi(.{ .runtime_name = "php_printf", .needs_allocator = true }) },
         .{ "chunk_split", bi(.{ .runtime_name = "php_chunk_split", .needs_allocator = true }) },
         .{ "wordwrap", bi(.{ .runtime_name = "php_wordwrap", .needs_allocator = true }) },
@@ -2034,16 +2527,19 @@ pub const NativeLinker = struct {
         .{ "in_array", bi(.{ .runtime_name = "php_in_array", .needs_allocator = false }) },
         .{ "array_key_exists", bi(.{ .runtime_name = "php_array_key_exists", .needs_allocator = false }) },
         .{ "array_keys", bi(.{ .runtime_name = "php_array_keys", .needs_allocator = true }) },
+        .{ "array_is_list", bi(.{ .runtime_name = "php_array_is_list", .needs_allocator = false, .may_raise = false }) },
         .{ "array_values", bi(.{ .runtime_name = "php_array_values", .needs_allocator = true }) },
         .{ "array_push", bi(.{ .runtime_name = "php_array_push", .needs_allocator = true }) },
         .{ "array_pop", bi(.{ .runtime_name = "php_array_pop", .needs_allocator = true }) },
         .{ "array_shift", bi(.{ .runtime_name = "php_array_shift", .needs_allocator = true }) },
         .{ "array_unshift", bi(.{ .runtime_name = "php_array_unshift", .needs_allocator = true }) },
         .{ "array_slice", bi(.{ .runtime_name = "php_array_slice", .needs_allocator = true }) },
+        .{ "array_splice", bi(.{ .runtime_name = "php_array_splice", .needs_allocator = true }) },
         .{ "array_merge", bi(.{ .runtime_name = "php_array_merge", .needs_allocator = true }) },
         .{ "array_map", bi(.{ .runtime_name = "php_array_map", .needs_allocator = true }) },
         .{ "array_filter", bi(.{ .runtime_name = "php_array_filter", .needs_allocator = true }) },
         .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true }) },
+        .{ "array_find", bi(.{ .runtime_name = "php_array_find", .needs_allocator = true }) },
         .{ "array_chunk", bi(.{ .runtime_name = "php_array_chunk", .needs_allocator = true }) },
         .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
         .{ "array_sum", bi(.{ .runtime_name = "php_array_sum", .needs_allocator = false }) },
@@ -2051,6 +2547,21 @@ pub const NativeLinker = struct {
         .{ "array_search", bi(.{ .runtime_name = "php_array_search", .needs_allocator = false }) },
         .{ "array_reverse", bi(.{ .runtime_name = "php_array_reverse", .needs_allocator = true }) },
         .{ "array_unique", bi(.{ .runtime_name = "php_array_unique", .needs_allocator = true }) },
+        .{ "array_flip", bi(.{ .runtime_name = "php_array_flip", .needs_allocator = true }) },
+        .{ "array_combine", bi(.{ .runtime_name = "php_array_combine", .needs_allocator = true }) },
+        .{ "array_pad", bi(.{ .runtime_name = "php_array_pad", .needs_allocator = true }) },
+        .{ "array_fill", bi(.{ .runtime_name = "php_array_fill", .needs_allocator = true }) },
+        .{ "array_fill_keys", bi(.{ .runtime_name = "php_array_fill_keys", .needs_allocator = true }) },
+        .{ "array_intersect", bi(.{ .runtime_name = "php_array_intersect", .needs_allocator = true }) },
+        .{ "array_diff", bi(.{ .runtime_name = "php_array_diff", .needs_allocator = true }) },
+        .{ "array_diff_key", bi(.{ .runtime_name = "php_array_diff_key", .needs_allocator = true }) },
+        .{ "array_walk", bi(.{ .runtime_name = "php_array_walk", .needs_allocator = true }) },
+        .{ "array_walk_recursive", bi(.{ .runtime_name = "php_array_walk_recursive", .needs_allocator = true }) },
+        .{ "array_count_values", bi(.{ .runtime_name = "php_array_count_values", .needs_allocator = true }) },
+        .{ "array_rand", bi(.{ .runtime_name = "php_array_rand", .needs_allocator = true }) },
+        .{ "array_key_first", bi(.{ .runtime_name = "php_array_key_first", .needs_allocator = false }) },
+        .{ "array_key_last", bi(.{ .runtime_name = "php_array_key_last", .needs_allocator = false }) },
+        .{ "array_multisort", bi(.{ .runtime_name = "php_array_multisort", .needs_allocator = true }) },
         .{ "array_flip", bi(.{ .runtime_name = "php_array_flip", .needs_allocator = true }) },
         .{ "array_key_first", bi(.{ .runtime_name = "php_array_key_first", .needs_allocator = false }) },
         .{ "array_count_values", bi(.{ .runtime_name = "php_array_count_values", .needs_allocator = true }) },
@@ -2064,6 +2575,7 @@ pub const NativeLinker = struct {
         .{ "array_fill", bi(.{ .runtime_name = "php_array_fill", .needs_allocator = true }) },
         .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
         .{ "array_walk", bi(.{ .runtime_name = "php_array_walk", .needs_allocator = true }) },
+        .{ "array_walk_recursive", bi(.{ .runtime_name = "php_array_walk_recursive", .needs_allocator = true }) },
         .{ "array_splice", bi(.{ .runtime_name = "php_array_splice", .needs_allocator = true }) },
         .{ "array_intersect", bi(.{ .runtime_name = "php_array_intersect", .needs_allocator = true }) },
         .{ "array_diff", bi(.{ .runtime_name = "php_array_diff", .needs_allocator = true }) },
@@ -2111,8 +2623,11 @@ pub const NativeLinker = struct {
         .{ "atan2", .{ .runtime_name = "php_atan2", .needs_allocator = false } },
         .{ "log", .{ .runtime_name = "php_log", .needs_allocator = false } },
         .{ "log10", .{ .runtime_name = "php_log10", .needs_allocator = false } },
+        .{ "log2", .{ .runtime_name = "php_log2", .needs_allocator = false } },
         .{ "exp", .{ .runtime_name = "php_exp", .needs_allocator = false } },
         .{ "fmod", .{ .runtime_name = "php_fmod", .needs_allocator = false } },
+        .{ "intdiv", .{ .runtime_name = "php_intdiv", .needs_allocator = false } },
+        .{ "fdiv", bi(.{ .runtime_name = "php_fdiv", .needs_allocator = false, .may_raise = false }) },
         .{ "hypot", .{ .runtime_name = "php_hypot", .needs_allocator = false } },
         .{ "deg2rad", .{ .runtime_name = "php_deg2rad", .needs_allocator = false } },
         .{ "rad2deg", .{ .runtime_name = "php_rad2deg", .needs_allocator = false } },
@@ -2121,6 +2636,8 @@ pub const NativeLinker = struct {
         .{ "mt_rand", .{ .runtime_name = "php_mt_rand", .needs_allocator = false } },
 
         .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
+        .{ "getdate", bi(.{ .runtime_name = "php_getdate", .needs_allocator = true }) },
+        .{ "mktime", .{ .runtime_name = "php_mktime", .needs_allocator = false } },
         .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
         .{ "date", bi(.{ .runtime_name = "php_date", .needs_allocator = true }) },
         .{ "strtotime", bi(.{ .runtime_name = "php_strtotime", .needs_allocator = true }) },
@@ -2142,22 +2659,26 @@ pub const NativeLinker = struct {
         .{ "is_float", .{ .runtime_name = "php_is_float", .needs_allocator = false } },
         .{ "is_string", .{ .runtime_name = "php_is_string", .needs_allocator = false } },
         .{ "is_array", .{ .runtime_name = "php_is_array", .needs_allocator = false } },
+        .{ "is_object", .{ .runtime_name = "php_is_object", .needs_allocator = false } },
         .{ "is_numeric", .{ .runtime_name = "php_is_numeric", .needs_allocator = false } },
         .{ "is_callable", .{ .runtime_name = "php_is_callable", .needs_allocator = false } },
         .{ "is_resource", .{ .runtime_name = "php_is_resource", .needs_allocator = false } },
+        .{ "is_scalar", .{ .runtime_name = "php_is_scalar", .needs_allocator = false } },
+        .{ "is_infinite", .{ .runtime_name = "php_is_infinite", .needs_allocator = false } },
+        .{ "is_nan", .{ .runtime_name = "php_is_nan", .needs_allocator = false } },
+        .{ "is_finite", .{ .runtime_name = "php_is_finite", .needs_allocator = false } },
+        .{ "is_countable", .{ .runtime_name = "php_is_countable", .needs_allocator = false } },
+        .{ "is_iterable", .{ .runtime_name = "php_is_iterable", .needs_allocator = false } },
         .{ "isset", .{ .runtime_name = "php_isset", .needs_allocator = false } },
         .{ "empty", .{ .runtime_name = "php_empty", .needs_allocator = false } },
-        .{ "unset", .{ .runtime_name = "php_unset", .needs_allocator = false } },
-        .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = false } },
-        .{ "fclose", .{ .runtime_name = "php_fclose", .needs_allocator = false } },
-        .{ "fread", .{ .runtime_name = "php_fread", .needs_allocator = false } },
-        .{ "fwrite", .{ .runtime_name = "php_fwrite", .needs_allocator = false } },
+        .{ "unset", .{ .runtime_name = "php_unset", .needs_allocator = true, .may_raise = false } },
 
         .{ "intval", .{ .runtime_name = "php_intval", .needs_allocator = false } },
         .{ "floatval", .{ .runtime_name = "php_floatval", .needs_allocator = false } },
         .{ "strval", .{ .runtime_name = "php_strval", .needs_allocator = true } },
         .{ "boolval", .{ .runtime_name = "php_boolval", .needs_allocator = false } },
         .{ "gettype", .{ .runtime_name = "php_gettype", .needs_allocator = true } },
+        .{ "settype", bi(.{ .runtime_name = "php_settype", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{0} }) },
         .{ "exit", .{ .runtime_name = "php_exit", .needs_allocator = false } },
         .{ "die", .{ .runtime_name = "php_exit", .needs_allocator = false } },
 
@@ -2174,8 +2695,112 @@ pub const NativeLinker = struct {
         .{ "rmdir", .{ .runtime_name = "php_rmdir", .needs_allocator = false } },
         .{ "basename", .{ .runtime_name = "php_basename", .needs_allocator = true } },
         .{ "dirname", .{ .runtime_name = "php_dirname", .needs_allocator = true } },
+        .{ "getmypid", bi(.{ .runtime_name = "php_getmypid", .needs_allocator = false, .may_raise = false }) },
 
         .{ "go", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
+
+        .{ "php_bool_or", bi(.{ .runtime_name = "php_bool_or", .needs_allocator = false, .may_raise = false }) },
+        .{ "php_property_array_push_with_obj", bi(.{ .runtime_name = "php_property_array_push_with_obj", .needs_allocator = false }) },
+        .{ "php_property_array_set_with_obj", bi(.{ .runtime_name = "php_property_array_set_with_obj", .needs_allocator = false }) },
+
+        // ctype 函数
+        .{ "ctype_alnum", bi(.{ .runtime_name = "php_ctype_alnum", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_alpha", bi(.{ .runtime_name = "php_ctype_alpha", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_digit", bi(.{ .runtime_name = "php_ctype_digit", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_lower", bi(.{ .runtime_name = "php_ctype_lower", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_upper", bi(.{ .runtime_name = "php_ctype_upper", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_space", bi(.{ .runtime_name = "php_ctype_space", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_print", bi(.{ .runtime_name = "php_ctype_print", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_punct", bi(.{ .runtime_name = "php_ctype_punct", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_xdigit", bi(.{ .runtime_name = "php_ctype_xdigit", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_cntrl", bi(.{ .runtime_name = "php_ctype_cntrl", .needs_allocator = false, .may_raise = false }) },
+        .{ "ctype_graph", bi(.{ .runtime_name = "php_ctype_graph", .needs_allocator = false, .may_raise = false }) },
+
+        // 网络函数
+        .{ "gethostbyname", bi(.{ .runtime_name = "php_gethostbyname", .needs_allocator = true }) },
+        .{ "gethostname", bi(.{ .runtime_name = "php_gethostname", .needs_allocator = true }) },
+        .{ "parse_url", bi(.{ .runtime_name = "php_parse_url", .needs_allocator = true }) },
+
+        // 回调函数（特殊处理参数，不走通用 allocator 逻辑）
+        .{ "call_user_func", bi(.{ .runtime_name = "php_call_user_func", .needs_allocator = false }) },
+        .{ "call_user_func_array", bi(.{ .runtime_name = "php_call_user_func_array", .needs_allocator = false }) },
+
+        // 字符串函数
+        .{ "addslashes", bi(.{ .runtime_name = "php_addslashes", .needs_allocator = true }) },
+        .{ "substr_count", bi(.{ .runtime_name = "php_substr_count", .needs_allocator = false }) },
+        .{ "crc32", bi(.{ .runtime_name = "php_crc32", .needs_allocator = false }) },
+
+        // 多字节字符串函数
+        .{ "mb_strlen", bi(.{ .runtime_name = "php_mb_strlen", .needs_allocator = false }) },
+        .{ "mb_substr", bi(.{ .runtime_name = "php_mb_substr", .needs_allocator = false }) },
+        .{ "mb_strtoupper", bi(.{ .runtime_name = "php_mb_strtoupper", .needs_allocator = false }) },
+        .{ "mb_strtolower", bi(.{ .runtime_name = "php_mb_strtolower", .needs_allocator = false }) },
+
+        // 错误处理（特殊处理参数）
+        .{ "set_error_handler", bi(.{ .runtime_name = "php_set_error_handler", .needs_allocator = false }) },
+        .{ "restore_error_handler", bi(.{ .runtime_name = "php_restore_error_handler", .needs_allocator = false }) },
+
+        // 类型/调试
+        .{ "get_debug_type", bi(.{ .runtime_name = "php_get_debug_type", .needs_allocator = true }) },
+
+        // 哈希
+        .{ "hash", bi(.{ .runtime_name = "php_hash", .needs_allocator = true }) },
+        .{ "hash_algos", bi(.{ .runtime_name = "php_hash_algos", .needs_allocator = true }) },
+
+        // 文件系统
+        .{ "filemtime", bi(.{ .runtime_name = "php_filemtime", .needs_allocator = false }) },
+        .{ "fileatime", bi(.{ .runtime_name = "php_fileatime", .needs_allocator = false }) },
+
+        // 数学
+        .{ "base_convert", bi(.{ .runtime_name = "php_base_convert", .needs_allocator = true }) },
+
+        // GC
+        .{ "gc_enabled", bi(.{ .runtime_name = "php_gc_enabled", .needs_allocator = false, .may_raise = false }) },
+
+        // 网络
+        .{ "ip2long", bi(.{ .runtime_name = "php_ip2long", .needs_allocator = false }) },
+        .{ "long2ip", bi(.{ .runtime_name = "php_long2ip", .needs_allocator = true }) },
+
+        // 错误处理
+        .{ "trigger_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = false }) },
+        .{ "user_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = false }) },
+        .{ "set_exception_handler", bi(.{ .runtime_name = "php_set_exception_handler", .needs_allocator = true }) },
+        .{ "restore_exception_handler", bi(.{ .runtime_name = "php_restore_exception_handler", .needs_allocator = false }) },
+
+        // 字符串
+        .{ "stripslashes", bi(.{ .runtime_name = "php_stripslashes", .needs_allocator = true }) },
+
+        // URL/网络
+        .{ "http_build_query", bi(.{ .runtime_name = "php_http_build_query", .needs_allocator = true }) },
+        .{ "parse_str", bi(.{ .runtime_name = "php_parse_str", .needs_allocator = true }) },
+
+        // 文件系统
+        .{ "glob", bi(.{ .runtime_name = "php_glob", .needs_allocator = true }) },
+        .{ "touch", bi(.{ .runtime_name = "php_touch", .needs_allocator = false }) },
+        .{ "pathinfo", bi(.{ .runtime_name = "php_pathinfo", .needs_allocator = false }) },
+        .{ "realpath", bi(.{ .runtime_name = "php_realpath", .needs_allocator = true }) },
+
+        // 输出缓冲
+        .{ "ob_start", bi(.{ .runtime_name = "php_ob_start", .needs_allocator = false }) },
+        .{ "ob_get_contents", bi(.{ .runtime_name = "php_ob_get_contents", .needs_allocator = true }) },
+        .{ "ob_end_clean", bi(.{ .runtime_name = "php_ob_end_clean", .needs_allocator = false }) },
+        .{ "ob_get_clean", bi(.{ .runtime_name = "php_ob_get_clean", .needs_allocator = true }) },
+        .{ "ob_get_level", bi(.{ .runtime_name = "php_ob_get_level", .needs_allocator = false, .may_raise = false }) },
+        .{ "ob_flush", bi(.{ .runtime_name = "php_ob_flush", .needs_allocator = false }) },
+        .{ "ob_end_flush", bi(.{ .runtime_name = "php_ob_end_flush", .needs_allocator = false }) },
+        .{ "ob_get_length", bi(.{ .runtime_name = "php_ob_get_length", .needs_allocator = false, .may_raise = false }) },
+        .{ "ob_get_status", bi(.{ .runtime_name = "php_ob_get_status", .needs_allocator = true }) },
+        .{ "ob_implicit_flush", bi(.{ .runtime_name = "php_ob_implicit_flush", .needs_allocator = false, .may_raise = false }) },
+        .{ "get_resource_id", bi(.{ .runtime_name = "php_get_resource_id", .needs_allocator = false }) },
+
+        // 临时文件/调试
+        .{ "tempnam", bi(.{ .runtime_name = "php_tempnam", .needs_allocator = true }) },
+        .{ "debug_zval_dump", bi(.{ .runtime_name = "php_debug_zval_dump", .needs_allocator = false }) },
+
+        // HTTP 头（CLI 模式）
+        .{ "headers_list", bi(.{ .runtime_name = "php_headers_list", .needs_allocator = true }) },
+        .{ "header", bi(.{ .runtime_name = "php_header", .needs_allocator = false }) },
+        .{ "http_response_code", bi(.{ .runtime_name = "php_http_response_code", .needs_allocator = false }) },
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
@@ -2191,6 +2816,8 @@ pub const NativeLinker = struct {
         .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
+        .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
+        .{ "php_object_call_named_args", bi(.{ .runtime_name = "php_object_call_named_args", .needs_allocator = true }) },
         .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
@@ -2219,6 +2846,9 @@ pub const NativeLinker = struct {
         // Socket 函数
         .{ "socket_create_pair", bi(.{ .runtime_name = "php_socket_create_pair", .needs_allocator = true }) },
         .{ "socket_close", bi(.{ .runtime_name = "php_socket_close", .needs_allocator = false }) },
+        
+        // 异常处理函数
+        .{ "throwThrowable", bi(.{ .runtime_name = "throwThrowable", .needs_allocator = true }) },
     }));
 
     fn bi(info: BuiltinInfo) BuiltinInfo {
@@ -2298,11 +2928,12 @@ pub const NativeLinker = struct {
         }
 
         // 统一函数签名：(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value
+        // Note: allocator 参数在大多数情况下未使用，但保留参数名以便需要时使用
         try code.appendSlice(self.allocator, "ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) !runtime.Value {\n");
         try code.appendSlice(self.allocator, "    _ = &ctx;\n");
-        try code.appendSlice(self.allocator, "    _ = &args;\n");
-        try code.appendSlice(self.allocator, "    _ = allocator;\n");
-        try code.appendSlice(self.allocator, "    _ = runtime;\n");
+        try code.appendSlice(self.allocator, "    _ = allocator; // 标记为故意未使用\n");
+        try code.appendSlice(self.allocator, "    const __prev_call_args = runtime.setCurrentCallArgs(args);\n");
+        try code.appendSlice(self.allocator, "    defer runtime.restoreCurrentCallArgs(__prev_call_args);\n");
 
         // 如果是类方法，设置 ClassContext
         if (std.mem.indexOf(u8, func.name, "::")) |_| {
@@ -2312,12 +2943,18 @@ pub const NativeLinker = struct {
             };
             const escaped_class = try self.escapeString(class_name);
             defer self.allocator.free(escaped_class);
-            // 使用 findClass 但不要求必须存在（Trait 方法可能没有对应的类）
+            // LSB: 只设置 scope class（定义方法的类），不覆盖 called class
+            // 调用方（php_call_static / ClassContext.init）已正确设置 called class
+            // 如果 called class 未设置（直接调用），则同时设置为定义类
             try code.appendSlice(self.allocator, "    if (runtime.findClass(\"");
             try code.appendSlice(self.allocator, escaped_class);
             try code.appendSlice(self.allocator, "\")) |__class_meta| {\n");
-            try code.appendSlice(self.allocator, "        const __class_guard = runtime.ClassContext.init(__class_meta, __class_meta);\n");
-            try code.appendSlice(self.allocator, "        defer __class_guard.deinit();\n");
+            try code.appendSlice(self.allocator, "        const __prev_scope = runtime.getCurrentScopeClass();\n");
+            try code.appendSlice(self.allocator, "        runtime.setCurrentScopeClass(__class_meta);\n");
+            try code.appendSlice(self.allocator, "        defer runtime.setCurrentScopeClass(__prev_scope);\n");
+            try code.appendSlice(self.allocator, "        if (runtime.getCurrentCalledClass() == null) {\n");
+            try code.appendSlice(self.allocator, "            runtime.setCurrentCalledClass(__class_meta);\n");
+            try code.appendSlice(self.allocator, "        }\n");
             try code.appendSlice(self.allocator, "    }\n");
         }
 
@@ -2396,6 +3033,8 @@ pub const NativeLinker = struct {
                             else => .php_value,
                         };
                         try all_registers.put(reg.id, inner_type);
+                        // mem2reg提升的alloca也需要在函数结束时清理
+                        try cleanup_registers_set.put(reg.id, {});
                         // std.debug.print("mem2reg promoted reg_{d}, type=ptr -> {s}\n", .{
                         //     reg.id,
                         //     @tagName(@as(std.meta.Tag(IR.Type), inner_type))
@@ -2483,7 +3122,11 @@ pub const NativeLinker = struct {
                     if (inst.op != .alloca) {
                         // 只cleanup创建新值的指令
                         switch (inst.op) {
-                            .const_string, .concat, .array_new, .new_object, .call => {
+                            .new_object => {
+                                // 对象创建：无论类型是php_object还是php_value都需要清理
+                                try cleanup_registers_set.put(reg.id, {});
+                            },
+                            .const_string, .concat, .array_new, .call => {
                                 if (corrected_type == .php_value) {
                                     try cleanup_registers_set.put(reg.id, {});
                                 }
@@ -2843,6 +3486,27 @@ pub const NativeLinker = struct {
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
+        // 收集PHI/select指令产生的指针寄存器（合并引用参数产生的指针类型）
+        var ref_ptr_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer ref_ptr_regs.deinit();
+        for (func.blocks.items) |blk_scan| {
+            for (blk_scan.instructions.items) |inst_scan| {
+                if (inst_scan.result) |res| {
+                    const rtag = @as(std.meta.Tag(IR.Type), res.type_);
+                    if (rtag == .ptr and !alloca_registers.contains(res.id)) {
+                        switch (inst_scan.op) {
+                            .phi, .select => {
+                                try ref_ptr_regs.put(res.id, {});
+                            },
+                            else => {},
+                        }
+                    }
+                }
+            }
+        }
+        self.current_ref_ptr_regs = &ref_ptr_regs;
+        defer self.current_ref_ptr_regs = null;
+
         // 生成寄存器声明 - 使用简单的方式
         // std.debug.print("About to generate register declarations: count={d}\n", .{all_registers.count()});
         if (all_registers.count() > 0) {
@@ -2919,8 +3583,8 @@ pub const NativeLinker = struct {
                         break :blk false;
                     };
 
-                    if (is_ref_param_reg) {
-                        // 引用参数寄存器：声明为指针类型
+                    if (is_ref_param_reg or ref_ptr_regs.contains(reg_id)) {
+                        // 引用参数寄存器或PHI/select合并的指针寄存器：声明为指针类型
                         try code.appendSlice(self.allocator, "    var reg_");
                         try code.writer(self.allocator).print("{d}", .{reg_id});
                         try code.appendSlice(self.allocator, ": *runtime.Value = undefined;\n");
@@ -3107,17 +3771,86 @@ pub const NativeLinker = struct {
         // 预扫描：记录 global_get 指令的结果寄存器 → 变量名映射
         var global_get_names = std.AutoHashMap(usize, []const u8).init(self.allocator);
         var concat_operand_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        var coalesce_nowarn_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer global_get_names.deinit();
         defer concat_operand_regs.deinit();
+        defer coalesce_nowarn_regs.deinit();
+        // 第一遍：收集 global_get 和 const_null 寄存器
+        var global_get_reg_set = std.AutoHashMap(usize, void).init(self.allocator);
+        defer global_get_reg_set.deinit();
+        var null_const_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer null_const_regs.deinit();
         for (func.blocks.items) |blk_scan| {
             for (blk_scan.instructions.items) |inst_scan| {
                 if (inst_scan.op == .global_get) {
                     if (inst_scan.result) |reg| {
                         try global_get_names.put(reg.id, inst_scan.op.global_get.name);
+                        try global_get_reg_set.put(reg.id, {});
                     }
                 } else if (inst_scan.op == .concat) {
                     try concat_operand_regs.put(inst_scan.op.concat.lhs.id, {});
                     try concat_operand_regs.put(inst_scan.op.concat.rhs.id, {});
+                } else if (inst_scan.op == .const_null) {
+                    if (inst_scan.result) |reg| {
+                        try null_const_regs.put(reg.id, {});
+                    }
+                }
+            }
+        }
+        // 收集 array_get 的 result → base_reg 映射（用于回溯）
+        var array_get_base = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer array_get_base.deinit();
+        for (func.blocks.items) |blk_scan2| {
+            for (blk_scan2.instructions.items) |inst_scan| {
+                if (inst_scan.op == .array_get) {
+                    if (inst_scan.result) |reg| {
+                        try array_get_base.put(reg.id, inst_scan.op.array_get.array.id);
+                    }
+                }
+            }
+        }
+        // 第二遍：找 coalesce 模式
+        for (func.blocks.items) |blk_scan| {
+            // 方法1：identical(reg, null_const) 模式检测
+            for (blk_scan.instructions.items) |inst_scan| {
+                if (inst_scan.op == .identical) {
+                    const id_op = inst_scan.op.identical;
+                    // 找出哪个操作数是 null const
+                    const coalesce_reg_id: ?usize = if (null_const_regs.contains(id_op.rhs.id))
+                        id_op.lhs.id
+                    else if (null_const_regs.contains(id_op.lhs.id))
+                        id_op.rhs.id
+                    else
+                        null;
+                    if (coalesce_reg_id) |cid| {
+                        // 直接是 global_get 结果
+                        if (global_get_reg_set.contains(cid)) {
+                            try coalesce_nowarn_regs.put(cid, {});
+                        }
+                        // 通过 array_get 间接连接的 global_get
+                        var trace_id = cid;
+                        var depth: usize = 0;
+                        while (depth < 5) : (depth += 1) {
+                            if (array_get_base.get(trace_id)) |base_id| {
+                                try coalesce_nowarn_regs.put(trace_id, {});
+                                if (global_get_reg_set.contains(base_id)) {
+                                    try coalesce_nowarn_regs.put(base_id, {});
+                                    break;
+                                }
+                                trace_id = base_id;
+                            } else break;
+                        }
+                    }
+                }
+            }
+            // 方法2：coalesce_rhs 块中的 global_get 和 array_get 也需要 NoWarn
+            if (std.mem.startsWith(u8, blk_scan.label, "coalesce_rhs")) {
+                for (blk_scan.instructions.items) |inst_scan| {
+                    if (inst_scan.op == .global_get or inst_scan.op == .array_get) {
+                        if (inst_scan.result) |reg| {
+                            try coalesce_nowarn_regs.put(reg.id, {});
+                        }
+                    }
                 }
             }
         }
@@ -3125,6 +3858,8 @@ pub const NativeLinker = struct {
         defer self.current_global_get_names = null;
         self.current_concat_operand_regs = &concat_operand_regs;
         defer self.current_concat_operand_regs = null;
+        self.current_coalesce_nowarn_regs = &coalesce_nowarn_regs;
+        defer self.current_coalesce_nowarn_regs = null;
 
         self.current_unset_regs = &unset_registers;
         defer self.current_unset_regs = null;
@@ -3212,6 +3947,9 @@ pub const NativeLinker = struct {
                                     // 跳过引用参数的alloca（它们是undefined）
                                     if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
+                                    // 跳过指针寄存器（PHI/select合并引用参数，不拥有值）
+                                    if (ref_ptr_regs.contains(reg_id)) continue;
+
                                     // 检查是否是alloca寄存器
                                     const is_ptr = alloca_registers.contains(reg_id);
 
@@ -3219,16 +3957,9 @@ pub const NativeLinker = struct {
                                     if (unset_registers.contains(reg_id)) continue;
 
                                     if (is_ptr) {
-                                        // alloca指针：检查是否被store过
-                                        const has_store = alloca_with_store.contains(reg_id);
-                                        if (has_store) {
-                                            // 被store过：release两次（store会retain）
-                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                        } else {
-                                            // 没有被store：release一次
-                                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                        }
+                                        // alloca指针：只需release一次
+                                        // store指令会retain，函数结束时release一次即可平衡
+                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                     } else {
                                         try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                     }
@@ -3237,21 +3968,13 @@ pub const NativeLinker = struct {
                         }
 
                         if (ret_val) |reg| {
-                            const type_tag = @as(std.meta.Tag(IR.Type), all_registers.get(reg.id) orelse reg.type_);
-                            if (type_tag == .i64) {
-                                try code.writer(self.allocator).print("    return runtime.Value.initInt(reg_{d}.asInt());\n", .{reg.id});
-                            } else if (type_tag == .f64) {
-                                try code.writer(self.allocator).print("    return runtime.Value.initFloat(reg_{d}.asFloat());\n", .{reg.id});
-                            } else if (type_tag == .bool) {
-                                try code.writer(self.allocator).print("    return runtime.Value.initBool(reg_{d}.asBool());\n", .{reg.id});
+                            // 始终返回原始 Value，不做类型转换
+                            // 类型推断可能不准确（如 && 结果推断为 i64 但实际是 bool）
+                            const is_alloca = alloca_registers.contains(reg.id);
+                            if (is_alloca) {
+                                try code.writer(self.allocator).print("    return reg_{d}.*;\n", .{reg.id});
                             } else {
-                                // 检查是否是 alloca 寄存器
-                                const is_alloca = alloca_registers.contains(reg.id);
-                                if (is_alloca) {
-                                    try code.writer(self.allocator).print("    return reg_{d}.*;\n", .{reg.id});
-                                } else {
-                                    try code.writer(self.allocator).print("    return reg_{d};\n", .{reg.id});
-                                }
+                                try code.writer(self.allocator).print("    return reg_{d};\n", .{reg.id});
                             }
                         } else {
                             try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
@@ -3273,7 +3996,8 @@ pub const NativeLinker = struct {
                             }
                         }
 
-                        try code.appendSlice(self.allocator, "    return error.RuntimeError;\n");
+                        // 返回 null 而非 error，让调用方的 hasException() 检查路由到 catch 块
+                        try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
                     },
                     else => {
                         // 其他terminator不应该出现在单基本块中
@@ -3289,6 +4013,9 @@ pub const NativeLinker = struct {
                                 // 跳过引用参数的alloca（它们是undefined）
                                 if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
+                                // 跳过指针寄存器（PHI/select合并引用参数，不拥有值）
+                                if (ref_ptr_regs.contains(reg_id)) continue;
+
                                 // 检查是否是alloca寄存器
                                 const is_ptr = alloca_registers.contains(reg_id);
 
@@ -3296,16 +4023,9 @@ pub const NativeLinker = struct {
                                 if (unset_registers.contains(reg_id)) continue;
 
                                 if (is_ptr) {
-                                    // alloca指针：检查是否被store过
-                                    const has_store = alloca_with_store.contains(reg_id);
-                                    if (has_store) {
-                                        // 被store过：release两次
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                    } else {
-                                        // 没有被store：release一次
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                    }
+                                    // alloca指针：只需release一次
+                                    // store指令会retain，函数结束时release一次即可平衡
+                                    try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                                 } else {
                                     try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                                 }
@@ -3329,21 +4049,17 @@ pub const NativeLinker = struct {
                         // 跳过引用参数的alloca（它们是undefined）
                         if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
+                        // 跳过指针寄存器（PHI/select合并引用参数，不拥有值）
+                        if (ref_ptr_regs.contains(reg_id)) continue;
+
                         // 跳过已unset的寄存器（避免访问已释放内存）
                         if (unset_registers.contains(reg_id)) continue;
 
                         const is_alloca = alloca_registers.contains(reg_id);
                         if (is_alloca) {
-                            // alloca指针：检查是否被store过
-                            const has_store = alloca_with_store.contains(reg_id);
-                            if (has_store) {
-                                // 被store过：release两次
-                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                            } else {
-                                // 没有被store：release一次
-                                try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
-                            }
+                            // alloca指针：只需release一次
+                            // store指令会retain，函数结束时release一次即可平衡
+                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
                         } else {
                             try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
                         }
@@ -3892,10 +4608,30 @@ pub const NativeLinker = struct {
         if (all_single_incoming) {
             for (phi_infos.items) |info| {
                 if (info.incoming.len > 0) {
-                    try writer.print("    reg_{d} = reg_{d};\n", .{
-                        info.result_reg.id,
-                        info.incoming[0].value.id,
-                    });
+                    const result_is_ptr = self.isPointerReg(info.result_reg.id);
+                    const value_is_ptr = self.isPointerReg(info.incoming[0].value.id);
+                    
+                    if (result_is_ptr and value_is_ptr) {
+                        try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    } else if (result_is_ptr) {
+                        try writer.print("    reg_{d}.* = reg_{d};\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    } else if (value_is_ptr) {
+                        try writer.print("    reg_{d} = reg_{d}.*;\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    } else {
+                        try writer.print("    reg_{d} = reg_{d};\n", .{
+                            info.result_reg.id,
+                            info.incoming[0].value.id,
+                        });
+                    }
                 }
             }
             return;
@@ -3958,7 +4694,39 @@ pub const NativeLinker = struct {
             try writer.writeAll("        },\n");
         }
 
-        try writer.writeAll("        else => unreachable,\n");
+        // 默认情况：如果prev_block不在预期范围内，使用第一个incoming的值
+        // 这可能发生在控制流优化或未初始化的prev_block场景
+        try writer.writeAll("        else => {\n");
+        try writer.writeAll("            // Fallback: use first incoming value\n");
+        for (phi_infos.items) |info| {
+            if (info.incoming.len > 0) {
+                const result_is_ptr = self.isPointerReg(info.result_reg.id);
+                const value_is_ptr = self.isPointerReg(info.incoming[0].value.id);
+                
+                if (result_is_ptr and value_is_ptr) {
+                    try writer.print("            reg_{d}.* = reg_{d}.*;\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                } else if (result_is_ptr) {
+                    try writer.print("            reg_{d}.* = reg_{d};\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                } else if (value_is_ptr) {
+                    try writer.print("            reg_{d} = reg_{d}.*;\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                } else {
+                    try writer.print("            reg_{d} = reg_{d};\n", .{
+                        info.result_reg.id,
+                        info.incoming[0].value.id,
+                    });
+                }
+            }
+        }
+        try writer.writeAll("        },\n");
         try writer.writeAll("    }\n");
     }
 
@@ -4043,7 +4811,18 @@ pub const NativeLinker = struct {
             // }
             try writer.writeAll(" },\n");
         }
-        try writer.writeAll("        else => unreachable,\n");
+        // 默认情况：使用第一个incoming值作为fallback
+        if (valid_incoming.items.len > 0) {
+            const first_src = valid_incoming.items[0].src;
+            const src_real_type = self.current_reg_types.?.get(first_src.id) orelse first_src.type_;
+            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
+            try writer.writeAll("        else => { reg_");
+            try writer.print("{d} = ", .{result_reg.id});
+            try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, first_src.id);
+            try writer.writeAll("; },\n");
+        } else {
+            try writer.writeAll("        else => {},\n");
+        }
         try writer.writeAll("    }\n");
     }
 
@@ -4294,20 +5073,14 @@ pub const NativeLinker = struct {
         if (!has_any_dependency) {
             // 无依赖，直接赋值（不需要retain，因为phi代替store）
             for (assignments) |assign| {
-                const value_is_alloca = if (self.current_alloca_regs) |regs|
-                    regs.contains(assign.value.id)
-                else
-                    false;
-                const result_is_alloca = if (self.current_alloca_regs) |regs|
-                    regs.contains(assign.result.id)
-                else
-                    false;
+                const value_is_ptr = self.isPointerReg(assign.value.id);
+                const result_is_ptr = self.isPointerReg(assign.result.id);
 
-                if (result_is_alloca and value_is_alloca) {
+                if (result_is_ptr and value_is_ptr) {
                     try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                } else if (result_is_alloca) {
+                } else if (result_is_ptr) {
                     try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                } else if (value_is_alloca) {
+                } else if (value_is_ptr) {
                     try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
                 } else {
                     try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
@@ -4320,11 +5093,8 @@ pub const NativeLinker = struct {
             // 第一步：保存需要临时变量的源值
             for (assignments, 0..) |assign, i| {
                 if (needs_temp.items[i]) {
-                    const value_is_alloca = if (self.current_alloca_regs) |regs|
-                        regs.contains(assign.value.id)
-                    else
-                        false;
-                    if (value_is_alloca) {
+                    const value_is_ptr = self.isPointerReg(assign.value.id);
+                    if (value_is_ptr) {
                         try writer.print("{s}const phi_temp_{d} = reg_{d}.*;\n", .{ indent, i, assign.value.id });
                     } else {
                         try writer.print("{s}const phi_temp_{d} = reg_{d};\n", .{ indent, i, assign.value.id });
@@ -4333,27 +5103,21 @@ pub const NativeLinker = struct {
             }
             // 第二步：赋值（不需要retain）
             for (assignments, 0..) |assign, i| {
-                const result_is_alloca = if (self.current_alloca_regs) |regs|
-                    regs.contains(assign.result.id)
-                else
-                    false;
+                const result_is_ptr = self.isPointerReg(assign.result.id);
 
                 if (needs_temp.items[i]) {
-                    if (result_is_alloca) {
+                    if (result_is_ptr) {
                         try writer.print("{s}reg_{d}.* = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                     } else {
                         try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                     }
                 } else {
-                    const value_is_alloca = if (self.current_alloca_regs) |regs|
-                        regs.contains(assign.value.id)
-                    else
-                        false;
-                    if (result_is_alloca and value_is_alloca) {
+                    const value_is_ptr = self.isPointerReg(assign.value.id);
+                    if (result_is_ptr and value_is_ptr) {
                         try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                    } else if (result_is_alloca) {
+                    } else if (result_is_ptr) {
                         try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                    } else if (value_is_alloca) {
+                    } else if (value_is_ptr) {
                         try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
                     } else {
                         try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
@@ -4684,6 +5448,9 @@ pub const NativeLinker = struct {
                             if (self.ref_param_alloca_map) |map| {
                                 if (map.get(reg_id)) |_| continue;
                             }
+                            if (self.current_ref_ptr_regs) |rpr| {
+                                if (rpr.contains(reg_id)) continue;
+                            }
                             // 只cleanup alloca寄存器（局部变量）
                             // 其他寄存器（临时值）可能被返回值引用，不安全释放
                             if (alloca_regs.contains(reg_id)) {
@@ -4693,22 +5460,12 @@ pub const NativeLinker = struct {
                     }
                 }
                 if (ret_val) |reg| {
-                    const real_type = self.current_reg_types.?.get(reg.id) orelse reg.type_;
-                    const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
-                    if (reg_type_tag == .i64) {
-                        try writer.print("                return runtime.Value.initInt(reg_{d}.asInt());\n", .{reg.id});
-                    } else if (reg_type_tag == .f64) {
-                        try writer.print("                return runtime.Value.initFloat(reg_{d}.asFloat());\n", .{reg.id});
-                    } else if (reg_type_tag == .bool) {
-                        try writer.print("                return runtime.Value.initBool(reg_{d}.asBool());\n", .{reg.id});
+                    // 始终返回原始 Value，不做类型转换
+                    const is_alloca = alloca_regs.contains(reg.id);
+                    if (is_alloca) {
+                        try writer.print("                return reg_{d}.*;\n", .{reg.id});
                     } else {
-                        // 检查是否是 alloca 寄存器
-                        const is_alloca = alloca_regs.contains(reg.id);
-                        if (is_alloca) {
-                            try writer.print("                return reg_{d}.*;\n", .{reg.id});
-                        } else {
-                            try writer.print("                return reg_{d};\n", .{reg.id});
-                        }
+                        try writer.print("                return reg_{d};\n", .{reg.id});
                     }
                 } else {
                     try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
@@ -4874,7 +5631,8 @@ pub const NativeLinker = struct {
                 if (self.current_exception_handler) |handler_idx| {
                     try writer.print("                current_block = {d};\n", .{handler_idx});
                 } else {
-                    try code.appendSlice(self.allocator, "                return error.RuntimeError;\n");
+                    // 返回 null 而非 error，让调用方的 hasException() 检查路由到 catch 块
+                    try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
                 }
             },
             else => {
@@ -5499,6 +6257,19 @@ pub const NativeLinker = struct {
                 }
                 if (is_ref_param_init) return;
 
+                // 检查value是否是指针寄存器（PHI/select合并引用参数），target是alloca
+                // 此时应重新指向而不是值赋值：reg_alloca = reg_ptr
+                if (self.current_ref_ptr_regs) |rpr| {
+                    if (rpr.contains(op.value.id)) {
+                        const is_target_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                        if (is_target_alloca) {
+                            // 指针重新绑定：让alloca指向PHI/select选择的位置
+                            try writer.print("    reg_{d} = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                            return;
+                        }
+                    }
+                }
+
                 // 检查ptr是否是引用参数的alloca（使用映射表重定向到param）
                 if (self.ref_param_alloca_map) |map| {
                     if (map.get(op.ptr.id)) |param_reg_id| {
@@ -5802,14 +6573,10 @@ pub const NativeLinker = struct {
 
                     const ptr_prefix = if (is_ptr or ptr_is_ref_param) "" else "&";
 
-                    if (type_tag == .i64) {
-                        // 普通寄存器都是Value类型，需要包装
-                        try writer.print("    reg_{d}{s} = runtime.Value.initInt(runtime.val_deref({s}reg_{d}).*.asInt());\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else if (type_tag == .f64) {
-                        try writer.print("    reg_{d}{s} = runtime.Value.initFloat(runtime.val_deref({s}reg_{d}).*.asFloat());\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d}{s} = runtime.Value.initBool(runtime.val_deref({s}reg_{d}).*.asBool());\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
-                    } else {
+                    // 始终使用通用加载路径，保留实际运行时类型
+                    // 类型推断可能不准确（如函数参数推断为i64但实际是bool），
+                    // 用 asInt()/asFloat()/asBool() 转换会丢失实际类型信息
+                    {
                         try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
                         if (self.regMayHeap(reg.id)) {
                             if (result_is_alloca) {
@@ -6398,7 +7165,7 @@ pub const NativeLinker = struct {
             },
             .shl => |op| {
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() << @as(u6, @intCast(@min(63, @max(0, reg_{d}.toInt())))));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    try writer.print("    reg_{d} = runtime.Value.initInt(@truncate(@as(i128, reg_{d}.toInt()) << @as(u7, @intCast(@min(63, @max(0, reg_{d}.toInt()))))));\n", .{ reg.id, op.lhs.id, op.rhs.id });
                 }
             },
             .shr => |op| {
@@ -6485,7 +7252,13 @@ pub const NativeLinker = struct {
             .param => |op| {
                 if (inst.result) |reg| {
                     if (std.mem.eql(u8, op.name, "this")) {
-                        try writer.print("    reg_{d} = ctx;\n", .{reg.id});
+                        // 检查reg是否是alloca指针
+                        const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                        if (is_alloca) {
+                            try writer.print("    reg_{d}.* = ctx;\n", .{reg.id});
+                        } else {
+                            try writer.print("    reg_{d} = ctx;\n", .{reg.id});
+                        }
                     } else {
                         // 检查函数是否有this参数
                         const has_this = blk: {
@@ -6524,7 +7297,12 @@ pub const NativeLinker = struct {
                                         if (inst_check.op == .store) {
                                             const store_op = inst_check.op.store;
                                             if (store_op.value.id == reg.id) {
-                                                try writer.print("    reg_{d} = reg_{d};\n", .{ store_op.ptr.id, reg.id });
+                                                // 检查目标寄存器类型：指针类型直接赋值，值类型需要解引用
+                                                if (self.isPointerReg(store_op.ptr.id)) {
+                                                    try writer.print("    reg_{d} = reg_{d};\n", .{ store_op.ptr.id, reg.id });
+                                                } else {
+                                                    try writer.print("    reg_{d} = reg_{d}.*;\n", .{ store_op.ptr.id, reg.id });
+                                                }
                                                 break;
                                             }
                                         }
@@ -6546,14 +7324,33 @@ pub const NativeLinker = struct {
 
                             if (is_variadic) {
                                 // 可变参数：收集从 args_index 开始的所有参数到数组
-                                try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                // 特殊处理：如果恰好一个参数且是关联数组（命名 variadic 参数），直接使用
+                                const is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(reg.id) else false;
+                                if (is_alloca) {
+                                    try writer.print("    reg_{d}.* = runtime.Value.initNull();\n", .{reg.id});
+                                } else {
+                                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                }
                                 try writer.print("    {{\n", .{});
-                                try writer.print("        var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
-                                try writer.print("        var i: usize = {d};\n", .{args_index});
-                                try writer.print("        while (i < args.len) : (i += 1) {{\n", .{});
-                                try writer.print("            try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                                try writer.print("        const __va_start: usize = {d};\n", .{args_index});
+                                try writer.print("        if (args.len == __va_start + 1 and args[__va_start].isArray() and args[__va_start].asArray().hasStringKeys()) {{\n", .{});
+                                if (is_alloca) {
+                                    try writer.print("            reg_{d}.* = args[__va_start];\n", .{reg.id});
+                                } else {
+                                    try writer.print("            reg_{d} = args[__va_start];\n", .{reg.id});
+                                }
+                                try writer.print("        }} else {{\n", .{});
+                                try writer.print("            var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
+                                try writer.print("            var i: usize = __va_start;\n", .{});
+                                try writer.print("            while (i < args.len) : (i += 1) {{\n", .{});
+                                try writer.print("                try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                                try writer.print("            }}\n", .{});
+                                if (is_alloca) {
+                                    try writer.print("            reg_{d}.* = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                } else {
+                                    try writer.print("            reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                }
                                 try writer.print("        }}\n", .{});
-                                try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
                                 try writer.print("    }}\n", .{});
                             } else {
                                 // 普通参数 - 现在所有寄存器都是 Value 类型
@@ -6593,27 +7390,59 @@ pub const NativeLinker = struct {
             },
             .select => |op| {
                 if (inst.result) |reg| {
-                    // 总是使用完整if语句，避免类型不匹配
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
-                    if (type_tag != .php_value) {
-                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                    // 检查结果是否是指针类型（引用参数合并）
+                    const is_result_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(reg.id) else false;
+
+                    if (is_result_ptr) {
+                        // 指针类型select：需要检查源值是否也是指针
+                        const then_is_ptr = self.isPointerReg(op.then_value.id);
+                        const else_is_ptr = self.isPointerReg(op.else_value.id);
+                        
+                        try writer.writeAll("    if (");
+                        try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
+                        try writer.writeAll(") {\n");
+                        
+                        if (then_is_ptr) {
+                            // then_value 是指针，直接赋值
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.then_value.id });
+                        } else {
+                            // then_value 不是指针，需要取地址
+                            try writer.print("        reg_{d} = &reg_{d};\n", .{ reg.id, op.then_value.id });
+                        }
+                        
+                        try writer.writeAll("    } else {\n");
+                        
+                        if (else_is_ptr) {
+                            // else_value 是指针，直接赋值
+                            try writer.print("        reg_{d} = reg_{d};\n", .{ reg.id, op.else_value.id });
+                        } else {
+                            // else_value 不是指针，需要取地址
+                            try writer.print("        reg_{d} = &reg_{d};\n", .{ reg.id, op.else_value.id });
+                        }
+                        
+                        try writer.writeAll("    }\n");
+                    } else {
+                        // 普通select：值类型
+                        const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
+                        if (type_tag != .php_value) {
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        }
+                        try writer.writeAll("    if (");
+                        try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
+                        try writer.writeAll(") {\n");
+
+                        var then_buf: [32]u8 = undefined;
+                        const then_ref = try self.getOperandRef(&then_buf, op.then_value.id);
+                        try writer.print("        reg_{d} = {s};\n", .{ reg.id, then_ref });
+                        try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
+                        try writer.writeAll("    } else {\n");
+
+                        var else_buf: [32]u8 = undefined;
+                        const else_ref = try self.getOperandRef(&else_buf, op.else_value.id);
+                        try writer.print("        reg_{d} = {s};\n", .{ reg.id, else_ref });
+                        try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
+                        try writer.writeAll("    }\n");
                     }
-                    try writer.writeAll("    if (");
-                    // 使用 writeConditionExpr 处理条件
-                    try self.writeConditionExpr(writer, op.cond.id, op.cond.type_);
-                    try writer.writeAll(") {\n");
-
-                    var then_buf: [32]u8 = undefined;
-                    const then_ref = try self.getOperandRef(&then_buf, op.then_value.id);
-                    try writer.print("        reg_{d} = {s};\n", .{ reg.id, then_ref });
-                    try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
-                    try writer.writeAll("    } else {\n");
-
-                    var else_buf: [32]u8 = undefined;
-                    const else_ref = try self.getOperandRef(&else_buf, op.else_value.id);
-                    try writer.print("        reg_{d} = {s};\n", .{ reg.id, else_ref });
-                    try writer.print("        _ = reg_{d}.retain();\n", .{reg.id});
-                    try writer.writeAll("    }\n");
                 }
             },
             .const_null => {
@@ -6761,60 +7590,28 @@ pub const NativeLinker = struct {
             },
             .identical => |op| {
                 if (inst.result) |reg| {
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    const deref = if (self.isPointerReg(reg.id)) ".*" else "";
 
-                    // 检查实际声明类型，不是推断类型
-                    if (type_tag == .php_value) {
-                        // 结果是 Value，不要 .toBool()
-                        try writer.print("    reg_{d} = try runtime.php_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = (try runtime.php_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(")).toBool();\n");
-                    } else {
-                        try writer.print("    reg_{d} = try runtime.php_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    }
+                    try writer.print("    reg_{d}{s} = try runtime.php_identical(", .{ reg.id, deref });
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(");\n");
                 }
             },
             .not_identical => |op| {
                 if (inst.result) |reg| {
-                    const type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                    const deref = if (self.isPointerReg(reg.id)) ".*" else "";
 
-                    // 检查实际声明类型，不是推断类型
-                    if (type_tag == .php_value) {
-                        // 结果是 Value，不要 .toBool()
-                        try writer.print("    reg_{d} = try runtime.php_not_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    } else if (type_tag == .bool) {
-                        try writer.print("    reg_{d} = (try runtime.php_not_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(")).toBool();\n");
-                    } else {
-                        try writer.print("    reg_{d} = try runtime.php_not_identical(", .{reg.id});
-                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                        try writer.writeAll(", ");
-                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                        try writer.writeAll(");\n");
-                    }
+                    try writer.print("    reg_{d}{s} = try runtime.php_not_identical(", .{ reg.id, deref });
+                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                    try writer.writeAll(");\n");
                 }
             },
             .lt => |op| {
@@ -7190,6 +7987,13 @@ pub const NativeLinker = struct {
                 }
             },
             .call => |op| {
+                // @ 错误抑制运算符：直接调用运行时函数
+                if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
+                    try writer.writeAll("    runtime.php_error_suppress_push();\n");
+                } else if (std.mem.eql(u8, op.func_name, "php_error_suppress_pop")) {
+                    try writer.writeAll("    runtime.php_error_suppress_pop();\n");
+                } else {
+
                 // 生成函数调用
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
@@ -7203,6 +8007,13 @@ pub const NativeLinker = struct {
                             const escaped_declared_name = try self.escapeString(declared_name);
                             defer self.allocator.free(escaped_declared_name);
                             try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
+                            // 注册函数元数据
+                            const pc = func.params.items.len;
+                            var rc: usize = 0;
+                            for (func.params.items) |p| {
+                                if (!p.has_default and !p.is_variadic) rc += 1;
+                            }
+                            try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ escaped_declared_name, pc, rc });
                         }
                     }
                     if (inst.result) |reg| {
@@ -7219,56 +8030,179 @@ pub const NativeLinker = struct {
                     if (is_builtin) {
                         const runtime_name = self.mapToRuntimeFunction(op.func_name);
 
-                        // 特殊处理 preg_match_with_matches：第3个参数是引用
-                        if (std.mem.eql(u8, runtime_name, "preg_match_with_matches")) {
-                            if (op.args.len >= 3) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                        // 特殊处理 throwThrowable：需要将Value参数转换为[]const u8
+                        if (std.mem.eql(u8, runtime_name, "throwThrowable")) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len >= 2) {
+                                // 第1个参数：class_name (Value -> []const u8)
+                                const class_arg = op.args[0];
+                                try writer.print("reg_{d}.asString().data, ", .{class_arg.id});
+                                
+                                // 第2个参数：message (Value -> []const u8)
+                                const msg_arg = op.args[1];
+                                try writer.print("reg_{d}.asString().data", .{msg_arg.id});
+                            } else {
+                                try writer.writeAll("\"UnhandledMatchError\", \"Unhandled match case\"");
+                            }
+                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                        } else if (std.mem.eql(u8, runtime_name, "preg_match") or std.mem.eql(u8, runtime_name, "php_preg_match")) {
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len >= 2) {
                                 // 前2个参数正常传递
                                 try self.writeValueArgs(writer, op.args[0..2]);
                                 try writer.writeAll(", ");
-                                // 第3个参数：如果是make_ref的结果，找到原始alloca并直接传递（不加&）
-                                const matches_arg = op.args[2];
-                                const matches_reg_id = matches_arg.id;
-
-                                if (self.findMakeRefSource(matches_reg_id)) |alloca_id| {
-                                    // alloca本身就是指针，直接传递
-                                    try writer.print("reg_{d}", .{alloca_id});
+                                
+                                // 第3个参数matches（引用）
+                                if (op.args.len >= 3) {
+                                    const matches_arg = op.args[2];
+                                    const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
+                                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                        alloca_regs.contains(matches_arg.id)
+                                    else
+                                        false;
+                                    
+                                    if (matches_type == .ptr or is_alloca) {
+                                        // 指针类型，直接传递
+                                        try writer.print("reg_{d}", .{matches_arg.id});
+                                    } else {
+                                        // 非指针类型：检查是否是常量（const.null等）
+                                        // 对于常量，使用临时变量；对于寄存器，取地址
+                                        const inst_for_arg = blk: {
+                                            if (self.current_function_for_resolve) |func| {
+                                                for (func.blocks.items) |block| {
+                                                    for (block.instructions.items) |inst_item| {
+                                                        if (inst_item.result) |res| {
+                                                            if (res.id == matches_arg.id) {
+                                                                break :blk inst_item;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            break :blk null;
+                                        };
+                                        
+                                        // 如果是常量指令（const_null, const_int等），使用临时变量
+                                        const is_const = if (inst_for_arg) |inst_item|
+                                            (inst_item.op == .const_null or inst_item.op == .const_int or inst_item.op == .const_float or inst_item.op == .const_bool or inst_item.op == .const_string)
+                                        else
+                                            false;
+                                        
+                                        if (is_const) {
+                                            try writer.writeAll("blk: { var tmp = reg_");
+                                            try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                        } else {
+                                            try writer.print("&reg_{d}", .{matches_arg.id});
+                                        }
+                                    }
                                 } else {
-                                    // fallback：传递地址
-                                    try writer.print("&reg_{d}", .{matches_reg_id});
+                                    // 使用一个临时变量
+                                    try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");
                                 }
+                                try writer.writeAll(", ");
+                                
+                                // 第4个参数flags（可选，默认0）
+                                if (op.args.len >= 4) {
+                                    try self.writeRegRef(writer, op.args[3].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                try writer.writeAll(", ");
+                                
+                                // 第5个参数offset（可选，默认0）
+                                if (op.args.len >= 5) {
+                                    try self.writeRegRef(writer, op.args[4].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else {
                                 // 参数不足，fallback
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                             }
-                        } else if (std.mem.eql(u8, runtime_name, "preg_match_all")) {
-                            // preg_match_all与preg_match_with_matches相同处理
+                        } else if (std.mem.eql(u8, runtime_name, "preg_match_all") or std.mem.eql(u8, runtime_name, "php_preg_match_all")) {
+                            // preg_match_all与preg_match相同处理
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len >= 2) {
+                                try self.writeValueArgs(writer, op.args[0..2]);
+                                try writer.writeAll(", ");
+                                
+                                if (op.args.len >= 3) {
+                                    const matches_arg = op.args[2];
+                                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                        alloca_regs.contains(matches_arg.id)
+                                    else
+                                        false;
+                                    
+                                    if (is_alloca) {
+                                        // 真正的alloca寄存器
+                                        try writer.print("reg_{d}", .{matches_arg.id});
+                                    } else {
+                                        // 非alloca：使用临时变量（因为可能是未定义的ptr寄存器）
+                                        try writer.writeAll("blk: { var tmp = reg_");
+                                        try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                    }
+                                } else {
+                                    try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");
+                                }
+                                try writer.writeAll(", ");
+                                
+                                if (op.args.len >= 4) {
+                                    try self.writeRegRef(writer, op.args[3].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                try writer.writeAll(", ");
+                                
+                                if (op.args.len >= 5) {
+                                    try self.writeRegRef(writer, op.args[4].id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initInt(0)");
+                                }
+                                
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else {
+                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
+                            }
+                        } else if (std.mem.eql(u8, runtime_name, "preg_match_with_matches")) {
+                            // 旧版本兼容：preg_match_with_matches
                             if (op.args.len >= 3) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
                                 // 前2个参数正常传递
                                 try self.writeValueArgs(writer, op.args[0..2]);
                                 try writer.writeAll(", ");
-                                // 第3个参数：引用
+                                // 第3个参数：引用参数
                                 const matches_arg = op.args[2];
-                                const matches_reg_id = matches_arg.id;
-
-                                if (self.findMakeRefSource(matches_reg_id)) |alloca_id| {
-                                    try writer.print("reg_{d}", .{alloca_id});
+                                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                    alloca_regs.contains(matches_arg.id)
+                                else
+                                    false;
+                                
+                                // 只有真正的alloca寄存器（*Value）才直接传递，其他都取地址
+                                if (is_alloca) {
+                                    try writer.print("reg_{d}", .{matches_arg.id});
                                 } else {
-                                    try writer.print("&reg_{d}", .{matches_reg_id});
+                                    try writer.print("&reg_{d}", .{matches_arg.id});
                                 }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                             } else {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                // 参数不足，fallback
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
                                 try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                                try writer.writeAll(", blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                             }
                         } else if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                             try self.writeValueArgsArray(writer, op.args);
+                            try writer.writeAll(");\n");
+                        } else if (std.mem.eql(u8, runtime_name, "php_in_array")) {
+                            // in_array(needle, haystack, strict = false)
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            try self.writeValueArgs(writer, op.args);
+                            if (op.args.len < 3) {
+                                try writer.writeAll(", runtime.Value.initBool(false)");
+                            }
                             try writer.writeAll(");\n");
                         } else if (std.mem.eql(u8, runtime_name, "php_array_slice")) {
                             // array_slice 的 length 参数是可选的，缺失时补 null
@@ -7278,6 +8212,18 @@ pub const NativeLinker = struct {
                                 try writer.writeAll(", runtime.Value.initNull()");
                             }
                             try writer.writeAll(", runtime.runtime_allocator);\n");
+                        } else if (std.mem.eql(u8, runtime_name, "php_mt_rand") or std.mem.eql(u8, runtime_name, "php_rand")) {
+                            // mt_rand(min = null, max = null) - 不需要allocator
+                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                            if (op.args.len == 0) {
+                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
+                            } else if (op.args.len == 1) {
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(", runtime.Value.initNull()");
+                            } else {
+                                try self.writeValueArgs(writer, op.args);
+                            }
+                            try writer.writeAll(");\n");
                         } else if (self.functionNeedsAllocator(op.func_name)) {
                             if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
                                 if (op.args.len == 0) {
@@ -7298,7 +8244,7 @@ pub const NativeLinker = struct {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeStrGetcsvArgs(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact")) {
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset")) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -7314,6 +8260,15 @@ pub const NativeLinker = struct {
                                     try self.writeValueArgsArray(writer, op.args[1..]);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_getdate")) {
+                                // getdate(timestamp = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_microtime")) {
                                 // microtime(get_as_float = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -7381,6 +8336,46 @@ pub const NativeLinker = struct {
                                     }
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_json_encode")) {
+                                // json_encode(value, flags = 0, depth = 512)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(512)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initInt(512)");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initInt(512)");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_column")) {
+                                // array_column(arr, column_key, index_key = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len >= 2) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_extract")) {
+                                // extract(arr, flags = EXTR_OVERWRITE, prefix = "")
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_array_iter_init") or
                                 std.mem.eql(u8, runtime_name, "php_array_iter_key") or
                                 std.mem.eql(u8, runtime_name, "php_array_iter_free"))
@@ -7400,6 +8395,27 @@ pub const NativeLinker = struct {
                                 } else {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.Value.initNull(), runtime.runtime_allocator);\n", .{runtime_name});
                                 }
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_filter")) {
+                                // array_filter(arr, callback = null, mode = 0)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "preg_split")) {
+                                // preg_split(pattern, subject, allocator) - 只接受3个参数
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len >= 2) {
+                                    try self.writeValueArgs(writer, op.args[0..2]);
+                                } else {
+                                    try self.writeValueArgs(writer, op.args);
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (op.args.len > 0) {
                                 // 特殊处理：file_put_contents只接受2个参数+allocator
                                 if (std.mem.eql(u8, runtime_name, "php_file_put_contents")) {
@@ -7440,6 +8456,28 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0)");
                                 }
                                 try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_isset")) {
+                                // isset(...$vars) - 可变参数，传递数组切片
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
+                                    }
+                                }
+                                try writer.writeAll("});\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_unset")) {
+                                // unset(...$vars) - 可变参数，传递数组切片
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
+                                    }
+                                }
+                                try writer.writeAll("}, runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_str_word_count")) {
                                 // str_word_count(str, format = 0, charlist = null)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -7454,8 +8492,167 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initNull()");
                                 }
                                 try writer.writeAll(");\n");
-                            } else {
+                            } else if (std.mem.eql(u8, runtime_name, "php_mkdir")) {
+                                // mkdir(dirname, permissions = 0777, recursive = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(0o777), runtime.Value.initBool(false)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0o777), runtime.Value.initBool(false)");
+                                }
+                                try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "aot_function_exists")) {
+                                // 直接调用，不带runtime.前缀
+                                try self.writeRegAssignmentFmt(writer, reg.id, "aot_function_exists(", .{});
+                                if (op.args.len > 0) {
+                                    const arg = op.args[0];
+                                    try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                    try writer.writeAll(".asString().data");
+                                }
+                                try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_set_error_handler")) {
+                                // set_error_handler(handler, error_types = E_ALL)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(32767)"); // E_ALL
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_call_user_func")) {
+                                // call_user_func(callback, ...args) — 需要传切片
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                for (op.args, 0..) |arg, i| {
+                                    if (i > 0) try writer.writeAll(", ");
+                                    try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                }
+                                try writer.writeAll("}, runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_call_user_func_array")) {
+                                // call_user_func_array(callback, args_array)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_mb_strlen")) {
+                                // mb_strlen(str, encoding = "UTF-8")
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                }
+                                try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_substr_count")) {
+                                // substr_count(haystack, needle, offset = 0, length = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initNull()");
+                                    } else if (op.args.len == 3) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                }
+                                try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_ob_start")) {
+                                // ob_start(callback = null, chunk_size = 0, flags = ...)
+                                // 只传第一个参数（callback），忽略 chunk_size 和 flags
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    const arg = op.args[0];
+                                    try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_var_dump")) {
+                                // var_dump(...$values) — 可变参数，逐个调用
+                                if (op.args.len <= 1) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len == 1) {
+                                        try self.writeValueArgs(writer, op.args);
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull()");
+                                    }
+                                    try writer.writeAll(");\n");
+                                } else {
+                                    for (op.args) |arg| {
+                                        try writer.print("    _ = try runtime.php_var_dump(", .{});
+                                        try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                        try writer.writeAll(");\n");
+                                    }
+                                    try self.writeRegAssignment(writer, reg.id, "runtime.Value.initNull()");
+                                }
+                            } else if (std.mem.eql(u8, runtime_name, "php_header")) {
+                                // header(string, replace = true, response_code = 0)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initBool(true), runtime.Value.initInt(0)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initInt(0)");
+                                    }
+                                }
+                                try writer.writeAll(");\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_pathinfo")) {
+                                // pathinfo(path, option = -1)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(-1)");
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_trigger_error")) {
+                                // trigger_error(message, error_type = E_USER_NOTICE)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(1024)"); // E_USER_NOTICE
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_mb_strtoupper") or std.mem.eql(u8, runtime_name, "php_mb_strtolower")) {
+                                // mb_strtoupper/mb_strtolower(str, encoding = "UTF-8")
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_mb_substr")) {
+                                // mb_substr(str, start, length = null, encoding = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
+                                    } else if (op.args.len == 3) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else {
+                                // 通用builtin函数调用
+                                const builtin_info = builtinInfo(op.func_name);
+                                const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                
+                                if (may_raise) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                } else {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                }
                                 try self.writeValueArgs(writer, op.args);
                                 try writer.writeAll(");\n");
                             }
@@ -7527,6 +8724,13 @@ pub const NativeLinker = struct {
                                 const escaped_declared_name = try self.escapeString(declared_name);
                                 defer self.allocator.free(escaped_declared_name);
                                 try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
+                                // 注册函数元数据
+                                const pc = func.params.items.len;
+                                var rc: usize = 0;
+                                for (func.params.items) |p| {
+                                    if (!p.has_default and !p.is_variadic) rc += 1;
+                                }
+                                try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ escaped_declared_name, pc, rc });
                             }
                         }
                     } else if (is_builtin) {
@@ -7554,7 +8758,7 @@ pub const NativeLinker = struct {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                 try self.writeStrGetcsvArgs(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_multisort")) {
+                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset")) {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -7578,11 +8782,27 @@ pub const NativeLinker = struct {
                                 try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
                             }
                         } else {
-                            // 特殊处理php_ref_assign_ptr：第一个参数不解引用
+                            // 特殊处理php_ref_assign_ptr：第一个参数需要指针
                             if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                // 第一个参数：直接使用指针（不解引用）
-                                try writer.print("reg_{d}", .{op.args[0].id});
+                                // 第一个参数：检查是否已经是指针类型寄存器
+                                const first_arg = op.args[0];
+                                const is_ptr_reg = if (self.current_ref_ptr_regs) |rpr|
+                                    rpr.contains(first_arg.id)
+                                else
+                                    false;
+                                const is_alloca_reg = if (self.current_alloca_regs) |ar|
+                                    ar.contains(first_arg.id)
+                                else
+                                    false;
+                                
+                                if (is_ptr_reg or is_alloca_reg) {
+                                    // 已经是指针类型寄存器，直接使用
+                                    try writer.print("reg_{d}", .{first_arg.id});
+                                } else {
+                                    // 普通值类型寄存器，需要取地址
+                                    try writer.print("&reg_{d}", .{first_arg.id});
+                                }
                                 // 其余参数：正常处理
                                 for (op.args[1..]) |arg| {
                                     try writer.writeAll(", ");
@@ -7590,7 +8810,15 @@ pub const NativeLinker = struct {
                                 }
                                 try writer.writeAll(");\n");
                             } else {
-                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                // 通用builtin函数调用（无返回值）
+                                const builtin_info = builtinInfo(op.func_name);
+                                const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                
+                                if (may_raise) {
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                } else {
+                                    try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                }
                                 try self.writeValueArgs(writer, op.args);
                                 try writer.writeAll(");\n");
                             }
@@ -7615,6 +8843,7 @@ pub const NativeLinker = struct {
                         try writer.writeAll("    }\n");
                     }
                 }
+                } // end else (not error_suppress)
             },
             .call_indirect => |op| {
                 // 检查func_ptr是否是alloca寄存器，需要解引用
@@ -7695,8 +8924,54 @@ pub const NativeLinker = struct {
                     if (self.shouldReleaseReg(reg.id)) {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
-
-                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_array_get(reg_{d}, reg_{d}, runtime.runtime_allocator);\n", .{ op.array.id, op.key.id });
+                    // coalesce 上下文: 基值为 null 时直接返回 null，不触发警告
+                    const is_coalesce_ag = if (self.current_coalesce_nowarn_regs) |cr| cr.contains(reg.id) else false;
+                    
+                    // 检查操作数是否是alloca
+                    const array_is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(op.array.id) else false;
+                    const key_is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(op.key.id) else false;
+                    
+                    if (is_coalesce_ag) {
+                        if (array_is_alloca) {
+                            try writer.print("    if (reg_{d}.*.isNull()) {{\n", .{op.array.id});
+                        } else {
+                            try writer.print("    if (reg_{d}.isNull()) {{\n", .{op.array.id});
+                        }
+                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initNull();\n", .{});
+                        try writer.print("    }} else {{\n", .{});
+                        try writer.writeAll("    ");
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
+                        try writer.writeAll("try runtime.php_array_get(");
+                        if (array_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.array.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.array.id});
+                        }
+                        try writer.writeAll(", ");
+                        if (key_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.key.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.key.id});
+                        }
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                        try writer.print("    }}\n", .{});
+                    } else {
+                        try writer.writeAll("    ");
+                        try self.writeRegAssignmentPrefix(writer, reg.id);
+                        try writer.writeAll("try runtime.php_array_get(");
+                        if (array_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.array.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.array.id});
+                        }
+                        try writer.writeAll(", ");
+                        if (key_is_alloca) {
+                            try writer.print("reg_{d}.*", .{op.key.id});
+                        } else {
+                            try writer.print("reg_{d}", .{op.key.id});
+                        }
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
                 }
             },
             .array_set => |op| {
@@ -7710,6 +8985,16 @@ pub const NativeLinker = struct {
                 try writer.writeAll(", ");
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll("});\n");
+                try writer.writeAll("    } else if (");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(".isString()) {\n");
+                try writer.writeAll("        try runtime.php_string_offset_set(&");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.value.id);
+                try writer.writeAll(", runtime.runtime_allocator);\n");
                 try writer.writeAll("    } else {\n");
                 try writer.writeAll("        try ");
                 try self.writeRegRef(writer, op.array.id);
@@ -7800,13 +9085,34 @@ pub const NativeLinker = struct {
                 }
             },
             .array_push => |op| {
-                // 检查value是否是alloca指针
-                const val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
-                if (val_is_alloca) {
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                // 检查array和value是否是alloca指针
+                const push_arr_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.array.id) else false;
+                const push_val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
+                const arr_deref = if (push_arr_is_alloca) ".*" else "";
+                // 检查是否是对象（ArrayAccess），调用offsetSet(null, value)
+                try writer.print("    if (runtime.Value_isObject(reg_{d}{s})) {{\n", .{ op.array.id, arr_deref });
+                try writer.print("        _ = try runtime.php_object_call(reg_{d}{s}, \"offsetSet\", &[_]runtime.Value{{runtime.Value.initNull(), ", .{ op.array.id, arr_deref });
+                if (push_val_is_alloca) {
+                    try writer.print("reg_{d}.*", .{op.value.id});
                 } else {
-                    try writer.print("    try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    try self.writeRegRef(writer, op.value.id);
                 }
+                try writer.writeAll("});\n");
+                try writer.writeAll("    } else {\n");
+                if (push_arr_is_alloca) {
+                    if (push_val_is_alloca) {
+                        try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                    } else {
+                        try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    }
+                } else {
+                    if (push_val_is_alloca) {
+                        try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                    } else {
+                        try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                    }
+                }
+                try writer.writeAll("    }\n");
             },
             .array_count => |op| {
                 if (inst.result) |reg| {
@@ -7823,11 +9129,22 @@ pub const NativeLinker = struct {
                 }
             },
             .array_unset => |op| {
-                // 简化：所有寄存器都是 Value 类型，使用 unsetByValue
+                // 检查是否是对象（ArrayAccess），调用offsetUnset
                 try writer.print(
-                    "    _ = reg_{d}.asArray().unsetByValue(runtime.runtime_allocator, reg_{d});\n",
+                    "    if (runtime.Value_isObject(reg_{d})) {{\n",
+                    .{op.array.id},
+                );
+                try writer.writeAll("        _ = try runtime.php_object_call(");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", \"offsetUnset\", &[_]runtime.Value{");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll("});\n");
+                try writer.writeAll("    } else {\n");
+                try writer.print(
+                    "        _ = reg_{d}.asArray().unsetByValue(runtime.runtime_allocator, reg_{d});\n",
                     .{ op.array.id, op.key.id },
                 );
+                try writer.writeAll("    }\n");
             },
             .interpolate => |op| {
                 // 字符串插值：将多个部分连接成一个字符串
@@ -7905,16 +9222,29 @@ pub const NativeLinker = struct {
                     const escaped_class = try self.escapeString(op.class_name);
                     defer self.allocator.free(escaped_class);
 
+                    const new_in_try = self.current_exception_handler != null;
                     if (is_alloca) {
                         try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
-                        try writer.print("    reg_{d}.* = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        if (new_in_try) {
+                            try writer.print("    reg_{d}.* = runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        } else {
+                            try writer.print("    reg_{d}.* = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        }
                     } else {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                        try writer.print("    reg_{d} = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        if (new_in_try) {
+                            try writer.print("    reg_{d} = runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_object_new_with_constructor(\"{s}\", ", .{ reg.id, escaped_class });
+                        }
                     }
 
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (new_in_try) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
 
                     // 检查异常
                     try writer.writeAll("    if (runtime.hasException()) {\n");
@@ -7933,8 +9263,24 @@ pub const NativeLinker = struct {
                 if (inst.result) |reg| {
                     const escaped_prop = try self.escapeString(op.property_name);
                     defer self.allocator.free(escaped_prop);
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                    const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
+                    const object_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.object.id) else false;
+                    
+                    if (result_is_alloca) {
+                        try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
+                        if (object_is_alloca) {
+                            try writer.print("    reg_{d}.* = try runtime.php_object_get(reg_{d}.*, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        } else {
+                            try writer.print("    reg_{d}.* = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        }
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        if (object_is_alloca) {
+                            try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}.*, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        }
+                    }
                 }
             },
             .property_set => |op| {
@@ -7984,9 +9330,15 @@ pub const NativeLinker = struct {
                         const has_return = self.func_return_types.get(direct_name) orelse false;
 
                         if (inst.result) |reg| {
-                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                            const is_alloca_reg = if (self.current_alloca_regs) |alloca_regs|
+                                alloca_regs.contains(reg.id)
+                            else
+                                false;
+                            const deref = if (is_alloca_reg) ".*." else ".";
+                            const star = if (is_alloca_reg) ".*" else "";
+                            try writer.print("    reg_{d}{s}release(runtime.runtime_allocator);\n", .{reg.id, deref});
                             if (has_return) {
-                                try writer.print("    reg_{d} = try @\"{s}\"(", .{ reg.id, escaped_direct });
+                                try writer.print("    reg_{d}{s} = try @\"{s}\"(", .{ reg.id, star, escaped_direct });
                                 try self.writeRegRef(writer, op.object.id);
                                 try writer.writeAll(", ");
                                 try self.writeValueArgsArray(writer, op.args);
@@ -7997,7 +9349,7 @@ pub const NativeLinker = struct {
                                 try writer.writeAll(", ");
                                 try self.writeValueArgsArray(writer, op.args);
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                                try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                try writer.print("    reg_{d}{s} = runtime.Value.initNull();\n", .{reg.id, star});
                             }
                         } else {
                             try writer.print("    _ = try @\"{s}\"(", .{escaped_direct});
@@ -8026,19 +9378,42 @@ pub const NativeLinker = struct {
                 const escaped_method = try self.escapeString(op.method_name);
                 defer self.allocator.free(escaped_method);
 
+                const method_in_try = self.current_exception_handler != null;
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("    reg_{d} = try runtime.php_object_call(", .{reg.id});
+                    const is_alloca_reg = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(reg.id)
+                    else
+                        false;
+                    const deref = if (is_alloca_reg) ".*." else ".";
+                    const star = if (is_alloca_reg) ".*" else "";
+                    try writer.print("    reg_{d}{s}release(runtime.runtime_allocator);\n", .{reg.id, deref});
+                    if (method_in_try) {
+                        try writer.print("    reg_{d}{s} = runtime.php_object_call(", .{reg.id, star});
+                    } else {
+                        try writer.print("    reg_{d}{s} = try runtime.php_object_call(", .{reg.id, star});
+                    }
                     try self.writeRegRef(writer, op.object.id);
                     try writer.print(", \"{s}\", ", .{escaped_method});
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(");\n");
+                    if (method_in_try) {
+                        try writer.writeAll(") catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(");\n");
+                    }
                 } else {
-                    try writer.writeAll("    _ = try runtime.php_object_call(");
+                    if (method_in_try) {
+                        try writer.writeAll("    _ = runtime.php_object_call(");
+                    } else {
+                        try writer.writeAll("    _ = try runtime.php_object_call(");
+                    }
                     try self.writeRegRef(writer, op.object.id);
                     try writer.print(", \"{s}\", ", .{escaped_method});
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(");\n");
+                    if (method_in_try) {
+                        try writer.writeAll(") catch {};\n");
+                    } else {
+                        try writer.writeAll(");\n");
+                    }
                 }
 
                 try writer.writeAll("    if (runtime.hasException()) {\n");
@@ -8107,23 +9482,48 @@ pub const NativeLinker = struct {
                 // 检测是否是 parent:: 调用，需要传递 ctx
                 const is_parent_call = std.mem.eql(u8, op.class_name, "parent");
 
+                const in_try = self.current_exception_handler != null;
                 if (inst.result) |reg| {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     if (is_parent_call) {
-                        try writer.print("    reg_{d} = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    reg_{d} = runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        }
                     } else {
-                        try writer.print("    reg_{d} = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    reg_{d} = runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ reg.id, escaped_class, escaped_method });
+                        }
                     }
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (in_try) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
                 } else {
                     if (is_parent_call) {
-                        try writer.print("    _ = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    _ = runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    _ = try runtime.php_call_static_with_ctx(ctx, \"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        }
                     } else {
-                        try writer.print("    _ = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        if (in_try) {
+                            try writer.print("    _ = runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        } else {
+                            try writer.print("    _ = try runtime.php_call_static(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_method });
+                        }
                     }
                     try self.writeValueArgsArray(writer, op.args);
-                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    if (in_try) {
+                        try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
+                    } else {
+                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                    }
                 }
 
                 try writer.writeAll("    if (runtime.hasException()) {\n");
@@ -8144,15 +9544,24 @@ pub const NativeLinker = struct {
                     const escaped_prop = try self.escapeString(op.property_name);
                     defer self.allocator.free(escaped_prop);
 
-                    // 设置ClassContext以支持self/static/parent
-                    try writer.print("    {{\n", .{});
-                    try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
-                    try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
-                    try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                    const is_special = std.mem.eql(u8, op.class_name, "static") or
+                        std.mem.eql(u8, op.class_name, "self") or
+                        std.mem.eql(u8, op.class_name, "parent");
 
-                    try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                    try writer.print("        reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
-                    try writer.writeAll("    }\n");
+                    if (!is_special) {
+                        // 具体类名：设置 ClassContext
+                        try writer.print("    {{\n", .{});
+                        try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
+                        try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                        try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                        try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        try writer.print("        reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
+                        try writer.writeAll("    }\n");
+                    } else {
+                        // static/self/parent：不覆盖 ClassContext，运行时 resolveSpecialClassName 使用已有上下文
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        try writer.print("    reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
+                    }
                 }
             },
             .static_property_set => |op| {
@@ -8163,16 +9572,26 @@ pub const NativeLinker = struct {
                 const escaped_prop = try self.escapeString(op.property_name);
                 defer self.allocator.free(escaped_prop);
 
-                // 设置ClassContext以支持self/static/parent
-                try writer.print("    {{\n", .{});
-                try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
-                try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
-                try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                const is_special = std.mem.eql(u8, op.class_name, "static") or
+                    std.mem.eql(u8, op.class_name, "self") or
+                    std.mem.eql(u8, op.class_name, "parent");
 
-                try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
-                try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
-                try writer.writeAll(");\n");
-                try writer.writeAll("    }\n");
+                if (!is_special) {
+                    // 具体类名：设置 ClassContext
+                    try writer.print("    {{\n", .{});
+                    try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
+                    try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                    try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
+                    try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
+                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
+                    try writer.writeAll(");\n");
+                    try writer.writeAll("    }\n");
+                } else {
+                    // static/self/parent：不覆盖 ClassContext
+                    try writer.print("    _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
+                    try self.writePhpValueExpr(writer, value_type_tag, op.value.id);
+                    try writer.writeAll(");\n");
+                }
             },
             // ============ 异常处理指令 ============
             .try_begin => {
@@ -8231,12 +9650,13 @@ pub const NativeLinker = struct {
                     const is_byref = if (self.current_byref_regs) |br| br.contains(reg.id) else false;
                     const is_switch_val = if (self.current_switch_value_regs) |sv| sv.contains(reg.id) else false;
                     const is_concat_operand = if (self.current_concat_operand_regs) |cr| cr.contains(reg.id) else false;
+                    const is_coalesce = if (self.current_coalesce_nowarn_regs) |cr| cr.contains(reg.id) else false;
                     if (is_switch_val) {
                         // switch 值：不在此处发 Warning，改为在每个 case 比较处发
                         try writer.print("    const __sw_undef_{d} = !globalVarIsDefined(\"{s}\");\n", .{ reg.id, escaped_name });
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
-                    } else if (is_byref or is_concat_operand) {
+                    } else if (is_byref or is_concat_operand or is_coalesce) {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
                     } else {
@@ -8255,9 +9675,9 @@ pub const NativeLinker = struct {
                         try writer.print("    try setGlobalVar(\"{s}\", reg_{d}.*);\n", .{ escaped_name, val.id });
                     } else {
                         try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ escaped_name, val.id });
-                        // setGlobalVar 会 retain 值，release 源寄存器以转移所有权
-                        // 防止 __main__ 中表达式寄存器的 refcount 泄漏
-                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{val.id});
+                        // setGlobalVar 会 retain 值，全局变量表持有一个引用
+                        // 寄存器继续持有原引用，由后续的正常清理逻辑处理
+                        // 不在这里释放寄存器，避免影响后续使用该寄存器的指令
                     }
                 }
             },
@@ -8290,6 +9710,14 @@ pub const NativeLinker = struct {
                 } else {
                     try writer.print("reg_{d});\n", .{op.value.id});
                 }
+            },
+            .global_ref_bind => |op| {
+                // 全局变量引用绑定: $target = &$source
+                const escaped_target = try self.escapeString(op.target);
+                defer self.allocator.free(escaped_target);
+                const escaped_source = try self.escapeString(op.source);
+                defer self.allocator.free(escaped_source);
+                try writer.print("    try bindGlobalRef(\"{s}\", \"{s}\");\n", .{ escaped_target, escaped_source });
             },
             .global_unset => |op| {
                 // 从全局变量表中删除
@@ -8559,7 +9987,10 @@ pub const NativeLinker = struct {
             .release => |op| {
                 // release: 减少引用计数，可能触发析构
                 const suffix = self.getRegSuffix(op.operand.id);
-                try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.operand.id, suffix });
+                try writer.print("    if (reg_{d}{s}.isArray() or runtime.Value_isObject(reg_{d}{s}) or reg_{d}{s}.isFunction()) {{\n", .{ op.operand.id, suffix, op.operand.id, suffix, op.operand.id, suffix });
+                try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.operand.id, suffix });
+                try writer.print("        reg_{d}{s} = runtime.Value.initNull();\n", .{ op.operand.id, suffix });
+                try writer.writeAll("    }\n");
             },
             .unset_var => |op| {
                 // unset_var: 专门处理unset操作
@@ -12908,7 +14339,8 @@ pub const NativeLinker = struct {
                 }
             },
             .throw => |exception_reg| {
-                try writer.print("                return error.PHPException; // Exception: reg_{d}\n", .{exception_reg.id});
+                // 返回 null 而非 error，让调用方的 hasException() 检查路由到 catch 块
+                try writer.print("                return runtime.Value.initNull(); // Exception: reg_{d}\n", .{exception_reg.id});
             },
             .unreachable_ => {
                 try writer.writeAll("                unreachable;\n");
@@ -13675,7 +15107,16 @@ pub const NativeLinker = struct {
             },
             .not => |op| {
                 var operand_buf: [32]u8 = undefined;
-                const operand = try std.fmt.bufPrint(&operand_buf, "reg_{d}", .{op.operand.id});
+                const operand_type = op.operand.type_;
+                const operand_tag = @as(std.meta.Tag(IR.Type), operand_type);
+                const operand = if (operand_tag == .i64)
+                    try std.fmt.bufPrint(&operand_buf, "runtime.Value.initInt(reg_{d}.asInt())", .{op.operand.id})
+                else if (operand_tag == .f64)
+                    try std.fmt.bufPrint(&operand_buf, "runtime.Value.initFloat(reg_{d}.asFloat())", .{op.operand.id})
+                else if (operand_tag == .bool)
+                    try std.fmt.bufPrint(&operand_buf, "runtime.Value.initBool(reg_{d}.toBool())", .{op.operand.id})
+                else
+                    try std.fmt.bufPrint(&operand_buf, "reg_{d}", .{op.operand.id});
                 try writer.print("        {s} = try runtime.php_not({s});\n", .{ result_reg.?, operand });
             },
 
@@ -13745,6 +15186,13 @@ pub const NativeLinker = struct {
             //   使用 try 传播错误到调用者
             // ========================================================================
             .call => |op| {
+                // @ 错误抑制运算符：直接调用运行时函数
+                if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
+                    try writer.writeAll("    runtime.php_error_suppress_push();\n");
+                } else if (std.mem.eql(u8, op.func_name, "php_error_suppress_pop")) {
+                    try writer.writeAll("    runtime.php_error_suppress_pop();\n");
+                } else {
+
                 // 检查是否是内置函数
                 const is_builtin = self.isBuiltinFunction(op.func_name);
                 const is_runtime_declare = std.mem.startsWith(u8, op.func_name, "__declare_function__::");
@@ -13756,6 +15204,13 @@ pub const NativeLinker = struct {
                     if (self.ir_module) |module| {
                         if (module.findFunction(declared_name)) |func| {
                             try writer.print("        try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                            // 注册函数元数据
+                            const pc = func.params.items.len;
+                            var rc: usize = 0;
+                            for (func.params.items) |p| {
+                                if (!p.has_default and !p.is_variadic) rc += 1;
+                            }
+                            try writer.print("        runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ declared_name, pc, rc });
                         }
                     }
                     if (result_reg) |r| {
@@ -13777,6 +15232,25 @@ pub const NativeLinker = struct {
                             }
                             try self.writeStrGetcsvArgs(writer, op.args);
                             try writer.writeAll(", runtime.runtime_allocator");
+                            if (in_try_block) {
+                                try writer.writeAll(") catch runtime.Value.initNull();\n");
+                            } else {
+                                try writer.writeAll(");\n");
+                            }
+                        } else if (std.mem.eql(u8, runtime_name, "php_in_array")) {
+                            // in_array(needle, haystack, strict = false)
+                            if (in_try_block) {
+                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                            } else {
+                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                            }
+                            for (op.args, 0..) |arg, i| {
+                                if (i > 0) try writer.writeAll(", ");
+                                try self.writeRegRef(writer, arg.id);
+                            }
+                            if (op.args.len < 3) {
+                                try writer.writeAll(", runtime.Value.initBool(false)");
+                            }
                             if (in_try_block) {
                                 try writer.writeAll(") catch runtime.Value.initNull();\n");
                             } else {
@@ -13848,6 +15322,13 @@ pub const NativeLinker = struct {
                         if (self.ir_module) |module| {
                             if (module.findFunction(declared_name)) |func| {
                                 try writer.print("        try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ declared_name, declared_name, func.location.file, func.location.line });
+                                // 注册函数元数据
+                                const pc = func.params.items.len;
+                                var rc: usize = 0;
+                                for (func.params.items) |p| {
+                                    if (!p.has_default and !p.is_variadic) rc += 1;
+                                }
+                                try writer.print("        runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ declared_name, pc, rc });
                             }
                         }
                     } else if (is_builtin) {
@@ -13896,6 +15377,7 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                } // end else (not error_suppress)
             },
 
             // ========================================================================
@@ -13914,13 +15396,25 @@ pub const NativeLinker = struct {
                 try writer.print("        {s} = try runtime.php_array_get({s}, {s}, runtime.runtime_allocator);\n", .{ result_reg.?, array, key });
             },
             .array_set => |op| {
-                try writer.writeAll("        try ");
+                try writer.writeAll("        if (");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(".isString()) {\n");
+                try writer.writeAll("            try runtime.php_string_offset_set(&");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(", ");
+                try self.writeRegRef(writer, op.value.id);
+                try writer.writeAll(", runtime.runtime_allocator);\n");
+                try writer.writeAll("        } else {\n");
+                try writer.writeAll("            try ");
                 try self.writeRegRef(writer, op.array.id);
                 try writer.writeAll(".asArray().setByValue(runtime.runtime_allocator, ");
                 try self.writeRegRef(writer, op.key.id);
                 try writer.writeAll(", ");
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll(");\n");
+                try writer.writeAll("        }\n");
             },
             .array_set_nested => |op| {
                 // 嵌套数组赋值，支持 auto-vivification
@@ -14145,6 +15639,75 @@ pub const NativeLinker = struct {
 
         // 使用 self 避免编译器警告
         _ = self.config.verbose;
+    }
+
+    /// 生成常量值的代码，将结果赋值给指定变量名
+    fn writeConstantValueCode(self: *Self, writer: anytype, value: IR.TypeDef.ConstantValue, var_name: []const u8) !void {
+        switch (value) {
+            .int => |v| try writer.print("        const {s} = runtime.Value.initInt({d});\n", .{ var_name, v }),
+            .float => |v| try writer.print("        const {s} = runtime.Value.initFloat({d});\n", .{ var_name, v }),
+            .string => |s| {
+                const escaped = try self.escapeString(s);
+                defer self.allocator.free(escaped);
+                try writer.print("        const {s} = runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"));\n", .{ var_name, escaped });
+            },
+            .bool => |b| try writer.print("        const {s} = runtime.Value.initBool({s});\n", .{ var_name, if (b) "true" else "false" }),
+            .null => try writer.print("        const {s} = runtime.Value.initNull();\n", .{var_name}),
+            .array => |elements| {
+                // 生成数组常量：创建数组并填充元素
+                try writer.print("        const {s} = blk_arr: {{\n", .{var_name});
+                try writer.writeAll("            const arr = try runtime.PHPArray.init(runtime.runtime_allocator);\n");
+                for (elements) |elem| {
+                    if (elem.key) |key| {
+                        try writer.writeAll("            try arr.setByValue(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, key);
+                        try writer.writeAll(", ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    } else {
+                        try writer.writeAll("            try arr.push(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    }
+                }
+                try writer.writeAll("            break :blk_arr runtime.Value.initArray(arr);\n");
+                try writer.writeAll("        };\n");
+            },
+        }
+    }
+
+    /// 生成常量值的内联代码（用于数组元素的键和值）
+    fn writeConstantValueInline(self: *Self, writer: anytype, value: IR.TypeDef.ConstantValue) !void {
+        switch (value) {
+            .int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+            .float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+            .string => |s| {
+                const escaped = try self.escapeString(s);
+                defer self.allocator.free(escaped);
+                try writer.print("runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"{s}\"))", .{escaped});
+            },
+            .bool => |b| try writer.print("runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
+            .null => try writer.writeAll("runtime.Value.initNull()"),
+            .array => |elements| {
+                try writer.writeAll("blk_inner: {\n");
+                try writer.writeAll("            const inner_arr = try runtime.PHPArray.init(runtime.runtime_allocator);\n");
+                for (elements) |elem| {
+                    if (elem.key) |key| {
+                        try writer.writeAll("            try inner_arr.setByValue(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, key);
+                        try writer.writeAll(", ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    } else {
+                        try writer.writeAll("            try inner_arr.push(runtime.runtime_allocator, ");
+                        try self.writeConstantValueInline(writer, elem.value);
+                        try writer.writeAll(");\n");
+                    }
+                }
+                try writer.writeAll("            break :blk_inner runtime.Value.initArray(inner_arr);\n");
+                try writer.writeAll("        }");
+            },
+        }
     }
 
     /// Escape a string for use in Zig source code
