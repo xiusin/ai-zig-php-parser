@@ -2574,6 +2574,8 @@ pub const NativeLinker = struct {
         .{ "sha1", bi(.{ .runtime_name = "php_sha1", .needs_allocator = true }) },
         .{ "password_hash", bi(.{ .runtime_name = "php_password_hash", .needs_allocator = true }) },
         .{ "password_verify", bi(.{ .runtime_name = "php_password_verify", .needs_allocator = true }) },
+        .{ "password_get_info", bi(.{ .runtime_name = "php_password_get_info", .needs_allocator = true }) },
+        .{ "password_needs_rehash", bi(.{ .runtime_name = "php_password_needs_rehash", .needs_allocator = true }) },
         .{ "uniqid", bi(.{ .runtime_name = "php_uniqid", .needs_allocator = true }) },
         .{ "ord", bi(.{ .runtime_name = "php_ord", .needs_allocator = false }) },
         .{ "chr", bi(.{ .runtime_name = "php_chr", .needs_allocator = true }) },

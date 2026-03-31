@@ -20217,10 +20217,23 @@ pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Va
         const hash_result = try std.crypto.pwhash.bcrypt.strHash(pwd, .{
             .allocator = allocator,
             .params = .{ .rounds_log = cost, .silently_truncate_password = true },
-            .encoding = .phc,
+            .encoding = .crypt,
         }, &hash_buf);
         
-        const php_str = try PHPString.init(allocator, hash_result);
+        // Zig生成$2b$前缀，PHP使用$2y$前缀，替换以保持兼容
+        var result_buf: [128]u8 = undefined;
+        const result_str = blk: {
+            if (hash_result.len >= 4 and hash_result[0] == '$' and hash_result[1] == '2' and hash_result[2] == 'b' and hash_result[3] == '$') {
+                result_buf[0] = '$';
+                result_buf[1] = '2';
+                result_buf[2] = 'y';
+                @memcpy(result_buf[3..hash_result.len], hash_result[3..]);
+                break :blk result_buf[0..hash_result.len];
+            }
+            break :blk hash_result;
+        };
+        
+        const php_str = try PHPString.init(allocator, result_str);
         return Value.initString(php_str);
     }
     
@@ -20237,13 +20250,101 @@ pub fn php_password_verify(password: Value, hash: Value, allocator: Allocator) !
     const pwd = password.asString().data;
     const hash_str = hash.asString().data;
     
+    // PHP使用$2y$前缀，Zig期望$2b$前缀，需要转换
+    var converted_buf: [128]u8 = undefined;
+    const verify_str = blk: {
+        if (hash_str.len >= 4 and hash_str[0] == '$' and hash_str[1] == '2' and hash_str[2] == 'y' and hash_str[3] == '$') {
+            converted_buf[0] = '$';
+            converted_buf[1] = '2';
+            converted_buf[2] = 'b';
+            if (hash_str.len <= converted_buf.len) {
+                @memcpy(converted_buf[3..hash_str.len], hash_str[3..]);
+                break :blk converted_buf[0..hash_str.len];
+            }
+        }
+        break :blk hash_str;
+    };
+    
     // 使用bcrypt验证
-    std.crypto.pwhash.bcrypt.strVerify(hash_str, pwd, .{
+    std.crypto.pwhash.bcrypt.strVerify(verify_str, pwd, .{
         .silently_truncate_password = true,
     }) catch {
         return Value.initBool(false);
     };
     
+    return Value.initBool(true);
+}
+
+/// password_get_info - 返回密码哈希的相关信息
+pub fn php_password_get_info(hash_val: Value, allocator: Allocator) !Value {
+    if (!hash_val.isString()) {
+        // 返回未知算法的空info
+        const arr = try PHPArray.init(allocator);
+        try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "algo")), Value.initNull());
+        try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "algoName")), Value.initString(try PHPString.init(allocator, "unknown")));
+        try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "options")), Value.initArray(try PHPArray.init(allocator)));
+        return Value.initArray(arr);
+    }
+
+    const hash_str = hash_val.asString().data;
+
+    // 检测bcrypt格式: $2y$XX$ 或 $2b$XX$ 或 $2a$XX$
+    if (hash_str.len >= 7 and hash_str[0] == '$' and hash_str[1] == '2' and
+        (hash_str[2] == 'y' or hash_str[2] == 'b' or hash_str[2] == 'a') and hash_str[3] == '$')
+    {
+        // 提取cost值: $2y$XX$...
+        const cost_str = hash_str[4..6];
+        var cost: i64 = 0;
+        for (cost_str) |c| {
+            if (c >= '0' and c <= '9') {
+                cost = cost * 10 + @as(i64, c - '0');
+            }
+        }
+
+        const options_arr = try PHPArray.init(allocator);
+        try options_arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "cost")), Value.initInt(cost));
+
+        const arr = try PHPArray.init(allocator);
+        try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "algo")), Value.initString(try PHPString.init(allocator, "2y")));
+        try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "algoName")), Value.initString(try PHPString.init(allocator, "bcrypt")));
+        try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "options")), Value.initArray(options_arr));
+        return Value.initArray(arr);
+    }
+
+    // 未知算法
+    const arr = try PHPArray.init(allocator);
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "algo")), Value.initNull());
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "algoName")), Value.initString(try PHPString.init(allocator, "unknown")));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "options")), Value.initArray(try PHPArray.init(allocator)));
+    return Value.initArray(arr);
+}
+
+/// password_needs_rehash - 检查哈希是否需要重新生成
+/// password_needs_rehash(hash, algo, options=[])
+pub fn php_password_needs_rehash(hash_val: Value, algo: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!hash_val.isString()) return Value.initBool(true);
+
+    const hash_str = hash_val.asString().data;
+    const algo_val = algo.toInt();
+
+    // PASSWORD_DEFAULT(0) 和 PASSWORD_BCRYPT(1) 都使用bcrypt
+    if (algo_val == 0 or algo_val == 1) {
+        // 检查是否是bcrypt格式
+        if (hash_str.len >= 7 and hash_str[0] == '$' and hash_str[1] == '2' and
+            (hash_str[2] == 'y' or hash_str[2] == 'b' or hash_str[2] == 'a') and hash_str[3] == '$')
+        {
+            // 提取cost值
+            var cost: i64 = 0;
+            if (hash_str[4] >= '0' and hash_str[4] <= '9') cost = cost * 10 + @as(i64, hash_str[4] - '0');
+            if (hash_str[5] >= '0' and hash_str[5] <= '9') cost = cost * 10 + @as(i64, hash_str[5] - '0');
+            // 默认cost=12，如果匹配则不需要rehash
+            return Value.initBool(cost != 12);
+        }
+        // 不是bcrypt格式，需要rehash
+        return Value.initBool(true);
+    }
+
     return Value.initBool(true);
 }
 
