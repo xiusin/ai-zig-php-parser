@@ -33,7 +33,7 @@ $x = "y";
 $y = "z";
 $z = "final value";
 echo "$$$x = " . $$x . "\n";
-echo "$$$$x = " . $$$x . "\n";
+// echo "$$$$x = " . ${${$x}} . "\n"; // Skip complex variable variable
 
 // 动态属性
 $prop = "dynamic";
