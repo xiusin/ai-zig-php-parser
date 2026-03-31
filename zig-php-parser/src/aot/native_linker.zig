@@ -2921,14 +2921,9 @@ pub const NativeLinker = struct {
         .{ "rewind", bi(.{ .runtime_name = "php_rewind", .needs_allocator = false }) },
         .{ "gethostbyaddr", bi(.{ .runtime_name = "php_gethostbyaddr", .needs_allocator = true }) },
         .{ "hash_file", bi(.{ .runtime_name = "php_hash_file", .needs_allocator = true }) },
-        .{ "iterator_to_array", bi(.{ .runtime_name = "php_iterator_to_array", .needs_allocator = true }) },
         .{ "get_resource_type", bi(.{ .runtime_name = "php_get_resource_type", .needs_allocator = true }) },
         .{ "stream_register_wrapper", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
         .{ "stream_wrapper_register", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
-        .{ "password_hash", bi(.{ .runtime_name = "php_password_hash", .needs_allocator = true }) },
-        .{ "password_verify", bi(.{ .runtime_name = "php_password_verify", .needs_allocator = true }) },
-        .{ "compact", bi(.{ .runtime_name = "php_compact", .needs_allocator = true }) },
-        .{ "extract", bi(.{ .runtime_name = "php_extract", .needs_allocator = true }) },
     }));
 
     fn bi(info: BuiltinInfo) BuiltinInfo {
@@ -8728,6 +8723,37 @@ pub const NativeLinker = struct {
                                         try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
                                     } else if (op.args.len == 3) {
                                         try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_password_hash")) {
+                                // password_hash(password, algo, options = [])
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initNull()");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initNull()");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_hash_file")) {
+                                // hash_file(algo, filename, binary = false)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeValueArgs(writer, op.args);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_stream_register_wrapper")) {
+                                // stream_register_wrapper(protocol, classname, flags = 0)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initInt(0)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initInt(0)");
                                     }
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");

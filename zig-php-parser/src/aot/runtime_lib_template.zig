@@ -23257,64 +23257,6 @@ pub fn php_hash_file(algo: Value, filename: Value, allocator: Allocator) !Value 
     );
 }
 
-/// iterator_to_array - 将迭代器中的元素复制到数组
-pub fn php_iterator_to_array(iter_val: Value, preserve_keys: Value, allocator: Allocator) !Value {
-    _ = preserve_keys;
-    // 如果是数组，直接返回副本
-    if (iter_val.isArray()) {
-        const src = iter_val.asArray();
-        const result = try PHPArray.init(allocator);
-        var it = src.iterator();
-        while (it.next()) |entry| {
-            _ = entry.value.retain();
-            if (entry.key.isString()) {
-                try result.setByString(allocator, entry.key.asString().data, entry.value);
-            } else {
-                try result.push(allocator, entry.value);
-            }
-        }
-        return Value.initArray(result);
-    }
-    // 如果是对象（实现了迭代器接口），尝试遍历
-    if (iter_val.isObject()) {
-        const obj = Value_asObject(iter_val);
-        const result = try PHPArray.init(allocator);
-
-        // 调用 rewind
-        if (obj.callMethod("rewind", &.{}, allocator)) |_| {} else |_| {}
-
-        // 遍历
-        var safety: usize = 0;
-        while (safety < 10000) : (safety += 1) {
-            // valid()
-            const valid = obj.callMethod("valid", &.{}, allocator) catch break;
-            if (!valid.toBool()) break;
-
-            // current()
-            const current = obj.callMethod("current", &.{}, allocator) catch break;
-            _ = current.retain();
-
-            // key()
-            if (obj.callMethod("key", &.{}, allocator)) |key| {
-                if (key.isString()) {
-                    try result.setByString(allocator, key.asString().data, current);
-                } else if (key.isInt()) {
-                    try result.setByIndex(allocator, @intCast(key.asInt()), current);
-                } else {
-                    try result.push(allocator, current);
-                }
-            } else |_| {
-                try result.push(allocator, current);
-            }
-
-            // next()
-            if (obj.callMethod("next", &.{}, allocator)) |_| {} else |_| {}
-        }
-        return Value.initArray(result);
-    }
-    return Value.initArray(try PHPArray.init(allocator));
-}
-
 /// get_resource_type - 返回资源类型
 pub fn php_get_resource_type(res: Value, allocator: Allocator) !Value {
     _ = res;
@@ -23327,41 +23269,6 @@ pub fn php_stream_register_wrapper(protocol: Value, classname: Value, flags: Val
     _ = classname;
     _ = flags;
     _ = allocator;
-    // 简化实现：返回 true（注册成功）
     return Value.initBool(true);
 }
 
-/// password_hash - 创建密码的哈希
-pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Value {
-    _ = algo;
-    if (!password.isString()) return Value.initBool(false);
-    // 简化实现：使用 SHA256 作为替代
-    return php_hash(
-        Value.initString(try PHPString.init(allocator, "sha256")),
-        password,
-        allocator,
-    );
-}
-
-/// password_verify - 验证密码是否和哈希匹配
-pub fn php_password_verify(password: Value, hash_val: Value, allocator: Allocator) !Value {
-    if (!password.isString() or !hash_val.isString()) return Value.initBool(false);
-    const hashed = try php_password_hash(password, Value.initInt(1), allocator);
-    if (!hashed.isString()) return Value.initBool(false);
-    return Value.initBool(std.mem.eql(u8, hashed.asString().data, hash_val.asString().data));
-}
-
-/// compact - 建立一个数组，包括变量名和它们的值
-pub fn php_compact(allocator: Allocator) !Value {
-    // compact() 需要访问局部变量作用域，在AOT中无法真正实现
-    // 返回空数组
-    return Value.initArray(try PHPArray.init(allocator));
-}
-
-/// extract - 从数组中将变量导入到当前的符号表
-pub fn php_extract(arr: Value, allocator: Allocator) !Value {
-    _ = arr;
-    _ = allocator;
-    // extract() 需要修改局部变量作用域，在AOT中无法真正实现
-    return Value.initInt(0);
-}
