@@ -8535,14 +8535,20 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
     return Value.initString(try PHPString.init(allocator, result));
 }
 
-/// preg_split - 正则分割
-pub fn preg_split(pattern_val: Value, subject_val: Value, allocator: Allocator) !Value {
+/// preg_split - 正则分割 (pattern, subject, limit=-1, flags=0, allocator)
+pub fn preg_split(pattern_val: Value, subject_val: Value, limit_val: Value, flags_val: Value, allocator: Allocator) !Value {
     if (!pattern_val.isString() or !subject_val.isString()) {
         return Value.initNull();
     }
 
     const pattern_str = pattern_val.asString();
     const subject_str = subject_val.asString();
+
+    // limit: -1 表示无限制
+    const limit: i64 = if (limit_val.isInt()) limit_val.asInt() else -1;
+    // flags: PREG_SPLIT_NO_EMPTY=1, PREG_SPLIT_DELIM_CAPTURE=2, PREG_SPLIT_OFFSET_CAPTURE=4
+    const flags: i64 = if (flags_val.isInt()) flags_val.asInt() else 0;
+    const no_empty = (flags & 1) != 0;
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
@@ -8563,14 +8569,25 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, allocator: Allocator) 
 
     const result_arr = try PHPArray.init(allocator);
     var offset: usize = 0;
+    var part_count: i64 = 0;
 
     while (offset < subject_str.length) {
+        // 如果达到limit-1，把剩余部分全部放入最后一个元素
+        if (limit > 0 and part_count >= limit - 1) {
+            const remaining = subject_str.data[offset..];
+            if (!no_empty or remaining.len > 0) {
+                const part_str = try PHPString.init(allocator, remaining);
+                try result_arr.push(allocator, Value.initString(part_str));
+            }
+            break;
+        }
+
         const rc = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, @intCast(offset), 0, match_data, null);
 
         if (rc == PCRE2_ERROR_NOMATCH) {
             // 添加剩余部分
             const remaining = subject_str.data[offset..];
-            if (remaining.len > 0) {
+            if (!no_empty or remaining.len > 0) {
                 const part = try PHPString.init(allocator, remaining);
                 try result_arr.push(allocator, Value.initString(part));
             }
@@ -8584,10 +8601,11 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, allocator: Allocator) 
         const match_end = ovec[1];
 
         // 添加匹配前的部分
-        if (match_start > offset) {
-            const part = subject_str.data[offset..match_start];
+        const part = subject_str.data[offset..match_start];
+        if (!no_empty or part.len > 0) {
             const part_str = try PHPString.init(allocator, part);
             try result_arr.push(allocator, Value.initString(part_str));
+            part_count += 1;
         }
 
         offset = match_end;
@@ -10197,6 +10215,7 @@ pub const ClassMeta = struct {
     is_final: bool = false,
     is_interface: bool = false,  // 是否为接口
     is_trait: bool = false,      // 是否为trait
+    is_enum: bool = false,       // 是否为enum
     allocator: Allocator,
 
     /// 魔法函数指针
@@ -11273,6 +11292,27 @@ pub const ClassMeta = struct {
         error_meta.magic_construct = meta.magic_construct;
         error_meta.magic_toString = meta.magic_toString;
         try registerClass(error_meta);
+
+        // ErrorException extends Exception
+        const errorexception_meta = try ClassMeta.init(allocator, "ErrorException");
+        errorexception_meta.parent = meta;
+        errorexception_meta.magic_construct = meta.magic_construct;
+        errorexception_meta.magic_toString = meta.magic_toString;
+        try registerClass(errorexception_meta);
+
+        // JsonException extends Exception
+        const jsonexception_meta = try ClassMeta.init(allocator, "JsonException");
+        jsonexception_meta.parent = meta;
+        jsonexception_meta.magic_construct = meta.magic_construct;
+        jsonexception_meta.magic_toString = meta.magic_toString;
+        try registerClass(jsonexception_meta);
+
+        // OutOfBoundsException extends RuntimeException
+        const oob_meta = try ClassMeta.init(allocator, "OutOfBoundsException");
+        oob_meta.parent = meta; // simplified: parent = Exception
+        oob_meta.magic_construct = meta.magic_construct;
+        oob_meta.magic_toString = meta.magic_toString;
+        try registerClass(oob_meta);
 
         // TypeError, ValueError extend Error
         const error_subclasses = [_][]const u8{ "TypeError", "ValueError", "UnhandledMatchError" };
@@ -14533,6 +14573,17 @@ pub fn trait_exists(ctx: Value, args: []const Value, allocator: Allocator) anyer
     return php_trait_exists(args[0], allocator);
 }
 
+/// enum_exists(name) -> bool
+pub fn php_enum_exists(name_val: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!name_val.isString()) return Value.initBool(false);
+    const name = name_val.asString().data;
+    if (findClass(name)) |meta| {
+        return Value.initBool(meta.is_enum);
+    }
+    return Value.initBool(false);
+}
+
 /// 检查是否是某个类的子类
 pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
     // 第一个参数可以是对象或类名字符串
@@ -15312,10 +15363,10 @@ pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
     const hours: i64 = @intCast(day_seconds.getHoursIntoDay());
     const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
     const seconds_val: i64 = @intCast(day_seconds.getSecondsIntoMinute());
-    
-    // 计算星期几 (0=Sunday, 6=Saturday)
-    // epoch_day.day 是从1970-01-01开始的天数，1970-01-01是星期四(4)
-    const wday: i64 = @intCast(@mod(epoch_day.day + 4, 7));
+    // 计算星期几：1970-01-01是周四(4)，PHP wday: 0=周日,1=周一,...,6=周六
+    const days_since_epoch: i64 = @intCast(epoch_day.day);
+    const wday: i64 = @mod(days_since_epoch + 4, 7);
+    // 一年中的第几天：year_day.day 是0-based，PHP yday也是0-based
     const yday: i64 = @intCast(year_day.day);
 
     const arr = try PHPArray.init(allocator);
@@ -15327,48 +15378,112 @@ pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
     try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "mon")), Value.initInt(month));
     try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "year")), Value.initInt(@intCast(@as(i32, year))));
     try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "yday")), Value.initInt(yday));
+    const weekday_names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    const month_names   = [_][]const u8{ "", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    const wday_idx = @as(usize, @intCast(@mod(wday, 7)));
+    const mon_idx  = @as(usize, @intCast(@min(@max(month, 1), 12)));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "weekday")), Value.initString(try PHPString.init(allocator, weekday_names[wday_idx])));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "month")),   Value.initString(try PHPString.init(allocator, month_names[mon_idx])));
     try arr.setByValue(allocator, Value.initInt(0), Value.initInt(timestamp));
     return Value.initArray(arr);
 }
 
-pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: Value, year: Value) !Value {
-    const h = hour.asInt();
-    const m = minute.asInt();
-    const s = second.asInt();
-    const mon = month.asInt();
-    const d = day.asInt();
-    const y = year.asInt();
-    
-    // 简化实现：使用epoch计算
-    // 1970-01-01 00:00:00 UTC
+pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!format_val.isString()) return Value.initInt(0);
+    const fmt = format_val.asString().data;
+    if (fmt.len == 0) return Value.initInt(0);
+    const timestamp = if (ts_val.isNull()) std.time.timestamp() else ts_val.toInt();
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @bitCast(timestamp))) };
+    const day_seconds = epoch.getDaySeconds();
+    const epoch_day = epoch.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const hours: i64 = @intCast(day_seconds.getHoursIntoDay());
+    const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
+    const secs: i64   = @intCast(day_seconds.getSecondsIntoMinute());
+    const day: i64    = @intCast(month_day.day_index + 1);
+    const month: i64  = @intCast(@intFromEnum(month_day.month));
+    const year: i64   = @intCast(@as(i32, year_day.year));
+    const days_since_epoch: i64 = @intCast(epoch_day.day);
+    const wday: i64   = @mod(days_since_epoch + 4, 7);
+    const yday: i64   = @intCast(year_day.day);
+    const result: i64 = switch (fmt[0]) {
+        'Y' => year,
+        'y' => @mod(year, 100),
+        'n', 'm' => month,
+        'j', 'd' => day,
+        'H' => hours,
+        'h' => blk: { const h = @mod(hours, 12); break :blk if (h == 0) 12 else h; },
+        'i' => minutes,
+        's' => secs,
+        'w', 'l' => wday,
+        'z' => yday,
+        'U' => timestamp,
+        else => 0,
+    };
+    return Value.initInt(result);
+}
+
+/// mktime(hour, minute, second, month, day, year) -> Unix timestamp
+pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: Value, year: Value) Value {
+    const h = hour.toInt();
+    const mi = minute.toInt();
+    const s = second.toInt();
+    const mon = month.toInt();
+    const d = day.toInt();
+    var y = year.toInt();
+    // PHP: 0-69 => 2000-2069, 70-100 => 1970-2000
+    if (y >= 0 and y <= 69) y += 2000;
+    if (y >= 70 and y <= 100) y += 1900;
     const days_per_month = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    
     var total_days: i64 = 0;
-    
-    // 计算年份的天数
-    var year_iter: i64 = 1970;
-    while (year_iter < y) : (year_iter += 1) {
-        const is_leap = (@rem(year_iter, 4) == 0 and @rem(year_iter, 100) != 0) or (@rem(year_iter, 400) == 0);
+    var yi: i64 = 1970;
+    while (yi < y) : (yi += 1) {
+        const is_leap = (@rem(yi, 4) == 0 and @rem(yi, 100) != 0) or (@rem(yi, 400) == 0);
         total_days += if (is_leap) 366 else 365;
     }
-    
-    // 计算月份的天数
-    var month_iter: i64 = 1;
-    while (month_iter < mon) : (month_iter += 1) {
-        const idx = @as(usize, @intCast(month_iter - 1));
+    var mi2: i64 = 1;
+    while (mi2 < mon) : (mi2 += 1) {
+        const idx = @as(usize, @intCast(mi2 - 1));
         total_days += days_per_month[idx];
-        if (month_iter == 2) {
+        if (mi2 == 2) {
             const is_leap = (@rem(y, 4) == 0 and @rem(y, 100) != 0) or (@rem(y, 400) == 0);
             if (is_leap) total_days += 1;
         }
     }
-    
-    // 加上日期
     total_days += d - 1;
-    
-    // 转换为秒
-    const timestamp = total_days * 86400 + h * 3600 + m * 60 + s;
-    return Value.initInt(timestamp);
+    const ts = total_days * 86400 + h * 3600 + mi * 60 + s;
+    return Value.initInt(ts);
+}
+
+/// checkdate(month, day, year) -> bool: 验证日期合法性
+pub fn php_checkdate(month: Value, day: Value, year: Value) Value {
+    const m = month.toInt();
+    const d = day.toInt();
+    const y = year.toInt();
+    if (y < 1 or y > 32767) return Value.initBool(false);
+    if (m < 1 or m > 12) return Value.initBool(false);
+    if (d < 1) return Value.initBool(false);
+    const days_in_month = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    const is_leap = (@rem(y, 4) == 0 and @rem(y, 100) != 0) or (@rem(y, 400) == 0);
+    var max_day = days_in_month[@as(usize, @intCast(m - 1))];
+    if (m == 2 and is_leap) max_day = 29;
+    return Value.initBool(d <= max_day);
+}
+
+/// gmdate(format, timestamp=null) -> string: UTC格式化（与date相同，时间戳已是UTC）
+pub fn php_gmdate(format: Value, timestamp: Value, allocator: Allocator) !Value {
+    if (!format.isString()) return Value.initString(try PHPString.init(allocator, ""));
+    const ts = if (timestamp.isNull())
+        std.time.timestamp()
+    else if (timestamp.isInt())
+        timestamp.asInt()
+    else if (timestamp.isFloat())
+        @as(i64, @intFromFloat(timestamp.asFloat()))
+    else
+        std.time.timestamp();
+    return formatPhpDateValue(ts, format.asString().data, allocator);
 }
 
 /// microtime - 返回当前时间（带微秒）
@@ -15406,23 +15521,66 @@ fn formatPhpDateValue(timestamp: i64, format_str: []const u8, allocator: Allocat
     const epoch_seconds: u64 = @intCast(@max(@as(i64, 0), timestamp));
     const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
     const day_seconds = epoch.getDaySeconds();
-    const year_day = epoch.getEpochDay().calculateYearDay();
+    const epoch_day = epoch.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
+    const days_since_epoch: i64 = @intCast(epoch_day.day);
+    const wday: usize = @intCast(@mod(days_since_epoch + 4, 7)); // 0=Sun
+    const year: i64 = @intCast(@as(i32, year_day.year));
+    const month: usize = @intCast(month_day.month.numeric());
+    const day: usize = @intCast(month_day.day_index + 1);
+    const hour: usize = @intCast(day_seconds.getHoursIntoDay());
+    const minute: usize = @intCast(day_seconds.getMinutesIntoHour());
+    const second: usize = @intCast(day_seconds.getSecondsIntoMinute());
+
+    const weekday_full = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    const weekday_short = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const month_full = [_][]const u8{ "", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    const month_short = [_][]const u8{ "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
     var result = try std.ArrayList(u8).initCapacity(allocator, format_str.len * 2);
     defer result.deinit(allocator);
+    const w = result.writer(allocator);
 
     var i: usize = 0;
     while (i < format_str.len) : (i += 1) {
         const c = format_str[i];
         switch (c) {
-            'Y' => try result.writer(allocator).print("{d:0>4}", .{year_day.year}),
-            'm' => try result.writer(allocator).print("{d:0>2}", .{month_day.month.numeric()}),
-            'd' => try result.writer(allocator).print("{d:0>2}", .{month_day.day_index + 1}),
-            'H' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getHoursIntoDay()}),
-            'i' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getMinutesIntoHour()}),
-            's' => try result.writer(allocator).print("{d:0>2}", .{day_seconds.getSecondsIntoMinute()}),
-            'U' => try result.writer(allocator).print("{d}", .{timestamp}),
+            // Year
+            'Y' => try w.print("{d:0>4}", .{@as(u32, @intCast(year))}),
+            'y' => try w.print("{d:0>2}", .{@as(u32, @intCast(@mod(year, 100)))}),
+            // Month
+            'm' => try w.print("{d:0>2}", .{month}),
+            'n' => try w.print("{d}", .{month}),
+            'F' => try w.writeAll(month_full[month]),
+            'M' => try w.writeAll(month_short[month]),
+            // Day
+            'd' => try w.print("{d:0>2}", .{day}),
+            'j' => try w.print("{d}", .{day}),
+            // Weekday
+            'l' => try w.writeAll(weekday_full[wday]),
+            'D' => try w.writeAll(weekday_short[wday]),
+            'w' => try w.print("{d}", .{wday}),
+            'N' => try w.print("{d}", .{if (wday == 0) @as(usize, 7) else wday}), // ISO: Mon=1..Sun=7
+            // Hour
+            'H' => try w.print("{d:0>2}", .{hour}),
+            'G' => try w.print("{d}", .{hour}),
+            'h' => try w.print("{d:0>2}", .{if (@mod(hour, 12) == 0) @as(usize, 12) else @mod(hour, 12)}),
+            'g' => try w.print("{d}", .{if (@mod(hour, 12) == 0) @as(usize, 12) else @mod(hour, 12)}),
+            'A' => try w.writeAll(if (hour < 12) "AM" else "PM"),
+            'a' => try w.writeAll(if (hour < 12) "am" else "pm"),
+            // Minute / second
+            'i' => try w.print("{d:0>2}", .{minute}),
+            's' => try w.print("{d:0>2}", .{second}),
+            // Timestamp
+            'U' => try w.print("{d}", .{timestamp}),
+            // Day of year (0-based in PHP)
+            'z' => try w.print("{d}", .{year_day.day}),
+            // Escape
+            '\\' => {
+                i += 1;
+                if (i < format_str.len) try result.append(allocator, format_str[i]);
+            },
             else => try result.append(allocator, c),
         }
     }
@@ -17412,56 +17570,63 @@ pub fn php_strripos(haystack: Value, needle: Value, offset: Value) !Value {
 
 /// number_format - 格式化数字
 pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thousands_sep: Value, allocator: Allocator) !Value {
-    _ = dec_point;
-    _ = thousands_sep;
     const num = number.toFloat();
-    const dec = @max(0, decimals.toInt());
+    const dec: usize = @intCast(@max(0, decimals.toInt()));
+    const dp: u8 = if (dec_point.isString() and dec_point.asString().data.len > 0)
+        dec_point.asString().data[0] else '.';
+    const ts: u8 = if (thousands_sep.isString() and thousands_sep.asString().data.len > 0)
+        thousands_sep.asString().data[0]
+        else if (thousands_sep.isNull()) ','
+        else ',';
 
-    const dec_u: usize = @intCast(dec);
     var pow10: u64 = 1;
-    var i: usize = 0;
-    while (i < dec_u) : (i += 1) {
-        pow10 *= 10;
-    }
+    for (0..dec) |_| pow10 *= 10;
 
-    const scaled: f64 = num * @as(f64, @floatFromInt(pow10));
-    const rounded_i64: i64 = @intFromFloat(std.math.round(scaled));
-    const negative = rounded_i64 < 0;
-    const abs_rounded: u64 = @intCast(if (negative) -rounded_i64 else rounded_i64);
+    const scaled = num * @as(f64, @floatFromInt(pow10));
+    const rounded: i64 = @intFromFloat(std.math.round(scaled));
+    const negative = rounded < 0;
+    const abs_r: u64 = @intCast(if (negative) -rounded else rounded);
+    const int_part: u64 = abs_r / pow10;
+    const frac_part: u64 = abs_r % pow10;
 
-    const int_part: u64 = abs_rounded / pow10;
-    const frac_part: u64 = abs_rounded % pow10;
-
+    // 整数部分转字符串（带千分位）
     const int_str = try std.fmt.allocPrint(allocator, "{d}", .{int_part});
     defer allocator.free(int_str);
+    const n_groups = (int_str.len + 2) / 3; // ceil
+    const sep_count = if (int_str.len > 3) (int_str.len - 1) / 3 else 0;
 
-    const total_len: usize = (if (negative) @as(usize, 1) else 0) + int_str.len + (if (dec_u > 0) 1 + dec_u else 0);
-    const out = try allocator.alloc(u8, total_len);
-    defer allocator.free(out);
+    // 估算总长度
+    var total: usize = (if (negative) @as(usize, 1) else 0) + int_str.len + sep_count;
+    if (dec > 0) total += 1 + dec;
+    _ = n_groups;
 
-    var pos: usize = 0;
-    if (negative) {
-        out[pos] = '-';
-        pos += 1;
+    var buf = try std.ArrayList(u8).initCapacity(allocator, total + 4);
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    if (negative) try w.writeByte('-');
+    // 写整数部分（带千分位）
+    for (int_str, 0..) |ch, idx| {
+        const remaining = int_str.len - idx;
+        if (idx > 0 and remaining % 3 == 0) try w.writeByte(ts);
+        try w.writeByte(ch);
     }
-
-    @memcpy(out[pos .. pos + int_str.len], int_str);
-    pos += int_str.len;
-
-    if (dec_u > 0) {
-        out[pos] = '.';
-        pos += 1;
+    // 写小数部分
+    if (dec > 0) {
+        try w.writeByte(dp);
         var tmp = frac_part;
-        var j: usize = 0;
-        while (j < dec_u) : (j += 1) {
-            const digit: u8 = @intCast(tmp % 10);
-            out[total_len - 1 - j] = '0' + digit;
+        var digits = try allocator.alloc(u8, dec);
+        defer allocator.free(digits);
+        var j: usize = dec;
+        while (j > 0) {
+            j -= 1;
+            digits[j] = '0' + @as(u8, @intCast(tmp % 10));
             tmp /= 10;
         }
+        try w.writeAll(digits);
     }
 
-    const result = try PHPString.init(allocator, out);
-    return Value.initString(result);
+    return Value.initString(try PHPString.init(allocator, buf.items));
 }
 
 /// nl2br - 将换行符转换为HTML <br>标签
@@ -17884,6 +18049,18 @@ fn ensureObInit() void {
         ob_stack = .{};
         ob_initialized = true;
     }
+}
+
+/// mysqli_connect stub — AOT不支持数据库，仅供function_exists识别
+pub fn php_mysqli_connect(host: Value, user: Value, password: Value, db: Value, port: Value, socket: Value, allocator: Allocator) !Value {
+    _ = host; _ = user; _ = password; _ = db; _ = port; _ = socket; _ = allocator;
+    return Value.initBool(false);
+}
+
+/// token_get_all stub — AOT不支持PHP tokenizer，仅供function_exists识别
+pub fn php_token_get_all(source: Value, flags: Value, allocator: Allocator) !Value {
+    _ = source; _ = flags;
+    return Value.initArray(try PHPArray.init(allocator));
 }
 
 /// ob_start - 打开输出缓冲
@@ -19024,6 +19201,25 @@ pub fn php_array_find(arr: Value, callback: Value, allocator: Allocator) !Value 
     return Value.initNull();
 }
 
+/// array_find_key - PHP 8.4: 返回第一个满足回调的元素的键
+pub fn php_array_find_key(arr: Value, callback: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return Value.initNull();
+    const php_arr = arr.asArray();
+    var iter = php_arr.elements.iterator();
+    while (iter.next()) |entry| {
+        const args = [_]Value{entry.value_ptr.*};
+        const result = try php_invoke_callable(callback, &args, allocator);
+        defer result.release(allocator);
+        if (result.toBool()) {
+            return switch (entry.key_ptr.*) {
+                .int => |k| Value.initInt(k),
+                .string => |s| Value.initString(try PHPString.init(allocator, s)),
+            };
+        }
+    }
+    return Value.initNull();
+}
+
 /// array_chunk - 将数组分割成指定大小的块
 /// array_chunk - 将数组分割成指定大小的块
 pub fn php_array_chunk(arr: Value, size: Value, preserve_keys: Value, allocator: Allocator) !Value {
@@ -19706,33 +19902,9 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
     return Value.initString(output);
 }
 
-pub fn php_preg_split(pattern: Value, subject: Value, allocator: Allocator) !Value {
-    if (!pattern.isString() or !subject.isString()) return Value.initBool(false);
-    
-    const pat = pattern.asString().data;
-    const subj = subject.asString().data;
-    
-    if (pat.len < 3) return Value.initBool(false);
-    const actual_pat = pat[1..pat.len-1];
-    
-    var arr = try PHPArray.init(allocator);
-    var pos: usize = 0;
-    
-    while (pos < subj.len) {
-        if (std.mem.indexOf(u8, subj[pos..], actual_pat)) |idx| {
-            const part = try allocator.dupe(u8, subj[pos..pos+idx]);
-            const php_str = try PHPString.init(allocator, part);
-            try arr.push(allocator, Value.initString(php_str));
-            pos += idx + actual_pat.len;
-        } else {
-            const part = try allocator.dupe(u8, subj[pos..]);
-            const php_str = try PHPString.init(allocator, part);
-            try arr.push(allocator, Value.initString(php_str));
-            break;
-        }
-    }
-    
-    return Value.initArray(arr);
+pub fn php_preg_split(pattern: Value, subject: Value, limit_val: Value, flags_val: Value, allocator: Allocator) !Value {
+    // 转发到 PCRE2 实现
+    return preg_split(pattern, subject, limit_val, flags_val, allocator);
 }
 
 /// filter_var - 使用特定的过滤器过滤一个变量
@@ -23025,4 +23197,171 @@ fn wrapBuiltin_stripslashes(ctx: Value, args: []const Value, allocator: Allocato
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_stripslashes(args[0], allocator);
+}
+
+// ============================================================================
+// 新增缺失的内置函数
+// ============================================================================
+
+/// error_get_last - 获取最后发生的错误
+pub fn php_error_get_last(allocator: Allocator) !Value {
+    // 简化实现：返回 null（表示没有错误）
+    // PHP CLI 中如果没有发生错误也返回 null
+    _ = allocator;
+    return Value.initNull();
+}
+
+/// rewind - 倒回文件指针的位置
+pub fn php_rewind(handle: Value) !Value {
+    if (!handle.isInt()) return Value.initBool(false);
+    const handle_ptr = handle.asInt();
+    if (handle_ptr <= 1) return Value.initBool(false);
+
+    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    file_handle.seekTo(0) catch return Value.initBool(false);
+    return Value.initBool(true);
+}
+
+/// gethostbyaddr - 获取指定IP地址对应的主机名
+pub fn php_gethostbyaddr(ip: Value, allocator: Allocator) !Value {
+    if (!ip.isString()) return Value.initBool(false);
+    const ip_str = ip.asString().data;
+    // 简化实现：对于本地地址直接返回
+    if (std.mem.eql(u8, ip_str, "127.0.0.1")) {
+        return Value.initString(try PHPString.init(allocator, "localhost"));
+    }
+    // 其他地址返回原 IP（模拟 PHP 在无法反解时的行为）
+    return Value.initString(try PHPString.init(allocator, ip_str));
+}
+
+/// hash_file - 使用给定文件的内容生成哈希值
+pub fn php_hash_file(algo: Value, filename: Value, allocator: Allocator) !Value {
+    if (!algo.isString() or !filename.isString()) return Value.initBool(false);
+
+    const algo_str = algo.asString().data;
+    const fname = filename.asString().data;
+
+    // 读取文件内容
+    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
+    defer allocator.free(content);
+
+    // 复用已有的 php_hash 逻辑
+    const content_val = Value.initString(try PHPString.init(allocator, content));
+    return php_hash(
+        Value.initString(try PHPString.init(allocator, algo_str)),
+        content_val,
+        allocator,
+    );
+}
+
+/// iterator_to_array - 将迭代器中的元素复制到数组
+pub fn php_iterator_to_array(iter_val: Value, preserve_keys: Value, allocator: Allocator) !Value {
+    _ = preserve_keys;
+    // 如果是数组，直接返回副本
+    if (iter_val.isArray()) {
+        const src = iter_val.asArray();
+        const result = try PHPArray.init(allocator);
+        var it = src.iterator();
+        while (it.next()) |entry| {
+            _ = entry.value.retain();
+            if (entry.key.isString()) {
+                try result.setByString(allocator, entry.key.asString().data, entry.value);
+            } else {
+                try result.push(allocator, entry.value);
+            }
+        }
+        return Value.initArray(result);
+    }
+    // 如果是对象（实现了迭代器接口），尝试遍历
+    if (iter_val.isObject()) {
+        const obj = Value_asObject(iter_val);
+        const result = try PHPArray.init(allocator);
+
+        // 调用 rewind
+        if (obj.callMethod("rewind", &.{}, allocator)) |_| {} else |_| {}
+
+        // 遍历
+        var safety: usize = 0;
+        while (safety < 10000) : (safety += 1) {
+            // valid()
+            const valid = obj.callMethod("valid", &.{}, allocator) catch break;
+            if (!valid.toBool()) break;
+
+            // current()
+            const current = obj.callMethod("current", &.{}, allocator) catch break;
+            _ = current.retain();
+
+            // key()
+            if (obj.callMethod("key", &.{}, allocator)) |key| {
+                if (key.isString()) {
+                    try result.setByString(allocator, key.asString().data, current);
+                } else if (key.isInt()) {
+                    try result.setByIndex(allocator, @intCast(key.asInt()), current);
+                } else {
+                    try result.push(allocator, current);
+                }
+            } else |_| {
+                try result.push(allocator, current);
+            }
+
+            // next()
+            if (obj.callMethod("next", &.{}, allocator)) |_| {} else |_| {}
+        }
+        return Value.initArray(result);
+    }
+    return Value.initArray(try PHPArray.init(allocator));
+}
+
+/// get_resource_type - 返回资源类型
+pub fn php_get_resource_type(res: Value, allocator: Allocator) !Value {
+    _ = res;
+    return Value.initString(try PHPString.init(allocator, "Unknown"));
+}
+
+/// stream_register_wrapper - 注册一个用 PHP 类实现的 URL 封装协议
+pub fn php_stream_register_wrapper(protocol: Value, classname: Value, flags: Value, allocator: Allocator) !Value {
+    _ = protocol;
+    _ = classname;
+    _ = flags;
+    _ = allocator;
+    // 简化实现：返回 true（注册成功）
+    return Value.initBool(true);
+}
+
+/// password_hash - 创建密码的哈希
+pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Value {
+    _ = algo;
+    if (!password.isString()) return Value.initBool(false);
+    // 简化实现：使用 SHA256 作为替代
+    return php_hash(
+        Value.initString(try PHPString.init(allocator, "sha256")),
+        password,
+        allocator,
+    );
+}
+
+/// password_verify - 验证密码是否和哈希匹配
+pub fn php_password_verify(password: Value, hash_val: Value, allocator: Allocator) !Value {
+    if (!password.isString() or !hash_val.isString()) return Value.initBool(false);
+    const hashed = try php_password_hash(password, Value.initInt(1), allocator);
+    if (!hashed.isString()) return Value.initBool(false);
+    return Value.initBool(std.mem.eql(u8, hashed.asString().data, hash_val.asString().data));
+}
+
+/// compact - 建立一个数组，包括变量名和它们的值
+pub fn php_compact(allocator: Allocator) !Value {
+    // compact() 需要访问局部变量作用域，在AOT中无法真正实现
+    // 返回空数组
+    return Value.initArray(try PHPArray.init(allocator));
+}
+
+/// extract - 从数组中将变量导入到当前的符号表
+pub fn php_extract(arr: Value, allocator: Allocator) !Value {
+    _ = arr;
+    _ = allocator;
+    // extract() 需要修改局部变量作用域，在AOT中无法真正实现
+    return Value.initInt(0);
 }

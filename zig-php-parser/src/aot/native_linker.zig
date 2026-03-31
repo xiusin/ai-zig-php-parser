@@ -247,7 +247,7 @@ pub const NativeLinker = struct {
             }
         }
         
-        // 检查是否是 ref_ptr 寄存器（PHI/select 合并引用参数）
+        // 检查是否是 ref_ptr 寄存器（PHI/select/param 合并引用参数）
         if (self.current_ref_ptr_regs) |ref_ptr_regs| {
             if (ref_ptr_regs.contains(reg_id)) {
                 return true;
@@ -255,6 +255,48 @@ pub const NativeLinker = struct {
         }
         
         return false;
+    }
+
+    /// 检查寄存器是否是 alloca 寄存器（内存地址槽）
+    fn isAllocaReg(self: *Self, reg_id: usize) bool {
+        if (self.current_alloca_regs) |alloca_regs| {
+            return alloca_regs.contains(reg_id);
+        }
+        return false;
+    }
+
+    /// 生成两个寄存器之间的赋值，根据指针语义选择正确形式：
+    ///   alloca←alloca  : result.* = value.*  （值拷贝）
+    ///   alloca←ref_ptr : result = value      （指针重定向）
+    ///   alloca←value   : result.* = value    （写入内存）
+    ///   value←alloca   : result = value.*    （读出内存）
+    ///   ptr←ptr(ref)   : result = value      （指针拷贝）
+    ///   value←value    : result = value
+    fn writePtrAwareAssign(self: *Self, writer: anytype, indent: []const u8, result_id: usize, value_id: usize) !void {
+        const result_is_alloca = self.isAllocaReg(result_id);
+        const value_is_alloca  = self.isAllocaReg(value_id);
+        const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(result_id) else false;
+        const value_is_ref_ptr  = if (self.current_ref_ptr_regs) |rpr| rpr.contains(value_id)  else false;
+
+        if (result_is_alloca and value_is_alloca) {
+            // alloca ← alloca: 拷贝值
+            try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_id, value_id });
+        } else if (result_is_alloca and value_is_ref_ptr) {
+            // alloca ← ref_ptr: 指针重定向（让alloca指向ref_ptr所指向的地址）
+            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
+        } else if (result_is_alloca) {
+            // alloca ← value: 写入内存
+            try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_id, value_id });
+        } else if (value_is_alloca) {
+            // value ← alloca: 读出内存
+            try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_id, value_id });
+        } else if ((result_is_ref_ptr or value_is_ref_ptr)) {
+            // ptr ← ptr: 指针拷贝
+            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
+        } else {
+            // value ← value: 普通赋值
+            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
+        }
     }
 
     /// 写入转义后的 Zig 字符串字面量内容（处理反斜杠等特殊字符）
@@ -1904,6 +1946,8 @@ pub const NativeLinker = struct {
                     try writer.print("    {s}_meta.is_interface = true;\n", .{short_cname});
                 } else if (td.kind == .trait) {
                     try writer.print("    {s}_meta.is_trait = true;\n", .{short_cname});
+                } else if (td.kind == .@"enum") {
+                    try writer.print("    {s}_meta.is_enum = true;\n", .{short_cname});
                 }
             }
 
@@ -2406,6 +2450,7 @@ pub const NativeLinker = struct {
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
 
         .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },
+        .{ "enum_exists", bi(.{ .runtime_name = "php_enum_exists", .needs_allocator = true }) },
         .{ "interface_exists", bi(.{ .runtime_name = "php_interface_exists", .needs_allocator = true }) },
         .{ "trait_exists", bi(.{ .runtime_name = "php_trait_exists", .needs_allocator = true }) },
         .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
@@ -2554,6 +2599,7 @@ pub const NativeLinker = struct {
         .{ "array_filter", bi(.{ .runtime_name = "php_array_filter", .needs_allocator = true }) },
         .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true }) },
         .{ "array_find", bi(.{ .runtime_name = "php_array_find", .needs_allocator = true }) },
+        .{ "array_find_key", bi(.{ .runtime_name = "php_array_find_key", .needs_allocator = true }) },
         .{ "array_chunk", bi(.{ .runtime_name = "php_array_chunk", .needs_allocator = true }) },
         .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
         .{ "array_sum", bi(.{ .runtime_name = "php_array_sum", .needs_allocator = false }) },
@@ -2652,7 +2698,10 @@ pub const NativeLinker = struct {
 
         .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
         .{ "getdate", bi(.{ .runtime_name = "php_getdate", .needs_allocator = true }) },
-        .{ "mktime", .{ .runtime_name = "php_mktime", .needs_allocator = false } },
+        .{ "idate", bi(.{ .runtime_name = "php_idate", .needs_allocator = true }) },
+        .{ "mktime", bi(.{ .runtime_name = "php_mktime", .needs_allocator = false, .may_raise = false }) },
+        .{ "checkdate", bi(.{ .runtime_name = "php_checkdate", .needs_allocator = false, .may_raise = false }) },
+        .{ "gmdate", bi(.{ .runtime_name = "php_gmdate", .needs_allocator = true }) },
         .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
         .{ "date", bi(.{ .runtime_name = "php_date", .needs_allocator = true }) },
         .{ "strtotime", bi(.{ .runtime_name = "php_strtotime", .needs_allocator = true }) },
@@ -2797,6 +2846,8 @@ pub const NativeLinker = struct {
 
         // 输出缓冲
         .{ "ob_start", bi(.{ .runtime_name = "php_ob_start", .needs_allocator = false }) },
+        .{ "mysqli_connect", bi(.{ .runtime_name = "php_mysqli_connect", .needs_allocator = true, .may_raise = false }) },
+        .{ "token_get_all", bi(.{ .runtime_name = "php_token_get_all", .needs_allocator = true }) },
         .{ "ob_get_contents", bi(.{ .runtime_name = "php_ob_get_contents", .needs_allocator = true }) },
         .{ "ob_end_clean", bi(.{ .runtime_name = "php_ob_end_clean", .needs_allocator = false }) },
         .{ "ob_get_clean", bi(.{ .runtime_name = "php_ob_get_clean", .needs_allocator = true }) },
@@ -2864,6 +2915,20 @@ pub const NativeLinker = struct {
         
         // 异常处理函数
         .{ "throwThrowable", bi(.{ .runtime_name = "throwThrowable", .needs_allocator = true }) },
+
+        // 新增缺失函数
+        .{ "error_get_last", bi(.{ .runtime_name = "php_error_get_last", .needs_allocator = true, .may_raise = false }) },
+        .{ "rewind", bi(.{ .runtime_name = "php_rewind", .needs_allocator = false }) },
+        .{ "gethostbyaddr", bi(.{ .runtime_name = "php_gethostbyaddr", .needs_allocator = true }) },
+        .{ "hash_file", bi(.{ .runtime_name = "php_hash_file", .needs_allocator = true }) },
+        .{ "iterator_to_array", bi(.{ .runtime_name = "php_iterator_to_array", .needs_allocator = true }) },
+        .{ "get_resource_type", bi(.{ .runtime_name = "php_get_resource_type", .needs_allocator = true }) },
+        .{ "stream_register_wrapper", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
+        .{ "stream_wrapper_register", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
+        .{ "password_hash", bi(.{ .runtime_name = "php_password_hash", .needs_allocator = true }) },
+        .{ "password_verify", bi(.{ .runtime_name = "php_password_verify", .needs_allocator = true }) },
+        .{ "compact", bi(.{ .runtime_name = "php_compact", .needs_allocator = true }) },
+        .{ "extract", bi(.{ .runtime_name = "php_extract", .needs_allocator = true }) },
     }));
 
     fn bi(info: BuiltinInfo) BuiltinInfo {
@@ -3501,7 +3566,7 @@ pub const NativeLinker = struct {
         // 记录被优化的 alloca 寄存器（直接变量而不是指针）
         self.current_optimized_alloca_regs = &optimized_alloca_regs;
 
-        // 收集PHI/select指令产生的指针寄存器（合并引用参数产生的指针类型）
+        // 收集PHI/select/param指令产生的指针寄存器（合并引用参数产生的指针类型）
         var ref_ptr_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer ref_ptr_regs.deinit();
         for (func.blocks.items) |blk_scan| {
@@ -3510,7 +3575,7 @@ pub const NativeLinker = struct {
                     const rtag = @as(std.meta.Tag(IR.Type), res.type_);
                     if (rtag == .ptr and !alloca_registers.contains(res.id)) {
                         switch (inst_scan.op) {
-                            .phi, .select => {
+                            .phi, .select, .param => {
                                 try ref_ptr_regs.put(res.id, {});
                             },
                             else => {},
@@ -5091,20 +5156,7 @@ pub const NativeLinker = struct {
         if (!has_any_dependency) {
             // 无依赖，直接赋值（不需要retain，因为phi代替store）
             for (assignments) |assign| {
-                const value_is_ptr = self.isPointerReg(assign.value.id);
-                const result_is_ptr = self.isPointerReg(assign.result.id);
-
-                if (result_is_ptr and value_is_ptr) {
-                    try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                } else if (result_is_ptr) {
-                    try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                } else if (value_is_ptr) {
-                    try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                } else {
-                    try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                }
-                // 注释掉retain，避免ref_count多1
-                // try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
+                try self.writePtrAwareAssign(writer, indent, assign.result.id, assign.value.id);
             }
         } else {
             // 有依赖，只为需要的赋值使用临时变量
@@ -5121,25 +5173,15 @@ pub const NativeLinker = struct {
             }
             // 第二步：赋值（不需要retain）
             for (assignments, 0..) |assign, i| {
-                const result_is_ptr = self.isPointerReg(assign.result.id);
-
                 if (needs_temp.items[i]) {
+                    const result_is_ptr = self.isPointerReg(assign.result.id);
                     if (result_is_ptr) {
                         try writer.print("{s}reg_{d}.* = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                     } else {
                         try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                     }
                 } else {
-                    const value_is_ptr = self.isPointerReg(assign.value.id);
-                    if (result_is_ptr and value_is_ptr) {
-                        try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                    } else if (result_is_ptr) {
-                        try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                    } else if (value_is_ptr) {
-                        try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, assign.result.id, assign.value.id });
-                    } else {
-                        try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, assign.result.id, assign.value.id });
-                    }
+                    try self.writePtrAwareAssign(writer, indent, assign.result.id, assign.value.id);
                 }
                 // 注释掉retain
                 // try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
@@ -8287,6 +8329,18 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initNull()");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_idate")) {
+                                // idate(format, timestamp = null)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len >= 2) {
+                                    try self.writeValueArgs(writer, op.args[0..2]);
+                                } else if (op.args.len == 1) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.Value.initNull()");
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_microtime")) {
                                 // microtime(get_as_float = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -8296,8 +8350,9 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initBool(false)");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_date")) {
-                                // date(format, timestamp = null)
+                            } else if (std.mem.eql(u8, runtime_name, "php_date") or
+                                       std.mem.eql(u8, runtime_name, "php_gmdate")) {
+                                // date/gmdate(format, timestamp = null)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
                                     try self.writeValueArgs(writer, op.args);
@@ -8425,13 +8480,28 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "preg_split")) {
-                                // preg_split(pattern, subject, allocator) - 只接受3个参数
+                            } else if (std.mem.eql(u8, runtime_name, "preg_split") or std.mem.eql(u8, runtime_name, "php_preg_split")) {
+                                // preg_split(pattern, subject, limit=-1, flags=0, allocator)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len >= 2) {
                                     try self.writeValueArgs(writer, op.args[0..2]);
+                                    // limit (optional, default -1)
+                                    if (op.args.len >= 3) {
+                                        try writer.writeAll(", ");
+                                        try self.writeValueArgs(writer, op.args[2..3]);
+                                    } else {
+                                        try writer.writeAll(", runtime.Value.initInt(-1)");
+                                    }
+                                    // flags (optional, default 0)
+                                    if (op.args.len >= 4) {
+                                        try writer.writeAll(", ");
+                                        try self.writeValueArgs(writer, op.args[3..4]);
+                                    } else {
+                                        try writer.writeAll(", runtime.Value.initInt(0)");
+                                    }
                                 } else {
                                     try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.Value.initInt(-1), runtime.Value.initInt(0)");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (op.args.len > 0) {
