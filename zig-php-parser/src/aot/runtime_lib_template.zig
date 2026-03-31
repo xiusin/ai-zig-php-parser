@@ -20201,26 +20201,15 @@ pub fn php_sha1(str: Value, raw_output: Value, allocator: Allocator) !Value {
 
 /// password_hash - 创建密码哈希
 /// 使用bcrypt算法 (PASSWORD_DEFAULT = PASSWORD_BCRYPT = 1)
-pub fn php_password_hash(password: Value, algo: Value, options: Value, allocator: Allocator) !Value {
+/// 签名: password_hash(password, algo, allocator) — options通过第三个Value参数传递时内部处理
+pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Value {
     if (!password.isString()) return error.InvalidArgument;
     
     const pwd = password.asString().data;
     const algo_val = algo.toInt();
     
-    // 获取cost参数（默认12）
-    var cost: u6 = 12;
-    if (options.isArray()) {
-        const cost_key = Value.initString(try PHPString.init(allocator, "cost"));
-        defer cost_key.release(allocator);
-        const cost_val = try options.asArray().getByValue(allocator, cost_key);
-        defer cost_val.release(allocator);
-        if (!cost_val.isNull()) {
-            const c = cost_val.toInt();
-            if (c >= 4 and c <= 31) {
-                cost = @intCast(c);
-            }
-        }
-    }
+    // 使用默认cost=12
+    const cost: u6 = 12;
     
     // 使用bcrypt (algo=1 是 PASSWORD_BCRYPT)
     if (algo_val == 1 or algo_val == 0) { // 0 = PASSWORD_DEFAULT
@@ -20229,6 +20218,7 @@ pub fn php_password_hash(password: Value, algo: Value, options: Value, allocator
             .allocator = allocator,
             .params = .{ .rounds_log = cost },
             .encoding = .phc,
+            .silently_truncate_password = true,
         }, &hash_buf);
         
         const php_str = try PHPString.init(allocator, hash_result);
@@ -23264,10 +23254,9 @@ pub fn php_get_resource_type(res: Value, allocator: Allocator) !Value {
 }
 
 /// stream_register_wrapper - 注册一个用 PHP 类实现的 URL 封装协议
-pub fn php_stream_register_wrapper(protocol: Value, classname: Value, flags: Value, allocator: Allocator) !Value {
+pub fn php_stream_register_wrapper(protocol: Value, classname: Value, allocator: Allocator) !Value {
     _ = protocol;
     _ = classname;
-    _ = flags;
     _ = allocator;
     return Value.initBool(true);
 }
