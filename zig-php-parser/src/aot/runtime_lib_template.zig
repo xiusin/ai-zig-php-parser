@@ -20201,7 +20201,7 @@ pub fn php_sha1(str: Value, raw_output: Value, allocator: Allocator) !Value {
 
 /// password_hash - 创建密码哈希
 /// 使用bcrypt算法 (PASSWORD_DEFAULT = PASSWORD_BCRYPT = 1)
-/// 签名: password_hash(password, algo, allocator) — options通过第三个Value参数传递时内部处理
+/// 签名: password_hash(password, algo, options = []) — options忽略，使用默认cost
 pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Value {
     if (!password.isString()) return error.InvalidArgument;
     
@@ -20216,9 +20216,8 @@ pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Va
         var hash_buf: [128]u8 = undefined;
         const hash_result = try std.crypto.pwhash.bcrypt.strHash(pwd, .{
             .allocator = allocator,
-            .params = .{ .rounds_log = cost },
+            .params = .{ .rounds_log = cost, .silently_truncate_password = true },
             .encoding = .phc,
-            .silently_truncate_password = true,
         }, &hash_buf);
         
         const php_str = try PHPString.init(allocator, hash_result);
@@ -20239,14 +20238,13 @@ pub fn php_password_verify(password: Value, hash: Value, allocator: Allocator) !
     const hash_str = hash.asString().data;
     
     // 使用bcrypt验证
-    const result = std.crypto.pwhash.bcrypt.strVerify(hash_str, pwd, .{
-        .allocator = runtime_allocator,
-        .encoding = .phc,
+    std.crypto.pwhash.bcrypt.strVerify(hash_str, pwd, .{
+        .silently_truncate_password = true,
     }) catch {
         return Value.initBool(false);
     };
     
-    return Value.initBool(result == .ok);
+    return Value.initBool(true);
 }
 
 pub fn php_uniqid(prefix: Value, more_entropy: Value, allocator: Allocator) !Value {
