@@ -6024,6 +6024,11 @@ pub const IRGenerator = struct {
             }
         }
         
+        // password_hash(password, algo, options=[]) — runtime只接受2个Value参数，截断options
+        if (std.mem.eql(u8, func_name, "password_hash") and args.len > 2) {
+            args = args[0..2];
+        }
+
         // 特殊处理：iterator_to_array 第二个参数可选，默认为true
         if (std.mem.eql(u8, func_name, "iterator_to_array") and args.len == 1) {
             const padded = try self.allocator.alloc(Register, 2);

@@ -8727,7 +8727,7 @@ pub const NativeLinker = struct {
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_password_hash")) {
-                                // password_hash(password, algo, options=[]) — runtime只接受(password, algo, allocator)
+                                // password_hash(password, algo) — IR已截断到2个参数，补齐不足的
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len >= 2) {
                                     try self.writeValueArgs(writer, op.args[0..2]);
@@ -8875,7 +8875,7 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("    _ = runtime.Value.initNull();\n");
                                 }
                             } else if (std.mem.eql(u8, runtime_name, "php_password_hash")) {
-                                // password_hash(password, algo, options=[]) — runtime只接受(password, algo, allocator)
+                                // password_hash(password, algo) — IR已截断到2个参数，补齐不足的
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                 if (op.args.len >= 2) {
                                     try self.writeValueArgs(writer, op.args[0..2]);
@@ -15375,7 +15375,7 @@ pub const NativeLinker = struct {
                                 try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
                             }
 
-                            const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents") or std.mem.eql(u8, op.func_name, "password_hash"))
+                            const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents"))
                                 @min(op.args.len, 2)
                             else
                                 op.args.len;
@@ -15455,12 +15455,8 @@ pub const NativeLinker = struct {
                             try self.writeStrGetcsvArgs(writer, op.args);
                             try writer.writeAll(", runtime.runtime_allocator);\n");
                         } else {
-                            const max_args4 = if (std.mem.eql(u8, op.func_name, "password_hash"))
-                                @min(op.args.len, 2)
-                            else
-                                op.args.len;
                             try writer.print("        _ = try runtime.{s}(", .{runtime_name});
-                            for (op.args[0..max_args4], 0..) |arg, i| {
+                            for (op.args, 0..) |arg, i| {
                                 if (i > 0) try writer.writeAll(", ");
                                 try self.writeRegRef(writer, arg.id);
                             }
