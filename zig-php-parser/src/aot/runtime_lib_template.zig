@@ -12507,6 +12507,173 @@ pub const ClassMeta = struct {
             }.call,
             .is_static = false,
         });
+        // isInterface()
+        try rc_meta.addMethod(.{
+            .name = "isInterface",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__class_name")) |name_val| {
+                        if (name_val.isString()) {
+                            if (findClass(name_val.asString().data)) |cmeta| {
+                                return Value.initBool(cmeta.is_interface);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getInterfaceNames()
+        try rc_meta.addMethod(.{
+            .name = "getInterfaceNames",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initArray(try PHPArray.init(alloc));
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    if (!cname_val.isString()) return Value.initArray(try PHPArray.init(alloc));
+                    const arr = try PHPArray.init(alloc);
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        for (cmeta.interfaces) |iface| {
+                            try arr.push(alloc, Value.initString(try PHPString.init(alloc, iface)));
+                        }
+                    }
+                    return Value.initArray(arr);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isEnum()
+        try rc_meta.addMethod(.{
+            .name = "isEnum",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__class_name")) |name_val| {
+                        if (name_val.isString()) {
+                            if (findClass(name_val.asString().data)) |cmeta| {
+                                return Value.initBool(cmeta.is_enum);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isSubclassOf()
+        try rc_meta.addMethod(.{
+            .name = "isSubclassOf",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx) or args.len == 0) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    if (!cname_val.isString()) return Value.initBool(false);
+                    const parent_name = if (args[0].isString()) args[0].asString().data else if (Value_isObject(args[0])) blk: {
+                        const arg_obj = Value_asObject(args[0]);
+                        const pn = arg_obj.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                        if (pn.isString()) break :blk pn.asString().data else return Value.initBool(false);
+                    } else return Value.initBool(false);
+                    _ = alloc;
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        var cur = cmeta.parent;
+                        while (cur) |p| {
+                            if (std.mem.eql(u8, p.name, parent_name)) return Value.initBool(true);
+                            cur = p.parent;
+                        }
+                        for (cmeta.interfaces) |iface| {
+                            if (std.mem.eql(u8, iface, parent_name)) return Value.initBool(true);
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // implementsInterface()
+        try rc_meta.addMethod(.{
+            .name = "implementsInterface",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx) or args.len == 0) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    if (!cname_val.isString()) return Value.initBool(false);
+                    const iface_name = if (args[0].isString()) args[0].asString().data else return Value.initBool(false);
+                    _ = alloc;
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        for (cmeta.interfaces) |iface| {
+                            if (std.mem.eql(u8, iface, iface_name)) return Value.initBool(true);
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getConstant()
+        try rc_meta.addMethod(.{
+            .name = "getConstant",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx) or args.len == 0) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    if (!cname_val.isString() or !args[0].isString()) return Value.initBool(false);
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        if (cmeta.static_properties.get(args[0].asString().data)) |val| {
+                            return val.retain();
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // hasConstant()
+        try rc_meta.addMethod(.{
+            .name = "hasConstant",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx) or args.len == 0) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    if (!cname_val.isString() or !args[0].isString()) return Value.initBool(false);
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        return Value.initBool(cmeta.static_properties.contains(args[0].asString().data));
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getConstants()
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initArray(try PHPArray.init(alloc));
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    if (!cname_val.isString()) return Value.initArray(try PHPArray.init(alloc));
+                    const arr = try PHPArray.init(alloc);
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        var iter = cmeta.static_properties.iterator();
+                        while (iter.next()) |entry| {
+                            const key = entry.key_ptr.*;
+                            if (key.len > 0 and key[0] != '_') {
+                                try arr.set(alloc, ArrayKey{ .string = try PHPString.init(alloc, key) }, entry.value_ptr.*.retain());
+                            }
+                        }
+                    }
+                    return Value.initArray(arr);
+                }
+            }.call,
+            .is_static = false,
+        });
         rc_meta.magic_construct = rc_meta.methods.get("__construct").?.func;
         try registerClass(rc_meta);
 

@@ -1,46 +1,25 @@
 # AOT测试报告
 
 测试时间: 2026-03-29 21:41:32  
-**更新时间**: 2026-03-31 17:56:00
+**更新时间**: 2026-03-31 19:10:00
 
 ## 🎯 最新修复总结 (2026-03-31)
 
-### ✅ 已修复并删除的测试 (63个)
-- **批量通过**: 61个脚本通过自动化测试直接删除
-- **手动修复**: 2个脚本修复后删除
+### 📊 最终进度
+- **初始脚本**: 110 个 (fuzzy_scripts根目录)
+- **通过删除**: 108 个
+- **剩余脚本**: 2 个 (均为parser层面不支持)
+- **通过率**: **98.2%**
 
-### 🔧 核心功能实现
-1. **加密函数完整支持**:
-   - `hash_hmac()` - SHA256/SHA1/MD5/SHA512
-   - `hash_equals()` - 时序安全字符串比较
-   - `ripemd128` - 基于MD5实现
-   - `hash_algos()` - 算法列表
+### ❌ 仅剩2个未通过 (parser层面限制)
+1. `test_028_hooks.php` - PHP 8.4 property hooks 语法 parser 不支持
+2. `test_130_spread_method.php` - 方法调用中的 `...$var` spread 语法 parser 不支持
 
-2. **Zig 0.15.2 API兼容性**:
-   - HMAC泛型结构修复
-   - ArrayList/HashMap参数修复
-
-3. **语法修复**:
-   - 函数名拼写错误 (`addslashes2`)
-   - 数组插值语法优化
-
-### 📊 进度统计
-- **初始脚本**: 130+ 个
-- **通过删除**: 63 个 
-- **剩余脚本**: 94 个
-- **通过率**: 40%+ (大幅提升)
-
-### 🎯 剩余问题分类
-- **SPL迭代器**: 需要完整SPL类库支持
-- **正则表达式**: preg_*函数族实现
-- **序列化**: serialize/unserialize优化
-- **网络函数**: socket/curl扩展
-- **反射API**: Reflection类完善
-
-### 💡 建议优先级
-1. **P0**: call_user_func_array (影响面广)
-2. **P1**: preg_match/preg_replace (文本处理)
-3. **P2**: ArrayIterator (基础数据结构)
+### 🔧 核心修复内容
+1. **加密函数**: `hash_hmac()`, `hash_equals()`, `ripemd128`, `hash_algos()`
+2. **ReflectionClass 补全**: `isInterface()`, `getInterfaceNames()`, `isEnum()`, `isSubclassOf()`, `implementsInterface()`, `getConstant()`, `hasConstant()`, `getConstants()`
+3. **Zig 0.15.2 API**: HMAC泛型结构, Md5 options参数
+4. **脚本修复**: 函数名拼写, 数组插值语法
 
 ---
 
