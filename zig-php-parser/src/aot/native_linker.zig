@@ -2811,6 +2811,8 @@ pub const NativeLinker = struct {
 
         // 哈希
         .{ "hash", bi(.{ .runtime_name = "php_hash", .needs_allocator = true }) },
+        .{ "hash_hmac", bi(.{ .runtime_name = "php_hash_hmac", .needs_allocator = true }) },
+        .{ "hash_equals", bi(.{ .runtime_name = "php_hash_equals", .needs_allocator = false }) },
         .{ "hash_algos", bi(.{ .runtime_name = "php_hash_algos", .needs_allocator = true }) },
 
         // 文件系统

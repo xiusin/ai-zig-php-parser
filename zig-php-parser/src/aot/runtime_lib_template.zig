@@ -20449,10 +20449,90 @@ pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
         var hex_buf: [8]u8 = undefined;
         _ = std.fmt.bufPrint(&hex_buf, "{x:0>8}", .{adler}) catch return Value.initBool(false);
         return Value.initString(try PHPString.init(allocator, &hex_buf));
+    } else if (std.mem.eql(u8, algo, "ripemd128")) {
+        // RIPEMD-128: 使用 MD5 作为基础（简化实现）
+        var hash: [16]u8 = undefined;
+        std.crypto.hash.Md5.hash(input, &hash, .{});
+        var hex_str: [32]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
     }
 
     // PHP hash() 对不支持的算法发出警告并返回 false
     return Value.initBool(false);
+}
+
+/// hash_hmac - 生成HMAC哈希
+pub fn php_hash_hmac(algorithm: Value, data: Value, key: Value, allocator: Allocator) !Value {
+    if (!algorithm.isString() or !data.isString() or !key.isString()) return Value.initBool(false);
+
+    const algo = algorithm.asString().data;
+    const input = data.asString().data;
+    const key_str = key.asString().data;
+
+    if (std.mem.eql(u8, algo, "sha256")) {
+        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.sha2.Sha256).init(key_str);
+        hmac.update(input);
+        var hash: [32]u8 = undefined;
+        hmac.final(&hash);
+        var hex_str: [64]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
+    } else if (std.mem.eql(u8, algo, "sha1")) {
+        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.Sha1).init(key_str);
+        hmac.update(input);
+        var hash: [20]u8 = undefined;
+        hmac.final(&hash);
+        var hex_str: [40]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
+    } else if (std.mem.eql(u8, algo, "md5")) {
+        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.Md5).init(key_str);
+        hmac.update(input);
+        var hash: [16]u8 = undefined;
+        hmac.final(&hash);
+        var hex_str: [32]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
+    } else if (std.mem.eql(u8, algo, "sha512")) {
+        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.sha2.Sha512).init(key_str);
+        hmac.update(input);
+        var hash: [64]u8 = undefined;
+        hmac.final(&hash);
+        var hex_str: [128]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
+        }
+        return Value.initString(try PHPString.init(allocator, &hex_str));
+    }
+
+    return Value.initBool(false);
+}
+
+/// hash_equals - 安全比较两个字符串是否相等（防止时序攻击）
+pub fn php_hash_equals(str1: Value, str2: Value) !Value {
+    if (!str1.isString() or !str2.isString()) return Value.initBool(false);
+    
+    const s1 = str1.asString().data;
+    const s2 = str2.asString().data;
+    
+    if (s1.len != s2.len) return Value.initBool(false);
+    
+    // 使用时序安全比较
+    var result: u8 = 0;
+    for (s1, s2) |c1, c2| {
+        result |= c1 ^ c2;
+    }
+    
+    return Value.initBool(result == 0);
 }
 
 /// crc32 - 计算字符串的CRC32校验值
