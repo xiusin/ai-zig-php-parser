@@ -1030,6 +1030,15 @@ pub const Parser = struct {
         if (self.curr.tag != .k_get and self.curr.tag != .k_set) return error.ExpectedHookName;
         const name_id = try self.context.intern(self.lexer.buffer[self.curr.loc.start..self.curr.loc.end]);
         self.nextToken();
+        // PHP 8.4: set hook may have parameter list: set(Type $value) { ... }
+        if (self.curr.tag == .l_paren) {
+            self.nextToken();
+            // Skip parameter list (type and variable)
+            while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                self.nextToken();
+            }
+            _ = try self.eat(.r_paren);
+        }
         var body: ast.Node.Index = 0;
         if (self.curr.tag == .fat_arrow) {
             self.nextToken();
@@ -2143,7 +2152,8 @@ pub const Parser = struct {
                     self.nextToken();
                     
                     // 检查是否是 first-class callable: $obj->method(...)
-                    if (self.curr.tag == .ellipsis) {
+                    // 注意区分: method(...) 是 first-class callable, method(...$var) 是 spread
+                    if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
                         self.nextToken();
                         _ = try self.eat(.r_paren);
                         
@@ -2168,7 +2178,7 @@ pub const Parser = struct {
                         arrow_params[0] = args_param;
                         left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = arrow_params, .return_type = null, .body = method_call, .is_static = false } } });
                     } else {
-                        // 普通方法调用
+                        // 普通方法调用（包括 spread 参数 ...$var）
                         var args = std.ArrayListUnmanaged(ast.Node.Index){};
                         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                             try args.append(self.allocator, try self.parseCallArg());
@@ -2516,7 +2526,8 @@ pub const Parser = struct {
                     self.nextToken();
                     
                     // 检查是否是 first-class callable: $obj->method(...)
-                    if (self.curr.tag == .ellipsis) {
+                    // 注意区分: method(...) 是 first-class callable, method(...$var) 是 spread
+                    if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
                         self.nextToken();
                         _ = try self.eat(.r_paren);
                         

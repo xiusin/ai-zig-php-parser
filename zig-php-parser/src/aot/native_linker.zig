@@ -1827,6 +1827,18 @@ pub const NativeLinker = struct {
         visibility: IR.TypeDef.Visibility,
         is_static: bool,
     ) !void {
+        return self.emitMethodRegistrationEx(writer, meta_name, exposed_name, function_trait, original_name, visibility, is_static, false, false, &.{});
+    }
+
+    fn emitMethodRegistrationFull(
+        self: *Self,
+        writer: anytype,
+        meta_name: []const u8,
+        exposed_name: []const u8,
+        function_trait: []const u8,
+        original_name: []const u8,
+        method: IR.TypeDef.Method,
+    ) !void {
         const full_method_name = try std.fmt.allocPrint(
             self.allocator,
             "{s}::{s}",
@@ -1838,19 +1850,112 @@ pub const NativeLinker = struct {
             full_method_name,
         );
         defer self.allocator.free(escaped_method_name);
-        // 从IR函数定义获取参数计数
+
+        // 直接使用 TypeDef.Method 的元数据（已在 ir_generator 中正确计算，不含隐式 this）
+        try writer.print(
+            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .is_abstract = {}, .is_final = {}, .param_count = {d}, .required_params = {d}",
+            .{
+                meta_name,
+                exposed_name,
+                escaped_method_name,
+                method.is_static,
+                method.visibility == .public,
+                method.visibility == .protected,
+                method.visibility == .private,
+                method.is_abstract,
+                method.is_final,
+                method.param_count,
+                method.required_params,
+            },
+        );
+        // 生成 param_names 数组
+        if (method.param_names.len > 0) {
+            try writer.writeAll(", .param_names = &[_][]const u8{");
+            for (method.param_names, 0..) |pn, i| {
+                if (i > 0) try writer.writeAll(", ");
+                const escaped_pn = try self.escapeString(pn);
+                defer self.allocator.free(escaped_pn);
+                try writer.print("\"{s}\"", .{escaped_pn});
+            }
+            try writer.writeAll("}");
+        }
+        // 生成 param_types 数组
+        if (method.param_types.len > 0) {
+            try writer.writeAll(", .param_types = &[_][]const u8{");
+            for (method.param_types, 0..) |pt, i| {
+                if (i > 0) try writer.writeAll(", ");
+                const escaped_pt = try self.escapeString(pt);
+                defer self.allocator.free(escaped_pt);
+                try writer.print("\"{s}\"", .{escaped_pt});
+            }
+            try writer.writeAll("}");
+        }
+        // 生成 param_nullable 数组
+        if (method.param_nullable.len > 0) {
+            try writer.writeAll(", .param_nullable = &[_]bool{");
+            for (method.param_nullable, 0..) |pn, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("{}", .{pn});
+            }
+            try writer.writeAll("}");
+        }
+        // 生成 return_type
+        if (method.return_type) |rt| {
+            const escaped_rt = try self.escapeString(rt);
+            defer self.allocator.free(escaped_rt);
+            try writer.print(", .return_type = \"{s}\"", .{escaped_rt});
+            try writer.print(", .return_nullable = {}", .{method.return_nullable});
+        }
+        try writer.writeAll(" });\n");
+    }
+
+    fn emitMethodRegistrationEx(
+        self: *Self,
+        writer: anytype,
+        meta_name: []const u8,
+        exposed_name: []const u8,
+        function_trait: []const u8,
+        original_name: []const u8,
+        visibility: IR.TypeDef.Visibility,
+        is_static: bool,
+        is_abstract: bool,
+        is_final: bool,
+        ir_param_names: []const []const u8,
+    ) !void {
+        const full_method_name = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}::{s}",
+            .{ function_trait, original_name },
+        );
+        defer self.allocator.free(full_method_name);
+        const escaped_method_name = try escapeBackslashes(
+            self.allocator,
+            full_method_name,
+        );
+        defer self.allocator.free(escaped_method_name);
+        // 从IR函数定义获取参数计数和参数名
         var pc: usize = 0;
         var rp: usize = 0;
+        var func_param_names = std.ArrayListUnmanaged([]const u8){};
+        defer func_param_names.deinit(self.allocator);
         if (self.ir_module) |ir_mod| {
             if (self.findFunction(ir_mod, full_method_name)) |func| {
-                pc = func.params.items.len;
                 for (func.params.items) |p| {
+                    // 跳过隐式 this 参数（非 static 方法的第一个参数）
+                    if (std.mem.eql(u8, p.name, "this") or std.mem.eql(u8, p.name, "$this")) continue;
+                    pc += 1;
                     if (!p.has_default and !p.is_variadic) rp += 1;
+                    // 去掉 $ 前缀，与 PHP ReflectionParameter::getName() 行为一致
+                    const pname = if (p.name.len > 0 and p.name[0] == '$') p.name[1..] else p.name;
+                    try func_param_names.append(self.allocator, pname);
                 }
             }
         }
+        // 如果IR函数没找到参数名，使用TypeDef.Method中的
+        const final_param_names = if (func_param_names.items.len > 0) func_param_names.items else ir_param_names;
+
         try writer.print(
-            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .param_count = {d}, .required_params = {d} }});\n",
+            "    try {s}_meta.addMethod(.{{ .name = \"{s}\", .func = @\"{s}\", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .is_abstract = {}, .is_final = {}, .param_count = {d}, .required_params = {d}",
             .{
                 meta_name,
                 exposed_name,
@@ -1859,10 +1964,24 @@ pub const NativeLinker = struct {
                 visibility == .public,
                 visibility == .protected,
                 visibility == .private,
+                is_abstract,
+                is_final,
                 pc,
                 rp,
             },
         );
+        // 生成 param_names 数组
+        if (final_param_names.len > 0) {
+            try writer.writeAll(", .param_names = &[_][]const u8{");
+            for (final_param_names, 0..) |pn, i| {
+                if (i > 0) try writer.writeAll(", ");
+                const escaped_pn = try self.escapeString(pn);
+                defer self.allocator.free(escaped_pn);
+                try writer.print("\"{s}\"", .{escaped_pn});
+            }
+            try writer.writeAll("}");
+        }
+        try writer.writeAll(" });\n");
     }
 
     /// 检查函数是否有返回值
@@ -1984,7 +2103,13 @@ pub const NativeLinker = struct {
                     } else {
                         try writer.writeAll("runtime.Value.initNull()");
                     }
-                    try writer.print(", .is_static = {}, .is_public = {}, .is_readonly = false }});\n", .{ prop.is_static, is_public });
+                    try writer.print(", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .is_readonly = {}, .has_default = {}", .{ prop.is_static, is_public, prop.visibility == .protected, prop.visibility == .private, prop.is_readonly, prop.has_default });
+                    if (prop.type_name) |tn| {
+                        const escaped_tn = try self.escapeString(tn);
+                        defer self.allocator.free(escaped_tn);
+                        try writer.print(", .type_name = \"{s}\", .type_nullable = {}", .{ escaped_tn, prop.type_nullable });
+                    }
+                    try writer.writeAll(" });\n");
 
                     if (prop.is_static) {
                         try writer.print("    try {s}_meta.setStaticProperty(\"{s}\", ", .{ short_cname, prop.name });
@@ -2034,7 +2159,13 @@ pub const NativeLinker = struct {
                     } else {
                         try writer.writeAll("runtime.Value.initNull()");
                     }
-                    try writer.print(", .is_static = {}, .is_public = {}, .is_readonly = false }});\n", .{ prop.is_static, is_public });
+                    try writer.print(", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .is_readonly = {}, .has_default = {}", .{ prop.is_static, is_public, prop.visibility == .protected, prop.visibility == .private, prop.is_readonly, prop.has_default });
+                    if (prop.type_name) |tn| {
+                        const escaped_tn = try self.escapeString(tn);
+                        defer self.allocator.free(escaped_tn);
+                        try writer.print(", .type_name = \"{s}\", .type_nullable = {}", .{ escaped_tn, prop.type_nullable });
+                    }
+                    try writer.writeAll(" });\n");
 
                     if (prop.is_static) {
                         try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", ", .{ short_cname, prop.name });
@@ -2060,14 +2191,13 @@ pub const NativeLinker = struct {
                 }
 
                 for (td.methods) |method| {
-                    try self.emitMethodRegistration(
+                    try self.emitMethodRegistrationFull(
                         writer,
                         short_cname,
                         method.name,
                         full_cname,
                         method.name,
-                        method.visibility,
-                        method.is_static,
+                        method,
                     );
                 }
                 for (trait_methods.items) |method| {
@@ -2100,6 +2230,8 @@ pub const NativeLinker = struct {
                         try writer.print("            const attr_obj = try runtime.php_object_new(\"ReflectionAttribute\", allocator);\n", .{});
                         try writer.print("            const attr_o = runtime.Value_asObject(attr_obj);\n", .{});
                         try writer.print("            try attr_o.setProperty(\"__name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_attr});
+                        // TARGET_CLASS = 1
+                        try writer.print("            try attr_o.setProperty(\"__target\", runtime.Value.initInt(1));\n", .{});
                         // 存储参数数组
                         try writer.print("            const args_arr = try runtime.PHPArray.init(allocator);\n", .{});
                         for (attr.args) |arg| {

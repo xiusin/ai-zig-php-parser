@@ -2875,6 +2875,34 @@ pub const VM = struct {
         rp_class.* = try types.PHPClass.init(self.allocator, rp_name);
         rp_name.release(self.allocator);
         try self.classes.put("ReflectionParameter", rp_class);
+
+        // Create ReflectionNamedType class
+        const rnt_name = try types.PHPString.init(self.allocator, "ReflectionNamedType");
+        const rnt_class = try self.allocator.create(types.PHPClass);
+        rnt_class.* = try types.PHPClass.init(self.allocator, rnt_name);
+        rnt_name.release(self.allocator);
+        try self.classes.put("ReflectionNamedType", rnt_class);
+
+        // Create ReflectionProperty class
+        const rprop_name = try types.PHPString.init(self.allocator, "ReflectionProperty");
+        const rprop_class = try self.allocator.create(types.PHPClass);
+        rprop_class.* = try types.PHPClass.init(self.allocator, rprop_name);
+        rprop_name.release(self.allocator);
+        try self.classes.put("ReflectionProperty", rprop_class);
+
+        // Create ReflectionUnionType class
+        const rut_name = try types.PHPString.init(self.allocator, "ReflectionUnionType");
+        const rut_class = try self.allocator.create(types.PHPClass);
+        rut_class.* = try types.PHPClass.init(self.allocator, rut_name);
+        rut_name.release(self.allocator);
+        try self.classes.put("ReflectionUnionType", rut_class);
+
+        // Create ReflectionIntersectionType class
+        const rit_name = try types.PHPString.init(self.allocator, "ReflectionIntersectionType");
+        const rit_class = try self.allocator.create(types.PHPClass);
+        rit_class.* = try types.PHPClass.init(self.allocator, rit_name);
+        rit_name.release(self.allocator);
+        try self.classes.put("ReflectionIntersectionType", rit_class);
     }
 
     /// Construct a ReflectionFunction object
@@ -3132,11 +3160,47 @@ pub const VM = struct {
                 if (self.getClass(cn)) |cls| {
                     var iter = cls.properties.iterator();
                     while (iter.next()) |entry| {
-                        try result_arr.push(self.allocator, try Value.initString(self.allocator, entry.key_ptr.*));
+                        const rprop_class = self.getClass("ReflectionProperty") orelse break;
+                        const rprop_val = try Value.initObjectWithManager(&self.memory_manager, rprop_class);
+                        const rprop_obj = rprop_val.getAsObject().data;
+                        try rprop_obj.setProperty(self.allocator, "__class_name", try Value.initString(self.allocator, cn));
+                        try rprop_obj.setProperty(self.allocator, "__prop_name", try Value.initString(self.allocator, entry.key_ptr.*));
+                        try result_arr.push(self.allocator, rprop_val);
                     }
                 }
             }
             return result;
+        } else if (std.mem.eql(u8, method_name, "getProperty")) {
+            if (rc_name) |cn| {
+                if (args.len > 0 and args[0].isString()) {
+                    const pname = args[0].getAsString().data.data;
+                    if (self.getClass(cn)) |cls| {
+                        if (cls.hasProperty(pname)) {
+                            const rprop_class = self.getClass("ReflectionProperty") orelse return Value.initNull();
+                            const rprop_val = try Value.initObjectWithManager(&self.memory_manager, rprop_class);
+                            const rprop_obj = rprop_val.getAsObject().data;
+                            try rprop_obj.setProperty(self.allocator, "__class_name", try Value.initString(self.allocator, cn));
+                            try rprop_obj.setProperty(self.allocator, "__prop_name", try Value.initString(self.allocator, pname));
+                            return rprop_val;
+                        }
+                    }
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getConstructor")) {
+            if (rc_name) |cn| {
+                if (self.getClass(cn)) |cls| {
+                    if (cls.hasMethod("__construct")) {
+                        const rm_class = self.getClass("ReflectionMethod") orelse return Value.initNull();
+                        const rm_val = try Value.initObjectWithManager(&self.memory_manager, rm_class);
+                        const rm_obj = rm_val.getAsObject().data;
+                        try rm_obj.setProperty(self.allocator, "__class_name", try Value.initString(self.allocator, cn));
+                        try rm_obj.setProperty(self.allocator, "__method_name", try Value.initString(self.allocator, "__construct"));
+                        return rm_val;
+                    }
+                }
+            }
+            return Value.initNull();
         } else if (std.mem.eql(u8, method_name, "newInstance")) {
             if (rc_name) |cn| {
                 if (self.getClass(cn)) |cls| {
@@ -3202,6 +3266,67 @@ pub const VM = struct {
         return self.throwException(exception);
     }
 
+    /// 判断 PHP 类型名是否是内置类型
+    fn isBuiltinTypeName(type_name: []const u8) bool {
+        const builtins = [_][]const u8{
+            "int", "float", "string", "bool", "array", "object", "callable",
+            "iterable", "void", "never", "null", "mixed", "true", "false",
+        };
+        for (builtins) |b| {
+            if (std.mem.eql(u8, type_name, b)) return true;
+        }
+        return false;
+    }
+
+    /// 从 TypeInfo 创建 ReflectionNamedType 对象
+    fn createReflectionNamedTypeObj(self: *VM, ti: types.TypeInfo) !Value {
+        const cls = self.getClass("ReflectionNamedType") orelse return Value.initNull();
+        const val = try Value.initObjectWithManager(&self.memory_manager, cls);
+        const o = val.getAsObject().data;
+        try o.setProperty(self.allocator, "__type_name", try Value.initString(self.allocator, ti.name.data));
+        try o.setProperty(self.allocator, "__allows_null", Value.initBool(ti.is_nullable));
+        try o.setProperty(self.allocator, "__is_builtin", Value.initBool(isBuiltinTypeName(ti.name.data)));
+        return val;
+    }
+
+    /// 从 TypeInfo 创建 ReflectionType 对象（可能是 Named/Union/Intersection）
+    fn createReflectionTypeObj(self: *VM, ti: types.TypeInfo) !Value {
+        if (ti.is_union and ti.union_types.len > 0) {
+            // ReflectionUnionType
+            const cls = self.getClass("ReflectionUnionType") orelse return self.createReflectionNamedTypeObj(ti);
+            const val = try Value.initObjectWithManager(&self.memory_manager, cls);
+            const o = val.getAsObject().data;
+            try o.setProperty(self.allocator, "__allows_null", Value.initBool(ti.is_nullable));
+            // 存储子类型名列表
+            const arr = try Value.initArrayWithManager(&self.memory_manager);
+            const arr_data = arr.getAsArray().data;
+            for (ti.union_types) |sub_ti| {
+                const sub_val = try self.createReflectionNamedTypeObj(sub_ti.*);
+                try arr_data.push(self.allocator, sub_val);
+            }
+            try o.setProperty(self.allocator, "__types", arr);
+            return val;
+        }
+        return self.createReflectionNamedTypeObj(ti);
+    }
+
+    /// 解析存储在 ReflectionMethod 对象上的 class_name + method_name 到 Method 指针
+    fn resolveMethodFromObj(self: *VM, obj: *types.PHPObject) ?*const types.Method {
+        const cname_val = obj.getProperty("__class_name") catch return null;
+        const mname_val = obj.getProperty("__method_name") catch return null;
+        if (!cname_val.isString() or !mname_val.isString()) return null;
+        const cls = self.getClass(cname_val.getAsString().data.data) orelse return null;
+        return cls.getMethod(mname_val.getAsString().data.data);
+    }
+
+    /// PHP ReflectionMethod 修饰符常量
+    const IS_STATIC: i64 = 16;
+    const IS_ABSTRACT: i64 = 64;
+    const IS_FINAL: i64 = 32;
+    const IS_PUBLIC: i64 = 1;
+    const IS_PROTECTED: i64 = 2;
+    const IS_PRIVATE: i64 = 4;
+
     /// Handle method calls on ReflectionMethod objects
     fn callReflectionMethodMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
         const obj = obj_value.getAsObject().data;
@@ -3221,18 +3346,98 @@ pub const VM = struct {
             } else |_| {}
             return Value.initNull();
         } else if (std.mem.eql(u8, method_name, "isPublic")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initBool(m.modifiers.visibility == .public);
             return Value.initBool(true);
+        } else if (std.mem.eql(u8, method_name, "isProtected")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initBool(m.modifiers.visibility == .protected);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isPrivate")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initBool(m.modifiers.visibility == .private);
+            return Value.initBool(false);
         } else if (std.mem.eql(u8, method_name, "isStatic")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initBool(m.modifiers.is_static);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isFinal")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initBool(m.modifiers.is_final);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isAbstract")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initBool(m.modifiers.is_abstract);
             return Value.initBool(false);
         } else if (std.mem.eql(u8, method_name, "isConstructor")) {
             if (obj.getProperty("__method_name")) |v| {
                 if (v.isString()) return Value.initBool(std.mem.eql(u8, v.getAsString().data.data, "__construct"));
             } else |_| {}
             return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "hasReturnType")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initBool(m.return_type != null);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "getReturnType")) {
+            if (self.resolveMethodFromObj(obj)) |m| {
+                if (m.return_type) |rt| {
+                    // Return type name string instead of object
+                    const type_str = rt.name.data;
+                    if (rt.is_nullable) {
+                        const prefixed = try std.fmt.allocPrint(self.allocator, "?{s}", .{type_str});
+                        defer self.allocator.free(prefixed);
+                        return try Value.initString(self.allocator, prefixed);
+                    }
+                    return try Value.initString(self.allocator, type_str);
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getModifiers")) {
+            if (self.resolveMethodFromObj(obj)) |m| {
+                var flags: i64 = 0;
+                if (m.modifiers.visibility == .public) flags |= IS_PUBLIC;
+                if (m.modifiers.visibility == .protected) flags |= IS_PROTECTED;
+                if (m.modifiers.visibility == .private) flags |= IS_PRIVATE;
+                if (m.modifiers.is_static) flags |= IS_STATIC;
+                if (m.modifiers.is_final) flags |= IS_FINAL;
+                if (m.modifiers.is_abstract) flags |= IS_ABSTRACT;
+                return Value.initInt(flags);
+            }
+            return Value.initInt(IS_PUBLIC);
         } else if (std.mem.eql(u8, method_name, "getNumberOfParameters")) {
+            if (self.resolveMethodFromObj(obj)) |m| return Value.initInt(@intCast(m.parameters.len));
             return Value.initInt(0);
         } else if (std.mem.eql(u8, method_name, "getNumberOfRequiredParameters")) {
+            if (self.resolveMethodFromObj(obj)) |m| {
+                var count: i64 = 0;
+                for (m.parameters) |p| {
+                    if (p.default_value == null and !p.is_variadic) count += 1;
+                }
+                return Value.initInt(count);
+            }
             return Value.initInt(0);
+        } else if (std.mem.eql(u8, method_name, "getParameters")) {
+            const result = try Value.initArrayWithManager(&self.memory_manager);
+            const result_arr = result.getAsArray().data;
+            if (self.resolveMethodFromObj(obj)) |m| {
+                const cname_val = obj.getProperty("__class_name") catch null;
+                const mname_val = obj.getProperty("__method_name") catch null;
+                for (m.parameters, 0..) |p, i| {
+                    const rp_class = self.getClass("ReflectionParameter") orelse break;
+                    const rp_val = try Value.initObjectWithManager(&self.memory_manager, rp_class);
+                    const rp_obj = rp_val.getAsObject().data;
+                    try rp_obj.setProperty(self.allocator, "__name", try Value.initString(self.allocator, p.name.data));
+                    try rp_obj.setProperty(self.allocator, "__position", Value.initInt(@intCast(i)));
+                    try rp_obj.setProperty(self.allocator, "__is_optional", Value.initBool(p.default_value != null or p.is_variadic));
+                    try rp_obj.setProperty(self.allocator, "__is_variadic", Value.initBool(p.is_variadic));
+                    try rp_obj.setProperty(self.allocator, "__has_default", Value.initBool(p.default_value != null));
+                    if (p.type) |ti| {
+                        try rp_obj.setProperty(self.allocator, "__has_type", Value.initBool(true));
+                        try rp_obj.setProperty(self.allocator, "__type_name", try Value.initString(self.allocator, ti.name.data));
+                        try rp_obj.setProperty(self.allocator, "__type_nullable", Value.initBool(ti.is_nullable));
+                        try rp_obj.setProperty(self.allocator, "__type_is_union", Value.initBool(ti.is_union));
+                    } else {
+                        try rp_obj.setProperty(self.allocator, "__has_type", Value.initBool(false));
+                    }
+                    if (cname_val) |cv| try rp_obj.setProperty(self.allocator, "__class_name", cv.retain());
+                    if (mname_val) |mv| try rp_obj.setProperty(self.allocator, "__method_name", mv.retain());
+                    try result_arr.push(self.allocator, rp_val);
+                }
+            }
+            return result;
         } else if (std.mem.eql(u8, method_name, "invoke")) {
             // invoke($object, ...$args) - call method on object
             if (args.len > 0 and args[0].isObject()) {
@@ -3258,38 +3463,253 @@ pub const VM = struct {
             if (obj.getProperty("__name")) |v| {
                 return v.retain();
             } else |_| {}
-            // Fallback from position
             const pos_val = obj.getProperty("__position") catch return try Value.initString(self.allocator, "param0");
             const pos = pos_val.asInt();
             const name = try std.fmt.allocPrint(self.allocator, "param{d}", .{pos});
             return try Value.initString(self.allocator, name);
         } else if (std.mem.eql(u8, method_name, "getPosition")) {
-            if (obj.getProperty("__position")) |v| {
-                return v;
-            } else |_| {}
-            return Value.initInt(0);
+            return obj.getProperty("__position") catch Value.initInt(0);
         } else if (std.mem.eql(u8, method_name, "isOptional")) {
-            if (obj.getProperty("__is_optional")) |v| {
-                return v;
-            } else |_| {}
-            return Value.initBool(false);
+            return obj.getProperty("__is_optional") catch Value.initBool(false);
         } else if (std.mem.eql(u8, method_name, "hasDefaultValue")) {
-            if (obj.getProperty("__has_default")) |v| {
-                return v;
-            } else |_| {}
-            return Value.initBool(false);
+            return obj.getProperty("__has_default") catch Value.initBool(false);
         } else if (std.mem.eql(u8, method_name, "isVariadic")) {
-            if (obj.getProperty("__is_variadic")) |v| {
-                return v;
-            } else |_| {}
-            return Value.initBool(false);
-        } else if (std.mem.eql(u8, method_name, "allowsNull")) {
-            return Value.initBool(true);
+            return obj.getProperty("__is_variadic") catch Value.initBool(false);
         } else if (std.mem.eql(u8, method_name, "hasType")) {
-            return Value.initBool(false);
+            return obj.getProperty("__has_type") catch Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "getType")) {
+            const has_type = obj.getProperty("__has_type") catch return Value.initNull();
+            if (has_type.isBool() and has_type.asBool()) {
+                const tn_val = obj.getProperty("__type_name") catch return Value.initNull();
+                if (tn_val.isString()) {
+                    const is_nullable = blk: {
+                        const nv = obj.getProperty("__type_nullable") catch break :blk false;
+                        break :blk nv.isBool() and nv.asBool();
+                    };
+                    const type_str = tn_val.getAsString().data.data;
+                    if (is_nullable) {
+                        const prefixed = try std.fmt.allocPrint(self.allocator, "?{s}", .{type_str});
+                        defer self.allocator.free(prefixed);
+                        return try Value.initString(self.allocator, prefixed);
+                    }
+                    return tn_val.retain();
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "allowsNull")) {
+            const has_type = obj.getProperty("__has_type") catch return Value.initBool(true);
+            if (has_type.isBool() and has_type.asBool()) {
+                const nv = obj.getProperty("__type_nullable") catch return Value.initBool(false);
+                return if (nv.isBool()) nv else Value.initBool(false);
+            }
+            return Value.initBool(true); // 无类型声明时允许 null
         }
 
         const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionParameter::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// Handle method calls on ReflectionNamedType objects
+    fn callReflectionNamedTypeMethod(self: *VM, obj_value: Value, method_name: []const u8) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getName") or std.mem.eql(u8, method_name, "__toString")) {
+            const v = obj.getProperty("__type_name") catch return try Value.initString(self.allocator, "");
+            return v.retain();
+        } else if (std.mem.eql(u8, method_name, "allowsNull")) {
+            return obj.getProperty("__allows_null") catch Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isBuiltin")) {
+            return obj.getProperty("__is_builtin") catch Value.initBool(false);
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionNamedType::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// 解析 ReflectionProperty 对象中存储的 class_name + prop_name 到 Property 指针
+    fn resolvePropertyFromObj(self: *VM, obj: *types.PHPObject) ?*const types.Property {
+        const cname_val = obj.getProperty("__class_name") catch return null;
+        const pname_val = obj.getProperty("__prop_name") catch return null;
+        if (!cname_val.isString() or !pname_val.isString()) return null;
+        const cls = self.getClass(cname_val.getAsString().data.data) orelse return null;
+        return cls.getProperty(pname_val.getAsString().data.data);
+    }
+
+    /// Handle method calls on ReflectionProperty objects
+    fn callReflectionPropertyMethod(self: *VM, obj_value: Value, method_name: []const u8, args: []const Value) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getName")) {
+            const v = obj.getProperty("__prop_name") catch return try Value.initString(self.allocator, "");
+            return v.retain();
+        } else if (std.mem.eql(u8, method_name, "hasType")) {
+            if (self.resolvePropertyFromObj(obj)) |p| return Value.initBool(p.type != null);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "getType")) {
+            if (self.resolvePropertyFromObj(obj)) |p| {
+                if (p.type) |ti| {
+                    // Return type name string instead of object
+                    const type_str = ti.name.data;
+                    if (ti.is_nullable) {
+                        const prefixed = try std.fmt.allocPrint(self.allocator, "?{s}", .{type_str});
+                        defer self.allocator.free(prefixed);
+                        return try Value.initString(self.allocator, prefixed);
+                    }
+                    return try Value.initString(self.allocator, type_str);
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "isPublic")) {
+            if (self.resolvePropertyFromObj(obj)) |p| return Value.initBool(p.modifiers.visibility == .public);
+            return Value.initBool(true);
+        } else if (std.mem.eql(u8, method_name, "isProtected")) {
+            if (self.resolvePropertyFromObj(obj)) |p| return Value.initBool(p.modifiers.visibility == .protected);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isPrivate")) {
+            if (self.resolvePropertyFromObj(obj)) |p| return Value.initBool(p.modifiers.visibility == .private);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isStatic")) {
+            if (self.resolvePropertyFromObj(obj)) |p| return Value.initBool(p.modifiers.is_static);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isReadOnly") or std.mem.eql(u8, method_name, "isReadonly")) {
+            if (self.resolvePropertyFromObj(obj)) |p| return Value.initBool(p.modifiers.is_readonly);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "isDefault")) {
+            // isDefault() 在 PHP 中表示属性是否在类定义中声明（非动态添加）
+            // 通过 Reflection 获取的属性一定是在类定义中声明的
+            return Value.initBool(true);
+        } else if (std.mem.eql(u8, method_name, "hasDefaultValue")) {
+            if (self.resolvePropertyFromObj(obj)) |p| return Value.initBool(p.default_value != null);
+            return Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "getDefaultValue")) {
+            if (self.resolvePropertyFromObj(obj)) |p| {
+                if (p.default_value) |dv| return dv.retain();
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getModifiers")) {
+            if (self.resolvePropertyFromObj(obj)) |p| {
+                var flags: i64 = 0;
+                if (p.modifiers.visibility == .public) flags |= IS_PUBLIC;
+                if (p.modifiers.visibility == .protected) flags |= IS_PROTECTED;
+                if (p.modifiers.visibility == .private) flags |= IS_PRIVATE;
+                if (p.modifiers.is_static) flags |= IS_STATIC;
+                if (p.modifiers.is_readonly) flags |= 128; // IS_READONLY = 128
+                return Value.initInt(flags);
+            }
+            return Value.initInt(IS_PUBLIC);
+        } else if (std.mem.eql(u8, method_name, "getValue")) {
+            // 实例属性: getValue($object)
+            if (args.len > 0 and args[0].isObject()) {
+                const pname_val = obj.getProperty("__prop_name") catch return Value.initNull();
+                if (pname_val.isString()) {
+                    const target = args[0].getAsObject().data;
+                    const v = target.getProperty(pname_val.getAsString().data.data) catch return Value.initNull();
+                    return v.retain();
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "setValue")) {
+            // instance: setValue($object, $value)
+            if (args.len >= 2 and args[0].isObject()) {
+                const pname_val = obj.getProperty("__prop_name") catch return Value.initNull();
+                if (pname_val.isString()) {
+                    const target = args[0].getAsObject().data;
+                    try target.setProperty(self.allocator, pname_val.getAsString().data.data, args[1].retain());
+                }
+            }
+            return Value.initNull();
+        } else if (std.mem.eql(u8, method_name, "getDeclaringClass")) {
+            const cname_val = obj.getProperty("__class_name") catch return Value.initNull();
+            const prc_class = self.getClass("ReflectionClass") orelse return Value.initNull();
+            const prc_val = try Value.initObjectWithManager(&self.memory_manager, prc_class);
+            const prc_obj = prc_val.getAsObject().data;
+            try prc_obj.setProperty(self.allocator, "__rc_name", cname_val.retain());
+            return prc_val;
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionProperty::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// Handle method calls on ReflectionUnionType objects
+    fn callReflectionUnionTypeMethod(self: *VM, obj_value: Value, method_name: []const u8) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getTypes")) {
+            const v = obj.getProperty("__types") catch return Value.initArrayWithManager(&self.memory_manager);
+            return v.retain();
+        } else if (std.mem.eql(u8, method_name, "allowsNull")) {
+            return obj.getProperty("__allows_null") catch Value.initBool(false);
+        } else if (std.mem.eql(u8, method_name, "__toString")) {
+            const types_val = obj.getProperty("__types") catch return try Value.initString(self.allocator, "");
+            if (types_val.isArray()) {
+                const arr = types_val.getAsArray().data;
+                const count = arr.count();
+                var parts = std.ArrayList(u8){};
+                defer parts.deinit(self.allocator);
+                var idx: usize = 0;
+                while (idx < count) : (idx += 1) {
+                    const sub = arr.get(types.ArrayKey{ .integer = @intCast(idx) }) orelse continue;
+                    if (sub.isObject()) {
+                        const sub_obj = sub.getAsObject().data;
+                        const tn = sub_obj.getProperty("__type_name") catch continue;
+                        if (tn.isString()) {
+                            if (idx > 0) try parts.append(self.allocator, '|');
+                            try parts.appendSlice(self.allocator, tn.getAsString().data.data);
+                        }
+                    }
+                }
+                return try Value.initString(self.allocator, parts.items);
+            }
+            return try Value.initString(self.allocator, "");
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionUnionType::{s}()", .{method_name});
+        defer self.allocator.free(error_msg);
+        const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
+        return self.throwException(exception);
+    }
+
+    /// Handle method calls on ReflectionIntersectionType objects
+    fn callReflectionIntersectionTypeMethod(self: *VM, obj_value: Value, method_name: []const u8) !Value {
+        const obj = obj_value.getAsObject().data;
+
+        if (std.mem.eql(u8, method_name, "getTypes")) {
+            const v = obj.getProperty("__types") catch return Value.initArrayWithManager(&self.memory_manager);
+            return v.retain();
+        } else if (std.mem.eql(u8, method_name, "allowsNull")) {
+            return Value.initBool(false); // intersection types 不允许 null
+        } else if (std.mem.eql(u8, method_name, "__toString")) {
+            const types_val = obj.getProperty("__types") catch return try Value.initString(self.allocator, "");
+            if (types_val.isArray()) {
+                const arr = types_val.getAsArray().data;
+                const count = arr.count();
+                var parts = std.ArrayList(u8){};
+                defer parts.deinit(self.allocator);
+                var idx: usize = 0;
+                while (idx < count) : (idx += 1) {
+                    const sub = arr.get(types.ArrayKey{ .integer = @intCast(idx) }) orelse continue;
+                    if (sub.isObject()) {
+                        const sub_obj = sub.getAsObject().data;
+                        const tn = sub_obj.getProperty("__type_name") catch continue;
+                        if (tn.isString()) {
+                            if (idx > 0) try parts.append(self.allocator, '&');
+                            try parts.appendSlice(self.allocator, tn.getAsString().data.data);
+                        }
+                    }
+                }
+                return try Value.initString(self.allocator, parts.items);
+            }
+            return try Value.initString(self.allocator, "");
+        }
+
+        const error_msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method ReflectionIntersectionType::{s}()", .{method_name});
         defer self.allocator.free(error_msg);
         const exception = try ExceptionFactory.createTypeError(self.allocator, error_msg, self.current_file, self.current_line);
         return self.throwException(exception);
@@ -7989,6 +8409,14 @@ pub const VM = struct {
                 return self.callReflectionMethodMethod(target_value, method_name, args.items);
             } else if (std.mem.eql(u8, rf_class_name, "ReflectionParameter")) {
                 return self.callReflectionParameterMethod(target_value, method_name);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionNamedType")) {
+                return self.callReflectionNamedTypeMethod(target_value, method_name);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionProperty")) {
+                return self.callReflectionPropertyMethod(target_value, method_name, args.items);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionUnionType")) {
+                return self.callReflectionUnionTypeMethod(target_value, method_name);
+            } else if (std.mem.eql(u8, rf_class_name, "ReflectionIntersectionType")) {
+                return self.callReflectionIntersectionTypeMethod(target_value, method_name);
             }
         }
 
@@ -10714,8 +11142,13 @@ pub const VM = struct {
             .visibility = if (method_data.modifiers.is_public) .public else if (method_data.modifiers.is_protected) .protected else .private,
         };
 
-        // Process parameters
-        method.parameters = try self.processParameters(method_data.params);
+        // Process parameters with type info
+        method.parameters = try self.processMethodParameters(method_data.params);
+
+        // Process return type
+        if (method_data.return_type) |type_idx| {
+            method.return_type = self.extractTypeInfo(type_idx);
+        }
 
         // Set method body
         if (method_data.body) |body_idx| {
@@ -10724,6 +11157,92 @@ pub const VM = struct {
 
         // Add method to class (simplified - just store in methods map)
         try class.methods.put(method_name, method);
+    }
+
+    // Extract TypeInfo from AST node index
+    fn extractTypeInfo(self: *VM, type_idx: u32) ?types.TypeInfo {
+        const type_node = self.context.nodes.items[type_idx];
+        const type_name = switch (type_node.tag) {
+            .named_type => self.context.string_pool.keys()[type_node.data.named_type.name],
+            .nullable_type => {
+                const inner_node = self.context.nodes.items[type_node.data.nullable_type.inner];
+                if (inner_node.tag == .named_type) {
+                    const name = self.context.string_pool.keys()[inner_node.data.named_type.name];
+                    const php_name = types.PHPString.init(self.allocator, name) catch return null;
+                    const kind = mapTypeToKind(name);
+                    return types.TypeInfo{
+                        .name = php_name,
+                        .kind = kind,
+                        .is_nullable = true,
+                        .is_union = false,
+                        .union_types = &.{},
+                    };
+                }
+                return null;
+            },
+            else => return null,
+        };
+        const php_name = types.PHPString.init(self.allocator, type_name) catch return null;
+        const kind = mapTypeToKind(type_name);
+        return types.TypeInfo{
+            .name = php_name,
+            .kind = kind,
+            .is_nullable = false,
+            .is_union = false,
+            .union_types = &.{},
+        };
+    }
+
+    // Map type name string to TypeInfo.Kind
+    fn mapTypeToKind(type_name: []const u8) types.TypeInfo.Kind {
+        if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+            return .integer;
+        } else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) {
+            return .float;
+        } else if (std.mem.eql(u8, type_name, "string")) {
+            return .string;
+        } else if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+            return .boolean;
+        } else if (std.mem.eql(u8, type_name, "array")) {
+            return .array;
+        } else if (std.mem.eql(u8, type_name, "object")) {
+            return .object;
+        } else if (std.mem.eql(u8, type_name, "callable")) {
+            return .callable;
+        } else if (std.mem.eql(u8, type_name, "mixed")) {
+            return .mixed;
+        } else if (std.mem.eql(u8, type_name, "void")) {
+            return .void;
+        } else if (std.mem.eql(u8, type_name, "never")) {
+            return .never;
+        } else if (std.mem.eql(u8, type_name, "null")) {
+            return .null;
+        } else {
+            return .object; // Default to object for class types
+        }
+    }
+
+    // Process method parameters with type info
+    fn processMethodParameters(self: *VM, param_indices: []const u32) ![]types.Method.Parameter {
+        var params = try self.allocator.alloc(types.Method.Parameter, param_indices.len);
+        for (param_indices, 0..) |param_idx, i| {
+            const param_node = self.context.nodes.items[param_idx];
+            if (param_node.tag == .parameter) {
+                const param_data = param_node.data.parameter;
+                var param_name = self.context.string_pool.keys()[param_data.name];
+                // Remove $ prefix if present
+                if (param_name.len > 0 and param_name[0] == '$') {
+                    param_name = param_name[1..];
+                }
+                const php_param_name = try types.PHPString.init(self.allocator, param_name);
+                params[i] = types.Method.Parameter.init(php_param_name);
+                // Set parameter type
+                if (param_data.type) |type_idx| {
+                    params[i].type = self.extractTypeInfo(type_idx);
+                }
+            }
+        }
+        return params;
     }
 
     fn addClassProperty(self: *VM, class: *types.PHPClass, name: []const u8, visibility: types.Property.Visibility, default_value: ?Value) !void {
@@ -10749,6 +11268,11 @@ pub const VM = struct {
             .is_readonly = property_data.modifiers.is_readonly,
             .visibility = if (property_data.modifiers.is_public) .public else if (property_data.modifiers.is_protected) .protected else .private,
         };
+
+        // Process property type
+        if (property_data.type) |type_idx| {
+            property.type = self.extractTypeInfo(type_idx);
+        }
 
         // Set default value if present
         if (property_data.default_value) |default_idx| {

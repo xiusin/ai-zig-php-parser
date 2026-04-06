@@ -1262,12 +1262,23 @@ pub const IRGenerator = struct {
                             else
                                 .public;
 
+                            var el_type_name: ?[]const u8 = null;
+                            var el_type_nullable: bool = false;
+                            if (prop_data.type) |type_idx| {
+                                const tsi = self.resolveTypeNodeToString(type_idx);
+                                if (tsi.name.len > 0) { el_type_name = tsi.name; el_type_nullable = tsi.nullable; }
+                            }
+
                             try properties.append(self.allocator, .{
                                 .name = prop_name,
                                 .type_ = prop_type,
                                 .default_value = default_inst,
                                 .is_static = prop_data.modifiers.is_static,
                                 .visibility = visibility,
+                                .type_name = el_type_name,
+                                .type_nullable = el_type_nullable,
+                                .has_default = prop_data.default_value != null,
+                                .is_readonly = prop_data.modifiers.is_readonly,
                             });
 
                             try self.generatePropertyDecl(prop_node, class_name);
@@ -1287,12 +1298,23 @@ pub const IRGenerator = struct {
                     else
                         .public;
 
+                    var pd_type_name: ?[]const u8 = null;
+                    var pd_type_nullable: bool = false;
+                    if (prop_data.type) |type_idx| {
+                        const tsi = self.resolveTypeNodeToString(type_idx);
+                        if (tsi.name.len > 0) { pd_type_name = tsi.name; pd_type_nullable = tsi.nullable; }
+                    }
+
                     try properties.append(self.allocator, .{
                         .name = prop_name,
                         .type_ = prop_type,
                         .default_value = default_inst,
                         .is_static = prop_data.modifiers.is_static,
                         .visibility = visibility,
+                        .type_name = pd_type_name,
+                        .type_nullable = pd_type_nullable,
+                        .has_default = prop_data.default_value != null,
+                        .is_readonly = prop_data.modifiers.is_readonly,
                     });
 
                     try self.generatePropertyDecl(member, class_name);
@@ -1812,12 +1834,23 @@ pub const IRGenerator = struct {
                     else
                         .public;
 
+                    var tp_type_name: ?[]const u8 = null;
+                    var tp_type_nullable: bool = false;
+                    if (prop_data.type) |type_idx| {
+                        const tsi = self.resolveTypeNodeToString(type_idx);
+                        if (tsi.name.len > 0) { tp_type_name = tsi.name; tp_type_nullable = tsi.nullable; }
+                    }
+
                     try properties.append(self.allocator, .{
                         .name = prop_name,
                         .type_ = prop_type,
                         .default_value = default_inst,
                         .is_static = prop_data.modifiers.is_static,
                         .visibility = visibility,
+                        .type_name = tp_type_name,
+                        .type_nullable = tp_type_nullable,
+                        .has_default = prop_data.default_value != null,
+                        .is_readonly = prop_data.modifiers.is_readonly,
                     });
 
                     try self.generatePropertyDecl(member, trait_name);
@@ -1886,13 +1919,107 @@ pub const IRGenerator = struct {
         );
     }
 
+    /// 将 AST 类型节点转换为 PHP 类型字符串表示（用于 Reflection API 元数据）
+    /// 返回值: (类型字符串, 是否nullable)
+    fn resolveTypeNodeToString(self: *const Self, type_index: Node.Index) struct { name: []const u8, nullable: bool } {
+        const type_node = self.getNode(type_index) orelse return .{ .name = "", .nullable = false };
+        switch (type_node.tag) {
+            .named_type => {
+                return .{ .name = self.getString(type_node.data.named_type.name), .nullable = false };
+            },
+            .nullable_type => {
+                const inner = self.resolveTypeNodeToString(type_node.data.nullable_type.inner);
+                return .{ .name = inner.name, .nullable = true };
+            },
+            .union_type => {
+                // 拼接 union type: "int|string"
+                var buf = std.ArrayListUnmanaged(u8){};
+                for (type_node.data.union_type.types, 0..) |t, i| {
+                    if (i > 0) buf.append(self.allocator, '|') catch {};
+                    const sub = self.resolveTypeNodeToString(t);
+                    buf.appendSlice(self.allocator, sub.name) catch {};
+                }
+                const result = self.allocator.dupe(u8, buf.items) catch "";
+                buf.deinit(self.allocator);
+                // union 包含 null 时视为 nullable
+                const has_null = for (type_node.data.union_type.types) |t| {
+                    const sub = self.resolveTypeNodeToString(t);
+                    if (std.mem.eql(u8, sub.name, "null")) break true;
+                } else false;
+                return .{ .name = result, .nullable = has_null };
+            },
+            .intersection_type => {
+                // 拼接 intersection type: "Countable&Traversable"
+                var buf = std.ArrayListUnmanaged(u8){};
+                for (type_node.data.intersection_type.types, 0..) |t, i| {
+                    if (i > 0) buf.append(self.allocator, '&') catch {};
+                    const sub = self.resolveTypeNodeToString(t);
+                    buf.appendSlice(self.allocator, sub.name) catch {};
+                }
+                const result = self.allocator.dupe(u8, buf.items) catch "";
+                buf.deinit(self.allocator);
+                return .{ .name = result, .nullable = false };
+            },
+            else => return .{ .name = "", .nullable = false },
+        }
+    }
+
     fn getMethodMeta(self: *Self, node: *const Node) TypeDef.Method {
         const method_data = node.data.method_decl;
+        // 统计参数信息
+        var param_count: u16 = 0;
+        var required_params: u16 = 0;
+        var param_name_list = std.ArrayListUnmanaged([]const u8){};
+        var param_type_list = std.ArrayListUnmanaged([]const u8){};
+        var param_nullable_list = std.ArrayListUnmanaged(bool){};
+        for (method_data.params) |param_idx| {
+            if (self.getNode(param_idx)) |param_node| {
+                if (param_node.tag == .parameter) {
+                    param_count += 1;
+                    if (param_node.data.parameter.default_value == null and !param_node.data.parameter.is_variadic) {
+                        required_params += 1;
+                    }
+                    const raw_pname = self.getString(param_node.data.parameter.name);
+                    // PHP ReflectionParameter::getName() 返回不带 $ 的参数名
+                    const pname = if (raw_pname.len > 0 and raw_pname[0] == '$') raw_pname[1..] else raw_pname;
+                    param_name_list.append(self.allocator, pname) catch {};
+                    // 提取参数类型信息
+                    if (param_node.data.parameter.type) |type_idx| {
+                        const type_info = self.resolveTypeNodeToString(type_idx);
+                        param_type_list.append(self.allocator, type_info.name) catch {};
+                        // nullable: 显式 ?Type 或无默认值时由类型决定
+                        param_nullable_list.append(self.allocator, type_info.nullable) catch {};
+                    } else {
+                        // 无类型声明
+                        param_type_list.append(self.allocator, "") catch {};
+                        param_nullable_list.append(self.allocator, true) catch {}; // 无类型声明时允许 null
+                    }
+                }
+            }
+        }
+        // 提取返回类型
+        var ret_type: ?[]const u8 = null;
+        var ret_nullable: bool = false;
+        if (method_data.return_type) |rt_idx| {
+            const rt_info = self.resolveTypeNodeToString(rt_idx);
+            if (rt_info.name.len > 0) {
+                ret_type = rt_info.name;
+                ret_nullable = rt_info.nullable;
+            }
+        }
         return .{
             .name = self.getString(method_data.name),
             .visibility = self.getVisibility(method_data.modifiers),
             .is_static = method_data.modifiers.is_static,
             .is_abstract = method_data.modifiers.is_abstract,
+            .is_final = method_data.modifiers.is_final,
+            .param_count = param_count,
+            .required_params = required_params,
+            .param_names = self.allocator.dupe([]const u8, param_name_list.items) catch &.{},
+            .param_types = self.allocator.dupe([]const u8, param_type_list.items) catch &.{},
+            .param_nullable = self.allocator.dupe(bool, param_nullable_list.items) catch &.{},
+            .return_type = ret_type,
+            .return_nullable = ret_nullable,
         };
     }
 
@@ -2090,7 +2217,10 @@ pub const IRGenerator = struct {
     }
 
     /// Generate IR for property declaration
+    /// 注意：属性的 TypeDef.Property 已在 generateClassDecl/generateTraitDecl 的调用方通过
+    /// properties.append 添加，此函数仅负责符号表注册。
     fn generatePropertyDecl(self: *Self, node: *const Node, class_name: []const u8) !void {
+        _ = class_name;
         const prop_data = node.data.property_decl;
         const prop_name = self.getString(prop_data.name);
 
@@ -2102,36 +2232,6 @@ pub const IRGenerator = struct {
         }
 
         try self.symbol_table.defineVariable(prop_name, prop_type, self.current_location);
-
-        // 添加到TypeDef
-        if (self.module) |module| {
-            for (module.types.items) |type_def_ptr| {
-                if (std.mem.eql(u8, type_def_ptr.name, class_name)) {
-                    const is_public = prop_data.modifiers.is_public;
-                    const is_static = prop_data.modifiers.is_static;
-
-                    const prop_def = TypeDef.Property{
-                        .name = prop_name,
-                        .visibility = if (is_public) .public else if (prop_data.modifiers.is_protected) .protected else .private,
-                        .is_static = is_static,
-                        .type_ = if (prop_data.type) |type_idx| try self.resolveTypeNode(type_idx) else .php_value,
-                        .default_value = if (prop_data.default_value) |val_idx| blk: {
-                            // 只处理编译时常量，运行时表达式在构造函数中初始化
-                            break :blk try self.tryMakeConstInstruction(val_idx);
-                        } else null,
-                    };
-
-                    const new_props = try self.allocator.alloc(TypeDef.Property, type_def_ptr.properties.len + 1);
-                    @memcpy(new_props[0..type_def_ptr.properties.len], type_def_ptr.properties);
-                    new_props[type_def_ptr.properties.len] = prop_def;
-                    if (type_def_ptr.properties.len > 0) {
-                        self.allocator.free(type_def_ptr.properties);
-                    }
-                    type_def_ptr.properties = new_props;
-                    break;
-                }
-            }
-        }
     }
 
     /// Generate IR for class constant declaration
@@ -6385,12 +6485,22 @@ pub const IRGenerator = struct {
                         .protected
                     else
                         .public;
+                    var ac_type_name: ?[]const u8 = null;
+                    var ac_type_nullable: bool = false;
+                    if (prop_data.type) |type_idx| {
+                        const tsi = self.resolveTypeNodeToString(type_idx);
+                        if (tsi.name.len > 0) { ac_type_name = tsi.name; ac_type_nullable = tsi.nullable; }
+                    }
                     try properties.append(self.allocator, .{
                         .name = prop_name,
                         .type_ = prop_type,
                         .default_value = default_inst,
                         .is_static = prop_data.modifiers.is_static,
                         .visibility = visibility,
+                        .type_name = ac_type_name,
+                        .type_nullable = ac_type_nullable,
+                        .has_default = prop_data.default_value != null,
+                        .is_readonly = prop_data.modifiers.is_readonly,
                     });
                     try self.generatePropertyDecl(member, anon_class_name);
                 },

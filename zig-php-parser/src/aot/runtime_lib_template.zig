@@ -53,6 +53,7 @@ pub var user_function_decl_locations: ?std.StringHashMap(FunctionDeclLocation) =
 pub const FunctionMeta = struct {
     param_count: u16 = 0,
     required_params: u16 = 0,
+    param_names: []const []const u8 = &.{},
 };
 pub var function_meta_registry: ?std.StringHashMap(FunctionMeta) = null;
 
@@ -10189,8 +10190,19 @@ pub const ClassMethod = struct {
     is_public: bool = true,
     is_protected: bool = false,
     is_private: bool = false,
+    is_abstract: bool = false,
+    is_final: bool = false,
     param_count: u16 = 0,
     required_params: u16 = 0,
+    param_names: []const []const u8 = &.{},
+    /// 参数类型字符串列表，与 param_names 一一对应（无类型声明时为空字符串）
+    param_types: []const []const u8 = &.{},
+    /// 参数是否允许 null（nullable 类型或无类型声明）
+    param_nullable: []const bool = &.{},
+    /// 返回类型字符串（无返回类型声明时为 null）
+    return_type: ?[]const u8 = null,
+    /// 返回类型是否 nullable
+    return_nullable: bool = false,
 };
 
 /// 类属性定义
@@ -10199,7 +10211,15 @@ pub const ClassProperty = struct {
     default_value: ?Value = null,
     is_static: bool = false,
     is_public: bool = true,
+    is_protected: bool = false,
+    is_private: bool = false,
     is_readonly: bool = false,
+    /// 属性类型字符串（无类型声明时为 null）
+    type_name: ?[]const u8 = null,
+    /// 属性类型是否 nullable
+    type_nullable: bool = false,
+    /// 是否有默认值（class body 中声明了默认值）
+    has_default: bool = false,
 };
 
 /// 类元数据
@@ -12163,6 +12183,19 @@ pub const ClassMeta = struct {
         try registerClass(meta);
     }
 
+    /// 判断 PHP 类型名是否是内置类型（用于 ReflectionNamedType::isBuiltin()）
+    /// 注意：self/static/parent 在 PHP 中不是 builtin type，isBuiltin() 返回 false
+    fn isBuiltinType(type_name: []const u8) bool {
+        const builtins = [_][]const u8{
+            "int", "float", "string", "bool", "array", "object", "callable",
+            "iterable", "void", "never", "null", "mixed", "true", "false",
+        };
+        for (builtins) |b| {
+            if (std.mem.eql(u8, type_name, b)) return true;
+        }
+        return false;
+    }
+
     /// Register Reflection classes for PHP reflection API
     fn registerReflectionClasses(allocator: Allocator) !void {
         // ReflectionAttribute
@@ -12193,6 +12226,80 @@ pub const ClassMeta = struct {
                         return v;
                     }
                     return Value.initArray(try PHPArray.init(alloc));
+                }
+            }.call,
+            .is_static = false,
+        });
+        // newInstance() - returns an object with attribute name and args as properties
+        try attr_meta.addMethod(.{
+            .name = "newInstance",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    // Create a simple stdClass-like object with attribute properties
+                    const name_val = this.getPropertyDirect("__name") orelse return Value.initNull();
+                    const args_val = this.getPropertyDirect("__args");
+                    if (findClass(if (name_val.isString()) name_val.asString().data else "stdClass")) |cmeta| {
+                        const obj = try PHPObject.initWithMeta(alloc, cmeta);
+                        // If class has constructor, call it with args
+                        if (cmeta.magic_construct) |ctor| {
+                            if (args_val) |av| {
+                                if (av.isArray()) {
+                                    const arr = av.asArray();
+                                    const count = arr.elements.count();
+                                    const real_args = try alloc.alloc(Value, count);
+                                    defer alloc.free(real_args);
+                                    var idx: usize = 0;
+                                    while (idx < count) : (idx += 1) {
+                                        real_args[idx] = arr.elements.get(ArrayKey{ .integer = @intCast(idx) }) orelse Value.initNull();
+                                    }
+                                    _ = try ctor(Value_initObject(obj), real_args, alloc);
+                                } else {
+                                    _ = try ctor(Value_initObject(obj), &.{}, alloc);
+                                }
+                            } else {
+                                _ = try ctor(Value_initObject(obj), &.{}, alloc);
+                            }
+                        }
+                        return Value_initObject(obj);
+                    }
+                    // Fallback: return stdClass with properties
+                    const obj = try PHPObject.init(alloc, "stdClass");
+                    if (name_val.isString()) try obj.setProperty("name", name_val.retain());
+                    if (args_val) |av| try obj.setProperty("args", av.retain());
+                    return Value_initObject(obj);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getTarget() - read from stored __target property
+        try attr_meta.addMethod(.{
+            .name = "getTarget",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initInt(0);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__target")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initInt(0);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isRepeated() - read from stored __is_repeated property (defaults to false)
+        try attr_meta.addMethod(.{
+            .name = "isRepeated",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__is_repeated")) |v| {
+                        return Value.initBool(v.toBool());
+                    }
+                    return Value.initBool(false);
                 }
             }.call,
             .is_static = false,
@@ -12406,7 +12513,7 @@ pub const ClassMeta = struct {
             }.call,
             .is_static = false,
         });
-        // getProperties() - 返回属性名数组
+        // getProperties() - 返回 ReflectionProperty 对象数组
         try rc_meta.addMethod(.{
             .name = "getProperties",
             .func = struct {
@@ -12419,10 +12526,42 @@ pub const ClassMeta = struct {
                     if (findClass(cname_val.asString().data)) |cmeta| {
                         var iter = cmeta.properties.iterator();
                         while (iter.next()) |entry| {
-                            try arr.push(alloc, Value.initString(try PHPString.init(alloc, entry.key_ptr.*)));
+                            if (findClass("ReflectionProperty")) |rp_cls| {
+                                const rp_obj = try PHPObject.initWithMeta(alloc, rp_cls);
+                                try rp_obj.setProperty("__class_name", cname_val);
+                                _ = cname_val.retain();
+                                try rp_obj.setProperty("__prop_name", Value.initString(try PHPString.init(alloc, entry.key_ptr.*)));
+                                try arr.push(alloc, Value_initObject(rp_obj));
+                            }
                         }
                     }
                     return Value.initArray(arr);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getProperty($name) - 返回单个 ReflectionProperty 对象
+        try rc_meta.addMethod(.{
+            .name = "getProperty",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx) or args.len == 0) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    if (!cname_val.isString()) return Value.initNull();
+                    const pname_str = try args[0].toString(alloc);
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        if (cmeta.properties.get(pname_str.data)) |_| {
+                            if (findClass("ReflectionProperty")) |rp_cls| {
+                                const rp_obj = try PHPObject.initWithMeta(alloc, rp_cls);
+                                try rp_obj.setProperty("__class_name", cname_val);
+                                _ = cname_val.retain();
+                                try rp_obj.setProperty("__prop_name", Value.initString(pname_str));
+                                return Value_initObject(rp_obj);
+                            }
+                        }
+                    }
+                    return Value.initNull();
                 }
             }.call,
             .is_static = false,
@@ -12499,6 +12638,44 @@ pub const ClassMeta = struct {
                                         return Value_initObject(rc_obj);
                                     }
                                 }
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isClass() - returns true if not interface and not enum
+        try rc_meta.addMethod(.{
+            .name = "isClass",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__class_name")) |name_val| {
+                        if (name_val.isString()) {
+                            if (findClass(name_val.asString().data)) |cmeta| {
+                                return Value.initBool(!cmeta.is_interface and !cmeta.is_enum);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isTrait()
+        try rc_meta.addMethod(.{
+            .name = "isTrait",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__class_name")) |name_val| {
+                        if (name_val.isString()) {
+                            if (findClass(name_val.asString().data)) |cmeta| {
+                                return Value.initBool(cmeta.is_trait);
                             }
                         }
                     }
@@ -12653,6 +12830,8 @@ pub const ClassMeta = struct {
             .is_static = false,
         });
         // getConstants()
+        try rc_meta.addMethod(.{
+            .name = "getConstants",
             .func = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initArray(try PHPArray.init(alloc));
@@ -12670,6 +12849,30 @@ pub const ClassMeta = struct {
                         }
                     }
                     return Value.initArray(arr);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getConstructor() - 返回 __construct 的 ReflectionMethod 或 null
+        try rc_meta.addMethod(.{
+            .name = "getConstructor",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    if (!cname_val.isString()) return Value.initNull();
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        if (cmeta.methods.get("__construct") != null) {
+                            if (findClass("ReflectionMethod")) |rm_cls| {
+                                const rm_obj = try PHPObject.initWithMeta(alloc, rm_cls);
+                                try rm_obj.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cname_val.asString().data)));
+                                try rm_obj.setProperty("__method_name", Value.initString(try PHPString.init(alloc, "__construct")));
+                                return Value_initObject(rm_obj);
+                            }
+                        }
+                    }
+                    return Value.initNull();
                 }
             }.call,
             .is_static = false,
@@ -12776,6 +12979,199 @@ pub const ClassMeta = struct {
         rcc_meta.magic_construct = rcc_meta.methods.get("__construct").?.func;
         try registerClass(rcc_meta);
 
+        // ReflectionNamedType - PHP ReflectionNamedType 类
+        const rnt_meta = try ClassMeta.init(allocator, "ReflectionNamedType");
+        // getName() - 返回类型名称字符串
+        try rnt_meta.addMethod(.{
+            .name = "getName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__type_name")) |v| { _ = v.retain(); return v; }
+                    return Value.initString(try PHPString.init(alloc, ""));
+                }
+            }.call,
+            .is_static = false,
+        });
+        // allowsNull() - 类型是否允许 null
+        try rnt_meta.addMethod(.{
+            .name = "allowsNull",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__allows_null")) |v| return Value.initBool(v.toBool());
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isBuiltin() - 是否是内置类型
+        try rnt_meta.addMethod(.{
+            .name = "isBuiltin",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__is_builtin")) |v| return Value.initBool(v.toBool());
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // __toString() - 返回类型名称
+        try rnt_meta.addMethod(.{
+            .name = "__toString",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__type_name")) |v| { _ = v.retain(); return v; }
+                    return Value.initString(try PHPString.init(alloc, ""));
+                }
+            }.call,
+            .is_static = false,
+        });
+        try registerClass(rnt_meta);
+
+        // ReflectionUnionType - PHP ReflectionUnionType 类
+        const rut_meta = try ClassMeta.init(allocator, "ReflectionUnionType");
+        // getTypes() - 返回 ReflectionNamedType 对象数组
+        try rut_meta.addMethod(.{
+            .name = "getTypes",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__types")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // allowsNull()
+        try rut_meta.addMethod(.{
+            .name = "allowsNull",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__allows_null")) |v| return v;
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // __toString() - 拼接子类型名 "int|string"
+        try rut_meta.addMethod(.{
+            .name = "__toString",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
+                    const this = Value_asObject(ctx);
+                    const types_val = this.getPropertyDirect("__types") orelse return Value.initString(try PHPString.init(alloc, ""));
+                    if (!types_val.isArray()) return Value.initString(try PHPString.init(alloc, ""));
+                    const arr = types_val.asArray();
+                    var buf: [1024]u8 = undefined;
+                    var pos: usize = 0;
+                    var idx: usize = 0;
+                    const count = arr.count();
+                    while (idx < count) : (idx += 1) {
+                        const sub = arr.getByIndex(@intCast(idx)) orelse continue;
+                        if (Value_isObject(sub)) {
+                            const sub_obj = Value_asObject(sub);
+                            if (sub_obj.getPropertyDirect("__type_name")) |tn| {
+                                if (tn.isString()) {
+                                    const tname = tn.asString().data;
+                                    if (idx > 0 and pos < buf.len) {
+                                        buf[pos] = '|';
+                                        pos += 1;
+                                    }
+                                    const end = @min(pos + tname.len, buf.len);
+                                    @memcpy(buf[pos..end], tname[0..end - pos]);
+                                    pos = end;
+                                }
+                            }
+                        }
+                    }
+                    return Value.initString(try PHPString.init(alloc, buf[0..pos]));
+                }
+            }.call,
+            .is_static = false,
+        });
+        try registerClass(rut_meta);
+
+        // ReflectionIntersectionType - PHP ReflectionIntersectionType 类
+        const rit_meta = try ClassMeta.init(allocator, "ReflectionIntersectionType");
+        // getTypes()
+        try rit_meta.addMethod(.{
+            .name = "getTypes",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__types")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // allowsNull() - intersection types 永远不允许 null
+        try rit_meta.addMethod(.{
+            .name = "allowsNull",
+            .func = struct {
+                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // __toString() - 拼接 "A&B"
+        try rit_meta.addMethod(.{
+            .name = "__toString",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
+                    const this = Value_asObject(ctx);
+                    const types_val = this.getPropertyDirect("__types") orelse return Value.initString(try PHPString.init(alloc, ""));
+                    if (!types_val.isArray()) return Value.initString(try PHPString.init(alloc, ""));
+                    const arr = types_val.asArray();
+                    var buf: [1024]u8 = undefined;
+                    var pos: usize = 0;
+                    var idx: usize = 0;
+                    const count = arr.count();
+                    while (idx < count) : (idx += 1) {
+                        const sub = arr.getByIndex(@intCast(idx)) orelse continue;
+                        if (Value_isObject(sub)) {
+                            const sub_obj = Value_asObject(sub);
+                            if (sub_obj.getPropertyDirect("__type_name")) |tn| {
+                                if (tn.isString()) {
+                                    const tname = tn.asString().data;
+                                    if (idx > 0 and pos < buf.len) {
+                                        buf[pos] = '&';
+                                        pos += 1;
+                                    }
+                                    const end = @min(pos + tname.len, buf.len);
+                                    @memcpy(buf[pos..end], tname[0..end - pos]);
+                                    pos = end;
+                                }
+                            }
+                        }
+                    }
+                    return Value.initString(try PHPString.init(alloc, buf[0..pos]));
+                }
+            }.call,
+            .is_static = false,
+        });
+        try registerClass(rit_meta);
+
         // ReflectionMethod
         const rm_meta = try ClassMeta.init(allocator, "ReflectionMethod");
         try rm_meta.addMethod(.{
@@ -12834,7 +13230,7 @@ pub const ClassMeta = struct {
                     if (cname_val.isString() and mname_val.isString()) {
                         if (findClass(cname_val.asString().data)) |cmeta| {
                             if (cmeta.methods.get(mname_val.asString().data)) |m| {
-                                return Value.initBool(!m.is_static);
+                                return Value.initBool(m.is_public);
                             }
                         }
                     }
@@ -12886,6 +13282,13 @@ pub const ClassMeta = struct {
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initInt(0);
                     const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initInt(0);
                     if (cname_val.isString() and mname_val.isString()) {
+                        // 优先从 ClassMethod 元数据读取
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                return Value.initInt(@intCast(m.param_count));
+                            }
+                        }
+                        // 回退到 function_meta_registry
                         const full_name_buf = std.fmt.allocPrint(std.heap.page_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initInt(0);
                         defer std.heap.page_allocator.free(full_name_buf);
                         if (function_meta_registry) |meta_reg| {
@@ -12908,6 +13311,13 @@ pub const ClassMeta = struct {
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initInt(0);
                     const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initInt(0);
                     if (cname_val.isString() and mname_val.isString()) {
+                        // 优先从 ClassMethod 元数据读取
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                return Value.initInt(@intCast(m.required_params));
+                            }
+                        }
+                        // 回退到 function_meta_registry
                         const full_name_buf = std.fmt.allocPrint(std.heap.page_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initInt(0);
                         defer std.heap.page_allocator.free(full_name_buf);
                         if (function_meta_registry) |meta_reg| {
@@ -12937,6 +13347,231 @@ pub const ClassMeta = struct {
                     }
                     _ = alloc;
                     return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getParameters() - return array of ReflectionParameter from real ClassMethod metadata
+        try rm_meta.addMethod(.{
+            .name = "getParameters",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initArray(try PHPArray.init(alloc));
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    if (!cname_val.isString() or !mname_val.isString()) return Value.initArray(try PHPArray.init(alloc));
+                    const arr = try PHPArray.init(alloc);
+                    // 优先从 ClassMethod 元数据获取参数信息
+                    if (findClass(cname_val.asString().data)) |cmeta| {
+                        if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                            var i: usize = 0;
+                            while (i < m.param_count) : (i += 1) {
+                                if (findClass("ReflectionParameter")) |rp_cls| {
+                                    const rp_obj = try PHPObject.initWithMeta(alloc, rp_cls);
+                                    try rp_obj.setProperty("__position", Value.initInt(@intCast(i)));
+                                    if (i < m.param_names.len) {
+                                        try rp_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, m.param_names[i])));
+                                    }
+                                    // 设置参数类型信息
+                                    if (i < m.param_types.len and m.param_types[i].len > 0) {
+                                        try rp_obj.setProperty("__type_name", Value.initString(try PHPString.init(alloc, m.param_types[i])));
+                                        try rp_obj.setProperty("__has_type", Value.initBool(true));
+                                    } else {
+                                        try rp_obj.setProperty("__has_type", Value.initBool(false));
+                                    }
+                                    // 设置 nullable 信息
+                                    if (i < m.param_nullable.len) {
+                                        try rp_obj.setProperty("__allows_null", Value.initBool(m.param_nullable[i]));
+                                    }
+                                    try arr.push(alloc, Value_initObject(rp_obj));
+                                }
+                            }
+                            return Value.initArray(arr);
+                        }
+                    }
+                    // 回退到 function_meta_registry
+                    const full_name_buf = std.fmt.allocPrint(std.heap.page_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initArray(arr);
+                    defer std.heap.page_allocator.free(full_name_buf);
+                    if (function_meta_registry) |meta_reg| {
+                        if (meta_reg.get(full_name_buf)) |meta| {
+                            var i: usize = 0;
+                            while (i < meta.param_count) : (i += 1) {
+                                if (findClass("ReflectionParameter")) |rp_cls| {
+                                    const rp_obj = try PHPObject.initWithMeta(alloc, rp_cls);
+                                    try rp_obj.setProperty("__position", Value.initInt(@intCast(i)));
+                                    if (i < meta.param_names.len) {
+                                        try rp_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, meta.param_names[i])));
+                                    }
+                                    try arr.push(alloc, Value_initObject(rp_obj));
+                                }
+                            }
+                        }
+                    }
+                    return Value.initArray(arr);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getReturnType() - 从 ClassMethod.return_type 读取真实类型声明
+        try rm_meta.addMethod(.{
+            .name = "getReturnType",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initNull();
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                if (m.return_type) |rt| {
+                                    // 创建 ReflectionNamedType 对象
+                                    if (findClass("ReflectionNamedType")) |rt_cls| {
+                                        const rt_obj = try PHPObject.initWithMeta(alloc, rt_cls);
+                                        try rt_obj.setProperty("__type_name", Value.initString(try PHPString.init(alloc, rt)));
+                                        try rt_obj.setProperty("__allows_null", Value.initBool(m.return_nullable));
+                                        try rt_obj.setProperty("__is_builtin", Value.initBool(isBuiltinType(rt)));
+                                        return Value_initObject(rt_obj);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // hasReturnType() - 从 ClassMethod.return_type 读取
+        try rm_meta.addMethod(.{
+            .name = "hasReturnType",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initBool(false);
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                return Value.initBool(m.return_type != null);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isAbstract() - read from real ClassMethod.is_abstract
+        try rm_meta.addMethod(.{
+            .name = "isAbstract",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initBool(false);
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                return Value.initBool(m.is_abstract);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isFinal() - read from real ClassMethod.is_final
+        try rm_meta.addMethod(.{
+            .name = "isFinal",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initBool(false);
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                return Value.initBool(m.is_final);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isPrivate() - read from real ClassMethod.is_private
+        try rm_meta.addMethod(.{
+            .name = "isPrivate",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initBool(false);
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                return Value.initBool(m.is_private);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isProtected() - read from real ClassMethod.is_protected
+        try rm_meta.addMethod(.{
+            .name = "isProtected",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initBool(false);
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                return Value.initBool(m.is_protected);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getModifiers() - 返回 PHP 标准修饰符位掩码
+        try rm_meta.addMethod(.{
+            .name = "getModifiers",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initInt(1); // IS_PUBLIC
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initInt(1);
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initInt(1);
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                var flags: i64 = 0;
+                                if (m.is_public) flags |= 1; // IS_PUBLIC
+                                if (m.is_protected) flags |= 2; // IS_PROTECTED
+                                if (m.is_private) flags |= 4; // IS_PRIVATE
+                                if (m.is_static) flags |= 16; // IS_STATIC
+                                if (m.is_final) flags |= 32; // IS_FINAL
+                                if (m.is_abstract) flags |= 64; // IS_ABSTRACT
+                                return Value.initInt(flags);
+                            }
+                        }
+                    }
+                    return Value.initInt(1); // default: IS_PUBLIC
                 }
             }.call,
             .is_static = false,
@@ -13033,7 +13668,11 @@ pub const ClassMeta = struct {
         try rp_meta.addMethod(.{
             .name = "allowsNull",
             .func = struct {
-                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(true);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__allows_null")) |v| return Value.initBool(v.toBool());
+                    // 无类型约束时默认允许null（与PHP行为一致）
                     return Value.initBool(true);
                 }
             }.call,
@@ -13042,14 +13681,332 @@ pub const ClassMeta = struct {
         try rp_meta.addMethod(.{
             .name = "hasType",
             .func = struct {
-                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__has_type")) |v| return Value.initBool(v.toBool());
                     return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getType() - 返回 ReflectionNamedType 对象或 null
+        try rp_meta.addMethod(.{
+            .name = "getType",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const has_type_val = this.getPropertyDirect("__has_type") orelse return Value.initNull();
+                    if (!has_type_val.toBool()) return Value.initNull();
+                    const type_name_val = this.getPropertyDirect("__type_name") orelse return Value.initNull();
+                    if (!type_name_val.isString()) return Value.initNull();
+                    const allows_null_val = this.getPropertyDirect("__allows_null");
+                    const allows_null = if (allows_null_val) |v| v.toBool() else true;
+                    // 创建 ReflectionNamedType 对象
+                    if (findClass("ReflectionNamedType")) |rt_cls| {
+                        const rt_obj = try PHPObject.initWithMeta(alloc, rt_cls);
+                        try rt_obj.setProperty("__type_name", type_name_val);
+                        _ = type_name_val.retain();
+                        try rt_obj.setProperty("__allows_null", Value.initBool(allows_null));
+                        try rt_obj.setProperty("__is_builtin", Value.initBool(isBuiltinType(type_name_val.asString().data)));
+                        return Value_initObject(rt_obj);
+                    }
+                    return Value.initNull();
                 }
             }.call,
             .is_static = false,
         });
         rp_meta.magic_construct = rp_meta.methods.get("__construct").?.func;
         try registerClass(rp_meta);
+
+        // ReflectionProperty - PHP ReflectionProperty 类
+        const rprop_meta = try ClassMeta.init(allocator, "ReflectionProperty");
+        try rprop_meta.addMethod(.{
+            .name = "__construct",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len < 2) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const class_str = try args[0].toString(alloc);
+                    const prop_str = try args[1].toString(alloc);
+                    try this.setProperty("__class_name", Value.initString(class_str));
+                    try this.setProperty("__prop_name", Value.initString(prop_str));
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getName()
+        try rprop_meta.addMethod(.{
+            .name = "getName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__prop_name")) |v| { _ = v.retain(); return v; }
+                    return Value.initString(try PHPString.init(alloc, ""));
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getDeclaringClass()
+        try rprop_meta.addMethod(.{
+            .name = "getDeclaringClass",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    if (!cname.isString()) return Value.initNull();
+                    if (findClass("ReflectionClass")) |rc_cls| {
+                        const rc_obj = try PHPObject.initWithMeta(alloc, rc_cls);
+                        try rc_obj.setProperty("__class_name", cname);
+                        _ = cname.retain();
+                        return Value_initObject(rc_obj);
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getValue($object) - 支持实例属性和 static 属性
+        try rprop_meta.addMethod(.{
+            .name = "getValue",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initNull();
+                    if (!pname_val.isString()) return Value.initNull();
+                    const pname = pname_val.asString().data;
+                    // 先检查是否是 static 属性
+                    if (cname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname)) |p| {
+                                if (p.is_static) {
+                                    if (cmeta.static_properties.get(pname)) |sv| {
+                                        _ = sv.retain();
+                                        return sv;
+                                    }
+                                    return Value.initNull();
+                                }
+                            }
+                        }
+                    }
+                    // 实例属性
+                    if (args.len > 0 and Value_isObject(args[0])) {
+                        const target = Value_asObject(args[0]);
+                        if (target.getPropertyDirect(pname)) |v| {
+                            _ = v.retain();
+                            return v;
+                        }
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // setValue($object, $value) - 支持实例属性和 static 属性
+        try rprop_meta.addMethod(.{
+            .name = "setValue",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initNull();
+                    if (!pname_val.isString()) return Value.initNull();
+                    const pname = pname_val.asString().data;
+                    // static 属性：setValue($value) 只需1个参数
+                    if (cname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname)) |p| {
+                                if (p.is_static) {
+                                    const val = if (args.len >= 1) args[0] else Value.initNull();
+                                    _ = val.retain();
+                                    cmeta.static_properties.getPtr(pname).?.* = val;
+                                    return Value.initNull();
+                                }
+                            }
+                        }
+                    }
+                    // 实例属性：setValue($object, $value) 需2个参数
+                    if (args.len >= 2 and Value_isObject(args[0])) {
+                        const target = Value_asObject(args[0]);
+                        _ = args[1].retain();
+                        try target.setProperty(pname, args[1]);
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isPublic/isProtected/isPrivate/isStatic/isReadOnly/isDefault
+        inline for (.{
+            .{ "isPublic", "is_public" },
+            .{ "isProtected", "is_protected" },
+            .{ "isPrivate", "is_private" },
+            .{ "isStatic", "is_static" },
+            .{ "isReadOnly", "is_readonly" },
+            .{ "isDefault", "has_default" },
+        }) |pair| {
+            try rprop_meta.addMethod(.{
+                .name = pair[0],
+                .func = struct {
+                    fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                        if (!Value_isObject(ctx)) return Value.initBool(false);
+                        const this = Value_asObject(ctx);
+                        const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                        const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initBool(false);
+                        if (cname_val.isString() and pname_val.isString()) {
+                            if (findClass(cname_val.asString().data)) |cmeta| {
+                                if (cmeta.properties.get(pname_val.asString().data)) |p| {
+                                    return Value.initBool(@field(p, pair[1]));
+                                }
+                            }
+                        }
+                        return Value.initBool(false);
+                    }
+                }.call,
+                .is_static = false,
+            });
+        }
+        // hasType()
+        try rprop_meta.addMethod(.{
+            .name = "hasType",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initBool(false);
+                    if (cname_val.isString() and pname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname_val.asString().data)) |p| {
+                                return Value.initBool(p.type_name != null);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getType() - 返回 ReflectionNamedType 或 null
+        try rprop_meta.addMethod(.{
+            .name = "getType",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initNull();
+                    if (cname_val.isString() and pname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname_val.asString().data)) |p| {
+                                if (p.type_name) |tn| {
+                                    if (findClass("ReflectionNamedType")) |rt_cls| {
+                                        const rt_obj = try PHPObject.initWithMeta(alloc, rt_cls);
+                                        try rt_obj.setProperty("__type_name", Value.initString(try PHPString.init(alloc, tn)));
+                                        try rt_obj.setProperty("__allows_null", Value.initBool(p.type_nullable));
+                                        try rt_obj.setProperty("__is_builtin", Value.initBool(isBuiltinType(tn)));
+                                        return Value_initObject(rt_obj);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // hasDefaultValue()
+        try rprop_meta.addMethod(.{
+            .name = "hasDefaultValue",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initBool(false);
+                    if (cname_val.isString() and pname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname_val.asString().data)) |p| {
+                                return Value.initBool(p.has_default);
+                            }
+                        }
+                    }
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getDefaultValue()
+        try rprop_meta.addMethod(.{
+            .name = "getDefaultValue",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initNull();
+                    if (cname_val.isString() and pname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname_val.asString().data)) |p| {
+                                if (p.default_value) |dv| {
+                                    _ = dv.retain();
+                                    return dv;
+                                }
+                            }
+                        }
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getModifiers() - 返回 PHP 标准属性修饰符位掩码
+        try rprop_meta.addMethod(.{
+            .name = "getModifiers",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initInt(1); // IS_PUBLIC
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initInt(1);
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initInt(1);
+                    if (cname_val.isString() and pname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname_val.asString().data)) |p| {
+                                var flags: i64 = 0;
+                                if (p.is_public) flags |= 1; // IS_PUBLIC
+                                if (p.is_protected) flags |= 2; // IS_PROTECTED
+                                if (p.is_private) flags |= 4; // IS_PRIVATE
+                                if (p.is_static) flags |= 16; // IS_STATIC
+                                if (p.is_readonly) flags |= 128; // IS_READONLY
+                                return Value.initInt(flags);
+                            }
+                        }
+                    }
+                    return Value.initInt(1); // default: IS_PUBLIC
+                }
+            }.call,
+            .is_static = false,
+        });
+        // isDefault() - 通过 Reflection 获取的属性都是在类定义中声明的
+        try rprop_meta.addMethod(.{
+            .name = "isDefault",
+            .func = struct {
+                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    return Value.initBool(true);
+                }
+            }.call,
+            .is_static = false,
+        });
+        rprop_meta.magic_construct = rprop_meta.methods.get("__construct").?.func;
+        try registerClass(rprop_meta);
 
         // ReflectionFunction
         const rf_meta = try ClassMeta.init(allocator, "ReflectionFunction");
@@ -13225,21 +14182,48 @@ pub const ClassMeta = struct {
             }.call,
             .is_static = false,
         });
-        // isUserDefined()
+        // isUserDefined() - check if function is user-defined (not a builtin)
         try rf_meta.addMethod(.{
             .name = "isUserDefined",
             .func = struct {
-                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(true);
+                    const this = Value_asObject(ctx);
+                    // 闭包始终是用户定义的
+                    if (this.getPropertyDirect("__closure")) |v| {
+                        if (v.isFunction()) return Value.initBool(true);
+                    }
+                    // 从函数名判断：如果存在于用户函数注册表中则为用户定义
+                    if (this.getPropertyDirect("__func_name")) |name_val| {
+                        if (name_val.isString()) {
+                            if (user_function_registry) |reg| {
+                                if (reg.get(name_val.asString().data) != null) return Value.initBool(true);
+                            }
+                        }
+                    }
+                    // AOT编译的函数都是用户定义的
                     return Value.initBool(true);
                 }
             }.call,
             .is_static = false,
         });
-        // isInternal()
+        // isInternal() - opposite of isUserDefined
         try rf_meta.addMethod(.{
             .name = "isInternal",
             .func = struct {
-                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__closure")) |v| {
+                        if (v.isFunction()) return Value.initBool(false);
+                    }
+                    if (this.getPropertyDirect("__func_name")) |name_val| {
+                        if (name_val.isString()) {
+                            if (user_function_registry) |reg| {
+                                if (reg.get(name_val.asString().data) != null) return Value.initBool(false);
+                            }
+                        }
+                    }
                     return Value.initBool(false);
                 }
             }.call,

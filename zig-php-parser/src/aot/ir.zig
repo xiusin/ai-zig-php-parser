@@ -201,6 +201,14 @@ pub const TypeDef = struct {
         default_value: ?*Instruction,
         is_static: bool,
         visibility: Visibility,
+        /// PHP 源码中声明的类型字符串（无类型声明时为 null）
+        type_name: ?[]const u8 = null,
+        /// 类型是否 nullable
+        type_nullable: bool = false,
+        /// 是否有默认值声明
+        has_default: bool = false,
+        /// 是否 readonly
+        is_readonly: bool = false,
     };
 
     pub const Method = struct {
@@ -208,6 +216,18 @@ pub const TypeDef = struct {
         visibility: Visibility,
         is_static: bool,
         is_abstract: bool = false,
+        is_final: bool = false,
+        param_count: u16 = 0,
+        required_params: u16 = 0,
+        param_names: []const []const u8 = &.{},
+        /// 参数类型字符串列表，与 param_names 一一对应（无类型声明时为空字符串）
+        param_types: []const []const u8 = &.{},
+        /// 参数是否允许 null（nullable 类型或无类型声明）
+        param_nullable: []const bool = &.{},
+        /// 返回类型字符串（无返回类型声明时为 null）
+        return_type: ?[]const u8 = null,
+        /// 返回类型是否 nullable
+        return_nullable: bool = false,
     };
 
     pub const Constant = struct {
