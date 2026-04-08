@@ -1318,13 +1318,62 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
         const cond = try self.parseExpression(0);
         _ = try self.eat(.r_paren);
+        
+        // 检查是否是替代语法 (if ...): ... endif;
+        const is_alternative = self.curr.tag == .colon;
+        if (is_alternative) {
+            _ = try self.eat(.colon);
+        }
+        
+        const then = try self.parseStatement();
+        var else_branch: ?ast.Node.Index = null;
+        
+        if (is_alternative) {
+            // 替代语法：处理 elseif/else 直到 endif
+            if (self.curr.tag == .k_elseif) {
+                else_branch = try self.parseElseifAlternative();
+            } else if (self.curr.tag == .k_else) {
+                self.nextToken();
+                if (self.curr.tag == .colon) {
+                    _ = try self.eat(.colon);
+                }
+                else_branch = try self.parseStatement();
+            }
+            // 消耗 endif;
+            if (self.curr.tag == .k_endif) {
+                self.nextToken();
+                _ = try self.eat(.semicolon);
+            }
+        } else {
+            // 标准语法
+            if (self.curr.tag == .k_elseif) {
+                // elseif is parsed as else { if (...) }
+                else_branch = try self.parseElseif();
+            } else if (self.curr.tag == .k_else) {
+                self.nextToken();
+                else_branch = try self.parseStatement();
+            }
+        }
+        return self.createNode(.{ .tag = .if_stmt, .main_token = token, .data = .{ .if_stmt = .{ .condition = cond, .then_branch = then, .else_branch = else_branch } } });
+    }
+
+    fn parseElseifAlternative(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_elseif);
+        _ = try self.eat(.l_paren);
+        const cond = try self.parseExpression(0);
+        _ = try self.eat(.r_paren);
+        if (self.curr.tag == .colon) {
+            _ = try self.eat(.colon);
+        }
         const then = try self.parseStatement();
         var else_branch: ?ast.Node.Index = null;
         if (self.curr.tag == .k_elseif) {
-            // elseif is parsed as else { if (...) }
-            else_branch = try self.parseElseif();
+            else_branch = try self.parseElseifAlternative();
         } else if (self.curr.tag == .k_else) {
             self.nextToken();
+            if (self.curr.tag == .colon) {
+                _ = try self.eat(.colon);
+            }
             else_branch = try self.parseStatement();
         }
         return self.createNode(.{ .tag = .if_stmt, .main_token = token, .data = .{ .if_stmt = .{ .condition = cond, .then_branch = then, .else_branch = else_branch } } });
@@ -1351,7 +1400,23 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
         const cond = try self.parseExpression(0);
         _ = try self.eat(.r_paren);
+        
+        // 检查是否是替代语法 (while ...): ... endwhile;
+        const is_alternative = self.curr.tag == .colon;
+        if (is_alternative) {
+            _ = try self.eat(.colon);
+        }
+        
         const body = try self.parseStatement();
+        
+        if (is_alternative) {
+            // 消耗 endwhile;
+            if (self.curr.tag == .k_endwhile) {
+                self.nextToken();
+                _ = try self.eat(.semicolon);
+            }
+        }
+        
         return self.createNode(.{ .tag = .while_stmt, .main_token = token, .data = .{ .while_stmt = .{ .condition = cond, .body = body } } });
     }
 
@@ -1416,7 +1481,23 @@ pub const Parser = struct {
         }
 
         _ = try self.eat(.r_paren);
+
+        // 检查是否是替代语法 (foreach ...): ... endforeach;
+        const is_alternative = self.curr.tag == .colon;
+        if (is_alternative) {
+            _ = try self.eat(.colon);
+        }
+
         const body = try self.parseStatement();
+
+        if (is_alternative) {
+            // 消耗 endforeach;
+            if (self.curr.tag == .k_endforeach) {
+                self.nextToken();
+                _ = try self.eat(.semicolon);
+            }
+        }
+
         return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = key, .value = value, .body = body, .value_by_ref = value_by_ref } } });
     }
 
@@ -1556,7 +1637,21 @@ pub const Parser = struct {
         }
         _ = try self.eat(.r_paren);
 
+        // 检查是否是替代语法 (for ...): ... endfor;
+        const is_alternative = self.curr.tag == .colon;
+        if (is_alternative) {
+            _ = try self.eat(.colon);
+        }
+
         const body = try self.parseStatement();
+
+        if (is_alternative) {
+            // 消耗 endfor;
+            if (self.curr.tag == .k_endfor) {
+                self.nextToken();
+                _ = try self.eat(.semicolon);
+            }
+        }
 
         const result = try self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = init_expr, .condition = condition, .loop = loop, .body = body } } });
         return result;
@@ -3058,18 +3153,27 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
         const expr = try self.parseExpression(0);
         _ = try self.eat(.r_paren);
-        _ = try self.eat(.l_brace);
+
+        // 检查是否是替代语法 (switch ...): ... endswitch;
+        const is_alternative = self.curr.tag == .colon;
+        if (is_alternative) {
+            _ = try self.eat(.colon);
+        } else {
+            _ = try self.eat(.l_brace);
+        }
 
         var cases = std.ArrayListUnmanaged(ast.Node.Index){};
         var default_case: ?ast.Node.Index = null;
 
-        while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+        // 使用 Token.Tag 类型避免 comptime-only 错误
+        const end_token: Token.Tag = if (is_alternative) .k_endswitch else .r_brace;
+        while (self.curr.tag != end_token and self.curr.tag != .eof) {
             if (self.curr.tag == .k_case) {
                 self.nextToken();
                 const case_expr = try self.parseExpression(0);
                 _ = try self.eat(.colon); // or .fat_arrow
                 var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
-                while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != .r_brace and self.curr.tag != .eof) {
+                while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != end_token and self.curr.tag != .eof) {
                     try stmts.append(self.allocator, try self.parseStatement());
                 }
                 const arena = self.context.arena.allocator();
@@ -3081,7 +3185,7 @@ pub const Parser = struct {
                 self.nextToken();
                 _ = try self.eat(.colon); // or .fat_arrow
                 var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
-                while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != .r_brace and self.curr.tag != .eof) {
+                while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != end_token and self.curr.tag != .eof) {
                     try stmts.append(self.allocator, try self.parseStatement());
                 }
                 const arena = self.context.arena.allocator();
@@ -3093,7 +3197,15 @@ pub const Parser = struct {
             }
         }
 
-        _ = try self.eat(.r_brace);
+        if (is_alternative) {
+            // 消耗 endswitch;
+            if (self.curr.tag == .k_endswitch) {
+                self.nextToken();
+                _ = try self.eat(.semicolon);
+            }
+        } else {
+            _ = try self.eat(.r_brace);
+        }
         const arena = self.context.arena.allocator();
         const cases_slice = try arena.dupe(ast.Node.Index, cases.items);
         cases.deinit(self.allocator);

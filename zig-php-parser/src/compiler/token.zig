@@ -51,14 +51,19 @@ pub const Token = struct {
         k_if,
         k_else,
         k_elseif,
+        k_endif, // 替代语法结束符
         k_while,
+        k_endwhile, // 替代语法结束符
         k_do,
         k_for,
+        k_endfor, // 替代语法结束符
         k_foreach,
+        k_endforeach, // 替代语法结束符
         k_as,
         k_match,
         k_default,
         k_switch,
+        k_endswitch, // 替代语法结束符
         k_case,
         k_break,
         k_continue,

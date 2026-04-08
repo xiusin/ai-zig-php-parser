@@ -1977,6 +1977,25 @@ pub const PHPArray = struct {
     pub fn unsetByValue(self: *PHPArray, allocator: Allocator, key: Value) bool {
         return self.unset(allocator, normalizeArrayKeyFromValue(key));
     }
+
+    /// 通过整数索引获取元素（用于数组遍历）
+    /// 参数: index - 整数索引 (usize)
+    /// 返回: 对应位置的元素，如果不存在返回 null
+    pub fn getByIndex(self: *PHPArray, index: usize) ?Value {
+        return self.elements.get(.{ .integer = @intCast(index) });
+    }
+
+    /// 通过整数索引获取元素指针（用于引用修改）
+    /// 参数: index - 整数索引 (usize)
+    /// 返回: 对应位置的元素指针，如果不存在返回 null
+    pub fn getPtrByIndex(self: *PHPArray, index: usize) ?*Value {
+        return self.elements.getPtr(.{ .integer = @intCast(index) });
+    }
+
+    /// 设置元素（通过整数索引）
+    pub fn setByIndex(self: *PHPArray, allocator: Allocator, index: usize, value: Value) !void {
+        try self.set(allocator, .{ .integer = @intCast(index) }, value);
+    }
 };
 
 // ============================================================================
@@ -3754,7 +3773,8 @@ fn wrapBuiltin_array_filter(ctx: Value, args: []const Value, allocator: Allocato
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     const callback = if (args.len >= 2) args[1] else Value.initNull();
-    return php_array_filter(args[0], callback, allocator);
+    const mode = if (args.len >= 3) args[2] else Value.initInt(0);
+    return php_array_filter(args[0], callback, mode, allocator);
 }
 
 fn wrapBuiltin_array_reduce(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -13081,7 +13101,7 @@ pub const ClassMeta = struct {
                     var idx: usize = 0;
                     const count = arr.count();
                     while (idx < count) : (idx += 1) {
-                        const sub = arr.getByIndex(@intCast(idx)) orelse continue;
+                        const sub = arr.getByIndex(idx) orelse continue;
                         if (Value_isObject(sub)) {
                             const sub_obj = Value_asObject(sub);
                             if (sub_obj.getPropertyDirect("__type_name")) |tn| {
@@ -13148,7 +13168,7 @@ pub const ClassMeta = struct {
                     var idx: usize = 0;
                     const count = arr.count();
                     while (idx < count) : (idx += 1) {
-                        const sub = arr.getByIndex(@intCast(idx)) orelse continue;
+                        const sub = arr.getByIndex(idx) orelse continue;
                         if (Value_isObject(sub)) {
                             const sub_obj = Value_asObject(sub);
                             if (sub_obj.getPropertyDirect("__type_name")) |tn| {
@@ -17447,7 +17467,7 @@ fn quickSortEntriesByKey(items: []KV, descending: bool) void {
 }
 
 pub fn php_sizeof(val: Value) !Value {
-    return php_count(val);
+    return php_count(val, Value.initInt(0));
 }
 
 pub fn php_array_combine(keys: Value, values: Value, allocator: Allocator) !Value {
@@ -20292,19 +20312,57 @@ pub fn php_array_map(args: []const Value, allocator: Allocator) !Value {
 }
 
 /// array_filter - 过滤数组元素
-pub fn php_array_filter(arr: Value, callback: Value, allocator: Allocator) !Value {
+/// mode: 0 = 只传值, 1 = 传键和值, 2 = 传键 (ARRAY_FILTER_USE_KEY, ARRAY_FILTER_USE_BOTH)
+pub fn php_array_filter(arr: Value, callback: Value, mode: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
 
     const php_arr = arr.asArray();
     const result_arr = try PHPArray.init(allocator);
+    const mode_int: u32 = if (mode.isInt()) @intCast(@max(mode.asInt(), 0)) else 0;
 
     var iter = php_arr.elements.iterator();
     while (iter.next()) |entry| {
         const should_keep = if (callback.isNull()) blk: {
+            // 无回调时，检查值是否为真
             break :blk entry.value_ptr.*.toBool();
         } else blk: {
-            const args = [_]Value{entry.value_ptr.*};
-            const result = try php_invoke_callable(callback, &args, allocator);
+            // 根据mode决定传参方式
+            const result = switch (mode_int) {
+                0 => blk2: {
+                    // ARRAY_FILTER_USE_VALUE (默认) - 只传值
+                    const args = [_]Value{entry.value_ptr.*};
+                    break :blk2 try php_invoke_callable(callback, &args, allocator);
+                },
+                1 => blk2: {
+                    // ARRAY_FILTER_USE_KEY - 只传键
+                    const key_val = switch (entry.key_ptr.*) {
+                        .integer => |k| Value.initInt(k),
+                        .string => |s| blk: {
+                            s.retain(); // 增加引用计数
+                            break :blk Value.initString(s);
+                        },
+                    };
+                    const args = [_]Value{key_val};
+                    break :blk2 try php_invoke_callable(callback, &args, allocator);
+                },
+                2 => blk2: {
+                    // ARRAY_FILTER_USE_BOTH - 传值和键
+                    const key_val = switch (entry.key_ptr.*) {
+                        .integer => |k| Value.initInt(k),
+                        .string => |s| blk: {
+                            s.retain(); // 增加引用计数
+                            break :blk Value.initString(s);
+                        },
+                    };
+                    const args = [_]Value{ entry.value_ptr.*, key_val };
+                    break :blk2 try php_invoke_callable(callback, &args, allocator);
+                },
+                else => blk2: {
+                    // 默认行为：只传值
+                    const args = [_]Value{entry.value_ptr.*};
+                    break :blk2 try php_invoke_callable(callback, &args, allocator);
+                },
+            };
             defer result.release(allocator);
             break :blk result.toBool();
         };

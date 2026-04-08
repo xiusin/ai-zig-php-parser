@@ -87,6 +87,12 @@ const keyword_map = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "__NAMESPACE__", .m_namespace },
     .{ "include_once", .k_include_once },
     .{ "require_once", .k_require_once },
+    // 替代语法结束符
+    .{ "endif", .k_endif },
+    .{ "endwhile", .k_endwhile },
+    .{ "endfor", .k_endfor },
+    .{ "endforeach", .k_endforeach },
+    .{ "endswitch", .k_endswitch },
 });
 
 /// 主查找函数
