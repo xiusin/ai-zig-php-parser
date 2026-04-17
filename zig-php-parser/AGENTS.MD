@@ -32,8 +32,9 @@
 > 测试/编译产物必须删除；
 > **AI 防幻觉规范**：必须阅读 [AI_ANTI_HALLUCINATION_GUIDE.md](AI_ANTI_HALLUCINATION_GUIDE.md)，遵循其中所有约束；
 > 修改代码前必须先读取目标文件上下文，禁止凭记忆/推测写代码；
-> 代码实现/脚本测试不考虑Fiber和生成器/spl；
+> 代码实现/脚本测试不考虑Fiber和生成器/spl/eval/ob相关；
 > 打印输出缩进不一致不视为BUG，一律忽略；
+> 开发过程务必考虑它只是php语法语言是编译型的，不可考虑ob等非编译型软件相关的开发；
 > Zig 0.15.2 API 对照表见防幻觉规范 1.2 节，ArrayList/HashMap 必须传 allocator；
 
 ## 输出格式契约
