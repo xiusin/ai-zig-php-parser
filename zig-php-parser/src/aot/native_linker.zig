@@ -265,9 +265,18 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// 检查寄存器是否是引用参数的 alloca（storage 类型为 *Value，reg 类型为 **Value）
+    fn isRefParamAlloca(self: *Self, reg_id: usize) bool {
+        if (self.ref_param_alloca_map) |map| {
+            return map.get(reg_id) != null;
+        }
+        return false;
+    }
+
     /// 生成两个寄存器之间的赋值，根据指针语义选择正确形式：
     ///   alloca←alloca  : result.* = value.*  （值拷贝）
-    ///   alloca←ref_ptr : result = value      （指针重定向）
+    ///   alloca←ref_ptr : result = value      （指针重定向，普通alloca）
+    ///   ref_param_alloca←ref_ptr : result.* = value （写入 **Value 槽位，存储 *Value 指针）
     ///   alloca←value   : result.* = value    （写入内存）
     ///   value←alloca   : result = value.*    （读出内存）
     ///   ptr←ptr(ref)   : result = value      （指针拷贝）
@@ -277,13 +286,20 @@ pub const NativeLinker = struct {
         const value_is_alloca  = self.isAllocaReg(value_id);
         const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(result_id) else false;
         const value_is_ref_ptr  = if (self.current_ref_ptr_regs) |rpr| rpr.contains(value_id)  else false;
+        const result_is_ref_param_alloca = self.isRefParamAlloca(result_id);
 
         if (result_is_alloca and value_is_alloca) {
             // alloca ← alloca: 拷贝值
             try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_id, value_id });
         } else if (result_is_alloca and value_is_ref_ptr) {
-            // alloca ← ref_ptr: 指针重定向（让alloca指向ref_ptr所指向的地址）
-            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
+            // alloca ← ref_ptr: 区分引用参数 alloca 与普通 alloca
+            if (result_is_ref_param_alloca) {
+                // 引用参数 alloca: reg 为 **Value，storage 为 *Value，写入槽位
+                try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_id, value_id });
+            } else {
+                // 普通 alloca: 指针重定向
+                try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
+            }
         } else if (result_is_alloca) {
             // alloca ← value: 写入内存
             try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_id, value_id });
@@ -3722,6 +3738,11 @@ pub const NativeLinker = struct {
         // std.debug.print("About to generate register declarations: count={d}\n", .{all_registers.count()});
         if (all_registers.count() > 0) {
             try code.appendSlice(self.allocator, "    // Register declarations\n");
+            // 引用参数 alloca 的 storage 占位值（必须先声明，供后续 reg_X_storage 引用）
+            if (ref_param_alloca_map.count() > 0) {
+                try code.appendSlice(self.allocator, "    var null_val_placeholder: runtime.Value = runtime.Value.initNull();\n");
+                try code.appendSlice(self.allocator, "    _ = &null_val_placeholder;\n");
+            }
 
             if (self.config.verbose) {
                 // std.debug.print("  Generating {d} register declarations\n", .{all_registers.count()});
@@ -3743,16 +3764,13 @@ pub const NativeLinker = struct {
                 if (is_alloca) {
                     // 检查是否是引用参数的alloca
                     if (ref_param_alloca_map.get(reg_id)) |_| {
-                        // 引用参数的alloca：根据类型声明
+                        // 引用参数的 alloca: reg 类型为 **Value，storage 类型为 *Value
+                        // 必须创建 storage 槽位并让 reg 指向它，否则 reg.* 写入会导致段错误
                         const type_str = self.irTypeToZigTypeString(reg_type);
-                        try code.appendSlice(self.allocator, "    var reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
-                        try code.appendSlice(self.allocator, ": ");
-                        try code.appendSlice(self.allocator, type_str);
-                        try code.appendSlice(self.allocator, " = undefined;\n");
-                        try code.appendSlice(self.allocator, "    _ = &reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
-                        try code.appendSlice(self.allocator, ";\n");
+                        // storage 是 *Value，初始化为 &null_val 占位（后续 param 初始化会覆盖）
+                        try code.writer(self.allocator).print("    var reg_{d}_storage: *runtime.Value = &null_val_placeholder;\n", .{reg_id});
+                        try code.writer(self.allocator).print("    var reg_{d}: {s} = &reg_{d}_storage;\n", .{ reg_id, type_str, reg_id });
+                        try code.writer(self.allocator).print("    _ = &reg_{d};\n", .{reg_id});
                     } else {
                         // 普通alloca：创建storage
                         try code.appendSlice(self.allocator, "    var reg_");
@@ -5604,14 +5622,19 @@ pub const NativeLinker = struct {
                     // 引用参数：生成initRef
                     const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
                     if (arg_type == .ptr) {
-                        // 已经是指针，直接initRef
-                        try writer.print("runtime.Value.initRef(&reg_{d}", .{arg.id});
-                        if (self.current_alloca_regs) |alloca_regs| {
-                            if (alloca_regs.contains(arg.id)) {
-                                try writer.writeAll(".*");
-                            }
+                        // 已经是指针
+                        if (self.isRefParamAlloca(arg.id)) {
+                            // ref_param_alloca: reg 为 **Value，storage 为 *Value
+                            // reg_X.* 直接就是 *Value，用它作为 initRef 的参数
+                            try writer.print("runtime.Value.initRef(reg_{d}.*)", .{arg.id});
+                        } else if (self.current_alloca_regs != null and self.current_alloca_regs.?.contains(arg.id)) {
+                            // 普通 alloca: reg 为 *Value，storage 为 Value
+                            // &reg_X.* 等价于 reg_X（但写成 &reg_X.* 更稳健，避免类型问题）
+                            try writer.print("runtime.Value.initRef(&reg_{d}.*)", .{arg.id});
+                        } else {
+                            // ref_ptr (*Value): 直接 initRef
+                            try writer.print("runtime.Value.initRef(reg_{d})", .{arg.id});
                         }
-                        try writer.writeAll(")");
                     } else {
                         // 不是指针，按普通参数处理
                         try self.writeRegRef(writer, arg.id);
@@ -6455,7 +6478,7 @@ pub const NativeLinker = struct {
                         const is_target_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
                         if (is_target_alloca) {
                             // 检查目标是否是引用参数的alloca（类型为**Value）
-                            const is_ref_param_alloca = self.ref_param_alloca_map.get(op.ptr.id) != null;
+                            const is_ref_param_alloca = self.isRefParamAlloca(op.ptr.id);
                             if (is_ref_param_alloca) {
                                 // 引用参数的alloca存储指针：reg_alloca = &reg_ptr_value
                                 // 由于ref_ptr_reg已经是*Value，需要取其地址存入**Value的alloca
@@ -7496,8 +7519,13 @@ pub const NativeLinker = struct {
                                         if (inst_check.op == .store) {
                                             const store_op = inst_check.op.store;
                                             if (store_op.value.id == reg.id) {
-                                                // 检查目标寄存器类型：指针类型直接赋值，值类型需要解引用
-                                                if (self.isPointerReg(store_op.ptr.id)) {
+                                                // 检查目标寄存器类型：
+                                                // - ref_param_alloca (**Value): 写入 storage 槽位 reg_X.* = reg_Y
+                                                // - 指针类型 (*Value): 直接赋值 reg_X = reg_Y
+                                                // - 值类型 (Value): 解引用 reg_X = reg_Y.*
+                                                if (self.isRefParamAlloca(store_op.ptr.id)) {
+                                                    try writer.print("    reg_{d}.* = reg_{d};\n", .{ store_op.ptr.id, reg.id });
+                                                } else if (self.isPointerReg(store_op.ptr.id)) {
                                                     try writer.print("    reg_{d} = reg_{d};\n", .{ store_op.ptr.id, reg.id });
                                                 } else {
                                                     try writer.print("    reg_{d} = reg_{d}.*;\n", .{ store_op.ptr.id, reg.id });

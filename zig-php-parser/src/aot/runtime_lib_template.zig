@@ -20337,9 +20337,9 @@ pub fn php_array_filter(arr: Value, callback: Value, mode: Value, allocator: All
                     // ARRAY_FILTER_USE_KEY - 只传键
                     const key_val = switch (entry.key_ptr.*) {
                         .integer => |k| Value.initInt(k),
-                        .string => |s| blk: {
+                        .string => |s| blk_s: {
                             s.retain(); // 增加引用计数
-                            break :blk Value.initString(s);
+                            break :blk_s Value.initString(s);
                         },
                     };
                     const args = [_]Value{key_val};
@@ -20349,9 +20349,9 @@ pub fn php_array_filter(arr: Value, callback: Value, mode: Value, allocator: All
                     // ARRAY_FILTER_USE_BOTH - 传值和键
                     const key_val = switch (entry.key_ptr.*) {
                         .integer => |k| Value.initInt(k),
-                        .string => |s| blk: {
+                        .string => |s| blk_s: {
                             s.retain(); // 增加引用计数
-                            break :blk Value.initString(s);
+                            break :blk_s Value.initString(s);
                         },
                     };
                     const args = [_]Value{ entry.value_ptr.*, key_val };
