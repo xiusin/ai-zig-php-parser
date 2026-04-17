@@ -331,6 +331,10 @@ pub const Lexer = struct {
     }
 
     fn lexVariable(self: *Lexer, start: usize) Token {
+        if (self.pos < self.buffer.len and self.buffer[self.pos] == '{') {
+            self.pos += 1;
+            return .{ .tag = .t_dollar_open_curly_brace, .loc = .{ .start = start, .end = self.pos } };
+        }
         if (self.buffer[self.pos] == '$') self.pos += 1;
         while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_')) self.pos += 1;
         return .{ .tag = .t_variable, .loc = .{ .start = start, .end = self.pos } };

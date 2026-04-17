@@ -2750,6 +2750,13 @@ pub const Parser = struct {
                 }
                 return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_name) } } });
             },
+            .t_dollar_open_curly_brace => {
+                const t = self.curr;
+                self.nextToken();
+                const inner_expr = try self.parseExpression(0);
+                _ = try self.eat(.r_brace);
+                return self.createNode(.{ .tag = .variable_variable, .main_token = t, .data = .{ .variable_variable = .{ .expr = inner_expr } } });
+            },
             .t_go_identifier => {
                 // Go mode: identifiers are variables, add $ prefix for VM compatibility
                 const t = try self.eat(.t_go_identifier);

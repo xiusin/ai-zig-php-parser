@@ -978,7 +978,12 @@ pub const NativeLinker = struct {
             \\pub fn getGlobalVarDynamic(name_val: runtime.Value) !runtime.Value {
             \\    const name_str = try name_val.toString(runtime.runtime_allocator);
             \\    defer name_str.release(runtime.runtime_allocator);
-            \\    return getGlobalVar(name_str.data);
+            \\    if (name_str.data.len > 0 and name_str.data[0] == '$') {
+            \\        return getGlobalVar(name_str.data);
+            \\    }
+            \\    const prefixed = try std.fmt.allocPrint(runtime.runtime_allocator, "${s}", .{name_str.data});
+            \\    defer runtime.runtime_allocator.free(prefixed);
+            \\    return getGlobalVar(prefixed);
             \\}
             \\
             \\pub fn setGlobalVarDynamic(name_val: runtime.Value, value: runtime.Value) !void {

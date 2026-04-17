@@ -3497,6 +3497,14 @@ pub const IRGenerator = struct {
         const target_node = self.getNode(assign_data.target) orelse return value_reg;
 
         switch (target_node.tag) {
+            .variable, .variable_variable, .array_access, .property_access, .variable_property_access, .static_property_access => {},
+            else => {
+                self.diagnostics.reportError(self.current_location, "Can't use function return value in write context", .{});
+                return value_reg;
+            },
+        }
+
+        switch (target_node.tag) {
             .variable => {
                 const var_name = self.getString(target_node.data.variable.name);
 

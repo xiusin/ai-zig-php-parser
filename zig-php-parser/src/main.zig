@@ -763,6 +763,24 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
             std.debug.print("Success: Compilation completed (no output file)\n", .{});
         }
     } else {
+        const diagnostics = aot_compiler.getDiagnostics();
+        if (diagnostics.diagnostics.items.len > 0) {
+            const first_diag = diagnostics.diagnostics.items[0];
+            if (std.mem.eql(u8, first_diag.message, "Can't use function return value in write context")) {
+                const abs_path = std.fs.cwd().realpathAlloc(
+                    allocator,
+                    options.input_file,
+                ) catch options.input_file;
+                try generateFatalErrorBinary(
+                    allocator,
+                    options,
+                    abs_path,
+                    first_diag.message,
+                    first_diag.location.line,
+                );
+                return;
+            }
+        }
         std.debug.print("Error: Compilation failed with {d} errors, {d} warnings\n", .{
             result.error_count,
             result.warning_count,
@@ -812,9 +830,8 @@ fn generateParseErrorBinary(
     try w.writeAll("pub fn main() void {\n");
     try w.writeAll("    const stdout = std.fs.File{ .handle = 1 };\n");
     try w.writeAll("    const stderr = std.fs.File{ .handle = 2 };\n");
-    // stdout 输出
-    try w.writeAll("    stdout.writeAll(\"");
-    for (stdout_msg) |c| {
+    try w.writeAll("    stderr.writeAll(\"");
+    for (stderr_msg) |c| {
         switch (c) {
             '\n' => try w.writeAll("\\n"),
             '"' => try w.writeAll("\\\""),
@@ -823,9 +840,8 @@ fn generateParseErrorBinary(
         }
     }
     try w.writeAll("\") catch {};\n");
-    // stderr 输出
-    try w.writeAll("    stderr.writeAll(\"");
-    for (stderr_msg) |c| {
+    try w.writeAll("    stdout.writeAll(\"");
+    for (stdout_msg) |c| {
         switch (c) {
             '\n' => try w.writeAll("\\n"),
             '"' => try w.writeAll("\\\""),
@@ -859,6 +875,97 @@ fn generateParseErrorBinary(
     };
 
     // 编译
+    const emit_arg = try std.fmt.allocPrint(
+        allocator,
+        "-femit-bin={s}",
+        .{output_path},
+    );
+    defer allocator.free(emit_arg);
+    const argv = [_][]const u8{
+        "zig", "build-exe", zig_path, emit_arg,
+    };
+
+    var child = std.process.Child.init(&argv, allocator);
+    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    _ = try child.spawnAndWait();
+
+    std.debug.print("Success: Compiled to {s}\n", .{output_path});
+}
+
+fn generateFatalErrorBinary(
+    allocator: std.mem.Allocator,
+    options: aot.CompileOptions,
+    abs_path: []const u8,
+    err_msg: []const u8,
+    line_num: u32,
+) !void {
+    const build_dir = ".zigphp_aot_build";
+    std.fs.cwd().makeDir(build_dir) catch {};
+
+    const stdout_msg = try std.fmt.allocPrint(
+        allocator,
+        "\nFatal error: {s} in {s} on line {d}\n",
+        .{ err_msg, abs_path, line_num },
+    );
+    defer allocator.free(stdout_msg);
+
+    const stderr_msg = try std.fmt.allocPrint(
+        allocator,
+        "PHP Fatal error:  {s} in {s} on line {d}\n",
+        .{ err_msg, abs_path, line_num },
+    );
+    defer allocator.free(stderr_msg);
+
+    var zig_src = std.ArrayListUnmanaged(u8){};
+    defer zig_src.deinit(allocator);
+    const w = zig_src.writer(allocator);
+    try w.writeAll("const std = @import(\"std\");\n");
+    try w.writeAll("pub fn main() void {\n");
+    try w.writeAll("    const stdout = std.fs.File{ .handle = 1 };\n");
+    try w.writeAll("    const stderr = std.fs.File{ .handle = 2 };\n");
+    try w.writeAll("    stderr.writeAll(\"");
+    for (stderr_msg) |c| {
+        switch (c) {
+            '\n' => try w.writeAll("\\n"),
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeAll("\") catch {};\n");
+    try w.writeAll("    stdout.writeAll(\"");
+    for (stdout_msg) |c| {
+        switch (c) {
+            '\n' => try w.writeAll("\\n"),
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeAll("\") catch {};\n");
+    try w.writeAll("    std.process.exit(255);\n");
+    try w.writeAll("}\n");
+
+    const zig_path = try std.fs.path.join(
+        allocator,
+        &[_][]const u8{ build_dir, "main.zig" },
+    );
+    defer allocator.free(zig_path);
+    {
+        const f = try std.fs.cwd().createFile(zig_path, .{});
+        defer f.close();
+        try f.writeAll(zig_src.items);
+    }
+
+    const output_path = options.output_file orelse blk: {
+        const input = options.input_file;
+        if (std.mem.endsWith(u8, input, ".php")) {
+            break :blk input[0 .. input.len - 4];
+        }
+        break :blk input;
+    };
+
     const emit_arg = try std.fmt.allocPrint(
         allocator,
         "-femit-bin={s}",
