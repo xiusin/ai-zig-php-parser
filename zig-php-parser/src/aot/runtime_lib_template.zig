@@ -9460,7 +9460,7 @@ pub fn php_array_union(lhs: Value, rhs: Value, allocator: Allocator) !Value {
     var it_r = rhs_arr.elements.iterator();
     while (it_r.next()) |entry| {
         const key = entry.key_ptr.*;
-        if (result.elements.contains(key)) continue;
+        if (result.elements.get(key) != null) continue;
         const value = entry.value_ptr.*.retain();
         switch (key) {
             .integer => |i| {
