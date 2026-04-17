@@ -2634,6 +2634,7 @@ pub const NativeLinker = struct {
 
         .{ "define", bi(.{ .runtime_name = "php_define", .needs_allocator = true }) },
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
+        .{ "get_defined_constants", bi(.{ .runtime_name = "php_get_defined_constants", .needs_allocator = true }) },
 
         .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },
         .{ "enum_exists", bi(.{ .runtime_name = "php_enum_exists", .needs_allocator = true }) },

@@ -4600,7 +4600,12 @@ pub const IRGenerator = struct {
                 break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
             },
             .function => blk: {
-                const name = if (self.current_function) |f| f.name else "";
+                const raw_name = if (self.current_function) |f| f.name else "";
+                // 剥离 "Class::" 前缀，__FUNCTION__ 只返回方法名
+                const name = if (std.mem.lastIndexOf(u8, raw_name, "::")) |idx|
+                    raw_name[idx + 2 ..]
+                else
+                    raw_name;
                 const id = try module.internString(name);
                 break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
             },
@@ -4611,9 +4616,17 @@ pub const IRGenerator = struct {
             },
             .method => blk: {
                 const class_name = self.lookupCurrentClassName() orelse "";
-                const func_name = if (self.current_function) |f| f.name else "";
+                const raw_name = if (self.current_function) |f| f.name else "";
+                // func_name 可能已经是 "Class::method" 形式，取最后一段作为方法名
+                const method_part = if (std.mem.lastIndexOf(u8, raw_name, "::")) |idx|
+                    raw_name[idx + 2 ..]
+                else
+                    raw_name;
                 var buf: [256]u8 = undefined;
-                const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, func_name }) catch func_name;
+                const full = if (class_name.len > 0)
+                    std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method_part }) catch method_part
+                else
+                    method_part;
                 const id = try module.internString(full);
                 break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
             },

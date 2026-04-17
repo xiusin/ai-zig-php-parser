@@ -404,8 +404,12 @@ fn initPredefinedConstants() !void {
     // PHP版本和浮点常量
     {
         const ver_key = try runtime_allocator.dupe(u8, "PHP_VERSION");
-        const ver_str = try PHPString.init(runtime_allocator, "8.4.0");
+        const ver_str = try PHPString.init(runtime_allocator, "8.4.8");
         try constants.put(ver_key, Value.initString(ver_str));
+        const ver_id_key = try runtime_allocator.dupe(u8, "PHP_VERSION_ID");
+        try constants.put(ver_id_key, Value.initInt(80408));
+        const release_key = try runtime_allocator.dupe(u8, "PHP_RELEASE_VERSION");
+        try constants.put(release_key, Value.initInt(8));
 
         const major_key = try runtime_allocator.dupe(u8, "PHP_MAJOR_VERSION");
         try constants.put(major_key, Value.initInt(8));
@@ -6008,8 +6012,7 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
         .{ .name = "PHP_SAPI", .value = "cli" },
         .{ .name = "PHP_OS", .value = "Darwin" },
         .{ .name = "PHP_OS_FAMILY", .value = "Darwin" },
-        .{ .name = "PHP_VERSION", .value = "8.3.0" },
-        .{ .name = "PHP_VERSION_ID", .value = "80300" },
+        .{ .name = "PHP_VERSION", .value = "8.4.8" },
         .{ .name = "DIRECTORY_SEPARATOR", .value = "/" },
         .{ .name = "PATH_SEPARATOR", .value = ":" },
         .{ .name = "PHP_EXTENSION_DIR", .value = "" },
@@ -6045,6 +6048,9 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
     try constants.put(null_key, Value.initNull());
 }
 
+/// 用户通过 define() 定义的常量集合（用于 get_defined_constants(true) 分类）
+var user_defined_constants: ?std.StringHashMap(void) = null;
+
 pub fn php_define(name_val: Value, value_val: Value, allocator: Allocator) !Value {
     if (!name_val.isString()) return Value.initBool(false);
     const name = name_val.asString().data;
@@ -6062,7 +6068,54 @@ pub fn php_define(name_val: Value, value_val: Value, allocator: Allocator) !Valu
     _ = value_val.retain();
 
     try constants.put(name_copy, value_val);
+
+    // 记录为用户定义的常量
+    if (user_defined_constants == null) {
+        user_defined_constants = std.StringHashMap(void).init(allocator);
+    }
+    if (user_defined_constants) |*set| {
+        _ = set.put(name_copy, {}) catch {};
+    }
     return Value.initBool(true);
+}
+
+/// get_defined_constants([bool $categorize = false]): array
+pub fn php_get_defined_constants(categorize_val: Value, allocator: Allocator) !Value {
+    const categorize = categorize_val.toBool();
+    if (categorize) {
+        const result = try PHPArray.init(allocator);
+        errdefer result.release(allocator);
+
+        const user_arr = try PHPArray.init(allocator);
+        const core_arr = try PHPArray.init(allocator);
+
+        var it = constants.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            const key_str = try PHPString.init(allocator, key);
+            const is_user = if (user_defined_constants) |*set| set.contains(key) else false;
+            const target = if (is_user) user_arr else core_arr;
+            try target.elements.put(.{ .string = key_str }, val.retain());
+        }
+
+        const core_key = try PHPString.init(allocator, "Core");
+        try result.elements.put(.{ .string = core_key }, Value.initArray(core_arr));
+        const user_key = try PHPString.init(allocator, "user");
+        try result.elements.put(.{ .string = user_key }, Value.initArray(user_arr));
+        return Value.initArray(result);
+    } else {
+        const result = try PHPArray.init(allocator);
+        errdefer result.release(allocator);
+        var it = constants.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            const key_str = try PHPString.init(allocator, key);
+            try result.elements.put(.{ .string = key_str }, val.retain());
+        }
+        return Value.initArray(result);
+    }
 }
 
 pub fn php_defined(name_val: Value) !Value {
