@@ -8052,6 +8052,35 @@ pub fn php_strstr(haystack: Value, needle: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
+/// stristr - 大小写不敏感查找并返回从匹配处开始的子串
+pub fn php_stristr(haystack: Value, needle: Value, allocator: Allocator) !Value {
+    if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
+    const h = haystack.asString();
+    const n = needle.asString();
+    if (n.length == 0) return Value.initBool(false);
+    if (n.length > h.length) return Value.initBool(false);
+
+    var i: usize = 0;
+    while (i + n.length <= h.length) : (i += 1) {
+        var matched = true;
+        var j: usize = 0;
+        while (j < n.length) : (j += 1) {
+            const a = std.ascii.toLower(h.data[i + j]);
+            const b = std.ascii.toLower(n.data[j]);
+            if (a != b) { matched = false; break; }
+        }
+        if (matched) {
+            const result_len = h.length - i;
+            const buffer = try allocator.alloc(u8, result_len);
+            @memcpy(buffer, h.data[i..h.length]);
+            const result = try allocator.create(PHPString);
+            result.* = .{ .data = buffer, .length = result_len, .ref_count = 1, .is_static = false };
+            return Value.initString(result);
+        }
+    }
+    return Value.initBool(false);
+}
+
 /// strrev - 反转字符串
 pub fn php_strrev(str: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
@@ -24240,6 +24269,33 @@ pub fn php_mb_strtolower(str: Value, encoding: Value, allocator: Allocator) !Val
     const result = try PHPString.init(allocator, result_data);
     allocator.free(result_data);
     return Value.initString(result);
+}
+
+/// mb_detect_encoding - 简化实现：检测字符串编码
+/// 规则：
+///   - 空/纯 ASCII -> "ASCII"
+///   - 合法 UTF-8 -> "UTF-8"
+///   - 其他 -> false
+pub fn php_mb_detect_encoding(str_val: Value, encodings: Value, strict: Value, allocator: Allocator) !Value {
+    _ = encodings;
+    _ = strict;
+    if (!str_val.isString()) return Value.initBool(false);
+    const data = str_val.asString().data;
+    // 检查是否全部 ASCII
+    var is_ascii = true;
+    for (data) |b| {
+        if (b >= 0x80) { is_ascii = false; break; }
+    }
+    if (is_ascii) {
+        const s = try PHPString.init(allocator, "ASCII");
+        return Value.initString(s);
+    }
+    // 验证 UTF-8
+    if (std.unicode.utf8ValidateSlice(data)) {
+        const s = try PHPString.init(allocator, "UTF-8");
+        return Value.initString(s);
+    }
+    return Value.initBool(false);
 }
 
 /// substr_count - 计算子字符串出现次数

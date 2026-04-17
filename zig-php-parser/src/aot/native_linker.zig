@@ -2713,6 +2713,9 @@ pub const NativeLinker = struct {
         .{ "str_repeat", bi(.{ .runtime_name = "php_str_repeat", .needs_allocator = true }) },
         .{ "str_pad", bi(.{ .runtime_name = "php_str_pad", .needs_allocator = true }) },
         .{ "strstr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) },
+        .{ "stristr", bi(.{ .runtime_name = "php_stristr", .needs_allocator = true }) },
+        .{ "strnatcmp", bi(.{ .runtime_name = "php_strnatcmp", .needs_allocator = false }) },
+        .{ "strnatcasecmp", bi(.{ .runtime_name = "php_strnatcasecmp", .needs_allocator = false }) },
         .{ "strchr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) }, // strchr是strstr的别名
         .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
@@ -2998,6 +3001,7 @@ pub const NativeLinker = struct {
         .{ "mb_substr", bi(.{ .runtime_name = "php_mb_substr", .needs_allocator = false }) },
         .{ "mb_strtoupper", bi(.{ .runtime_name = "php_mb_strtoupper", .needs_allocator = false }) },
         .{ "mb_strtolower", bi(.{ .runtime_name = "php_mb_strtolower", .needs_allocator = false }) },
+        .{ "mb_detect_encoding", bi(.{ .runtime_name = "php_mb_detect_encoding", .needs_allocator = true }) },
 
         // 错误处理（特殊处理参数）
         .{ "set_error_handler", bi(.{ .runtime_name = "php_set_error_handler", .needs_allocator = false }) },
@@ -8741,6 +8745,20 @@ pub const NativeLinker = struct {
                                     try self.writeValueArgs(writer, op.args[0..1]);
                                 } else {
                                     try writer.writeAll("runtime.Value.initBool(false)");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_mb_detect_encoding")) {
+                                // mb_detect_encoding(str, encodings = null, strict = false)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initBool(false)");
+                                    } else if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initBool(false)");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (op.args.len > 0) {
