@@ -807,6 +807,34 @@ pub const NativeLinker = struct {
             \\    return count;
             \\}
             \\
+            \\/// 同步 $GLOBALS 数组内容：从 global_vars 复制用户变量到 $GLOBALS 数组（不含 $ 前缀的键）
+            \\fn syncGlobalsArray() void {
+            \\    if (!global_vars_initialized) return;
+            \\    const globals_val = global_vars.get("$GLOBALS") orelse return;
+            \\    if (!globals_val.isArray()) return;
+            \\    const arr = globals_val.asArray();
+            \\    // 清空旧内容
+            \\    var iter = arr.elements.iterator();
+            \\    while (iter.next()) |entry| {
+            \\        entry.value_ptr.release(runtime.runtime_allocator);
+            \\    }
+            \\    arr.elements.deinit();
+            \\    arr.elements = runtime.PHPArray.Elements.init(runtime.runtime_allocator);
+            \\    // 复制全局变量（排除超全局本身）
+            \\    var git = global_vars.iterator();
+            \\    while (git.next()) |entry| {
+            \\        const key_str = entry.key_ptr.*;
+            \\        if (key_str.len < 1 or key_str[0] != '$') continue;
+            \\        const short_name = key_str[1..];
+            \\        // 跳过超全局
+            \\        if (std.mem.eql(u8, short_name, "GLOBALS")) continue;
+            \\        if (short_name.len > 0 and short_name[0] == '_') continue;
+            \\        const php_str = runtime.PHPString.init(runtime.runtime_allocator, short_name) catch continue;
+            \\        const retained = entry.value_ptr.retain();
+            \\        arr.elements.put(.{ .string = php_str }, retained) catch {};
+            \\    }
+            \\}
+            \\
             \\pub fn getGlobalVar(name: []const u8) runtime.Value {
             \\    // 超全局变量直接从global_vars读取
             \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
@@ -816,6 +844,7 @@ pub const NativeLinker = struct {
             \\        }
             \\    }
             \\    if (std.mem.eql(u8, name, "$GLOBALS") and global_vars_initialized) {
+            \\        syncGlobalsArray();
             \\        if (global_vars.get(name)) |value| {
             \\            _ = value.retain();
             \\            return value;
@@ -851,6 +880,7 @@ pub const NativeLinker = struct {
             \\        }
             \\    }
             \\    if (std.mem.eql(u8, name, "$GLOBALS") and global_vars_initialized) {
+            \\        syncGlobalsArray();
             \\        if (global_vars.get(name)) |value| {
             \\            _ = value.retain();
             \\            return value;
