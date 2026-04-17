@@ -416,6 +416,12 @@ pub const Parser = struct {
                 }
             },
             .l_brace => self.parseBlock(),
+            .semicolon => blk: {
+                // 空语句：解析为空块（用于 for(...); while(...); 等）
+                const token = self.curr;
+                self.nextToken();
+                break :blk self.createNode(.{ .tag = .block, .main_token = token, .data = .{ .block = .{ .stmts = &[_]ast.Node.Index{} } } });
+            },
             .t_string => {
                 // Check for goto label: identifier followed by colon at statement level
                 if (self.peek.tag == .colon) {
