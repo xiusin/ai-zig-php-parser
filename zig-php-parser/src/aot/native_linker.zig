@@ -931,16 +931,26 @@ pub const NativeLinker = struct {
             \\// 直接设置全局变量值，不处理引用传播
             \\fn setGlobalVarDirect(name: []const u8, value: runtime.Value) !void {
             \\    if (!global_vars_initialized) return;
+            \\    // PHP 值语义：数组在赋值时如果已被其他变量共享，则进行深拷贝（COW 分离）
+            \\    const final_val: runtime.Value = blk: {
+            \\        if (value.isArray() and !value.isRef()) {
+            \\            const arr = value.asArray();
+            \\            if (arr.ref_count > 1) {
+            \\                const cloned = arr.cloneDeep(runtime.runtime_allocator) catch break :blk value;
+            \\                break :blk runtime.Value.initArray(cloned);
+            \\            }
+            \\        }
+            \\        _ = value.retain();
+            \\        break :blk value;
+            \\    };
             \\    const gop = try global_vars.getOrPut(name);
             \\    if (!gop.found_existing) {
             \\        const key_copy = try runtime.runtime_allocator.dupe(u8, name);
             \\        gop.key_ptr.* = key_copy;
-            \\        _ = value.retain();
-            \\        gop.value_ptr.* = value;
+            \\        gop.value_ptr.* = final_val;
             \\    } else {
             \\        gop.value_ptr.release(runtime.runtime_allocator);
-            \\        _ = value.retain();
-            \\        gop.value_ptr.* = value;
+            \\        gop.value_ptr.* = final_val;
             \\    }
             \\}
             \\

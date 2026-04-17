@@ -1851,6 +1851,36 @@ pub const PHPArray = struct {
         self.ref_count += 1;
     }
 
+    /// 深拷贝数组（PHP 值语义：数组赋值时复制）
+    /// 对嵌套数组递归复制；对象/字符串仅增加引用计数（PHP 中对象仍然按引用共享）
+    pub fn cloneDeep(self: *PHPArray, allocator: Allocator) !*PHPArray {
+        const new_arr = try PHPArray.init(allocator);
+        new_arr.next_index = self.next_index;
+        var iter = self.elements.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            // 递归克隆子数组；其他类型（字符串/对象/标量）仅 retain
+            var new_val: Value = undefined;
+            if (val.isArray() and !val.isRef()) {
+                const sub = try val.asArray().cloneDeep(allocator);
+                new_val = Value.initArray(sub);
+            } else {
+                new_val = val.retain();
+            }
+            // 若 key 为字符串，需要增加字符串的引用计数
+            const new_key: ArrayKey = switch (key) {
+                .string => |s| blk: {
+                    s.retain();
+                    break :blk .{ .string = s };
+                },
+                .integer => key,
+            };
+            try new_arr.elements.put(new_key, new_val);
+        }
+        return new_arr;
+    }
+
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPArray, allocator: Allocator) void {
         // 检测内存破坏
@@ -2551,9 +2581,25 @@ pub const PHPClosure = struct {
 };
 
 /// 变量赋值
+/// PHP 值语义：若赋值源为共享数组（非引用且 ref_count > 1），
+/// 为目标制作一份深拷贝，避免两个变量通过同一底层数组互相影响。
+/// 注意：调用者负责释放旧值和 retain 新值。若触发 clone，本函数会撤销调用者的 retain。
 pub fn val_assign(target: *Value, value: Value) void {
-    // 直接覆盖值（包括引用值）
-    // 注意：调用者负责释放旧值和retain新值
+    if (value.isArray() and !value.isRef()) {
+        const arr = value.asArray();
+        // 调用者已经执行一次 retain，因此当 ref_count > 1 时，除本次引用外仍有其他持有者，
+        // 需要分离（COW）以维持值语义。
+        if (arr.ref_count > 1) {
+            const cloned = arr.cloneDeep(runtime_allocator) catch {
+                target.* = value;
+                return;
+            };
+            // 撤销调用者的 retain（原数组少一个引用）
+            arr.release(runtime_allocator);
+            target.* = Value.initArray(cloned);
+            return;
+        }
+    }
     target.* = value;
 }
 
