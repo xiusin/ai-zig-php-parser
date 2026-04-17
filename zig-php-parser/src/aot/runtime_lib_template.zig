@@ -14852,6 +14852,47 @@ pub fn php_weak_mark_dead(val: Value) void {
     }
 }
 
+/// 已触发 __destruct 的对象集合（防止重复触发）
+var destructed_objects: ?std.AutoHashMap(usize, void) = null;
+
+/// 对象是否已经执行过 __destruct
+pub fn php_is_destructed(obj: *PHPObject) bool {
+    if (destructed_objects) |*set| {
+        return set.contains(@intFromPtr(obj));
+    }
+    return false;
+}
+
+/// 标记对象已执行 __destruct
+fn markDestructed(obj: *PHPObject) void {
+    if (destructed_objects == null) {
+        destructed_objects = std.AutoHashMap(usize, void).init(runtime_allocator);
+    }
+    if (destructed_objects) |*set| {
+        set.put(@intFromPtr(obj), {}) catch {};
+    }
+}
+
+/// 立即对对象触发 __destruct（若尚未触发），用于 unset 时 PHP 语义。
+/// 不释放内存，等待真正的 refcount 归零时 deinit 再释放。
+pub fn php_force_destruct_if_object(val: Value) void {
+    if (!Value_isObject(val)) return;
+    const obj = Value_asObject(val);
+    if (php_is_destructed(obj)) return;
+    if (obj.class_meta) |meta| {
+        if (class_registry == null) return;
+        if (meta.findMethodLookup("__destruct")) |lookup| {
+            markDestructed(obj);
+            const this_val = Value_initObject(obj);
+            const guard = ClassContext.init(meta, lookup.owner);
+            defer guard.deinit();
+            _ = lookup.method.func(this_val, &.{}, obj.allocator) catch {};
+        } else {
+            markDestructed(obj);
+        }
+    }
+}
+
 /// 检查对象是否仍然存活（未被 unset 标记为死亡）
 fn php_weak_is_alive(addr: usize) bool {
     if (weak_dead_objects) |*set| {
@@ -15156,16 +15197,23 @@ pub const PHPObject = struct {
         if (self.class_meta) |meta| {
             // 简单检查：如果class_registry已被清理，跳过__destruct
             if (class_registry != null) {
-                if (meta.findMethodLookup("__destruct")) |lookup| {
-                    // 临时增加引用计数，防止析构函数内部的retain/release导致无限递归
-                    // 析构函数执行期间，对象的refcount应该保持为1
-                    self.ref_count = 1;
-                    const this_val = Value_initObject(self);
-                    const guard = ClassContext.init(meta, lookup.owner);
-                    defer guard.deinit();
-                    _ = lookup.method.func(this_val, &.{}, self.allocator) catch {};
-                    // 析构函数执行完毕，恢复refcount为0以继续销毁流程
-                    self.ref_count = 0;
+                // 若已被 php_force_destruct_if_object 显式触发过，跳过
+                if (!php_is_destructed(self)) {
+                    if (meta.findMethodLookup("__destruct")) |lookup| {
+                        // 临时增加引用计数，防止析构函数内部的retain/release导致无限递归
+                        // 析构函数执行期间，对象的refcount应该保持为1
+                        self.ref_count = 1;
+                        const this_val = Value_initObject(self);
+                        const guard = ClassContext.init(meta, lookup.owner);
+                        defer guard.deinit();
+                        _ = lookup.method.func(this_val, &.{}, self.allocator) catch {};
+                        // 析构函数执行完毕，恢复refcount为0以继续销毁流程
+                        self.ref_count = 0;
+                    }
+                }
+                // 清理 destructed 记录
+                if (destructed_objects) |*set| {
+                    _ = set.remove(@intFromPtr(self));
                 }
             }
         }

@@ -920,14 +920,19 @@ pub const NativeLinker = struct {
             \\    const name = name_val.asString().data;
             \\    // 从全局变量表中删除并释放
             \\    if (global_vars.getPtr(name)) |val_ptr| {
+            \\        const saved_val = val_ptr.*;
             \\        // 通知弱引用系统：对象即将被 unset
-            \\        runtime.php_weak_mark_dead(val_ptr.*);
+            \\        runtime.php_weak_mark_dead(saved_val);
             \\        // Release setGlobalVar的retain
             \\        val_ptr.release(runtime.runtime_allocator);
             \\        // 从表中删除
             \\        if (global_vars.fetchRemove(name)) |kv| {
             \\            runtime.runtime_allocator.free(kv.key);
             \\        }
+            \\        // PHP 语义：unset 应立即触发 __destruct（如果这是"逻辑"上的唯一引用）。
+            \\        // AOT 中寄存器可能额外持有实现层引用，导致 refcount > 0。
+            \\        // 这里显式触发一次 __destruct，然后等待真正的 refcount 归零时再清理内存。
+            \\        runtime.php_force_destruct_if_object(saved_val);
             \\    }
             \\}
             \\
