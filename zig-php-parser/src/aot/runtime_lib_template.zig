@@ -4511,6 +4511,10 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
 
 /// 加法运算（PHP语义）
 pub fn php_add(lhs: Value, rhs: Value) !Value {
+    // 数组联合运算：$a + $b（保留左侧值，右侧不存在的键才加入）
+    if (lhs.isArray() and rhs.isArray()) {
+        return php_array_union(lhs, rhs, runtime_allocator);
+    }
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "+");
     }
@@ -9419,6 +9423,58 @@ pub fn php_array_merge(arrays: []const Value, allocator: Allocator) !Value {
 
     result.next_index = next_int_key;
 
+    return Value.initArray(result);
+}
+
+/// 数组联合运算（PHP + 运算符）
+///
+/// 与 array_merge 不同：
+/// - 保留左侧数组的所有键值对
+/// - 右侧数组中键不在左侧时才加入
+/// - 整数键不重新索引
+pub fn php_array_union(lhs: Value, rhs: Value, allocator: Allocator) !Value {
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    // 先拷贝左侧所有元素
+    const lhs_arr = lhs.asArray();
+    var it_l = lhs_arr.elements.iterator();
+    var max_int_key: i64 = -1;
+    while (it_l.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*.retain();
+        switch (key) {
+            .integer => |i| {
+                if (i > max_int_key) max_int_key = i;
+                try result.elements.put(key, value);
+            },
+            .string => |s| {
+                s.retain();
+                try result.elements.put(key, value);
+            },
+        }
+    }
+
+    // 再拷贝右侧中左侧不存在的键
+    const rhs_arr = rhs.asArray();
+    var it_r = rhs_arr.elements.iterator();
+    while (it_r.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (result.elements.contains(key)) continue;
+        const value = entry.value_ptr.*.retain();
+        switch (key) {
+            .integer => |i| {
+                if (i > max_int_key) max_int_key = i;
+                try result.elements.put(key, value);
+            },
+            .string => |s| {
+                s.retain();
+                try result.elements.put(key, value);
+            },
+        }
+    }
+
+    result.next_index = max_int_key + 1;
     return Value.initArray(result);
 }
 
