@@ -1,14 +1,9 @@
 === PHP AOT 模糊测试完整报告 ===
-生成时间: Fri Apr 17 19:54:36 CST 2026
-
-===================================
+生成时间: Fri Apr 17 20:49:25 CST 2026
 
 === [test_001_variables] ===
-文件: fuzzy_scripts/test_001_variables.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 a=42
 b=3.14159
 c='hello world'
@@ -25,12 +20,10 @@ g=array (
 )
 dynamic=dynamic
 indirect=indirect
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_001_variables.php on line 12
 PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_001_variables.php on line 12
-
 --- diff ---
 1,16c1,3
 < a=42
@@ -54,14 +47,9 @@ PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-
 > Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_001_variables.php on line 12
 > PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_001_variables.php on line 12
 
-===================================
-
 === [test_002_operators] ===
-文件: fuzzy_scripts/test_002_operators.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 加法: 13
 减法: 7
 乘法: 30
@@ -102,8 +90,7 @@ XOR: true
 )
 数组相等: false
 数组全等: false
-
---- AOT 编译输出 ---
+--- AOT ---
 加法: 13
 减法: 7
 乘法: 30
@@ -146,7 +133,6 @@ Fatal error: Uncaught TypeError: Unsupported operand types: array + array in /Us
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_002_operators.php on line 65
-
 --- diff ---
 19c19
 < XOR: true
@@ -171,14 +157,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_002_operators.php on line 65
 
-===================================
-
 === [test_003_type_juggling] ===
-文件: fuzzy_scripts/test_003_type_juggling.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 字符串+数字: 8
 数字+字符串: 30
 PHP Fatal error:  Uncaught TypeError: Unsupported operand types: string + int in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_003_type_juggling.php:7
@@ -190,12 +171,10 @@ Fatal error: Uncaught TypeError: Unsupported operand types: string + int in /Use
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_003_type_juggling.php on line 7
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_003_type_juggling.php on line 12
 PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_003_type_juggling.php on line 12
-
 --- diff ---
 1,6d0
 < 字符串+数字: 8
@@ -213,14 +192,9 @@ PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-
 > Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_003_type_juggling.php on line 12
 > PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_003_type_juggling.php on line 12
 
-===================================
-
 === [test_006_loops_for] ===
-文件: fuzzy_scripts/test_006_loops_for.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 基础循环:
 0 1 2 3 4 
 多变量:
@@ -261,12 +235,10 @@ iteration 2
 done
 双重break:
 (0,0) (0,1) 
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_006_loops_for.php on line 88
 PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_006_loops_for.php on line 88
-
 --- diff ---
 1,40c1,3
 < 基础循环:
@@ -314,14 +286,9 @@ PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-
 > Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_006_loops_for.php on line 88
 > PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_006_loops_for.php on line 88
 
-===================================
-
 === [test_007_loops_while] ===
-文件: fuzzy_scripts/test_007_loops_while.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 基础while:
 0 1 2 3 4 
 while替代语法:
@@ -359,12 +326,10 @@ val=2
 done
 break层级:
 (0,0) (0,1) (0,2) (1,0) 
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_007_loops_while.php on line 19
 PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_007_loops_while.php on line 19
-
 --- diff ---
 1,37c1,3
 < 基础while:
@@ -409,14 +374,9 @@ PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-
 > Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_007_loops_while.php on line 19
 > PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_007_loops_while.php on line 19
 
-===================================
-
 === [test_008_loops_foreach] ===
-文件: fuzzy_scripts/test_008_loops_foreach.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 索引数组:
 apple banana cherry 
 带键遍历:
@@ -460,8 +420,7 @@ list解构:
 [0] 1 => a
 [1] 2 => b
 [2] 3 => c
-
---- AOT 编译输出 ---
+--- AOT ---
 索引数组:
 apple banana cherry 
 带键遍历:
@@ -501,7 +460,6 @@ list解构:
 [0] 1 => a
 [1] 2 => b
 [2] 3 => c
-
 --- diff ---
 22,23d21
 < x => 10
@@ -510,23 +468,16 @@ list解构:
 < i=3, val=4
 < i=4, val=5
 
-===================================
-
 === [test_009_functions_basic] ===
-文件: fuzzy_scripts/test_009_functions_basic.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 PHP Fatal error:  Can't use function return value in write context in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_009_functions_basic.php on line 63
 
 Fatal error: Can't use function return value in write context in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_009_functions_basic.php on line 63
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_009_functions_basic.php on line 113
 PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_009_functions_basic.php on line 113
-
 --- diff ---
 1d0
 < PHP Fatal error:  Can't use function return value in write context in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_009_functions_basic.php on line 63
@@ -536,14 +487,9 @@ PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-
 > Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_009_functions_basic.php on line 113
 > PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_009_functions_basic.php on line 113
 
-===================================
-
 === [test_010_closures] ===
-文件: fuzzy_scripts/test_010_closures.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Hello, Closure!
 Hello, World!
 count after closure: 3
@@ -563,8 +509,7 @@ mul(3,2) = 6
 nested(3) = 6
 execute: 5
 execute closure: 42
-
---- AOT 编译输出 ---
+--- AOT ---
 Hello, Closure!
 Hello, World!
 count after closure: 3
@@ -587,7 +532,6 @@ mul(3,2) = 6
 nested(3) = 6
 execute: 5
 execute closure: 42
-
 --- diff ---
 13c13,16
 < bound closure: 2
@@ -597,14 +541,9 @@ execute closure: 42
 > Fatal error: Call to a member function on a non-object
 > bound closure: 
 
-===================================
-
 === [test_012_arrays_basic] ===
-文件: fuzzy_scripts/test_012_arrays_basic.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 arr3: 1, 2, 3, 4, 5
 arr5: array (
   'key1' => 'value1',
@@ -646,8 +585,7 @@ array_rand returns array
 array_unique: 1, 2, 3
 array_filter: 3, 4, 5
 array_map: 2, 4, 6
-
---- AOT 编译输出 ---
+--- AOT ---
 arr3: 1, 2, 3, 4, 5
 arr5: array (
     'key1' => 'value1',
@@ -682,7 +620,6 @@ Fatal error: Uncaught TypeError: Unsupported operand types: array + array in /Us
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_012_arrays_basic.php on line 71
-
 --- diff ---
 3,4c3,4
 <   'key1' => 'value1',
@@ -718,14 +655,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_012_arrays_basic.php on line 71
 
-===================================
-
 === [test_014_oop_basic] ===
-文件: fuzzy_scripts/test_014_oop_basic.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Hello, I'm Alice, 25 years old.
 Hello, I'm Bob, 30 years old.
 Name: Alice
@@ -746,8 +678,7 @@ Typed float: 3.14
 Typed string: hello
 Typed bool: true
 Typed array count: 3
-
---- AOT 编译输出 ---
+--- AOT ---
 Hello, I'm Alice, 25 years old.
 Hello, I'm Bob, 30 years old.
 Name: Alice
@@ -768,28 +699,15 @@ Typed float: 3.14
 Typed string: hello
 Typed bool: true
 Typed array count: 3
-
 --- diff ---
 11c11
 < After unset count: 1
 ---
 > After unset count: 2
 
-===================================
-
-=== [test_017_oop_trait] ===
-文件: fuzzy_scripts/test_017_oop_trait.php
-状态: 编译成功
-结果: PASS
-
-===================================
-
 === [test_018_magic_methods] ===
-文件: fuzzy_scripts/test_018_magic_methods.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 __construct called with TestObject
 __set called for dynamicProp = 'dynamic value'
 __get called for dynamicProp
@@ -822,8 +740,7 @@ __destruct called for TestObject
 __destruct called for TestObject (clone)
 Done
 __destruct called for TestObject
-
---- AOT 编译输出 ---
+--- AOT ---
 __construct called with TestObject
 __set called for dynamicProp = 'dynamic value'
 __get called for dynamicProp
@@ -852,7 +769,6 @@ serialized: O:10:"MagicClass":2:{s:4:"name";s:10:"TestObject";s:4:"data";a:0:{}}
 __unserialize called
 unserialized: MagicClass(TestObject)
 Done
-
 --- diff ---
 19,24c19,23
 < debugInfo: \MagicClass::__set_state(array(
@@ -873,14 +789,9 @@ Done
 32d28
 < __destruct called for TestObject
 
-===================================
-
 === [test_021_math_functions] ===
-文件: fuzzy_scripts/test_021_math_functions.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 abs(-5) = 5
 ceil(4.3) = 5
 floor(4.7) = 4
@@ -937,8 +848,7 @@ sprintf octal: 10
 round(1.555, 2) = 1.56
 round(1.555, 2, PHP_ROUND_HALF_UP) = 1.56
 round(1.555, 2, PHP_ROUND_HALF_DOWN) = 1.55
-
---- AOT 编译输出 ---
+--- AOT ---
 abs(-5) = 5
 ceil(4.3) = 5
 floor(4.7) = 4
@@ -965,7 +875,6 @@ Fatal error: Uncaught Error: Call to undefined function sinh() in /Users/tuoke/D
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_021_math_functions.php on line 28
-
 --- diff ---
 18,56c18,26
 < sinh(0) = 0
@@ -1018,14 +927,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_021_math_functions.php on line 28
 
-===================================
-
 === [test_023_string_advanced] ===
-文件: fuzzy_scripts/test_023_string_advanced.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 strlen: 17
 mb_strlen: 9
 mb_substr: 你好
@@ -1069,8 +973,7 @@ crc32: 907060870
 base64_encode: SGVsbG8gV29ybGQ=
 base64_decode: Hello World
 count_chars: 1, 1, 2, 1
-
---- AOT 编译输出 ---
+--- AOT ---
 strlen: 17
 mb_strlen: 9
 mb_substr: 你好
@@ -1083,7 +986,6 @@ Fatal error: Uncaught Error: Call to undefined function mb_detect_encoding() in 
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_023_string_advanced.php on line 12
-
 --- diff ---
 4,43c4,12
 < mb_detect_encoding: UTF-8
@@ -1137,14 +1039,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_023_string_advanced.php on line 12
 
-===================================
-
 === [test_029_callback] ===
-文件: fuzzy_scripts/test_029_callback.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 double: 10
 square: 25
 uppercase: HELLO
@@ -1165,22 +1062,20 @@ is_callable valid: true
 is_callable invalid: false
 invokable: 27
 is_callable invokable: true
-
---- AOT 编译输出 ---
+--- AOT ---
 double: 10
 square: 25
 uppercase: HELLO
 error: UnknownFunction
-/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/runtime_lib.zig:24357:9: 0x100a1bc63 in php_call_user_func (main)
+/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/runtime_lib.zig:24357:9: 0x100ca3c63 in php_call_user_func (main)
         return error.UnknownFunction;
         ^
-/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:3115:14: 0x100a35833 in __main__ (main)
+/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:3115:14: 0x100cbd833 in __main__ (main)
     reg_30 = try runtime.php_call_user_func(&[_]runtime.Value{reg_26, reg_29}, runtime.runtime_allocator);
              ^
-/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:14491:9: 0x100a7ee57 in main (main)
+/Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:14491:9: 0x100d06e57 in main (main)
         return err;
         ^
-
 --- diff ---
 4,20c4,13
 < static method: 15
@@ -1202,33 +1097,26 @@ error: UnknownFunction
 < is_callable invokable: true
 ---
 > error: UnknownFunction
-> /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/runtime_lib.zig:24357:9: 0x100a1bc63 in php_call_user_func (main)
+> /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/runtime_lib.zig:24357:9: 0x100ca3c63 in php_call_user_func (main)
 >         return error.UnknownFunction;
 >         ^
-> /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:3115:14: 0x100a35833 in __main__ (main)
+> /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:3115:14: 0x100cbd833 in __main__ (main)
 >     reg_30 = try runtime.php_call_user_func(&[_]runtime.Value{reg_26, reg_29}, runtime.runtime_allocator);
 >              ^
-> /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:14491:9: 0x100a7ee57 in main (main)
+> /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/.zigphp_aot_build/main.zig:14491:9: 0x100d06e57 in main (main)
 >         return err;
 >         ^
 
-===================================
-
 === [test_030_variables_advanced] ===
-文件: fuzzy_scripts/test_030_variables_advanced.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 PHP Fatal error:  Can't use function return value in write context in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_030_variables_advanced.php on line 88
 
 Fatal error: Can't use function return value in write context in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_030_variables_advanced.php on line 88
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_030_variables_advanced.php on line 18
 PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_030_variables_advanced.php on line 18
-
 --- diff ---
 1d0
 < PHP Fatal error:  Can't use function return value in write context in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_030_variables_advanced.php on line 88
@@ -1238,14 +1126,9 @@ PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-
 > Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_030_variables_advanced.php on line 18
 > PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_030_variables_advanced.php on line 18
 
-===================================
-
 === [test_032_spl_iterators] ===
-文件: fuzzy_scripts/test_032_spl_iterators.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 ArrayIterator:
   0 => a
   1 => b
@@ -1303,8 +1186,7 @@ MultipleIterator:
   a=2, b=y
   a=3, b=z
 SPL Iterator tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 ArrayIterator:
   0 => a
   1 => b
@@ -1324,7 +1206,6 @@ Fatal error: Uncaught Error: Class "DirectoryIterator" not found in /Users/tuoke
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_032_spl_iterators.php on line 21
-
 --- diff ---
 11,57c11,19
 <   com.apple.ImageIOXPCService
@@ -1385,23 +1266,16 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_032_spl_iterators.php on line 21
 
-===================================
-
 === [test_033_namespaces] ===
-文件: fuzzy_scripts/test_033_namespaces.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 PHP Fatal error:  Cannot mix bracketed namespace declarations with unbracketed namespace declarations in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_033_namespaces.php on line 25
 
 Fatal error: Cannot mix bracketed namespace declarations with unbracketed namespace declarations in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_033_namespaces.php on line 25
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: syntax error, unexpected "{", expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_033_namespaces.php on line 83
 PHP Parse error:  syntax error, unexpected "{", expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_033_namespaces.php on line 83
-
 --- diff ---
 1d0
 < PHP Fatal error:  Cannot mix bracketed namespace declarations with unbracketed namespace declarations in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_033_namespaces.php on line 25
@@ -1411,87 +1285,9 @@ PHP Parse error:  syntax error, unexpected "{", expecting ";" in /Users/tuoke/De
 > Parse error: syntax error, unexpected "{", expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_033_namespaces.php on line 83
 > PHP Parse error:  syntax error, unexpected "{", expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_033_namespaces.php on line 83
 
-===================================
-
-=== [test_039_union_types] ===
-文件: fuzzy_scripts/test_039_union_types.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
-int result: 10
-float result: 6.28
-Integer: 42
-Float: 3.14
-String: hello
-found: 'Item 1'
-null: NULL
-handle A: A
-handle B: B
-process FileHandler: test data
-process MemoryHandler: test data
-int return: integer
-string return: string
-int id: 1
-string id: abc
-complex array: array
-complex bool: bool
-complex null: null
-Factory type: Concrete
-mixed int: 42
-mixed array: array (
-  0 => 1,
-  1 => 2,
-  2 => 3,
-)
-Union types tests completed
-
---- AOT 编译输出 ---
-int result: 10
-float result: 6.28
-Integer: 42
-Float: 3.14
-String: hello
-found: 'Item 1'
-null: NULL
-handle A: A
-handle B: B
-process FileHandler: test data
-process MemoryHandler: test data
-int return: integer
-string return: string
-int id: 1
-string id: abc
-complex array: array
-complex bool: bool
-complex null: null
-Factory type: Concrete
-mixed int: 42
-mixed array: array (
-    0 => 1,
-    1 => 2,
-    2 => 3,
-)
-Union types tests completed
-
---- diff ---
-22,24c22,24
-<   0 => 1,
-<   1 => 2,
-<   2 => 3,
----
->     0 => 1,
->     1 => 2,
->     2 => 3,
-
-===================================
-
 === [test_043_fibers_basic] ===
-文件: fuzzy_scripts/test_043_fibers_basic.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Starting fiber
 Fiber started
 After start: 'suspended value'
@@ -1520,8 +1316,7 @@ PHP Warning:  Undefined variable $fiberCurrent in /Users/tuoke/Desktop/ai-zig-ph
 Warning: Undefined variable $fiberCurrent in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_043_fibers_basic.php on line 98
 Current fiber is self: false
 Fiber tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 Starting fiber
 Fiber started
 After start: 'suspended value'
@@ -1546,7 +1341,6 @@ Outer fiber completed
 Caught thrown exception: thrown into fiber
 Current fiber is self: true
 Fiber tests completed
-
 --- diff ---
 22d21
 < Caught exception: Fiber exception
@@ -1558,14 +1352,9 @@ Fiber tests completed
 ---
 > Current fiber is self: true
 
-===================================
-
 === [test_047_readonly_props] ===
-文件: fuzzy_scripts/test_047_readonly_props.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 User: Alice <alice@example.com>
 Updated email: alice.new@example.com
 Distance: 5
@@ -1579,8 +1368,7 @@ Delayed: initialized
 Container content exists: true
 Empty container: true
 Readonly properties tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 User: Alice <alice@example.com>
 Updated email: alice.new@example.com
 Distance: 5
@@ -1594,7 +1382,6 @@ Fatal error: Uncaught Error: Class "DateTimeImmutable" not found in /Users/tuoke
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_047_readonly_props.php on line 71
-
 --- diff ---
 5,13c5,13
 < Product: Widget costs $19.99
@@ -1617,23 +1404,16 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_047_readonly_props.php on line 71
 
-===================================
-
 === [test_048_dnf_types] ===
-文件: fuzzy_scripts/test_048_dnf_types.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 PHP Parse error:  syntax error, unexpected token "&", expecting variable in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_048_dnf_types.php on line 59
 
 Parse error: syntax error, unexpected token "&", expecting variable in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_048_dnf_types.php on line 59
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: syntax error, unexpected "(", expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_048_dnf_types.php on line 69
 PHP Parse error:  syntax error, unexpected "(", expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_048_dnf_types.php on line 69
-
 --- diff ---
 1d0
 < PHP Parse error:  syntax error, unexpected token "&", expecting variable in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_048_dnf_types.php on line 59
@@ -1643,23 +1423,16 @@ PHP Parse error:  syntax error, unexpected "(", expecting "token" in /Users/tuok
 > Parse error: syntax error, unexpected "(", expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_048_dnf_types.php on line 69
 > PHP Parse error:  syntax error, unexpected "(", expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_048_dnf_types.php on line 69
 
-===================================
-
 === [test_049_type_system] ===
-文件: fuzzy_scripts/test_049_type_system.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 PHP Fatal error:  strict_types declaration must be the very first statement in the script in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_049_type_system.php on line 37
 
 Fatal error: strict_types declaration must be the very first statement in the script in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_049_type_system.php on line 37
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_049_type_system.php on line 37
 PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_049_type_system.php on line 37
-
 --- diff ---
 1d0
 < PHP Fatal error:  strict_types declaration must be the very first statement in the script in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_049_type_system.php on line 37
@@ -1669,14 +1442,9 @@ PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-
 > Parse error: Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_049_type_system.php on line 37
 > PHP Parse error:  Unexpected token in expression in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_049_type_system.php on line 37
 
-===================================
-
 === [test_050_spl_datastructures] ===
-文件: fuzzy_scripts/test_050_spl_datastructures.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 SplFixedArray[2]: 20
 SplFixedArray count: 5
 DLL top: c
@@ -1707,8 +1475,7 @@ LIFO mode:
   1
 After resize: 3
 SPL data structure tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 SplFixedArray[2]: 20
 SplFixedArray count: 5
 PHP Fatal error:  Uncaught Error: Class "SplDoublyLinkedList" not found in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_050_spl_datastructures.php:13
@@ -1720,7 +1487,6 @@ Fatal error: Uncaught Error: Class "SplDoublyLinkedList" not found in /Users/tuo
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_050_spl_datastructures.php on line 13
-
 --- diff ---
 3,30c3,11
 < DLL top: c
@@ -1762,14 +1528,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_050_spl_datastructures.php on line 13
 
-===================================
-
 === [test_051_closures_advanced] ===
-文件: fuzzy_scripts/test_051_closures_advanced.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 First increment: 1
 Second increment: 2
 Counter count: 2
@@ -1785,12 +1546,10 @@ Memoized 1: 25
 Memoized 2 (cached): 25
 Composed: Result: 11
 Advanced closures tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: syntax error, unexpected token, expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_051_closures_advanced.php on line 72
 PHP Parse error:  syntax error, unexpected token, expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_051_closures_advanced.php on line 72
-
 --- diff ---
 1,15c1,3
 < First increment: 1
@@ -1813,23 +1572,16 @@ PHP Parse error:  syntax error, unexpected token, expecting ";" in /Users/tuoke/
 > Parse error: syntax error, unexpected token, expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_051_closures_advanced.php on line 72
 > PHP Parse error:  syntax error, unexpected token, expecting ";" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_051_closures_advanced.php on line 72
 
-===================================
-
 === [test_052_complex_expressions] ===
-文件: fuzzy_scripts/test_052_complex_expressions.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 PHP Parse error:  syntax error, unexpected token "if", expecting "=>" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_052_complex_expressions.php on line 101
 
 Parse error: syntax error, unexpected token "if", expecting "=>" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_052_complex_expressions.php on line 101
-
---- AOT 编译输出 ---
+--- AOT ---
 
 Parse error: syntax error, unexpected token, expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_052_complex_expressions.php on line 101
 PHP Parse error:  syntax error, unexpected token, expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_052_complex_expressions.php on line 101
-
 --- diff ---
 1d0
 < PHP Parse error:  syntax error, unexpected token "if", expecting "=>" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_052_complex_expressions.php on line 101
@@ -1839,14 +1591,9 @@ PHP Parse error:  syntax error, unexpected token, expecting "token" in /Users/tu
 > Parse error: syntax error, unexpected token, expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_052_complex_expressions.php on line 101
 > PHP Parse error:  syntax error, unexpected token, expecting "token" in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_052_complex_expressions.php on line 101
 
-===================================
-
 === [test_053_generators_basic] ===
-文件: fuzzy_scripts/test_053_generators_basic.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Generator values:
   1
   2
@@ -1890,8 +1637,7 @@ File line: Line 2
 File line: Line 3
 File line: 
 Generator basic tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 Generator values:
   1
   2
@@ -1930,7 +1676,6 @@ File line: Line 2
 File line: Line 3
 File line: 
 Generator basic tests completed
-
 --- diff ---
 29,33d28
 < Infinite gen: 0
@@ -1939,14 +1684,9 @@ Generator basic tests completed
 < Infinite gen: 3
 < Infinite gen: 4
 
-===================================
-
 === [test_056_superglobals] ===
-文件: fuzzy_scripts/test_056_superglobals.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 GLOBALS testVar: global value
 newGlobal: new value
 PHP_VERSION: 8.4.8
@@ -1981,8 +1721,7 @@ _SESSION exists: false
 _REQUEST exists: false
 _ENV exists: true
 Superglobals tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 GLOBALS testVar: 
 newGlobal: new value
 PHP_VERSION: 8.3.0
@@ -2012,7 +1751,6 @@ Fatal error: Uncaught Error: Call to undefined function get_defined_constants() 
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_056_superglobals.php on line 56
-
 --- diff ---
 1c1
 < GLOBALS testVar: global value
@@ -2052,14 +1790,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_056_superglobals.php on line 56
 
-===================================
-
 === [test_057_output_buffering] ===
-文件: fuzzy_scripts/test_057_output_buffering.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Buffered content: This is buffered
 Outer: Outer buffer
 Inner:  - Inner buffer
@@ -2074,8 +1807,7 @@ Conditional: Conditional output
 Template result: Alice is 25 years old
 gzhandler available
 Output buffering tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 This is bufferedBuffered content: 
 Outer buffer - Inner bufferOuter: 
 Inner: 
@@ -2099,7 +1831,6 @@ Fatal error: Uncaught Error: Call to undefined function eval() in /Users/tuoke/D
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_057_output_buffering.php on line 92
-
 --- diff ---
 1,3c1,3
 < Buffered content: This is buffered
@@ -2140,14 +1871,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_057_output_buffering.php on line 92
 
-===================================
-
 === [test_059_reflection] ===
-文件: fuzzy_scripts/test_059_reflection.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Class name: SampleClass
 Is instantiable: true
 Properties count: 3
@@ -2173,8 +1899,7 @@ Param b type: string
 Param c type: ?float
 Return type: array
 Reflection tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 Class name: SampleClass
 Is instantiable: true
 Properties count: 3
@@ -2199,7 +1924,6 @@ Fatal error: Uncaught Error: Class "ReflectionExtension" not found in /Users/tuo
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_059_reflection.php on line 61
-
 --- diff ---
 4d3
 <   Property: privateProp (private)
@@ -2233,14 +1957,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_059_reflection.php on line 61
 
-===================================
-
 === [test_063_sorting_algorithms] ===
-文件: fuzzy_scripts/test_063_sorting_algorithms.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Built-in sort: 11, 12, 22, 25, 33, 34, 45, 64, 78, 90
 Bubble sort: 11, 12, 22, 25, 33, 34, 45, 64, 78, 90
 Selection sort: 11, 12, 22, 25, 33, 34, 45, 64, 78, 90
@@ -2258,8 +1977,7 @@ Validation:
   heap: OK
 
 Sorting tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 Built-in sort: 11, 12, 22, 25, 33, 34, 45, 64, 78, 90
 Bubble sort: 11, 12, 22, 25, 33, 34, 45, 64, 78, 90
 Selection sort: 11, 12, 22, 25, 33, 34, 45, 64, 78, 90
@@ -2277,7 +1995,6 @@ Validation:
   heap: OK
 
 Sorting tests completed
-
 --- diff ---
 5c5
 < Quick sort: 11, 12, 22, 25, 33, 34, 45, 64, 78, 90
@@ -2288,14 +2005,9 @@ Sorting tests completed
 ---
 >   quick: FAIL
 
-===================================
-
 === [test_064_string_manipulation] ===
-文件: fuzzy_scripts/test_064_string_manipulation.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 === Multibyte String ===
 strlen: 23
 mb_strlen: 12
@@ -2370,8 +2082,7 @@ str_word_count: 9
 substr_count 'o': 4
 
 String manipulation tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 === Multibyte String ===
 strlen: 23
 mb_strlen: 12
@@ -2387,7 +2098,6 @@ Fatal error: Uncaught Error: Call to undefined function mb_detect_encoding() in 
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_064_string_manipulation.php on line 14
-
 --- diff ---
 7c7,10
 < mb_detect_encoding: ASCII
@@ -2469,14 +2179,9 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_064_string_manipulation.php on line 14
 
-===================================
-
 === [test_065_array_walk] ===
-文件: fuzzy_scripts/test_065_array_walk.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 Before walk: 1, 2, 3
 After walk: 2, 4, 6
 After walk with data: 20, 40, 60
@@ -2492,8 +2197,7 @@ Multi-array sums: 12, 15, 18
 Transposed rows: 3
 Sorted by price: Thing, Widget, Gadget
 array_walk tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 Before walk: 1, 2, 3
 After walk: 2, 4, 6
 After walk with data: 20, 40, 60
@@ -2509,7 +2213,6 @@ Multi-array sums: 12, 15, 18
 Transposed rows: 3
 Sorted by price: Thing, Widget, Gadget
 array_walk tests completed
-
 --- diff ---
 7,9c7,9
 < Filtered: 3, 4, 5
@@ -2520,14 +2223,9 @@ array_walk tests completed
 > Reduced sum: 55
 > Reduced product: 14400
 
-===================================
-
 === [test_068_misc_functions] ===
-文件: fuzzy_scripts/test_068_misc_functions.php
-状态: 编译成功
-结果: FAIL (输出不一致)
-
---- PHP 原生输出 ---
+结果: FAIL
+--- PHP ---
 === Variable Functions ===
 isset: true
 empty: false
@@ -2558,11 +2256,11 @@ Decoded: array (
 )
 
 === Unique IDs ===
-uniqid: 69e21fcb8011f
-uniqid with prefix: test_69e21fcb80121
+uniqid: 69e22c9a37c30
+uniqid with prefix: test_69e22c9a37c32
 
 === Process Info ===
-getmypid: 76688
+getmypid: 86173
 getmygid: true
 
 === Memory Info ===
@@ -2571,7 +2269,7 @@ memory_get_peak_usage: 489808
 memory_get_usage real: 2097152
 
 === Timing ===
-Elapsed: 0.001271 seconds
+Elapsed: 0.001255 seconds
 
 === Misc ===
 phpversion: 8.4.8
@@ -2590,8 +2288,7 @@ extension_loaded('nonexistent'): false
 Human readable: 1.50 KB
 
 Misc function tests completed
-
---- AOT 编译输出 ---
+--- AOT ---
 === Variable Functions ===
 isset: true
 empty: false
@@ -2622,11 +2319,11 @@ Decoded: array (
 )
 
 === Unique IDs ===
-uniqid: 69e21fcb17374
-uniqid with prefix: test_69e21fcb17376
+uniqid: 69e22c9a0fe9b
+uniqid with prefix: test_69e22c9a0fe9d
 
 === Process Info ===
-getmypid: 76690
+getmypid: 86177
 getmygid: false
 
 === Memory Info ===
@@ -2635,7 +2332,7 @@ memory_get_peak_usage: 84457
 memory_get_usage real: 84594
 
 === Timing ===
-Elapsed: 0.001115 seconds
+Elapsed: 0.001158 seconds
 
 === Misc ===
 PHP Fatal error:  Uncaught Error: Call to undefined function phpversion() in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_068_misc_functions.php:74
@@ -2647,7 +2344,6 @@ Fatal error: Uncaught Error: Call to undefined function phpversion() in /Users/t
 Stack trace:
 #0 {main}
   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_068_misc_functions.php on line 74
-
 --- diff ---
 16c16
 < resource: is_int=false, is_float=false, is_string=false
@@ -2662,16 +2358,16 @@ Stack trace:
 >     'age' => 25,
 >     'active' => true,
 31,32c31,32
-< uniqid: 69e21fcb8011f
-< uniqid with prefix: test_69e21fcb80121
+< uniqid: 69e22c9a37c30
+< uniqid with prefix: test_69e22c9a37c32
 ---
-> uniqid: 69e21fcb17374
-> uniqid with prefix: test_69e21fcb17376
+> uniqid: 69e22c9a0fe9b
+> uniqid with prefix: test_69e22c9a0fe9d
 35,36c35,36
-< getmypid: 76688
+< getmypid: 86173
 < getmygid: true
 ---
-> getmypid: 76690
+> getmypid: 86177
 > getmygid: false
 39,41c39,41
 < memory_get_usage: 429352
@@ -2682,9 +2378,9 @@ Stack trace:
 > memory_get_peak_usage: 84457
 > memory_get_usage real: 84594
 44c44
-< Elapsed: 0.001271 seconds
+< Elapsed: 0.001255 seconds
 ---
-> Elapsed: 0.001115 seconds
+> Elapsed: 0.001158 seconds
 47,49c47,50
 < phpversion: 8.4.8
 < php_sapi_name: cli
@@ -2713,11 +2409,5 @@ Stack trace:
 > #0 {main}
 >   thrown in /Users/tuoke/Desktop/ai-zig-php-parser/zig-php-parser/fuzzy_scripts/test_068_misc_functions.php on line 74
 
-===================================
-
-
 === 汇总 ===
-通过: 1
-失败: 33
-编译失败: 0
-总计: 34
+通过: 0 / 失败: 32 / 编译失败: 0 / 总计: 32
