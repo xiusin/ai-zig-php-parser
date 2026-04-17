@@ -435,6 +435,13 @@ fn initPredefinedConstants() !void {
         const eol_str = try PHPString.init(runtime_allocator, "\n");
         try constants.put(eol_key, Value.initString(eol_str));
 
+        const stdin_key = try runtime_allocator.dupe(u8, "STDIN");
+        try constants.put(stdin_key, Value.initInt(1));
+        const stdout_key = try runtime_allocator.dupe(u8, "STDOUT");
+        try constants.put(stdout_key, Value.initInt(2));
+        const stderr_key = try runtime_allocator.dupe(u8, "STDERR");
+        try constants.put(stderr_key, Value.initInt(3));
+
         const maxpath_key = try runtime_allocator.dupe(u8, "PHP_MAXPATHLEN");
         try constants.put(maxpath_key, Value.initInt(4096));
     }
@@ -2670,6 +2677,8 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "array_merge", wrapBuiltin_array_merge },
     .{ "array_sum", wrapBuiltin_array_sum },
     .{ "round", wrapBuiltin_round },
+    .{ "ob_start", wrapBuiltin_ob_start },
+    .{ "ob_gzhandler", wrapBuiltin_ob_gzhandler },
     .{ "usort", wrapBuiltin_usort },
     .{ "select", wrapBuiltin_select },
     .{ "get_class_methods", wrapBuiltin_get_class_methods },
@@ -2683,6 +2692,7 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "fileatime", wrapBuiltin_fileatime },
     .{ "filectime", wrapBuiltin_filectime },
     // 网络函数
+    .{ "getenv", wrapBuiltin_getenv },
     .{ "gethostbyname", wrapBuiltin_gethostbyname },
     .{ "gethostname", wrapBuiltin_gethostname },
     .{ "ip2long", wrapBuiltin_ip2long },
@@ -4000,6 +4010,12 @@ fn wrapBuiltin_filectime(ctx: Value, args: []const Value, allocator: Allocator) 
 // 网络函数包装器
 // ============================================================================
 
+fn wrapBuiltin_getenv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_getenv(args[0], allocator);
+}
+
 fn wrapBuiltin_gethostbyname(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
@@ -4240,6 +4256,26 @@ fn php_get_object_vars(obj_val: Value, allocator: Allocator) !Value {
     const res_arr = try PHPArray.init(allocator);
     var iter = obj.properties.iterator();
     while (iter.next()) |entry| {
+        const key_str = try PHPString.init(allocator, entry.key_ptr.*);
+        try res_arr.set(allocator, ArrayKey{ .string = key_str }, entry.value_ptr.*);
+        key_str.release(allocator);
+    }
+    return Value.initArray(res_arr);
+}
+
+fn php_get_public_object_vars_snapshot(obj_val: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) return error.InvalidArgument;
+    const obj = Value_asObject(obj_val);
+
+    const res_arr = try PHPArray.init(allocator);
+    var iter = obj.properties.iterator();
+    while (iter.next()) |entry| {
+        if (obj.class_meta) |meta| {
+            if (meta.properties.get(entry.key_ptr.*)) |prop| {
+                if (prop.is_static or !prop.is_public) continue;
+            }
+        }
+
         const key_str = try PHPString.init(allocator, entry.key_ptr.*);
         try res_arr.set(allocator, ArrayKey{ .string = key_str }, entry.value_ptr.*);
         key_str.release(allocator);
@@ -5517,30 +5553,41 @@ fn phpStripTrailingZeros(s: []u8) []const u8 {
 }
 
 /// echo语句
-pub fn php_echo(value: Value) !void {
-    const stdout_file = std.fs.File{ .handle = 1 };
+fn php_output_write(bytes: []const u8) !void {
+    ensureObInit();
+    if (ob_stack.items.len > 0) {
+        const level = &ob_stack.items[ob_stack.items.len - 1];
+        try level.buffer.appendSlice(runtime_allocator, bytes);
+        return;
+    }
 
+    const stdout_file = std.fs.File{ .handle = 1 };
+    try stdout_file.writeAll(bytes);
+}
+
+pub fn php_echo(value: Value) !void {
     if (value.isNull()) {
         // null不输出任何内容
         return;
     } else if (value.isBool()) {
         if (value.asBool()) {
-            try stdout_file.writeAll("1");
+            try php_output_write("1");
         }
         // false不输出任何内容
     } else if (value.isInt()) {
         var buf: [64]u8 = undefined;
         const str = try std.fmt.bufPrint(&buf, "{d}", .{value.asInt()});
-        try stdout_file.writeAll(str);
+        try php_output_write(str);
     } else if (value.isFloat()) {
         var buf: [64]u8 = undefined;
         const str = phpFormatFloat(&buf, value.asFloat());
-        try stdout_file.writeAll(str);
+        try php_output_write(str);
     } else if (value.isString()) {
         const str = value.asString();
-        try stdout_file.writeAll(str.data);
+        try php_output_write(str.data);
     } else if (value.isArray()) {
         // PHP Warning: Array to string conversion
+        const stdout_file = std.fs.File{ .handle = 1 };
         const stderr_file = std.fs.File{ .handle = 2 };
         var wbuf: [512]u8 = undefined;
         const wmsg = std.fmt.bufPrint(
@@ -5560,7 +5607,7 @@ pub fn php_echo(value: Value) !void {
             ) catch "";
             if (emsg.len > 0) stderr_file.writeAll(emsg) catch {};
         }
-        try stdout_file.writeAll("Array");
+        try php_output_write("Array");
     }
 }
 
@@ -6221,6 +6268,27 @@ pub const ArrayIterator = struct {
     ref_count: usize = 1, // 引用计数，初始为1
 };
 
+pub fn php_array_iter_init_snapshot(array_val: Value, allocator: Allocator) !Value {
+    if (Value_isObject(array_val)) {
+        const props_snapshot = try php_get_public_object_vars_snapshot(array_val, allocator);
+        defer props_snapshot.release(allocator);
+
+        const iter_val = try php_array_iter_init(props_snapshot, allocator);
+        return iter_val;
+    }
+
+    if (!array_val.isArray()) {
+        return php_array_iter_init(array_val, allocator);
+    }
+
+    const snapshot = try array_val.asArray().cloneDeep(allocator);
+    errdefer snapshot.release(allocator);
+
+    const iter_val = try php_array_iter_init(Value.initArray(snapshot), allocator);
+    snapshot.release(allocator);
+    return iter_val;
+}
+
 pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
     // 检测是否是Iterator对象
     if (Value_isObject(array_val)) {
@@ -6252,6 +6320,10 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
                 iter_val.release(allocator);
             }
         }
+
+        const props_snapshot = try php_get_public_object_vars_snapshot(array_val, allocator);
+        defer props_snapshot.release(allocator);
+        return php_array_iter_init(props_snapshot, allocator);
     }
 
     // 普通数组
@@ -18727,6 +18799,16 @@ pub fn php_rawurldecode(input: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// gethostbyname - 通过主机名获取IP地址
+pub fn php_getenv(name_val: Value, allocator: Allocator) !Value {
+    if (!name_val.isString()) return Value.initBool(false);
+
+    const name = name_val.asString().data;
+    const env_val = std.process.getEnvVarOwned(allocator, name) catch return Value.initBool(false);
+    defer allocator.free(env_val);
+
+    return Value.initString(try PHPString.init(allocator, env_val));
+}
+
 pub fn php_gethostbyname(hostname: Value, allocator: Allocator) !Value {
     if (!hostname.isString()) return Value.initString(try PHPString.init(allocator, ""));
 
@@ -19597,6 +19679,14 @@ pub fn php_mysqli_connect(host: Value, user: Value, password: Value, db: Value, 
 pub fn php_token_get_all(source: Value, flags: Value, allocator: Allocator) !Value {
     _ = source; _ = flags;
     return Value.initArray(try PHPArray.init(allocator));
+}
+
+/// ob_gzhandler - zlib 输出缓冲回调
+/// CLI/AOT 中不做压缩，按 PHP 回调签名原样返回 buffer
+pub fn php_ob_gzhandler(buffer: Value, phase: Value, allocator: Allocator) !Value {
+    _ = phase;
+    if (!buffer.isString()) return Value.initString(try PHPString.init(allocator, ""));
+    return Value.initString(try PHPString.init(allocator, buffer.asString().data));
 }
 
 /// ob_start - 打开输出缓冲
@@ -20677,7 +20767,7 @@ pub fn php_array_map(args: []const Value, allocator: Allocator) !Value {
 }
 
 /// array_filter - 过滤数组元素
-/// mode: 0 = 只传值, 1 = 传键和值, 2 = 传键 (ARRAY_FILTER_USE_KEY, ARRAY_FILTER_USE_BOTH)
+/// mode: 0 = 只传值, 1 = 传值和键 (ARRAY_FILTER_USE_BOTH), 2 = 传键 (ARRAY_FILTER_USE_KEY)
 pub fn php_array_filter(arr: Value, callback: Value, mode: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
 
@@ -20699,18 +20789,6 @@ pub fn php_array_filter(arr: Value, callback: Value, mode: Value, allocator: All
                     break :blk2 try php_invoke_callable(callback, &args, allocator);
                 },
                 1 => blk2: {
-                    // ARRAY_FILTER_USE_KEY - 只传键
-                    const key_val = switch (entry.key_ptr.*) {
-                        .integer => |k| Value.initInt(k),
-                        .string => |s| blk_s: {
-                            s.retain(); // 增加引用计数
-                            break :blk_s Value.initString(s);
-                        },
-                    };
-                    const args = [_]Value{key_val};
-                    break :blk2 try php_invoke_callable(callback, &args, allocator);
-                },
-                2 => blk2: {
                     // ARRAY_FILTER_USE_BOTH - 传值和键
                     const key_val = switch (entry.key_ptr.*) {
                         .integer => |k| Value.initInt(k),
@@ -20720,6 +20798,18 @@ pub fn php_array_filter(arr: Value, callback: Value, mode: Value, allocator: All
                         },
                     };
                     const args = [_]Value{ entry.value_ptr.*, key_val };
+                    break :blk2 try php_invoke_callable(callback, &args, allocator);
+                },
+                2 => blk2: {
+                    // ARRAY_FILTER_USE_KEY - 只传键
+                    const key_val = switch (entry.key_ptr.*) {
+                        .integer => |k| Value.initInt(k),
+                        .string => |s| blk_s: {
+                            s.retain(); // 增加引用计数
+                            break :blk_s Value.initString(s);
+                        },
+                    };
+                    const args = [_]Value{key_val};
                     break :blk2 try php_invoke_callable(callback, &args, allocator);
                 },
                 else => blk2: {
@@ -24695,101 +24785,12 @@ pub fn php_call_user_func(args: []const Value, allocator: Allocator) !Value {
 
     const callback = args[0];
     const call_args = args[1..];
-
-    // 处理字符串函数名
-    if (callback.isString()) {
-        const func_name = callback.asString().data;
-
-        // 先检查用户函数
-        if (user_function_registry) |registry| {
-            if (registry.get(func_name)) |func| {
-                return func(Value.initNull(), call_args, allocator);
-            }
-        }
-
-        // 再检查内置函数
-        if (lookupBuiltinFunction(func_name)) |func| {
-            return func(Value.initNull(), call_args, allocator);
-        }
-
-        // 最后检查 AOT hook
-        if (aot_callable_hook) |hook| {
-            return hook(func_name, call_args, allocator);
-        }
-
-        return error.UnknownFunction;
-    }
-
-    // 处理数组形式 [obj/class, method]
-    if (callback.isArray()) {
-        const arr = callback.asArray();
-        var key_idx: usize = 0;
-        var iter = arr.elements.iterator();
-        var obj_or_class: ?Value = null;
-        var method_name: ?Value = null;
-
-        while (iter.next()) |entry| : (key_idx += 1) {
-            if (key_idx == 0) obj_or_class = entry.value_ptr.*;
-            if (key_idx == 1) method_name = entry.value_ptr.*;
-        }
-
-        if (obj_or_class) |obj| {
-            if (method_name) |method| {
-                if (method.isString()) {
-                    const method_str = method.asString().data;
-                    if (Value_isObject(obj)) {
-                        const php_obj = Value_asObject(obj);
-                        if (php_obj.class_meta) |meta| {
-                            if (meta.findMethod(method_str)) |method_info| {
-                                return method_info.func(obj, call_args, allocator);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return error.UnknownFunction;
-    }
-
-    // 处理 __invoke 对象
-    if (Value_isObject(callback)) {
-        const obj = Value_asObject(callback);
-        if (obj.class_meta) |meta| {
-            if (meta.findMethod("__invoke")) |method| {
-                return method.func(callback, call_args, allocator);
-            }
-        }
-    }
-
-    // PHP: call_user_func 对不存在的回调发出 warning 并返回 false
-    const stderr = std.fs.File{ .handle = 2 };
-    stderr.writeAll("PHP Warning:  call_user_func() expects parameter 1 to be a valid callback\n") catch {};
-    return Value.initBool(false);
+    return php_invoke_callable(callback, call_args, allocator);
 }
 
 /// call_user_func_array - 使用数组参数调用回调函数
 pub fn php_call_user_func_array(callback: Value, args_arr: Value, allocator: Allocator) !Value {
-    if (!args_arr.isArray()) {
-        return php_call_user_func(&[_]Value{callback}, allocator);
-    }
-
-    const arr = args_arr.asArray();
-    var call_args = try std.ArrayList(Value).initCapacity(allocator, 0);
-    defer call_args.deinit(allocator);
-
-    var iter = arr.elements.iterator();
-    while (iter.next()) |entry| {
-        try call_args.append(allocator, entry.value_ptr.*);
-    }
-
-    var full_args = try std.ArrayList(Value).initCapacity(allocator, 0);
-    defer full_args.deinit(allocator);
-    try full_args.append(allocator, callback);
-    for (call_args.items) |arg| {
-        try full_args.append(allocator, arg);
-    }
-
-    return php_call_user_func(full_args.items, allocator);
+    return php_invoke_callable_args_array(callback, args_arr, allocator);
 }
 
 // 更多函数包装器
@@ -24815,6 +24816,104 @@ fn wrapBuiltin_call_user_func_array(ctx: Value, args: []const Value, allocator: 
     _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
     return php_call_user_func_array(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_ob_gzhandler(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const phase = if (args.len >= 2) args[1] else Value.initInt(0);
+    return php_ob_gzhandler(args[0], phase, allocator);
+}
+
+fn wrapBuiltin_ob_start(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const callback = if (args.len >= 1) args[0] else Value.initNull();
+    return php_ob_start(callback, allocator);
+}
+
+fn wrapBuiltin_mysqli_connect(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const host = if (args.len >= 1) args[0] else Value.initNull();
+    const user = if (args.len >= 2) args[1] else Value.initNull();
+    const password = if (args.len >= 3) args[2] else Value.initNull();
+    const db = if (args.len >= 4) args[3] else Value.initNull();
+    const port = if (args.len >= 5) args[4] else Value.initNull();
+    const socket = if (args.len >= 6) args[5] else Value.initNull();
+    return php_mysqli_connect(host, user, password, db, port, socket, allocator);
+}
+
+fn wrapBuiltin_token_get_all(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const flags = if (args.len >= 2) args[1] else Value.initInt(0);
+    return php_token_get_all(args[0], flags, allocator);
+}
+
+fn wrapBuiltin_ob_get_contents(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_ob_get_contents(allocator);
+}
+
+fn wrapBuiltin_ob_end_clean(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_ob_end_clean();
+}
+
+fn wrapBuiltin_ob_get_clean(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_ob_get_clean(allocator);
+}
+
+fn wrapBuiltin_ob_get_level(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_ob_get_level();
+}
+
+fn wrapBuiltin_ob_flush(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_ob_flush();
+}
+
+fn wrapBuiltin_ob_end_flush(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_ob_end_flush();
+}
+
+fn wrapBuiltin_ob_get_length(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    return php_ob_get_length();
+}
+
+fn wrapBuiltin_ob_get_status(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const full_status = if (args.len >= 1) args[0] else Value.initBool(false);
+    return php_ob_get_status(full_status, allocator);
+}
+
+fn wrapBuiltin_ob_implicit_flush(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const flag = if (args.len >= 1) args[0] else Value.initBool(true);
+    return php_ob_implicit_flush(flag);
+}
+
+fn wrapBuiltin_get_resource_id(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_resource_id(args[0]);
 }
 
 fn wrapBuiltin_compact(ctx: Value, args: []const Value, allocator: Allocator) !Value {

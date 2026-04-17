@@ -2573,7 +2573,7 @@ pub const IRGenerator = struct {
         }
 
         // 根据是否引用选择不同的初始化函数
-        const init_func = if (foreach_data.value_by_ref) "php_array_iter_init_ref" else "php_array_iter_init";
+        const init_func = if (foreach_data.value_by_ref) "php_array_iter_init_ref" else "php_array_iter_init_snapshot";
         const iter_addr = try self.emitWithResult(.{
             .call = .{
                 .func_name = init_func,

@@ -828,7 +828,6 @@ pub const NativeLinker = struct {
             \\        const short_name = key_str[1..];
             \\        // 跳过超全局
             \\        if (std.mem.eql(u8, short_name, "GLOBALS")) continue;
-            \\        if (short_name.len > 0 and short_name[0] == '_') continue;
             \\        const php_str = runtime.PHPString.init(runtime.runtime_allocator, short_name) catch continue;
             \\        const retained = entry.value_ptr.retain();
             \\        arr.elements.put(.{ .string = php_str }, retained) catch {};
@@ -1007,7 +1006,7 @@ pub const NativeLinker = struct {
             \\
             \\    // 初始化超全局变量
             \\    {
-            \\        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_SESSION", "$_ENV", "$_FILES", "$GLOBALS" };
+            \\        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_COOKIE", "$_ENV", "$_FILES", "$GLOBALS" };
             \\        for (superglobal_names) |name| {
             \\            const key = try allocator.dupe(u8, name);
             \\            const arr = try runtime.PHPArray.init(allocator);
@@ -2987,6 +2986,7 @@ pub const NativeLinker = struct {
         .{ "ctype_graph", bi(.{ .runtime_name = "php_ctype_graph", .needs_allocator = false, .may_raise = false }) },
 
         // 网络函数
+        .{ "getenv", bi(.{ .runtime_name = "php_getenv", .needs_allocator = true }) },
         .{ "gethostbyname", bi(.{ .runtime_name = "php_gethostbyname", .needs_allocator = true }) },
         .{ "gethostname", bi(.{ .runtime_name = "php_gethostname", .needs_allocator = true }) },
         .{ "parse_url", bi(.{ .runtime_name = "php_parse_url", .needs_allocator = true }) },
@@ -3055,6 +3055,7 @@ pub const NativeLinker = struct {
 
         // 输出缓冲
         .{ "ob_start", bi(.{ .runtime_name = "php_ob_start", .needs_allocator = false }) },
+        .{ "ob_gzhandler", bi(.{ .runtime_name = "php_ob_gzhandler", .needs_allocator = true }) },
         .{ "mysqli_connect", bi(.{ .runtime_name = "php_mysqli_connect", .needs_allocator = true, .may_raise = false }) },
         .{ "token_get_all", bi(.{ .runtime_name = "php_token_get_all", .needs_allocator = true }) },
         .{ "ob_get_contents", bi(.{ .runtime_name = "php_ob_get_contents", .needs_allocator = true }) },
@@ -3079,6 +3080,7 @@ pub const NativeLinker = struct {
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
+        .{ "php_array_iter_init_snapshot", bi(.{ .runtime_name = "php_array_iter_init_snapshot", .needs_allocator = true }) },
         .{ "php_array_iter_init_ref", bi(.{ .runtime_name = "php_array_iter_init_ref", .needs_allocator = true }) },
         .{ "php_array_iter_key", bi(.{ .runtime_name = "php_array_iter_key", .needs_allocator = true }) },
         .{ "php_array_iter_value_ref_reuse", bi(.{ .runtime_name = "php_array_iter_value_ref_reuse", .needs_allocator = false, .may_raise = true }) },
