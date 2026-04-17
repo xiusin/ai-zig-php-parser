@@ -266,7 +266,10 @@ pub const NativeLinker = struct {
     }
 
     /// 检查寄存器是否是引用参数的 alloca（storage 类型为 *Value，reg 类型为 **Value）
+    /// 注意：必须同时是 alloca 寄存器，否则说明已被 mem2reg 优化掉，此时类型为 Value
     fn isRefParamAlloca(self: *Self, reg_id: usize) bool {
+        // 已被 mem2reg 优化掉的 ref_param_alloca，声明为 runtime.Value，按普通值处理
+        if (!self.isAllocaReg(reg_id)) return false;
         if (self.ref_param_alloca_map) |map| {
             return map.get(reg_id) != null;
         }
@@ -8682,6 +8685,16 @@ pub const NativeLinker = struct {
                                 } else {
                                     try self.writeValueArgs(writer, op.args);
                                     try writer.writeAll(", runtime.Value.initInt(-1), runtime.Value.initInt(0)");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_ob_get_status")) {
+                                // ob_get_status(full_status = false) - 无参数时补默认 false
+                                // 函数签名: php_ob_get_status(full_status: Value, allocator: Allocator)
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len >= 1) {
+                                    try self.writeValueArgs(writer, op.args[0..1]);
+                                } else {
+                                    try writer.writeAll("runtime.Value.initBool(false)");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (op.args.len > 0) {
