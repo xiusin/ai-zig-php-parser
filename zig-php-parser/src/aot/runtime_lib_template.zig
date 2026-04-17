@@ -20533,14 +20533,17 @@ pub fn php_array_walk(arr: Value, callback: Value, userdata: Value, allocator: A
 
     var iter = php_arr.elements.iterator();
     while (iter.next()) |entry| {
-        // 构建回调参数：value, key, userdata
+        // 构建回调参数：value(by-ref), key, userdata
         const key_val = switch (entry.key_ptr.*) {
             .integer => |k| Value.initInt(k),
             .string => |k| Value.initString(k),
         };
 
+        // array_walk 的回调第一个参数按引用传递（PHP 规范）
+        // 直接用 entry.value_ptr 构造 Ref，使回调内对 $value 的赋值写回数组槽位
+        // iterator 返回 *const Value，此处需要可写指针以实现引用语义
         var args_buf: [3]Value = undefined;
-        args_buf[0] = entry.value_ptr.*;
+        args_buf[0] = Value.initRef(@constCast(entry.value_ptr));
         args_buf[1] = key_val;
         const arg_count: usize = if (userdata.isNull()) 2 else blk: {
             args_buf[2] = userdata;

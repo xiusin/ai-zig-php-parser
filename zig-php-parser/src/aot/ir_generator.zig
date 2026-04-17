@@ -114,6 +114,10 @@ pub const IRGenerator = struct {
     current_has_this_param: bool = false,
     /// 引用参数集合（参数名 -> void）
     reference_params: std.StringHashMapUnmanaged(void),
+    /// 预扫描阶段收集的函数签名引用参数信息（函数名 -> 引用参数索引列表）。
+    /// 这是 symbol_table 的稳定替代（symbol_table.functions 存储 getPtr 返回的指针，
+    /// 在 HashMap 扩容时会失效），用于在调用方查询被调用方的引用参数。
+    function_ref_params: std.StringHashMapUnmanaged([]const u32),
 
     // ✅ 命名空间支持
     /// 当前命名空间（如 "App\\Utils"）
@@ -183,6 +187,7 @@ pub const IRGenerator = struct {
             .global_vars = .{},
             .static_vars = .{},
             .reference_params = .{},
+            .function_ref_params = .{},
             .namespace_aliases = .{},
             .namespace_imports = .{},
             .trait_methods = .{},
@@ -259,6 +264,14 @@ pub const IRGenerator = struct {
         self.try_stack.deinit(self.allocator);
         self.reference_params.deinit(self.allocator);
 
+        // 释放 function_ref_params 中的 key（dup 的函数名）和 value（分配的 u32 slice）
+        var fref_it = self.function_ref_params.iterator();
+        while (fref_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.function_ref_params.deinit(self.allocator);
+
         // 释放constant_cache的key
         var it = self.constant_cache.keyIterator();
         while (it.next()) |key| {
@@ -331,6 +344,10 @@ pub const IRGenerator = struct {
         // Process root node at the specified index
         if (root_index < nodes.len and nodes[root_index].tag == .root) {
             const root_data = nodes[root_index].data.root;
+
+            // 预扫描：先将所有顶层函数声明注册到 symbol_table，
+            // 以便后处理函数体时能通过 symbol_table 查到前向引用的函数签名（包括 is_reference 标记）
+            try self.preRegisterFunctions(root_data.stmts);
 
             // Separate function declarations from top-level statements
             var top_level_stmts = std.ArrayListUnmanaged(Node.Index){};
@@ -721,6 +738,37 @@ pub const IRGenerator = struct {
             try self.generateStatement(stmt_idx);
             // Stop if block is terminated (return, break, etc.)
             if (self.isBlockTerminated()) break;
+        }
+    }
+
+    /// 预扫描所有顶层函数声明，将签名注册到 symbol_table。
+    /// 解决前向引用场景下，调用方无法获取被调用方 is_reference 元数据的问题。
+    /// 不生成函数体，也不 dup 任何资源；symbol_table 仅存储字符串切片的引用。
+    fn preRegisterFunctions(self: *Self, stmts: []const Node.Index) !void {
+        for (stmts) |stmt_idx| {
+            const stmt_node = self.getNode(stmt_idx) orelse continue;
+            if (stmt_node.tag != .function_decl) continue;
+
+            const func_data = stmt_node.data.function_decl;
+            const func_name = self.getString(func_data.name);
+            if (func_name.len == 0) continue;
+            // 收集引用参数索引
+            var ref_indices = std.ArrayListUnmanaged(u32){};
+            defer ref_indices.deinit(self.allocator);
+            for (func_data.params, 0..) |param_idx, i| {
+                if (self.getNode(param_idx)) |pnode| {
+                    if (pnode.tag == .parameter and pnode.data.parameter.is_reference) {
+                        try ref_indices.append(self.allocator, @intCast(i));
+                    }
+                }
+            }
+
+            // 存储到 function_ref_params（使用稳定的 key 拷贝）
+            const gop = try self.function_ref_params.getOrPut(self.allocator, func_name);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = try self.allocator.dupe(u8, func_name);
+                gop.value_ptr.* = try ref_indices.toOwnedSlice(self.allocator);
+            }
         }
     }
 
@@ -5703,6 +5751,13 @@ pub const IRGenerator = struct {
             else
                 null;
 
+            // 回退到预扫描收集的引用参数信息（处理前向引用：调用者在被调用者之前处理时，
+            // module.findFunction 返回 null）
+            const prescan_ref_params: []const u32 = if (func_name.len > 0)
+                (self.function_ref_params.get(func_name) orelse &[_]u32{})
+            else
+                &[_]u32{};
+
             // 获取内建函数的引用参数信息
             const builtin_ref_params = if (func_name.len > 0) NativeLinker.getBuiltinRefParams(func_name) else &[_]u8{};
 
@@ -5713,11 +5768,15 @@ pub const IRGenerator = struct {
 
                 // 检查是否是引用参数（用户定义函数或内建函数）
                 const is_ref_param = blk: {
-                    // 先检查用户定义函数
+                    // 先检查用户定义函数（module）
                     if (target_func) |func| {
                         for (func.ref_params.items) |ref_idx| {
                             if (ref_idx == i) break :blk true;
                         }
+                    }
+                    // 回退到预扫描收集的引用参数信息（前向引用场景）
+                    for (prescan_ref_params) |ref_idx| {
+                        if (ref_idx == i) break :blk true;
                     }
                     // 再检查内建函数引用参数
                     for (builtin_ref_params) |ref_idx| {
