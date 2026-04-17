@@ -7846,22 +7846,7 @@ pub fn php_rtrim(str: Value, char_mask: Value, allocator: Allocator) !Value {
 fn php_string_replace_once(subject_data: []const u8, search_data: []const u8, replace_data: []const u8, allocator: Allocator, ignore_case: bool) ![]u8 {
     if (search_data.len == 0) return allocator.dupe(u8, subject_data);
 
-    var found_count: usize = 0;
-    var pos: usize = 0;
-    while (pos < subject_data.len) {
-        if (pos + search_data.len <= subject_data.len) {
-            const matched = if (ignore_case)
-                std.ascii.eqlIgnoreCase(subject_data[pos .. pos + search_data.len], search_data)
-            else
-                std.mem.eql(u8, subject_data[pos .. pos + search_data.len], search_data);
-            if (matched) {
-                found_count += 1;
-                pos += search_data.len;
-                continue;
-            }
-        }
-        pos += 1;
-    }
+    const found_count = php_string_count_replacements(subject_data, search_data, ignore_case);
 
     if (found_count == 0) return allocator.dupe(u8, subject_data);
 
@@ -7870,6 +7855,7 @@ fn php_string_replace_once(subject_data: []const u8, search_data: []const u8, re
     errdefer allocator.free(buffer);
 
     var write_pos: usize = 0;
+    var pos: usize = 0;
     pos = 0;
     while (pos < subject_data.len) {
         if (pos + search_data.len <= subject_data.len) {
@@ -7892,6 +7878,28 @@ fn php_string_replace_once(subject_data: []const u8, search_data: []const u8, re
     return buffer;
 }
 
+fn php_string_count_replacements(subject_data: []const u8, search_data: []const u8, ignore_case: bool) usize {
+    if (search_data.len == 0) return 0;
+
+    var found_count: usize = 0;
+    var pos: usize = 0;
+    while (pos < subject_data.len) {
+        if (pos + search_data.len <= subject_data.len) {
+            const matched = if (ignore_case)
+                std.ascii.eqlIgnoreCase(subject_data[pos .. pos + search_data.len], search_data)
+            else
+                std.mem.eql(u8, subject_data[pos .. pos + search_data.len], search_data);
+            if (matched) {
+                found_count += 1;
+                pos += search_data.len;
+                continue;
+            }
+        }
+        pos += 1;
+    }
+    return found_count;
+}
+
 fn php_value_to_owned_string_slice(val: Value, allocator: Allocator) ![]u8 {
     if (val.isString()) return allocator.dupe(u8, val.asString().data);
     const str = try val.toString(allocator);
@@ -7900,8 +7908,9 @@ fn php_value_to_owned_string_slice(val: Value, allocator: Allocator) ![]u8 {
 }
 
 fn php_str_replace_common(search: Value, replace: Value, subject: Value, count_out: Value, allocator: Allocator, ignore_case: bool) !Value {
-    _ = count_out;
     if (!subject.isString()) return subject;
+
+    var total_count: usize = 0;
 
     if (search.isArray()) {
         var current = try allocator.dupe(u8, subject.asString().data);
@@ -7928,9 +7937,14 @@ fn php_str_replace_common(search: Value, replace: Value, subject: Value, count_o
             };
             defer allocator.free(replace_slice);
 
+            total_count += php_string_count_replacements(current, search_slice, ignore_case);
             const next = try php_string_replace_once(current, search_slice, replace_slice, allocator, ignore_case);
             allocator.free(current);
             current = next;
+        }
+
+        if (count_out.isRef()) {
+            count_out.asRef().* = Value.initInt(@intCast(total_count));
         }
 
         const result = try PHPString.init(allocator, current);
@@ -7942,6 +7956,10 @@ fn php_str_replace_common(search: Value, replace: Value, subject: Value, count_o
     defer allocator.free(search_slice);
     const replace_slice = try php_value_to_owned_string_slice(replace, allocator);
     defer allocator.free(replace_slice);
+    total_count = php_string_count_replacements(subject.asString().data, search_slice, ignore_case);
+    if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(@intCast(total_count));
+    }
     const buffer = try php_string_replace_once(subject.asString().data, search_slice, replace_slice, allocator, ignore_case);
     defer allocator.free(buffer);
     return Value.initString(try PHPString.init(allocator, buffer));
@@ -8052,6 +8070,33 @@ pub fn php_strstr(haystack: Value, needle: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
+pub fn php_strrchr(haystack: Value, needle: Value, allocator: Allocator) !Value {
+    if (!haystack.isString()) return Value.initBool(false);
+
+    const h = haystack.asString();
+    if (h.length == 0) return Value.initBool(false);
+
+    var needle_byte: u8 = 0;
+    if (needle.isInt()) {
+        needle_byte = @as(u8, @truncate(@as(u64, @intCast(needle.toInt() & 0xFF))));
+    } else if (needle.isString()) {
+        const n = needle.asString();
+        if (n.length == 0) return Value.initBool(false);
+        needle_byte = n.data[0];
+    } else {
+        return Value.initBool(false);
+    }
+
+    const pos = std.mem.lastIndexOfScalar(u8, h.data[0..h.length], needle_byte) orelse return Value.initBool(false);
+    const result_len = h.length - pos;
+    const buffer = try allocator.alloc(u8, result_len);
+    @memcpy(buffer, h.data[pos..h.length]);
+
+    const result = try allocator.create(PHPString);
+    result.* = .{ .data = buffer, .length = result_len, .ref_count = 1, .is_static = false };
+    return Value.initString(result);
+}
+
 /// stristr - 大小写不敏感查找并返回从匹配处开始的子串
 pub fn php_stristr(haystack: Value, needle: Value, allocator: Allocator) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
@@ -8092,6 +8137,28 @@ pub fn php_strrev(str: Value, allocator: Allocator) !Value {
     var i: usize = 0;
     while (i < php_str.length) : (i += 1) {
         buffer[i] = php_str.data[php_str.length - 1 - i];
+    }
+
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
+    return Value.initString(result);
+}
+
+pub fn php_str_shuffle(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+
+    const php_str = str.asString();
+    if (php_str.length <= 1) return str;
+
+    const buffer = try allocator.dupe(u8, php_str.data[0..php_str.length]);
+    errdefer allocator.free(buffer);
+
+    var i: usize = php_str.length - 1;
+    while (i > 0) : (i -= 1) {
+        const j: usize = @intCast(nextRandom() % @as(u64, @intCast(i + 1)));
+        const tmp = buffer[i];
+        buffer[i] = buffer[j];
+        buffer[j] = tmp;
     }
 
     const result = try PHPString.init(allocator, buffer);
@@ -9222,6 +9289,20 @@ pub fn php_strcasecmp(str1: Value, str2: Value, allocator: Allocator) !Value {
     const s1 = str1.asString();
     const s2 = str2.asString();
     return Value.initInt(php_string_compare_bytes(s1.data[0..s1.length], s2.data[0..s2.length], true));
+}
+
+pub fn php_strncasecmp(str1: Value, str2: Value, length: Value) !Value {
+    if (!str1.isString() or !str2.isString()) return Value.initInt(0);
+
+    const limit = length.toInt();
+    if (limit <= 0) return Value.initInt(0);
+
+    const compare_len: usize = @intCast(limit);
+    const s1 = str1.asString();
+    const s2 = str2.asString();
+    const lhs = s1.data[0..@min(s1.length, compare_len)];
+    const rhs = s2.data[0..@min(s2.length, compare_len)];
+    return Value.initInt(php_string_compare_bytes(lhs, rhs, true));
 }
 
 /// strnatcmp - 自然排序字符串比较（区分大小写）
@@ -18476,6 +18557,58 @@ pub fn php_chr(code: Value, allocator: Allocator) !Value {
     return Value.initString(result);
 }
 
+pub fn php_count_chars(str: Value, mode: Value, allocator: Allocator) !Value {
+    const mode_int = mode.toInt();
+    if (!str.isString()) {
+        return switch (mode_int) {
+            3, 4 => Value.initString(try PHPString.init(allocator, "")),
+            else => Value.initArray(try PHPArray.init(allocator)),
+        };
+    }
+
+    const bytes = str.asString().data;
+    var counts = [_]usize{0} ** 256;
+    for (bytes) |b| {
+        counts[b] += 1;
+    }
+
+    switch (mode_int) {
+        0, 1, 2 => {
+            const result = try PHPArray.init(allocator);
+            errdefer result.release(allocator);
+            var i: usize = 0;
+            while (i < 256) : (i += 1) {
+                const count = counts[i];
+                if (mode_int == 1 and count == 0) continue;
+                if (mode_int == 2 and count != 0) continue;
+                try result.set(allocator, .{ .integer = @intCast(i) }, Value.initInt(@intCast(count)));
+            }
+            return Value.initArray(result);
+        },
+        3, 4 => {
+            var buf = try std.ArrayList(u8).initCapacity(allocator, 32);
+            defer buf.deinit(allocator);
+            var i: usize = 0;
+            while (i < 256) : (i += 1) {
+                const count = counts[i];
+                if (mode_int == 3 and count == 0) continue;
+                if (mode_int == 4 and count != 0) continue;
+                try buf.append(allocator, @as(u8, @intCast(i)));
+            }
+            return Value.initString(try PHPString.init(allocator, buf.items));
+        },
+        else => {
+            const result = try PHPArray.init(allocator);
+            errdefer result.release(allocator);
+            var i: usize = 0;
+            while (i < 256) : (i += 1) {
+                try result.set(allocator, .{ .integer = @intCast(i) }, Value.initInt(@intCast(counts[i])));
+            }
+            return Value.initArray(result);
+        },
+    }
+}
+
 /// urlencode - PHP URL 编码（空格→+，其他特殊字符→%XX）
 pub fn php_urlencode(input: Value, allocator: Allocator) !Value {
     if (!input.isString()) {
@@ -24220,25 +24353,27 @@ pub fn php_mb_strtoupper(str: Value, encoding: Value, allocator: Allocator) !Val
     const php_str = str.asString();
     const data = php_str.data;
 
-    // 对于ASCII字符串，直接使用 strtoupper
-    // 对于UTF-8，需要更复杂的处理，这里简化为ASCII处理
-    const result_data = try allocator.alloc(u8, data.len);
-    errdefer allocator.free(result_data);
+    var result_data = try std.ArrayList(u8).initCapacity(allocator, data.len + 4);
+    defer result_data.deinit(allocator);
 
     var i: usize = 0;
     while (i < data.len) {
+        if (i + 1 < data.len and data[i] == 0xC3 and data[i + 1] == 0x9F) {
+            try result_data.appendSlice(allocator, "SS");
+            i += 2;
+            continue;
+        }
+
         const byte = data[i];
-        // 只转换ASCII字母
         if (byte >= 'a' and byte <= 'z') {
-            result_data[i] = byte - 32;
+            try result_data.append(allocator, byte - 32);
         } else {
-            result_data[i] = byte;
+            try result_data.append(allocator, byte);
         }
         i += 1;
     }
 
-    const result = try PHPString.init(allocator, result_data);
-    allocator.free(result_data);
+    const result = try PHPString.init(allocator, result_data.items);
     return Value.initString(result);
 }
 

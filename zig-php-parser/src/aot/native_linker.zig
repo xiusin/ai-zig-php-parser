@@ -2708,16 +2708,18 @@ pub const NativeLinker = struct {
         .{ "trim", bi(.{ .runtime_name = "php_trim", .needs_allocator = true }) },
         .{ "ltrim", bi(.{ .runtime_name = "php_ltrim", .needs_allocator = true }) },
         .{ "rtrim", bi(.{ .runtime_name = "php_rtrim", .needs_allocator = true }) },
-        .{ "str_replace", bi(.{ .runtime_name = "php_str_replace", .needs_allocator = true }) },
-        .{ "str_ireplace", bi(.{ .runtime_name = "php_str_ireplace", .needs_allocator = true }) },
+        .{ "str_replace", bi(.{ .runtime_name = "php_str_replace", .needs_allocator = true, .ref_params = &[_]u8{3} }) },
+        .{ "str_ireplace", bi(.{ .runtime_name = "php_str_ireplace", .needs_allocator = true, .ref_params = &[_]u8{3} }) },
         .{ "str_repeat", bi(.{ .runtime_name = "php_str_repeat", .needs_allocator = true }) },
         .{ "str_pad", bi(.{ .runtime_name = "php_str_pad", .needs_allocator = true }) },
         .{ "strstr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) },
         .{ "stristr", bi(.{ .runtime_name = "php_stristr", .needs_allocator = true }) },
+        .{ "strrchr", bi(.{ .runtime_name = "php_strrchr", .needs_allocator = true }) },
         .{ "strnatcmp", bi(.{ .runtime_name = "php_strnatcmp", .needs_allocator = false }) },
         .{ "strnatcasecmp", bi(.{ .runtime_name = "php_strnatcasecmp", .needs_allocator = false }) },
         .{ "strchr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) }, // strchr是strstr的别名
         .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
+        .{ "str_shuffle", bi(.{ .runtime_name = "php_str_shuffle", .needs_allocator = true }) },
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
         .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
         .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
@@ -2731,6 +2733,7 @@ pub const NativeLinker = struct {
         .{ "preg_last_error", bi(.{ .runtime_name = "preg_last_error", .needs_allocator = false, .may_raise = false }) },
         .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
         .{ "str_word_count", bi(.{ .runtime_name = "php_str_word_count", .needs_allocator = false }) },
+        .{ "count_chars", bi(.{ .runtime_name = "php_count_chars", .needs_allocator = true }) },
         .{ "str_ends_with", bi(.{ .runtime_name = "php_str_ends_with", .needs_allocator = false }) },
         .{ "ucfirst", bi(.{ .runtime_name = "php_ucfirst", .needs_allocator = true }) },
         .{ "lcfirst", bi(.{ .runtime_name = "php_lcfirst", .needs_allocator = true }) },
@@ -2742,6 +2745,7 @@ pub const NativeLinker = struct {
         .{ "str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
         .{ "strcmp", bi(.{ .runtime_name = "php_strcmp", .needs_allocator = false }) },
         .{ "strcasecmp", bi(.{ .runtime_name = "php_strcasecmp", .needs_allocator = true }) },
+        .{ "strncasecmp", bi(.{ .runtime_name = "php_strncasecmp", .needs_allocator = false }) },
         .{ "strnatcmp", bi(.{ .runtime_name = "php_strnatcmp", .needs_allocator = false }) },
         .{ "strnatcasecmp", bi(.{ .runtime_name = "php_strnatcasecmp", .needs_allocator = false }) },
         .{ "stripos", bi(.{ .runtime_name = "php_stripos", .needs_allocator = false }) },
@@ -2752,7 +2756,7 @@ pub const NativeLinker = struct {
         .{ "sscanf", .{ .runtime_name = "php_sscanf", .needs_allocator = true } },
         .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
         .{ "preg_match_all", .{ .runtime_name = "php_preg_match_all", .needs_allocator = true } },
-        .{ "preg_replace", .{ .runtime_name = "php_preg_replace", .needs_allocator = true } },
+        .{ "preg_replace", .{ .runtime_name = "preg_replace", .needs_allocator = true } },
         .{ "preg_replace_callback", .{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true } },
         .{ "preg_split", .{ .runtime_name = "php_preg_split", .needs_allocator = true } },
         .{ "filter_var", bi(.{ .runtime_name = "php_filter_var", .needs_allocator = true }) },
@@ -8759,6 +8763,28 @@ pub const NativeLinker = struct {
                                     }
                                 } else {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initBool(false)");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_base64_decode")) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initBool(false)");
+                                }
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            } else if (std.mem.eql(u8, runtime_name, "php_count_chars")) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                if (op.args.len > 0) {
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initInt(0)");
+                                    }
+                                } else {
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0)");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (op.args.len > 0) {
