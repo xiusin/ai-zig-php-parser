@@ -22,6 +22,8 @@ pub const Parser = struct {
     syntax_hooks: ?*const SyntaxHooks = null,
     /// Collect all tokens for line number calculation
     all_tokens: std.ArrayList(Token),
+    block_depth: u32 = 0,
+    top_level_stmt_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8) anyerror!Parser {
         var lexer = Lexer.init(source);
@@ -303,6 +305,7 @@ pub const Parser = struct {
                 continue;
             };
             try stmts.append(self.allocator, stmt);
+            self.top_level_stmt_count += 1;
         }
 
         // Copy all tokens to context for line number calculation
@@ -358,6 +361,7 @@ pub const Parser = struct {
         return switch (self.curr.tag) {
             .k_namespace => self.parseNamespace(),
             .k_use => self.parseUse(),
+            .k_declare => self.parseDeclare(),
             .k_class => self.parseContainer(.class_decl, attributes),
             .k_interface => self.parseContainer(.interface_decl, attributes),
             .k_trait => self.parseContainer(.trait_decl, attributes),
@@ -1117,6 +1121,36 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .use_stmt, .main_token = token, .data = .{ .use_stmt = .{ .namespace = name_id, .alias = alias_id, .use_type = use_type } } });
     }
 
+    fn parseDeclare(self: *Parser) anyerror!ast.Node.Index {
+        const token = try self.eat(.k_declare);
+        _ = try self.eat(.l_paren);
+
+        while (true) {
+            const name_tok = if (self.curr.tag == .t_string)
+                try self.eat(.t_string)
+            else if (self.eatKeywordAsIdentifier()) |tok|
+                tok
+            else
+                try self.eat(.t_string);
+
+            const name = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+            _ = try self.eat(.equal);
+            _ = try self.parseExpression(1);
+
+            if (std.mem.eql(u8, name, "strict_types") and self.block_depth == 0 and self.top_level_stmt_count != 0) {
+                self.reportError("strict_types declaration must be the very first statement in the script");
+                return error.ParseError;
+            }
+
+            if (self.curr.tag != .comma) break;
+            self.nextToken();
+        }
+
+        _ = try self.eat(.r_paren);
+        _ = try self.eat(.semicolon);
+        return self.createNode(.{ .tag = .block, .main_token = token, .data = .{ .block = .{ .stmts = &[_]ast.Node.Index{} } } });
+    }
+
     fn parseAttributes(self: *Parser) anyerror![]const ast.Node.Index {
         var attrs = std.ArrayListUnmanaged(ast.Node.Index){};
         while (self.curr.tag == .t_attribute_start) {
@@ -1792,6 +1826,14 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .echo_stmt, .main_token = token, .data = .{ .echo_stmt = .{ .exprs = try arena.dupe(ast.Node.Index, exprs.items) } } });
     }
 
+    fn isValidAssignmentTarget(self: *Parser, node_idx: ast.Node.Index) bool {
+        const node = self.context.nodes.items[node_idx];
+        return switch (node.tag) {
+            .variable, .variable_variable, .array_access, .property_access, .variable_property_access, .static_property_access => true,
+            else => false,
+        };
+    }
+
     fn parseAssignment(self: *Parser) anyerror!ast.Node.Index {
         // Check if this is a list() assignment
         if (self.curr.tag == .k_list) {
@@ -1800,6 +1842,11 @@ pub const Parser = struct {
 
         const target = try self.parseExpression(100);
         const op = try self.eat(.equal);
+
+        if (!self.isValidAssignmentTarget(target)) {
+            self.reportError("Can't use function return value in write context");
+            return error.ParseError;
+        }
 
         // Check for reference assignment (&)
         const is_reference = if (self.curr.tag == .ampersand) blk: {
@@ -2195,6 +2242,8 @@ pub const Parser = struct {
         const token = try self.eat(.l_brace);
         var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
         defer stmts.deinit(self.allocator);
+        self.block_depth += 1;
+        defer self.block_depth -= 1;
 
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             try stmts.append(self.allocator, try self.parseStatement());
@@ -2439,6 +2488,10 @@ pub const Parser = struct {
                 const right = try self.parseExpression(next_p);
                 left = try self.createNode(.{ .tag = .pipe_expr, .main_token = op, .data = .{ .pipe_expr = .{ .left = left, .right = right } } });
             } else if (tag == .equal) {
+                if (!self.isValidAssignmentTarget(left)) {
+                    self.reportError("Can't use function return value in write context");
+                    return error.ParseError;
+                }
                 const right = try self.parseExpression(precedence);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
             } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal or tag == .star_star_equal or tag == .less_less_equal or tag == .greater_greater_equal or tag == .and_equal or tag == .or_equal or tag == .caret_equal or tag == .double_question_equal) {

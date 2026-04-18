@@ -698,6 +698,19 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         const line_num = first_err.line;
         const err_msg = first_err.msg;
 
+        if (std.mem.eql(u8, err_msg, "Can't use function return value in write context") or
+            std.mem.eql(u8, err_msg, "strict_types declaration must be the very first statement in the script"))
+        {
+            try generateFatalErrorBinary(
+                allocator,
+                options,
+                abs_path,
+                err_msg,
+                line_num,
+            );
+            return;
+        }
+
         // 生成 parse error 二进制
         try generateParseErrorBinary(
             allocator,
