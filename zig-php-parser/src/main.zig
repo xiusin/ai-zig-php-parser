@@ -699,7 +699,8 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         const err_msg = first_err.msg;
 
         if (std.mem.eql(u8, err_msg, "Can't use function return value in write context") or
-            std.mem.eql(u8, err_msg, "strict_types declaration must be the very first statement in the script"))
+            std.mem.eql(u8, err_msg, "strict_types declaration must be the very first statement in the script") or
+            std.mem.eql(u8, err_msg, "Cannot mix bracketed namespace declarations with unbracketed namespace declarations"))
         {
             try generateFatalErrorBinary(
                 allocator,

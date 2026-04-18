@@ -24,6 +24,8 @@ pub const Parser = struct {
     all_tokens: std.ArrayList(Token),
     block_depth: u32 = 0,
     top_level_stmt_count: usize = 0,
+    /// Track namespace declaration style: 0=none, 1=unbracketed, 2=bracketed
+    namespace_style: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8) anyerror!Parser {
         var lexer = Lexer.init(source);
@@ -163,7 +165,7 @@ pub const Parser = struct {
         const actual_desc = self.describeToken(self.curr);
         const expected_desc = tagToExpected(tag);
         const arena = self.context.arena.allocator();
-        const msg = std.fmt.allocPrint(arena, "syntax error, unexpected {s}, expecting \"{s}\"", .{ actual_desc, expected_desc }) catch "Unexpected Token";
+        const msg = std.fmt.allocPrint(arena, "syntax error, unexpected {s}, expecting {s}", .{ actual_desc, expected_desc }) catch "Unexpected Token";
         self.reportError(msg);
         return error.UnexpectedToken;
     }
@@ -181,19 +183,41 @@ pub const Parser = struct {
             .r_paren => "\")\"",
             .l_brace => "\"{\"",
             .r_brace => "\"}\"",
+            .l_bracket => "\"[\"",
+            .r_bracket => "\"]\"",
+            .equal => "\"=\"",
+            .fat_arrow => "\"=>\"",
+            .comma => "\",\"",
+            .colon => "\":\"",
+            .ampersand => "token \"&\"",
             .eof => "end of file",
-            else => "token",
+            else => blk: {
+                // For keywords, show token "keyword_text"
+                const text = self.lexer.buffer[tok.loc.start..tok.loc.end];
+                if (text.len > 0 and text.len <= 20) {
+                    const arena = self.context.arena.allocator();
+                    break :blk std.fmt.allocPrint(arena, "token \"{s}\"", .{text}) catch "token";
+                }
+                break :blk "token";
+            },
         };
     }
 
     fn tagToExpected(tag: Token.Tag) []const u8 {
         return switch (tag) {
-            .l_paren => "(",
-            .r_paren => ")",
-            .l_brace => "{",
-            .r_brace => "}",
-            .semicolon => ";",
+            .l_paren => "\"(\"",
+            .r_paren => "\")\"",
+            .l_brace => "\"{\"",
+            .r_brace => "\"}\"",
+            .l_bracket => "\"[\"",
+            .r_bracket => "\"]\"",
+            .semicolon => "\";\"",
+            .equal => "\"=\"",
+            .fat_arrow => "\"=>\"",
+            .comma => "\",\"",
+            .colon => "\":\"",
             .t_string => "identifier",
+            .t_variable => "variable",
             else => "token",
         };
     }
@@ -381,7 +405,7 @@ pub const Parser = struct {
             .k_echo => self.parseEcho(),
             .k_global => self.parseGlobal(),
             .k_static => {
-                if (self.peek.tag == .double_colon) return self.parseExpressionStatement();
+                if (self.peek.tag == .double_colon or self.peek.tag == .k_function or self.peek.tag == .k_fn) return self.parseExpressionStatement();
                 return self.parseStatic();
             },
             .k_const => self.parseConst(),
@@ -1065,7 +1089,11 @@ pub const Parser = struct {
 
         // Handle global namespace: namespace { ... }
         if (self.curr.tag == .l_brace) {
-            // Global namespace block
+            if (self.namespace_style == 1) {
+                self.reportError("Cannot mix bracketed namespace declarations with unbracketed namespace declarations");
+                return error.ParseError;
+            }
+            self.namespace_style = 2;
             self.context.current_namespace = null;
             const body = try self.parseBlock();
             return body;
@@ -1077,11 +1105,21 @@ pub const Parser = struct {
 
         // Handle namespace with block: namespace Foo { ... }
         if (self.curr.tag == .l_brace) {
+            if (self.namespace_style == 1) {
+                self.reportError("Cannot mix bracketed namespace declarations with unbracketed namespace declarations");
+                return error.ParseError;
+            }
+            self.namespace_style = 2;
             const body = try self.parseBlock();
             return body;
         }
 
         // Handle namespace with semicolon: namespace Foo;
+        if (self.namespace_style == 2) {
+            self.reportError("Cannot mix bracketed namespace declarations with unbracketed namespace declarations");
+            return error.ParseError;
+        }
+        self.namespace_style = 1;
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .namespace_stmt, .main_token = token, .data = .{ .namespace_stmt = .{ .name = name_id } } });
     }
@@ -1097,10 +1135,16 @@ pub const Parser = struct {
             self.nextToken();
         }
         const name_tok = try self.eat(.t_string);
-        const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
+        const name_text = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
+        const name_id = try self.context.intern(name_text);
+
+        // Check for grouped use: use Foo\Bar\{Baz, Qux};
+        if (self.curr.tag == .l_brace) {
+            return self.parseGroupedUse(token, name_text, use_type);
+        }
 
         // Extract last part for default alias
-        var parts = std.mem.splitScalar(u8, self.lexer.buffer[name_tok.loc.start..name_tok.loc.end], '\\');
+        var parts = std.mem.splitScalar(u8, name_text, '\\');
         var last_part: []const u8 = "";
         while (parts.next()) |part| last_part = part;
         const default_alias_id = try self.context.intern(last_part);
@@ -1119,6 +1163,51 @@ pub const Parser = struct {
 
         _ = try self.eat(.semicolon);
         return self.createNode(.{ .tag = .use_stmt, .main_token = token, .data = .{ .use_stmt = .{ .namespace = name_id, .alias = alias_id, .use_type = use_type } } });
+    }
+
+    fn parseGroupedUse(self: *Parser, token: Token, prefix: []const u8, parent_use_type: u8) anyerror!ast.Node.Index {
+        _ = try self.eat(.l_brace);
+        var last_node: ast.Node.Index = 0;
+
+        while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
+            var use_type = parent_use_type;
+            if (self.curr.tag == .k_function) {
+                use_type = 1;
+                self.nextToken();
+            } else if (self.curr.tag == .k_const) {
+                use_type = 2;
+                self.nextToken();
+            }
+
+            const member_tok = try self.eat(.t_string);
+            const member_text = self.lexer.buffer[member_tok.loc.start..member_tok.loc.end];
+
+            // Build full name: prefix + \\ + member
+            const full_name = try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ prefix, member_text });
+            const full_id = try self.context.intern(full_name);
+
+            // Extract alias (last part or explicit)
+            var alias_id: ?u32 = null;
+            if (self.curr.tag == .k_as) {
+                self.nextToken();
+                const alias_tok = try self.eat(.t_string);
+                alias_id = try self.context.intern(self.lexer.buffer[alias_tok.loc.start..alias_tok.loc.end]);
+                try self.context.imports.put(self.allocator, alias_id.?, full_id);
+            } else {
+                const default_alias_id = try self.context.intern(member_text);
+                try self.context.imports.put(self.allocator, default_alias_id, full_id);
+            }
+
+            last_node = try self.createNode(.{ .tag = .use_stmt, .main_token = token, .data = .{ .use_stmt = .{ .namespace = full_id, .alias = alias_id, .use_type = use_type } } });
+
+            if (self.curr.tag == .comma) {
+                self.nextToken();
+            } else break;
+        }
+
+        _ = try self.eat(.r_brace);
+        _ = try self.eat(.semicolon);
+        return last_node;
     }
 
     fn parseDeclare(self: *Parser) anyerror!ast.Node.Index {
@@ -1321,7 +1410,7 @@ pub const Parser = struct {
             type_node = try self.parseType();
         }
         var is_reference = false;
-        if (self.curr.tag == .ampersand) {
+        if (self.curr.tag == .ampersand and (self.peek.tag == .t_variable or self.peek.tag == .ellipsis or self.peek.tag == .t_go_identifier)) {
             is_reference = true;
             self.nextToken();
         }
@@ -1365,7 +1454,7 @@ pub const Parser = struct {
             _ = try self.eat(.colon);
         }
         
-        const then = try self.parseStatement();
+        const then = if (is_alternative) try self.parseAlternativeBody(.k_endif) else try self.parseStatement();
         var else_branch: ?ast.Node.Index = null;
         
         if (is_alternative) {
@@ -1377,7 +1466,7 @@ pub const Parser = struct {
                 if (self.curr.tag == .colon) {
                     _ = try self.eat(.colon);
                 }
-                else_branch = try self.parseStatement();
+                else_branch = try self.parseAlternativeBody(.k_endif);
             }
             // 消耗 endif;
             if (self.curr.tag == .k_endif) {
@@ -1445,19 +1534,30 @@ pub const Parser = struct {
         const is_alternative = self.curr.tag == .colon;
         if (is_alternative) {
             _ = try self.eat(.colon);
+            const body = try self.parseAlternativeBody(.k_endwhile);
+            _ = try self.eat(.k_endwhile);
+            _ = try self.eat(.semicolon);
+            return self.createNode(.{ .tag = .while_stmt, .main_token = token, .data = .{ .while_stmt = .{ .condition = cond, .body = body } } });
         }
         
         const body = try self.parseStatement();
-        
-        if (is_alternative) {
-            // 消耗 endwhile;
-            if (self.curr.tag == .k_endwhile) {
-                self.nextToken();
-                _ = try self.eat(.semicolon);
-            }
-        }
-        
         return self.createNode(.{ .tag = .while_stmt, .main_token = token, .data = .{ .while_stmt = .{ .condition = cond, .body = body } } });
+    }
+
+    /// Parse statements until the specified end token, collecting them into a block node.
+    /// Used for alternative syntax: while(): ... endwhile; / for(): ... endfor; / foreach(): ... endforeach;
+    fn parseAlternativeBody(self: *Parser, end_tag: Token.Tag) anyerror!ast.Node.Index {
+        var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+        while (self.curr.tag != end_tag and self.curr.tag != .eof) {
+            // Also stop at elseif/else/endif for if alternative syntax
+            if (end_tag == .k_endif and (self.curr.tag == .k_elseif or self.curr.tag == .k_else)) break;
+            const stmt = try self.parseStatement();
+            try stmts.append(self.allocator, stmt);
+        }
+        const arena = self.context.arena.allocator();
+        const stmts_slice = try arena.dupe(ast.Node.Index, stmts.items);
+        stmts.deinit(self.allocator);
+        return self.createNode(.{ .tag = .block, .main_token = self.curr, .data = .{ .block = .{ .stmts = stmts_slice } } });
     }
 
     fn parseDoWhile(self: *Parser) anyerror!ast.Node.Index {
@@ -1523,21 +1623,15 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
 
         // 检查是否是替代语法 (foreach ...): ... endforeach;
-        const is_alternative = self.curr.tag == .colon;
-        if (is_alternative) {
+        if (self.curr.tag == .colon) {
             _ = try self.eat(.colon);
+            const body = try self.parseAlternativeBody(.k_endforeach);
+            _ = try self.eat(.k_endforeach);
+            _ = try self.eat(.semicolon);
+            return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = key, .value = value, .body = body, .value_by_ref = value_by_ref } } });
         }
 
         const body = try self.parseStatement();
-
-        if (is_alternative) {
-            // 消耗 endforeach;
-            if (self.curr.tag == .k_endforeach) {
-                self.nextToken();
-                _ = try self.eat(.semicolon);
-            }
-        }
-
         return self.createNode(.{ .tag = .foreach_stmt, .main_token = token, .data = .{ .foreach_stmt = .{ .iterable = iterable, .key = key, .value = value, .body = body, .value_by_ref = value_by_ref } } });
     }
 
@@ -1678,23 +1772,16 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
 
         // 检查是否是替代语法 (for ...): ... endfor;
-        const is_alternative = self.curr.tag == .colon;
-        if (is_alternative) {
+        if (self.curr.tag == .colon) {
             _ = try self.eat(.colon);
+            const body = try self.parseAlternativeBody(.k_endfor);
+            _ = try self.eat(.k_endfor);
+            _ = try self.eat(.semicolon);
+            return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = init_expr, .condition = condition, .loop = loop, .body = body } } });
         }
 
         const body = try self.parseStatement();
-
-        if (is_alternative) {
-            // 消耗 endfor;
-            if (self.curr.tag == .k_endfor) {
-                self.nextToken();
-                _ = try self.eat(.semicolon);
-            }
-        }
-
-        const result = try self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = init_expr, .condition = condition, .loop = loop, .body = body } } });
-        return result;
+        return self.createNode(.{ .tag = .for_stmt, .main_token = token, .data = .{ .for_stmt = .{ .init = init_expr, .condition = condition, .loop = loop, .body = body } } });
     }
 
     fn parseGlobal(self: *Parser) anyerror!ast.Node.Index {
@@ -2752,6 +2839,15 @@ pub const Parser = struct {
                 return self.createNode(.{ .tag = .parent_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
             },
             .k_static => {
+                if (self.peek.tag == .k_function) {
+                    // static function() { ... } — static closure
+                    self.nextToken(); // consume 'static'
+                    return self.parseStaticClosure();
+                } else if (self.peek.tag == .k_fn) {
+                    // static fn() => ... — static arrow function
+                    self.nextToken(); // consume 'static'
+                    return self.parseStaticArrowFunction();
+                }
                 const t = try self.eat(.k_static);
                 const name_id = try self.context.intern("static");
                 return self.createNode(.{ .tag = .static_expr, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
@@ -3011,8 +3107,8 @@ pub const Parser = struct {
                     self.nextToken();
                     if (self.curr.tag == .r_paren) {
                         self.nextToken();
-                        // Parse the expression being cast
-                        const cast_expr = try self.parseUnaryPostfix();
+                        // Parse the expression being cast (use parseUnary to handle prefix -/+/!/~)
+                        const cast_expr = try self.parseUnary();
                         return self.createNode(.{ .tag = .cast_expr, .main_token = cast_token, .data = .{ .cast_expr = .{ .cast_type = cast_type, .expr = cast_expr } } });
                     }
                 } else if (self.curr.tag == .t_string) {
@@ -3035,7 +3131,7 @@ pub const Parser = struct {
                         self.nextToken();
                         if (self.curr.tag == .r_paren) {
                             self.nextToken();
-                            const cast_expr = try self.parseUnaryPostfix();
+                            const cast_expr = try self.parseUnary();
                             return self.createNode(.{ .tag = .cast_expr, .main_token = cast_token, .data = .{ .cast_expr = .{ .cast_type = cast_type, .expr = cast_expr } } });
                         }
                     }
@@ -3131,7 +3227,7 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .literal_string, .main_token = start_token, .data = .{ .literal_string = .{ .value = try self.context.internLiteral("") } } });
     }
 
-    fn parseClosure(self: *Parser) anyerror!ast.Node.Index {
+    fn parseClosureInner(self: *Parser, is_static: bool) anyerror!ast.Node.Index {
         const token = try self.eat(.k_function);
         _ = try self.eat(.l_paren);
 
@@ -3169,7 +3265,15 @@ pub const Parser = struct {
         const captures_slice = try arena.dupe(ast.Node.Index, captures.items);
         params.deinit(self.allocator);
         captures.deinit(self.allocator);
-        return self.createNode(.{ .tag = .closure, .main_token = token, .data = .{ .closure = .{ .attributes = &.{}, .params = params_slice, .captures = captures_slice, .return_type = return_type, .body = body, .is_static = false } } });
+        return self.createNode(.{ .tag = .closure, .main_token = token, .data = .{ .closure = .{ .attributes = &.{}, .params = params_slice, .captures = captures_slice, .return_type = return_type, .body = body, .is_static = is_static } } });
+    }
+
+    fn parseClosure(self: *Parser) anyerror!ast.Node.Index {
+        return self.parseClosureInner(false);
+    }
+
+    fn parseStaticClosure(self: *Parser) anyerror!ast.Node.Index {
+        return self.parseClosureInner(true);
     }
 
     fn parseMatch(self: *Parser) anyerror!ast.Node.Index {
@@ -3556,7 +3660,7 @@ pub const Parser = struct {
         return idx;
     }
 
-    fn parseArrowFunction(self: *Parser) anyerror!ast.Node.Index {
+    fn parseArrowFunctionInner(self: *Parser, is_static: bool) anyerror!ast.Node.Index {
         const token = try self.eat(.k_fn);
         _ = try self.eat(.l_paren);
 
@@ -3584,7 +3688,15 @@ pub const Parser = struct {
         // 在创建节点前清理params数组，避免内存泄漏
         params.deinit(self.allocator);
 
-        return self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = params_slice, .return_type = return_type, .body = body, .is_static = false } } });
+        return self.createNode(.{ .tag = .arrow_function, .main_token = token, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = params_slice, .return_type = return_type, .body = body, .is_static = is_static } } });
+    }
+
+    fn parseArrowFunction(self: *Parser) anyerror!ast.Node.Index {
+        return self.parseArrowFunctionInner(false);
+    }
+
+    fn parseStaticArrowFunction(self: *Parser) anyerror!ast.Node.Index {
+        return self.parseArrowFunctionInner(true);
     }
 
     fn parseArrayConstruct(self: *Parser) anyerror!ast.Node.Index {
@@ -3737,7 +3849,9 @@ pub const Parser = struct {
 
         // Check for intersection type: Type&OtherType
         // But NOT reference parameter: int &$var (ampersand followed by variable)
-        if (self.curr.tag == .ampersand) {
+        // PHP disallows ?Type&OtherType — nullable cannot participate in intersection directly
+        const left_node = self.context.nodes.items[left];
+        if (self.curr.tag == .ampersand and left_node.tag != .nullable_type) {
             // Use peek to see if next token is a variable (reference parameter case)
             // In Go mode, check for both t_variable and t_go_identifier
             if (self.peek.tag == .t_variable or self.peek.tag == .t_go_identifier or self.peek.tag == .ellipsis) {
