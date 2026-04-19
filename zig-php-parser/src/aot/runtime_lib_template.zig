@@ -11637,6 +11637,26 @@ pub const ClassMeta = struct {
 
         meta.magic_construct = meta.methods.get("__construct").?.func;
         try registerClass(meta);
+
+        // DateTimeImmutable 类（复用 DateTime 方法，行为与 DateTime 一致）
+        const imm_meta = try ClassMeta.init(allocator, "DateTimeImmutable");
+        // 复制 DateTime 所有属性定义
+        try imm_meta.addProperty(.{ .name = "timestamp", .default_value = Value.initNull(), .is_public = false });
+        try imm_meta.addProperty(.{ .name = "microseconds", .default_value = Value.initInt(0), .is_public = false });
+        try imm_meta.addProperty(.{ .name = "timezone", .default_value = Value.initNull(), .is_public = false });
+        try imm_meta.addProperty(.{ .name = "__offset", .default_value = Value.initInt(0), .is_public = false });
+
+        // 复用 DateTime 的所有方法
+        var meth_iter = meta.methods.iterator();
+        while (meth_iter.next()) |entry| {
+            try imm_meta.addMethod(.{
+                .name = entry.key_ptr.*,
+                .func = entry.value_ptr.func,
+                .is_static = entry.value_ptr.is_static,
+            });
+        }
+        imm_meta.magic_construct = meta.magic_construct;
+        try registerClass(imm_meta);
     }
 
     /// 注册内置 Exception 类
@@ -19678,6 +19698,41 @@ pub fn php_dirname(path: Value, allocator: Allocator) !Value {
 pub fn php_getmypid() Value {
     const pid = std.c.getpid();
     return Value.initInt(@intCast(pid));
+}
+
+/// phpversion - 返回PHP版本号
+pub fn php_phpversion(ext: Value, allocator: Allocator) !Value {
+    // phpversion(?string $extension = null): string|false
+    if (!ext.isNull() and ext.isString()) {
+        // 查询扩展版本 — AOT 模式下不支持扩展，返回 false
+        return Value.initBool(false);
+    }
+    return Value.initString(try PHPString.init(allocator, "8.4.8"));
+}
+
+/// extension_loaded - 检查扩展是否加载
+pub fn php_extension_loaded(name: Value) Value {
+    if (!name.isString()) return Value.initBool(false);
+    const ext = name.asString().data;
+    // AOT 模式下模拟核心扩展已加载
+    const core_exts = [_][]const u8{
+        "Core", "core", "standard", "date", "pcre", "json",
+        "ctype", "mbstring", "tokenizer", "SPL", "spl",
+    };
+    for (core_exts) |e| {
+        if (std.mem.eql(u8, ext, e)) return Value.initBool(true);
+    }
+    return Value.initBool(false);
+}
+
+/// get_loaded_extensions - 返回已加载的扩展列表
+pub fn php_get_loaded_extensions(allocator: Allocator) !Value {
+    const arr = try PHPArray.init(allocator);
+    const exts = [_][]const u8{ "Core", "standard", "date", "pcre", "json", "ctype", "mbstring", "SPL" };
+    for (exts) |e| {
+        try arr.pushValue(Value.initString(try PHPString.init(allocator, e)));
+    }
+    return Value.initArray(arr);
 }
 
 /// touch - 设置文件的访问和修改时间
