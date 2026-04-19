@@ -2892,6 +2892,16 @@ pub const NativeLinker = struct {
         .{ "acos", .{ .runtime_name = "php_acos", .needs_allocator = false } },
         .{ "atan", .{ .runtime_name = "php_atan", .needs_allocator = false } },
         .{ "atan2", .{ .runtime_name = "php_atan2", .needs_allocator = false } },
+        .{ "sinh", .{ .runtime_name = "php_sinh", .needs_allocator = false } },
+        .{ "cosh", .{ .runtime_name = "php_cosh", .needs_allocator = false } },
+        .{ "tanh", .{ .runtime_name = "php_tanh", .needs_allocator = false } },
+        .{ "decbin", .{ .runtime_name = "php_decbin", .needs_allocator = true } },
+        .{ "dechex", .{ .runtime_name = "php_dechex", .needs_allocator = true } },
+        .{ "decoct", .{ .runtime_name = "php_decoct", .needs_allocator = true } },
+        .{ "bindec", .{ .runtime_name = "php_bindec", .needs_allocator = false } },
+        .{ "hexdec", .{ .runtime_name = "php_hexdec", .needs_allocator = false } },
+        .{ "octdec", .{ .runtime_name = "php_octdec", .needs_allocator = false } },
+        .{ "base_convert", .{ .runtime_name = "php_base_convert", .needs_allocator = true } },
         .{ "log", .{ .runtime_name = "php_log", .needs_allocator = false } },
         .{ "log10", .{ .runtime_name = "php_log10", .needs_allocator = false } },
         .{ "log2", .{ .runtime_name = "php_log2", .needs_allocator = false } },
@@ -8812,14 +8822,17 @@ pub const NativeLinker = struct {
                         } else {
                             // 特殊处理可选参数函数
                             if (std.mem.eql(u8, runtime_name, "php_round")) {
+                                // round(val, precision=0, mode=0) -> 3 args
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
                                     try self.writeValueArgs(writer, op.args);
                                     if (op.args.len == 1) {
+                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
+                                    } else if (op.args.len == 2) {
                                         try writer.writeAll(", runtime.Value.initNull()");
                                     }
                                 } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initNull()");
                                 }
                                 try writer.writeAll(");\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_count")) {

@@ -9931,17 +9931,44 @@ pub fn php_sqrt(val: Value) !Value {
     return Value.initFloat(@sqrt(val.toFloat()));
 }
 
-/// round - 四舍五入
-pub fn php_round(val: Value, precision_val: Value) !Value {
+/// round - 四舍五入 (支持3参数: value, precision, mode)
+/// mode: 0=PHP_ROUND_HALF_UP(default), 1=PHP_ROUND_HALF_DOWN, 2=PHP_ROUND_HALF_EVEN, 3=PHP_ROUND_HALF_ODD
+pub fn php_round(val: Value, precision_val: Value, mode_val: Value) !Value {
     const num = val.toFloat();
     const precision = if (precision_val.isNull()) 0 else @as(i32, @intCast(precision_val.toInt()));
-
-    if (precision == 0) {
-        return Value.initFloat(@round(num));
-    }
+    const mode = if (mode_val.isNull()) @as(i64, 0) else mode_val.toInt();
 
     const multiplier = std.math.pow(f64, 10.0, @floatFromInt(precision));
-    return Value.initFloat(@round(num * multiplier) / multiplier);
+    const scaled = num * multiplier;
+    const frac = scaled - @floor(scaled);
+    const is_half = @abs(frac - 0.5) < 1e-9;
+
+    const rounded = if (is_half) blk: {
+        switch (mode) {
+            1 => {
+                // HALF_DOWN: round towards zero
+                break :blk if (num >= 0) @floor(scaled) / multiplier else @ceil(scaled) / multiplier;
+            },
+            2 => {
+                // HALF_EVEN: round to nearest even
+                const floor_val = @floor(scaled);
+                const floor_int: i64 = @intFromFloat(floor_val);
+                break :blk if (@rem(floor_int, 2) == 0) floor_val / multiplier else @ceil(scaled) / multiplier;
+            },
+            3 => {
+                // HALF_ODD: round to nearest odd
+                const floor_val = @floor(scaled);
+                const floor_int: i64 = @intFromFloat(floor_val);
+                break :blk if (@rem(floor_int, 2) != 0) floor_val / multiplier else @ceil(scaled) / multiplier;
+            },
+            else => {
+                // HALF_UP (default): round away from zero
+                break :blk @round(scaled) / multiplier;
+            },
+        }
+    } else @round(scaled) / multiplier;
+
+    return Value.initFloat(rounded);
 }
 
 /// floor - 向下取整
@@ -10048,6 +10075,91 @@ pub fn php_atan(val: Value) !Value {
 /// atan2 - 两个参数的反正切
 pub fn php_atan2(y: Value, x: Value) !Value {
     return Value.initFloat(std.math.atan2(y.toFloat(), x.toFloat()));
+}
+
+/// sinh - 双曲正弦
+pub fn php_sinh(val: Value) !Value {
+    const x = val.toFloat();
+    return Value.initFloat((std.math.exp(x) - std.math.exp(-x)) / 2.0);
+}
+
+/// cosh - 双曲余弦
+pub fn php_cosh(val: Value) !Value {
+    const x = val.toFloat();
+    return Value.initFloat((std.math.exp(x) + std.math.exp(-x)) / 2.0);
+}
+
+/// tanh - 双曲正切
+pub fn php_tanh(val: Value) !Value {
+    const x = val.toFloat();
+    const ex = std.math.exp(x);
+    const emx = std.math.exp(-x);
+    return Value.initFloat((ex - emx) / (ex + emx));
+}
+
+/// dechex - 十进制转十六进制字符串
+pub fn php_dechex(val: Value, allocator: Allocator) !Value {
+    const n = val.toInt();
+    const un: u64 = @bitCast(n);
+    const str = try std.fmt.allocPrint(allocator, "{x}", .{un});
+    defer allocator.free(str);
+    const php_str = try PHPString.init(allocator, str);
+    return Value.initString(php_str);
+}
+
+/// decoct - 十进制转八进制字符串
+pub fn php_decoct(val: Value, allocator: Allocator) !Value {
+    const n = val.toInt();
+    const un: u64 = @bitCast(n);
+    const str = try std.fmt.allocPrint(allocator, "{o}", .{un});
+    defer allocator.free(str);
+    const php_str = try PHPString.init(allocator, str);
+    return Value.initString(php_str);
+}
+
+/// bindec - 二进制字符串转十进制
+pub fn php_bindec(val: Value) !Value {
+    if (!val.isString()) return Value.initInt(0);
+    const s = val.asString().data;
+    var result: i64 = 0;
+    for (s) |c| {
+        if (c == '0' or c == '1') {
+            result = result * 2 + @as(i64, c - '0');
+        }
+    }
+    return Value.initInt(result);
+}
+
+/// hexdec - 十六进制字符串转十进制
+pub fn php_hexdec(val: Value) !Value {
+    if (!val.isString()) return Value.initInt(0);
+    const s = val.asString().data;
+    var result: i64 = 0;
+    for (s) |c| {
+        const digit: i64 = if (c >= '0' and c <= '9')
+            @as(i64, c - '0')
+        else if (c >= 'a' and c <= 'f')
+            @as(i64, c - 'a' + 10)
+        else if (c >= 'A' and c <= 'F')
+            @as(i64, c - 'A' + 10)
+        else
+            break;
+        result = result * 16 + digit;
+    }
+    return Value.initInt(result);
+}
+
+/// octdec - 八进制字符串转十进制
+pub fn php_octdec(val: Value) !Value {
+    if (!val.isString()) return Value.initInt(0);
+    const s = val.asString().data;
+    var result: i64 = 0;
+    for (s) |c| {
+        if (c >= '0' and c <= '7') {
+            result = result * 8 + @as(i64, c - '0');
+        } else break;
+    }
+    return Value.initInt(result);
 }
 
 /// log - 自然对数
