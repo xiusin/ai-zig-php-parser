@@ -2188,7 +2188,14 @@ pub const NativeLinker = struct {
                             .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
                             else => try writer.writeAll("runtime.Value.initNull()"),
                         }
+                    } else if (!prop.has_default and prop.is_readonly) {
+                        // readonly 属性没有默认值（如 public readonly string $value;）
+                        // 使用 null 表示"无默认值"，initWithMeta 不会初始化该属性
+                        // 这样 isset($this->value) 对未初始化的 readonly 属性返回 false
+                        try writer.writeAll("null");
                     } else {
+                        // 非 readonly 声明属性或有默认值 null
+                        // 初始化为 null，避免触发 __set/__get 魔术方法
                         try writer.writeAll("runtime.Value.initNull()");
                     }
                     try writer.print(", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .is_readonly = {}, .has_default = {}", .{ prop.is_static, is_public, prop.visibility == .protected, prop.visibility == .private, prop.is_readonly, prop.has_default });
@@ -2668,6 +2675,7 @@ pub const NativeLinker = struct {
 
         .{ "define", bi(.{ .runtime_name = "php_define", .needs_allocator = true }) },
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
+        .{ "constant", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "get_defined_constants", bi(.{ .runtime_name = "php_get_defined_constants", .needs_allocator = true }) },
 
         .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },

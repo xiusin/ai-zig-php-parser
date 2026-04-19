@@ -19701,12 +19701,7 @@ pub fn php_getmypid() Value {
 }
 
 /// phpversion - 返回PHP版本号
-pub fn php_phpversion(ext: Value, allocator: Allocator) !Value {
-    // phpversion(?string $extension = null): string|false
-    if (!ext.isNull() and ext.isString()) {
-        // 查询扩展版本 — AOT 模式下不支持扩展，返回 false
-        return Value.initBool(false);
-    }
+pub fn php_phpversion(allocator: Allocator) !Value {
     return Value.initString(try PHPString.init(allocator, "8.4.8"));
 }
 
