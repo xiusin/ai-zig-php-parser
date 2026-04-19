@@ -2869,8 +2869,9 @@ fn wrapBuiltin_round(ctx: Value, args: []const Value, allocator: Allocator) !Val
     _ = ctx;
     _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
-    const precision = if (args.len >= 2) args[1] else Value.initInt(0);
-    return php_round(args[0], precision);
+    const precision = if (args.len >= 2) args[1] else Value.initNull();
+    const mode = if (args.len >= 3) args[2] else Value.initNull();
+    return php_round(args[0], precision, mode);
 }
 
 fn wrapBuiltin_usort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -5704,7 +5705,14 @@ pub fn var_export(value: Value, return_output: Value) !Value {
 
 fn writeIndent(writer: anytype, indent: usize) !void {
     var i: usize = 0;
-    while (i < indent * 4) : (i += 1) { // 4空格缩进
+    while (i < indent * 4) : (i += 1) { // 4空格缩进 (print_r)
+        try writer.writeByte(' ');
+    }
+}
+
+fn writeExportIndent(writer: anytype, indent: usize) !void {
+    var i: usize = 0;
+    while (i < indent * 2) : (i += 1) { // 2空格缩进 (var_export)
         try writer.writeByte(' ');
     }
 }
@@ -5902,7 +5910,7 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
         try writer.writeAll("array (\n");
         var iter = arr.elements.iterator();
         while (iter.next()) |entry| {
-            try writeIndent(writer, indent + 1);
+            try writeExportIndent(writer, indent + 1);
             switch (entry.key_ptr.*) {
                 .integer => |i| try writer.print("{d}", .{i}),
                 .string => |k| {
@@ -5923,7 +5931,7 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
             try exportValue(writer, entry.value_ptr.*, indent + 1);
             try writer.writeAll(",\n");
         }
-        try writeIndent(writer, indent);
+        try writeExportIndent(writer, indent);
         try writer.writeAll(")");
         return;
     }
@@ -5932,7 +5940,7 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
         try writer.writeAll("(object) array(\n");
         var it = obj.properties.iterator();
         while (it.next()) |entry| {
-            try writeIndent(writer, indent + 1);
+            try writeExportIndent(writer, indent + 1);
             try writer.writeAll("'");
             for (entry.key_ptr.*) |c| {
                 if (c == '\'') {
@@ -5947,7 +5955,7 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
             try exportValue(writer, entry.value_ptr.*, indent + 1);
             try writer.writeAll(",\n");
         }
-        try writeIndent(writer, indent);
+        try writeExportIndent(writer, indent);
         try writer.writeAll(")");
         return;
     }
@@ -17348,9 +17356,9 @@ fn nextRandom() u64 {
 /// @return 随机整数
 pub fn php_rand(min: Value, max: Value) !Value {
     if (min.isNull() and max.isNull()) {
-        // 无参数：返回 0 到 RAND_MAX
+        // 无参数：返回 0 到 RAND_MAX (PHP uses generate() >> 1)
         const random = nextRandom();
-        return Value.initInt(@as(i64, @intCast(random & 0x7FFFFFFF)));
+        return Value.initInt(@as(i64, @intCast(random >> 1)));
     }
 
     const min_val = min.toInt();
@@ -17383,8 +17391,8 @@ pub fn php_mt_rand(min: Value, max: Value) !Value {
     // mt_rand() - 无参数，返回0到MT_RAND_MAX
     // mt_rand(min, max) - 返回min到max之间的随机数
     if (min.isNull() and max.isNull()) {
-        // 无参数：返回0到2147483647
-        return Value.initInt(@intCast(mt_state.?.generate() & 0x7FFFFFFF));
+        // 无参数：返回0到2147483647 (PHP uses generate() >> 1)
+        return Value.initInt(@intCast(mt_state.?.generate() >> 1));
     }
     return php_rand(min, max);
 }
