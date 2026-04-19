@@ -21088,13 +21088,35 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 continue;
             }
 
-            // 跳过标志
-            while (i < fmt.len and (fmt[i] == '-' or fmt[i] == '+' or fmt[i] == ' ' or fmt[i] == '0')) {
+            // 解析标志
+            var flag_minus = false;
+            var flag_plus = false;
+            var flag_space = false;
+            var flag_zero = false;
+            var pad_char: u8 = ' ';
+            while (i < fmt.len) {
+                switch (fmt[i]) {
+                    '-' => flag_minus = true,
+                    '+' => flag_plus = true,
+                    ' ' => flag_space = true,
+                    '0' => flag_zero = true,
+                    '\'' => {
+                        // PHP custom pad char: %'x10s
+                        i += 1;
+                        if (i < fmt.len) {
+                            pad_char = fmt[i];
+                        }
+                    },
+                    else => break,
+                }
                 i += 1;
             }
+            if (flag_zero and !flag_minus) pad_char = '0';
 
-            // 跳过宽度
+            // 解析宽度
+            var width: usize = 0;
             while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
+                width = width * 10 + (fmt[i] - '0');
                 i += 1;
             }
 
@@ -21119,46 +21141,64 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
             const arg = args[arg_idx];
             arg_idx += 1;
 
+            // Format the value into a temporary buffer, then apply width/padding
+            var tmp_buf = try std.ArrayList(u8).initCapacity(allocator, 0);
+            defer tmp_buf.deinit(allocator);
+
             switch (specifier) {
                 's' => {
                     if (arg.isString()) {
-                        try result.appendSlice(allocator, arg.asString().data);
+                        const sdata = arg.asString().data;
+                        if (precision) |prec| {
+                            const len = @min(prec, sdata.len);
+                            try tmp_buf.appendSlice(allocator, sdata[0..len]);
+                        } else {
+                            try tmp_buf.appendSlice(allocator, sdata);
+                        }
                     } else {
                         const str = try arg.toString(allocator);
                         defer str.release(allocator);
-                        try result.appendSlice(allocator, str.data);
+                        if (precision) |prec| {
+                            const len = @min(prec, str.data.len);
+                            try tmp_buf.appendSlice(allocator, str.data[0..len]);
+                        } else {
+                            try tmp_buf.appendSlice(allocator, str.data);
+                        }
                     }
                 },
                 'd', 'i' => {
                     const val = arg.toInt();
+                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+')
+                    else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
                     const str = try std.fmt.allocPrint(allocator, "{d}", .{val});
                     defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    try tmp_buf.appendSlice(allocator, str);
                 },
                 'f' => {
                     const val = arg.toFloat();
+                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+')
+                    else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
                     const prec = precision orelse 6;
-                    // 使用自定义精度格式化
                     var fbuf: [128]u8 = undefined;
                     const fstr = formatFloatPrecision(&fbuf, val, prec);
-                    try result.appendSlice(allocator, fstr);
+                    try tmp_buf.appendSlice(allocator, fstr);
                 },
                 'x' => {
                     const val = arg.toInt();
                     const str = try std.fmt.allocPrint(allocator, "{x}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    try tmp_buf.appendSlice(allocator, str);
                 },
                 'X' => {
                     const val = arg.toInt();
                     const str = try std.fmt.allocPrint(allocator, "{X}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    try tmp_buf.appendSlice(allocator, str);
                 },
                 'c' => {
                     const val = arg.toInt();
                     if (val >= 0 and val <= 255) {
-                        try result.append(allocator, @intCast(val));
+                        try tmp_buf.append(allocator, @intCast(val));
                     }
                 },
                 'u' => {
@@ -21166,30 +21206,55 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     const uval: u64 = @bitCast(val);
                     const str = try std.fmt.allocPrint(allocator, "{d}", .{uval});
                     defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    try tmp_buf.appendSlice(allocator, str);
                 },
                 'o' => {
                     const val = arg.toInt();
                     const str = try std.fmt.allocPrint(allocator, "{o}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    try tmp_buf.appendSlice(allocator, str);
                 },
                 'b' => {
                     const val = arg.toInt();
                     const str = try std.fmt.allocPrint(allocator, "{b}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    try tmp_buf.appendSlice(allocator, str);
                 },
                 'e', 'E' => {
                     const val = arg.toFloat();
                     const str = try std.fmt.allocPrint(allocator, "{e}", .{val});
                     defer allocator.free(str);
-                    try result.appendSlice(allocator, str);
+                    try tmp_buf.appendSlice(allocator, str);
                 },
                 else => {
                     try result.append(allocator, '%');
                     try result.append(allocator, specifier);
+                    continue;
                 },
+            }
+
+            // Apply width padding
+            const content = tmp_buf.items;
+            if (width > 0 and content.len < width) {
+                const padding = width - content.len;
+                if (flag_minus) {
+                    // Left-align: content first, then padding
+                    try result.appendSlice(allocator, content);
+                    for (0..padding) |_| try result.append(allocator, pad_char);
+                } else {
+                    // Right-align: padding first, then content
+                    // For zero-padding with sign, put sign before zeros
+                    if (pad_char == '0' and content.len > 0 and (content[0] == '-' or content[0] == '+' or content[0] == ' ')) {
+                        try result.append(allocator, content[0]);
+                        for (0..padding) |_| try result.append(allocator, '0');
+                        try result.appendSlice(allocator, content[1..]);
+                    } else {
+                        for (0..padding) |_| try result.append(allocator, pad_char);
+                        try result.appendSlice(allocator, content);
+                    }
+                }
+            } else {
+                try result.appendSlice(allocator, content);
             }
         } else {
             try result.append(allocator, fmt[i]);
