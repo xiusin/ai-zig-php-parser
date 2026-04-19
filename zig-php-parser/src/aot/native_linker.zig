@@ -835,6 +835,14 @@ pub const NativeLinker = struct {
             \\}
             \\
             \\pub fn getGlobalVar(name: []const u8) runtime.Value {
+            \\    // Closure::bind/bindTo: $this 优先从绑定栈获取
+            \\    if (std.mem.eql(u8, name, "$this")) {
+            \\        const bound = runtime.getClosureBoundThis();
+            \\        if (!bound.isNull()) {
+            \\            _ = bound.retain();
+            \\            return bound;
+            \\        }
+            \\    }
             \\    // 超全局变量直接从global_vars读取
             \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
             \\        if (global_vars.get(name)) |value| {
@@ -872,6 +880,13 @@ pub const NativeLinker = struct {
             \\}
             \\
             \\pub fn getGlobalVarNoWarn(name: []const u8) runtime.Value {
+            \\    if (std.mem.eql(u8, name, "$this")) {
+            \\        const bound = runtime.getClosureBoundThis();
+            \\        if (!bound.isNull()) {
+            \\            _ = bound.retain();
+            \\            return bound;
+            \\        }
+            \\    }
             \\    if (name.len > 1 and name[0] == '$' and name[1] == '_' and global_vars_initialized) {
             \\        if (global_vars.get(name)) |value| {
             \\            _ = value.retain();
@@ -1047,6 +1062,11 @@ pub const NativeLinker = struct {
             \\    // 再注册 global_vars cleanup，这样 global_vars cleanup 先执行
             \\    defer runtime.cleanupAllClasses();
             \\    defer {
+            \\        // 先对所有全局对象触发 __destruct（PHP 脚本结束语义）
+            \\        var dit = global_vars.valueIterator();
+            \\        while (dit.next()) |dval| {
+            \\            runtime.php_force_destruct_if_object(dval.*);
+            \\        }
             \\        var it = global_vars.valueIterator();
             \\        while (it.next()) |val| {
             \\            val.release(runtime.runtime_allocator);

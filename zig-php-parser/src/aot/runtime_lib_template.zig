@@ -2536,6 +2536,7 @@ pub const PHPClosure = struct {
     allocator: Allocator,
     param_count: u16 = 0,
     required_params: u16 = 0,
+    bound_this: Value = Value.initNull(), // Closure::bind/bindTo 绑定的 $this
 
     pub fn init(
         allocator: Allocator,
@@ -2561,7 +2562,7 @@ pub const PHPClosure = struct {
             alloc_counters.php_closure_live_objects,
         );
 
-        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0 };
+        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0, .bound_this = Value.initNull() };
         return f;
     }
 
@@ -2576,6 +2577,7 @@ pub const PHPClosure = struct {
             for (self.captures) |c| {
                 c.release(allocator);
             }
+            self.bound_this.release(allocator);
             allocator.free(self.captures);
             if (alloc_counters.php_closure_live_objects > 0) {
                 alloc_counters.php_closure_live_objects -= 1;
@@ -4344,6 +4346,14 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
     }
 }
 
+// Closure::bind/bindTo 绑定的 $this 栈（支持嵌套调用）
+threadlocal var closure_bound_this_stack: Value = Value.initNull();
+
+/// 获取当前 Closure::bind 绑定的 $this（供 getGlobalVar("$this") 使用）
+pub fn getClosureBoundThis() Value {
+    return closure_bound_this_stack;
+}
+
 pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allocator) !Value {
     // 引用透明：闭包自引用场景中 callback 可能是 Ref(cell)
     var actual_cb = if (callback.isRef()) callback.asRef().* else callback;
@@ -4355,6 +4365,13 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
     
     if (actual_cb.isFunction()) {
         const closure = actual_cb.asFunction();
+        // Closure::bind/bindTo: 如果有 bound_this，临时设置全局 $this
+        if (!closure.bound_this.isNull()) {
+            const prev_this = closure_bound_this_stack;
+            closure_bound_this_stack = closure.bound_this;
+            defer closure_bound_this_stack = prev_this;
+            return closure.func(actual_cb, args, allocator);
+        }
         return closure.func(actual_cb, args, allocator);
     }
     if (Value_isObject(actual_cb)) {
@@ -5937,7 +5954,11 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
     }
     if (Value_isObject(value)) {
         const obj = Value_asObject(value);
-        try writer.writeAll("(object) array(\n");
+        // PHP var_export: \ClassName::__set_state(array(...))
+        const class_name = if (obj.class_meta) |m| m.name else "stdClass";
+        try writer.writeAll("\\");
+        try writer.writeAll(class_name);
+        try writer.writeAll("::__set_state(array(\n");
         var it = obj.properties.iterator();
         while (it.next()) |entry| {
             try writeExportIndent(writer, indent + 1);
@@ -5956,7 +5977,7 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
             try writer.writeAll(",\n");
         }
         try writeExportIndent(writer, indent);
-        try writer.writeAll(")");
+        try writer.writeAll("))");
         return;
     }
     try writer.writeAll("NULL");
@@ -11869,17 +11890,15 @@ pub const ClassMeta = struct {
                     const orig_closure = closure_val.asFunction();
 
                     // 创建新闭包，复制原闭包的函数指针和捕获列表
-                    var new_captures = try alloc.alloc(Value, orig_closure.captures.len + 1);
-                    // 复制原有的捕获变量
+                    const new_captures = try alloc.alloc(Value, orig_closure.captures.len);
                     for (orig_closure.captures, 0..) |cap, i| {
                         _ = cap.retain();
                         new_captures[i] = cap;
                     }
-                    // 最后一个捕获变量是绑定的 $this
-                    _ = new_this.retain();
-                    new_captures[orig_closure.captures.len] = new_this;
 
                     const new_closure = try allocPHPClosure(alloc);
+                    // 绑定 $this 到 bound_this 字段
+                    _ = new_this.retain();
                     new_closure.* = .{
                         .func = orig_closure.func,
                         .captures = new_captures,
@@ -11888,6 +11907,7 @@ pub const ClassMeta = struct {
                         .allocator = alloc,
                         .param_count = orig_closure.param_count,
                         .required_params = orig_closure.required_params,
+                        .bound_this = new_this,
                     };
 
                     alloc_counters.php_closure_objects += 1;
@@ -11949,7 +11969,12 @@ pub const ClassMeta = struct {
                     if (!ctx.isFunction()) return Value.initNull();
                     if (args.len == 0) return Value.initNull();
                     // args[0] = newThis, args[1..] = call args
+                    const new_this = args[0];
                     const closure = ctx.asFunction();
+                    // 临时绑定 $this
+                    const prev_this = closure_bound_this_stack;
+                    closure_bound_this_stack = new_this;
+                    defer closure_bound_this_stack = prev_this;
                     return closure.func(ctx, args[1..], alloc);
                 }
             }.call,
@@ -16110,6 +16135,21 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
             return php_concat(obj_val, args[0], runtime_allocator);
         }
         return error.UnknownMethod;
+    }
+
+    // Closure 方法调用：bindTo/call/bind 等
+    if (obj_val.isFunction()) {
+        if (findClass("Closure")) |closure_meta| {
+            if (closure_meta.findMethod(method_name)) |method| {
+                return method.func(obj_val, args, runtime_allocator);
+            }
+        }
+        // 未知闭包方法
+        const stderr = std.fs.File{ .handle = 2 };
+        stderr.writeAll("PHP Fatal error:  Call to undefined method Closure::") catch {};
+        stderr.writeAll(method_name) catch {};
+        stderr.writeAll("()\n") catch {};
+        return Value.initNull();
     }
 
     if (!Value_isObject(obj_val)) {
