@@ -5945,6 +5945,11 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
                 },
             }
             try writer.writeAll(" => ");
+            // PHP var_export: 数组/对象值换行后同级缩进
+            if (entry.value_ptr.*.isArray() or Value_isObject(entry.value_ptr.*)) {
+                try writer.writeAll("\n");
+                try writeExportIndent(writer, indent + 1);
+            }
             try exportValue(writer, entry.value_ptr.*, indent + 1);
             try writer.writeAll(",\n");
         }
@@ -5973,6 +5978,10 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
                 }
             }
             try writer.writeAll("' => ");
+            if (entry.value_ptr.*.isArray() or Value_isObject(entry.value_ptr.*)) {
+                try writer.writeAll("\n");
+                try writeExportIndent(writer, indent + 1);
+            }
             try exportValue(writer, entry.value_ptr.*, indent + 1);
             try writer.writeAll(",\n");
         }
@@ -19698,6 +19707,12 @@ pub fn php_dirname(path: Value, allocator: Allocator) !Value {
 pub fn php_getmypid() Value {
     const pid = std.c.getpid();
     return Value.initInt(@intCast(pid));
+}
+
+/// getmygid - 获取当前进程组ID
+const c_getgid = @extern(*const fn () callconv(.c) u32, .{ .name = "getgid" });
+pub fn php_getmygid() Value {
+    return Value.initInt(@intCast(c_getgid()));
 }
 
 /// phpversion - 返回PHP版本号

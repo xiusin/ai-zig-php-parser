@@ -3008,6 +3008,7 @@ pub const NativeLinker = struct {
         .{ "basename", .{ .runtime_name = "php_basename", .needs_allocator = true } },
         .{ "dirname", .{ .runtime_name = "php_dirname", .needs_allocator = true } },
         .{ "getmypid", bi(.{ .runtime_name = "php_getmypid", .needs_allocator = false, .may_raise = false }) },
+        .{ "getmygid", bi(.{ .runtime_name = "php_getmygid", .needs_allocator = false, .may_raise = false }) },
         .{ "phpversion", bi(.{ .runtime_name = "php_phpversion", .needs_allocator = true, .may_raise = false }) },
         .{ "extension_loaded", bi(.{ .runtime_name = "php_extension_loaded", .needs_allocator = false, .may_raise = false }) },
         .{ "get_loaded_extensions", bi(.{ .runtime_name = "php_get_loaded_extensions", .needs_allocator = true, .may_raise = false }) },
