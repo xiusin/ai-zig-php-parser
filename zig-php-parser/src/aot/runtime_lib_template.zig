@@ -2537,6 +2537,7 @@ pub const PHPClosure = struct {
     param_count: u16 = 0,
     required_params: u16 = 0,
     bound_this: Value = Value.initNull(), // Closure::bind/bindTo 绑定的 $this
+    is_static: bool = false, // static closure 不能绑定 $this
 
     pub fn init(
         allocator: Allocator,
@@ -2562,7 +2563,7 @@ pub const PHPClosure = struct {
             alloc_counters.php_closure_live_objects,
         );
 
-        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0, .bound_this = Value.initNull() };
+        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0, .bound_this = Value.initNull(), .is_static = false };
         return f;
     }
 
@@ -2774,12 +2775,13 @@ fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
     return builtin_function_map.get(name);
 }
 
-pub fn php_create_closure(name: Value, captures: Value, allocator: Allocator) !Value {
+pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, allocator: Allocator) !Value {
     if (!name.isString()) return error.InvalidClosureName;
     if (!captures.isArray()) return error.InvalidCaptureList;
 
     const func_name = name.asString().data;
     const caps_arr = captures.asArray();
+    const is_static = is_static_val.toBool();
 
     // Convert PHPArray to []Value slice
     // We need to iterate the array.
@@ -2818,6 +2820,7 @@ pub fn php_create_closure(name: Value, captures: Value, allocator: Allocator) !V
             closure.required_params = meta.required_params;
         }
     }
+    closure.is_static = is_static;
     return Value.initFunction(closure);
 }
 
@@ -11918,6 +11921,12 @@ pub const ClassMeta = struct {
                     if (!closure_val.isFunction()) return Value.initNull();
                     const orig_closure = closure_val.asFunction();
 
+                    // static closure 不能绑定 $this
+                    if (orig_closure.is_static and !new_this.isNull()) {
+                        emitWarning("Cannot bind an instance to a static closure");
+                        return Value.initNull();
+                    }
+
                     // 创建新闭包，复制原闭包的函数指针和捕获列表
                     const new_captures = try alloc.alloc(Value, orig_closure.captures.len);
                     for (orig_closure.captures, 0..) |cap, i| {
@@ -11926,8 +11935,11 @@ pub const ClassMeta = struct {
                     }
 
                     const new_closure = try allocPHPClosure(alloc);
-                    // 绑定 $this 到 bound_this 字段
-                    _ = new_this.retain();
+                    // 绑定 $this 到 bound_this 字段（static closure 不绑定）
+                    const bound_this = if (orig_closure.is_static) Value.initNull() else brk: {
+                        _ = new_this.retain();
+                        break :brk new_this;
+                    };
                     new_closure.* = .{
                         .func = orig_closure.func,
                         .captures = new_captures,
@@ -11936,7 +11948,8 @@ pub const ClassMeta = struct {
                         .allocator = alloc,
                         .param_count = orig_closure.param_count,
                         .required_params = orig_closure.required_params,
-                        .bound_this = new_this,
+                        .bound_this = bound_this,
+                        .is_static = orig_closure.is_static,
                     };
 
                     alloc_counters.php_closure_objects += 1;

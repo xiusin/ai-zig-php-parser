@@ -7067,9 +7067,11 @@ pub const IRGenerator = struct {
         const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_string);
 
         // Call php_create_closure
-        const args = try self.allocator.alloc(Register, 2);
+        const is_static_reg = try self.emitWithResult(.{ .const_bool = closure_data.is_static }, .bool);
+        const args = try self.allocator.alloc(Register, 3);
         args[0] = name_reg;
         args[1] = caps_arr_reg;
+        args[2] = is_static_reg;
 
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
@@ -7158,9 +7160,11 @@ pub const IRGenerator = struct {
         const name_id = try self.module.?.internString(name_copy);
         const name_reg = try self.emitWithResult(.{ .const_string = name_id }, .php_string);
 
-        const args = try self.allocator.alloc(Register, 2);
+        const is_static_reg = try self.emitWithResult(.{ .const_bool = arrow_data.is_static }, .bool);
+        const args = try self.allocator.alloc(Register, 3);
         args[0] = name_reg;
         args[1] = caps_arr_reg;
+        args[2] = is_static_reg;
 
         return self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
