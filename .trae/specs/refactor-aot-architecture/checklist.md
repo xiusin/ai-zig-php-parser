@@ -1,0 +1,8 @@
+- [x] 架构分层与依赖方向在 spec 中定义清晰，并能映射到现有代码目录结构调整方案
+- [x] Function Registry 的数据模型（FunctionId/FunctionMeta）在 spec 中完整定义，覆盖参数/引用/allocator/异常/可变参数等关键元数据
+- [x] AOT 调用点绑定 FunctionId 的策略在 spec 中明确：哪些编译期绑定、哪些保留动态 fallback
+- [x] VM/解释器与 AOT 的 builtin 元数据“单一真相”方案在 spec 中明确，并包含迁移/兼容策略
+- [x] Runtime/Stdlib 模块化拆分边界与注册机制在 spec 中明确（含 feature flags 与初始化顺序）
+- [x] 性能目标与基准/回归门禁在 spec 中明确：至少包含 microbench + 真实脚本对比集与阈值策略
+- [x] 非确定性输出处理策略在 spec 中明确：归一化与跳过策略均可配置，并不会掩盖真实 mismatch
+- [x] Embedding API 的边界与最小能力在 spec 中明确：编译缓存、资源限制、可观测性
