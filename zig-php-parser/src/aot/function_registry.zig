@@ -48,6 +48,23 @@ pub const Category = enum(u8) {
     misc, // define, constant, function_exists, ...
 };
 
+/// 参数默认值描述 — 用于声明式自动补齐
+/// 编译期常量，零运行时开销
+pub const DefaultArgValue = union(enum) {
+    /// 必填参数位（占位，不会被实际使用）
+    none: void,
+    /// const_int
+    int_val: i64,
+    /// const_null
+    null_val: void,
+    /// const_bool
+    bool_val: bool,
+    /// const_string（IR 生成时 intern）
+    string_val: []const u8,
+    /// const_missing（用于 iterator_to_array 等）
+    missing: void,
+};
+
 /// 函数元数据
 pub const FunctionMeta = struct {
     /// PHP 函数名
@@ -70,6 +87,9 @@ pub const FunctionMeta = struct {
     max_arity: u8 = 255,
     /// 是否为语句函数（返回值通常被忽略）
     is_statement: bool = false,
+    /// 参数默认值（按位置索引），用于 IR generator 自动补齐
+    /// 当 args.len < default_args.len 时，用 default_args[i] 填充缺失参数
+    default_args: []const DefaultArgValue = &[_]DefaultArgValue{},
 };
 
 /// FunctionId 类型 - u16 提供最多 65536 个函数 ID
@@ -92,22 +112,22 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "echo", .runtime_name = "php_echo", .category = .output, .is_statement = true },
     .{ .php_name = "print", .runtime_name = "php_print", .category = .output },
     .{ .php_name = "var_dump", .runtime_name = "php_var_dump", .category = .output, .is_statement = true },
-    .{ .php_name = "print_r", .runtime_name = "print_r", .category = .output, .is_statement = true },
-    .{ .php_name = "var_export", .runtime_name = "var_export", .category = .output },
+    .{ .php_name = "print_r", .runtime_name = "print_r", .category = .output, .is_statement = true, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
+    .{ .php_name = "var_export", .runtime_name = "var_export", .category = .output, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
 
     // ===== String 函数 (ID 6-) =====
     .{ .php_name = "strlen", .runtime_name = "php_strlen", .category = .string, .is_pure = true, .min_arity = 1, .max_arity = 1 },
-    .{ .php_name = "substr", .runtime_name = "php_substr", .needs_allocator = true, .category = .string, .min_arity = 2, .max_arity = 3 },
-    .{ .php_name = "strpos", .runtime_name = "php_strpos", .category = .string, .min_arity = 2, .max_arity = 3 },
+    .{ .php_name = "substr", .runtime_name = "php_substr", .needs_allocator = true, .category = .string, .min_arity = 2, .max_arity = 3, .default_args = &[_]DefaultArgValue{ .none, .none, .null_val } },
+    .{ .php_name = "strpos", .runtime_name = "php_strpos", .category = .string, .min_arity = 2, .max_arity = 3, .default_args = &[_]DefaultArgValue{ .none, .none, .{ .int_val = 0 } } },
     .{ .php_name = "strtoupper", .runtime_name = "php_strtoupper", .needs_allocator = true, .category = .string, .is_pure = true },
     .{ .php_name = "strtolower", .runtime_name = "php_strtolower", .needs_allocator = true, .category = .string, .is_pure = true },
-    .{ .php_name = "trim", .runtime_name = "php_trim", .needs_allocator = true, .category = .string, .is_pure = true },
-    .{ .php_name = "ltrim", .runtime_name = "php_ltrim", .needs_allocator = true, .category = .string, .is_pure = true },
-    .{ .php_name = "rtrim", .runtime_name = "php_rtrim", .needs_allocator = true, .category = .string, .is_pure = true },
-    .{ .php_name = "str_replace", .runtime_name = "php_str_replace", .needs_allocator = true, .category = .string, .ref_params = &[_]u8{3} },
-    .{ .php_name = "str_ireplace", .runtime_name = "php_str_ireplace", .needs_allocator = true, .category = .string, .ref_params = &[_]u8{3} },
+    .{ .php_name = "trim", .runtime_name = "php_trim", .needs_allocator = true, .category = .string, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .null_val } },
+    .{ .php_name = "ltrim", .runtime_name = "php_ltrim", .needs_allocator = true, .category = .string, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .null_val } },
+    .{ .php_name = "rtrim", .runtime_name = "php_rtrim", .needs_allocator = true, .category = .string, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .null_val } },
+    .{ .php_name = "str_replace", .runtime_name = "php_str_replace", .needs_allocator = true, .category = .string, .ref_params = &[_]u8{3}, .default_args = &[_]DefaultArgValue{ .none, .none, .none, .null_val } },
+    .{ .php_name = "str_ireplace", .runtime_name = "php_str_ireplace", .needs_allocator = true, .category = .string, .ref_params = &[_]u8{3}, .default_args = &[_]DefaultArgValue{ .none, .none, .none, .null_val } },
     .{ .php_name = "str_repeat", .runtime_name = "php_str_repeat", .needs_allocator = true, .category = .string, .is_pure = true },
-    .{ .php_name = "str_pad", .runtime_name = "php_str_pad", .needs_allocator = true, .category = .string },
+    .{ .php_name = "str_pad", .runtime_name = "php_str_pad", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .none, .{ .string_val = " " }, .{ .int_val = 1 } } },
     .{ .php_name = "strstr", .runtime_name = "php_strstr", .needs_allocator = true, .category = .string },
     .{ .php_name = "stristr", .runtime_name = "php_stristr", .needs_allocator = true, .category = .string },
     .{ .php_name = "strrchr", .runtime_name = "php_strrchr", .needs_allocator = true, .category = .string },
@@ -123,30 +143,30 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "count_chars", .runtime_name = "php_count_chars", .needs_allocator = true, .category = .string },
     .{ .php_name = "ucfirst", .runtime_name = "php_ucfirst", .needs_allocator = true, .category = .string, .is_pure = true },
     .{ .php_name = "lcfirst", .runtime_name = "php_lcfirst", .needs_allocator = true, .category = .string, .is_pure = true },
-    .{ .php_name = "ucwords", .runtime_name = "php_ucwords", .needs_allocator = true, .category = .string, .is_pure = true },
-    .{ .php_name = "explode", .runtime_name = "php_explode", .needs_allocator = true, .category = .string },
+    .{ .php_name = "ucwords", .runtime_name = "php_ucwords", .needs_allocator = true, .category = .string, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .null_val } },
+    .{ .php_name = "explode", .runtime_name = "php_explode", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .none, .null_val } },
     .{ .php_name = "implode", .runtime_name = "php_implode", .needs_allocator = true, .category = .string },
     .{ .php_name = "join", .runtime_name = "php_implode", .needs_allocator = true, .category = .string }, // alias
     .{ .php_name = "str_getcsv", .runtime_name = "php_str_getcsv", .needs_allocator = true, .category = .string },
-    .{ .php_name = "str_split", .runtime_name = "php_str_split", .needs_allocator = true, .category = .string },
+    .{ .php_name = "str_split", .runtime_name = "php_str_split", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 1 } } },
     .{ .php_name = "strcmp", .runtime_name = "php_strcmp", .category = .string, .is_pure = true },
     .{ .php_name = "strcasecmp", .runtime_name = "php_strcasecmp", .needs_allocator = true, .category = .string, .is_pure = true },
     .{ .php_name = "strncasecmp", .runtime_name = "php_strncasecmp", .category = .string, .is_pure = true },
-    .{ .php_name = "stripos", .runtime_name = "php_stripos", .category = .string },
-    .{ .php_name = "strrpos", .runtime_name = "php_strrpos", .category = .string },
-    .{ .php_name = "strripos", .runtime_name = "php_strripos", .category = .string },
+    .{ .php_name = "stripos", .runtime_name = "php_stripos", .category = .string, .default_args = &[_]DefaultArgValue{ .none, .none, .{ .int_val = 0 } } },
+    .{ .php_name = "strrpos", .runtime_name = "php_strrpos", .category = .string, .default_args = &[_]DefaultArgValue{ .none, .none, .{ .int_val = 0 } } },
+    .{ .php_name = "strripos", .runtime_name = "php_strripos", .category = .string, .default_args = &[_]DefaultArgValue{ .none, .none, .{ .int_val = 0 } } },
     .{ .php_name = "sprintf", .runtime_name = "php_sprintf", .needs_allocator = true, .category = .string },
     .{ .php_name = "vsprintf", .runtime_name = "php_vsprintf", .needs_allocator = true, .category = .string },
     .{ .php_name = "sscanf", .runtime_name = "php_sscanf", .needs_allocator = true, .category = .string },
     .{ .php_name = "printf", .runtime_name = "php_printf", .needs_allocator = true, .category = .string },
-    .{ .php_name = "chunk_split", .runtime_name = "php_chunk_split", .needs_allocator = true, .category = .string },
-    .{ .php_name = "wordwrap", .runtime_name = "php_wordwrap", .needs_allocator = true, .category = .string },
-    .{ .php_name = "nl2br", .runtime_name = "php_nl2br", .needs_allocator = true, .category = .string },
-    .{ .php_name = "strip_tags", .runtime_name = "php_strip_tags", .needs_allocator = true, .category = .string },
-    .{ .php_name = "htmlspecialchars", .runtime_name = "php_htmlspecialchars", .needs_allocator = true, .category = .string },
-    .{ .php_name = "htmlentities", .runtime_name = "php_htmlentities", .needs_allocator = true, .category = .string },
-    .{ .php_name = "htmlspecialchars_decode", .runtime_name = "php_htmlspecialchars_decode", .needs_allocator = true, .category = .string },
-    .{ .php_name = "number_format", .runtime_name = "php_number_format", .needs_allocator = true, .category = .string },
+    .{ .php_name = "chunk_split", .runtime_name = "php_chunk_split", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 76 }, .{ .string_val = "\r\n" } } },
+    .{ .php_name = "wordwrap", .runtime_name = "php_wordwrap", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 75 }, .{ .string_val = "\n" }, .{ .bool_val = false } } },
+    .{ .php_name = "nl2br", .runtime_name = "php_nl2br", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = true } } },
+    .{ .php_name = "strip_tags", .runtime_name = "php_strip_tags", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .null_val } },
+    .{ .php_name = "htmlspecialchars", .runtime_name = "php_htmlspecialchars", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 0 }, .{ .string_val = "UTF-8" }, .{ .bool_val = true } } },
+    .{ .php_name = "htmlentities", .runtime_name = "php_htmlentities", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 0 }, .{ .string_val = "UTF-8" }, .{ .bool_val = true } } },
+    .{ .php_name = "htmlspecialchars_decode", .runtime_name = "php_htmlspecialchars_decode", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 0 } } },
+    .{ .php_name = "number_format", .runtime_name = "php_number_format", .needs_allocator = true, .category = .string, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 0 }, .{ .string_val = "." }, .{ .string_val = "," } } },
     .{ .php_name = "addslashes", .runtime_name = "php_addslashes", .needs_allocator = true, .category = .string, .is_pure = true },
     .{ .php_name = "stripslashes", .runtime_name = "php_stripslashes", .needs_allocator = true, .category = .string, .is_pure = true },
     .{ .php_name = "substr_count", .runtime_name = "php_substr_count", .category = .string, .is_pure = true },
@@ -160,15 +180,15 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "bin2hex", .runtime_name = "php_bin2hex", .needs_allocator = true, .category = .encoding, .is_pure = true },
     .{ .php_name = "hex2bin", .runtime_name = "php_hex2bin", .needs_allocator = true, .category = .encoding, .is_pure = true },
     .{ .php_name = "base64_encode", .runtime_name = "php_base64_encode", .needs_allocator = true, .category = .encoding, .is_pure = true },
-    .{ .php_name = "base64_decode", .runtime_name = "php_base64_decode", .needs_allocator = true, .category = .encoding, .is_pure = true },
+    .{ .php_name = "base64_decode", .runtime_name = "php_base64_decode", .needs_allocator = true, .category = .encoding, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
     .{ .php_name = "urlencode", .runtime_name = "php_urlencode", .needs_allocator = true, .category = .encoding, .is_pure = true },
     .{ .php_name = "urldecode", .runtime_name = "php_urldecode", .needs_allocator = true, .category = .encoding, .is_pure = true },
     .{ .php_name = "rawurlencode", .runtime_name = "php_rawurlencode", .needs_allocator = true, .category = .encoding, .is_pure = true },
     .{ .php_name = "rawurldecode", .runtime_name = "php_rawurldecode", .needs_allocator = true, .category = .encoding, .is_pure = true },
 
     // ===== Hash 函数 =====
-    .{ .php_name = "md5", .runtime_name = "php_md5", .needs_allocator = true, .category = .hash, .is_pure = true },
-    .{ .php_name = "sha1", .runtime_name = "php_sha1", .needs_allocator = true, .category = .hash, .is_pure = true },
+    .{ .php_name = "md5", .runtime_name = "php_md5", .needs_allocator = true, .category = .hash, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
+    .{ .php_name = "sha1", .runtime_name = "php_sha1", .needs_allocator = true, .category = .hash, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
     .{ .php_name = "hash", .runtime_name = "php_hash", .needs_allocator = true, .category = .hash },
     .{ .php_name = "hash_hmac", .runtime_name = "php_hash_hmac", .needs_allocator = true, .category = .hash },
     .{ .php_name = "hash_equals", .runtime_name = "php_hash_equals", .category = .hash, .is_pure = true },
@@ -178,7 +198,7 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "password_verify", .runtime_name = "php_password_verify", .needs_allocator = true, .category = .hash },
     .{ .php_name = "password_get_info", .runtime_name = "php_password_get_info", .needs_allocator = true, .category = .hash },
     .{ .php_name = "password_needs_rehash", .runtime_name = "php_password_needs_rehash", .needs_allocator = true, .category = .hash },
-    .{ .php_name = "uniqid", .runtime_name = "php_uniqid", .needs_allocator = true, .category = .hash },
+    .{ .php_name = "uniqid", .runtime_name = "php_uniqid", .needs_allocator = true, .category = .hash, .default_args = &[_]DefaultArgValue{ .{ .string_val = "" }, .{ .bool_val = false } } },
 
     // ===== Array 函数 =====
     .{ .php_name = "count", .runtime_name = "php_count", .category = .array, .is_pure = true },
@@ -193,7 +213,7 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "array_shift", .runtime_name = "php_array_shift", .needs_allocator = true, .category = .array, .is_statement = true },
     .{ .php_name = "array_unshift", .runtime_name = "php_array_unshift", .needs_allocator = true, .category = .array, .is_statement = true },
     .{ .php_name = "array_slice", .runtime_name = "php_array_slice", .needs_allocator = true, .category = .array },
-    .{ .php_name = "array_splice", .runtime_name = "php_array_splice", .needs_allocator = true, .category = .array },
+    .{ .php_name = "array_splice", .runtime_name = "php_array_splice", .needs_allocator = true, .category = .array, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 0 }, .null_val, .null_val } },
     .{ .php_name = "array_merge", .runtime_name = "php_array_merge", .needs_allocator = true, .category = .array },
     .{ .php_name = "array_map", .runtime_name = "php_array_map", .needs_allocator = true, .category = .callback },
     .{ .php_name = "array_filter", .runtime_name = "php_array_filter", .needs_allocator = true, .category = .callback },
@@ -215,9 +235,9 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "array_intersect", .runtime_name = "php_array_intersect", .needs_allocator = true, .category = .array },
     .{ .php_name = "array_diff", .runtime_name = "php_array_diff", .needs_allocator = true, .category = .array },
     .{ .php_name = "array_diff_key", .runtime_name = "php_array_diff_key", .needs_allocator = true, .category = .array },
-    .{ .php_name = "array_walk", .runtime_name = "php_array_walk", .needs_allocator = true, .category = .callback },
-    .{ .php_name = "array_walk_recursive", .runtime_name = "php_array_walk_recursive", .needs_allocator = true, .category = .callback },
-    .{ .php_name = "iterator_to_array", .runtime_name = "php_iterator_to_array", .needs_allocator = true, .category = .array },
+    .{ .php_name = "array_walk", .runtime_name = "php_array_walk", .needs_allocator = true, .category = .callback, .default_args = &[_]DefaultArgValue{ .none, .none, .null_val } },
+    .{ .php_name = "array_walk_recursive", .runtime_name = "php_array_walk_recursive", .needs_allocator = true, .category = .callback, .default_args = &[_]DefaultArgValue{ .none, .none, .null_val } },
+    .{ .php_name = "iterator_to_array", .runtime_name = "php_iterator_to_array", .needs_allocator = true, .category = .array, .default_args = &[_]DefaultArgValue{ .none, .missing } },
     .{ .php_name = "array_count_values", .runtime_name = "php_array_count_values", .needs_allocator = true, .category = .array },
     .{ .php_name = "array_rand", .runtime_name = "php_array_rand", .needs_allocator = true, .category = .array },
     .{ .php_name = "array_key_first", .runtime_name = "php_array_key_first", .category = .array },
@@ -323,7 +343,7 @@ pub const registry = [_]FunctionMeta{
 
     // ===== JSON 函数 =====
     .{ .php_name = "json_encode", .runtime_name = "php_json_encode", .needs_allocator = true, .category = .json },
-    .{ .php_name = "json_decode", .runtime_name = "php_json_decode", .needs_allocator = true, .category = .json },
+    .{ .php_name = "json_decode", .runtime_name = "php_json_decode", .needs_allocator = true, .category = .json, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
     .{ .php_name = "json_last_error", .runtime_name = "php_json_last_error", .category = .json, .may_raise = false },
     .{ .php_name = "json_last_error_msg", .runtime_name = "php_json_last_error_msg", .needs_allocator = true, .category = .json, .may_raise = false },
     .{ .php_name = "serialize", .runtime_name = "php_serialize", .needs_allocator = true, .category = .json },
@@ -337,8 +357,8 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "preg_filter", .runtime_name = "preg_filter", .needs_allocator = true, .category = .regex },
     .{ .php_name = "preg_replace_callback", .runtime_name = "php_preg_replace_callback", .needs_allocator = true, .category = .regex },
     .{ .php_name = "preg_split", .runtime_name = "php_preg_split", .needs_allocator = true, .category = .regex },
-    .{ .php_name = "preg_grep", .runtime_name = "preg_grep", .needs_allocator = true, .category = .regex },
-    .{ .php_name = "preg_quote", .runtime_name = "preg_quote", .needs_allocator = true, .category = .regex, .is_pure = true },
+    .{ .php_name = "preg_grep", .runtime_name = "preg_grep", .needs_allocator = true, .category = .regex, .default_args = &[_]DefaultArgValue{ .none, .none, .{ .int_val = 0 } } },
+    .{ .php_name = "preg_quote", .runtime_name = "preg_quote", .needs_allocator = true, .category = .regex, .is_pure = true, .default_args = &[_]DefaultArgValue{ .none, .null_val } },
     .{ .php_name = "preg_last_error", .runtime_name = "preg_last_error", .category = .regex, .may_raise = false },
 
     // ===== File 函数 =====
@@ -529,6 +549,8 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "php_constant_get", .runtime_name = "php_constant_get", .needs_allocator = true, .category = .internal },
     .{ .php_name = "php_json_encode", .runtime_name = "php_json_encode", .needs_allocator = true, .category = .internal },
     .{ .php_name = "php_go_builtin", .runtime_name = "php_go_builtin", .needs_allocator = true, .category = .internal },
+    .{ .php_name = "php_error_suppress_push", .runtime_name = "php_error_suppress_push", .category = .internal, .may_raise = false },
+    .{ .php_name = "php_error_suppress_pop", .runtime_name = "php_error_suppress_pop", .category = .internal, .may_raise = false },
     .{ .php_name = "php_bool_or", .runtime_name = "php_bool_or", .category = .internal, .may_raise = false },
     .{ .php_name = "php_property_array_push_with_obj", .runtime_name = "php_property_array_push_with_obj", .category = .internal },
     .{ .php_name = "php_property_array_set_with_obj", .runtime_name = "php_property_array_set_with_obj", .category = .internal },

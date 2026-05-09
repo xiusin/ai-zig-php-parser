@@ -3543,24 +3543,33 @@ pub const NativeLinker = struct {
         defer self.current_var_name_map = null;
 
         // 预扫描：找出被传给 by-ref 内建函数第一个参数的寄存器
+        // 使用 FunctionId switch (O(1) jump table) 替代字符串比较
         var byref_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer byref_regs.deinit();
         {
-            const byref_funcs = [_][]const u8{
-                "array_push", "array_pop", "array_shift",  "array_unshift",
-                "sort",       "rsort",     "usort",        "uksort",
-                "uasort",     "shuffle",   "array_splice", "array_walk",
-            };
             for (func.blocks.items) |blk_scan| {
                 for (blk_scan.instructions.items) |inst_scan| {
                     if (inst_scan.op == .call) {
                         const call_op = inst_scan.op.call;
                         if (call_op.args.len > 0) {
-                            for (byref_funcs) |bf| {
-                                if (std.mem.eql(u8, call_op.func_name, bf)) {
-                                    try byref_regs.put(call_op.args[0].id, {});
-                                    break;
-                                }
+                            const is_byref_first = if (call_op.function_id != 0) switch (call_op.function_id) {
+                                FunctionRegistry.comptimeLookup("array_push"),
+                                FunctionRegistry.comptimeLookup("array_pop"),
+                                FunctionRegistry.comptimeLookup("array_shift"),
+                                FunctionRegistry.comptimeLookup("array_unshift"),
+                                FunctionRegistry.comptimeLookup("sort"),
+                                FunctionRegistry.comptimeLookup("rsort"),
+                                FunctionRegistry.comptimeLookup("usort"),
+                                FunctionRegistry.comptimeLookup("uksort"),
+                                FunctionRegistry.comptimeLookup("uasort"),
+                                FunctionRegistry.comptimeLookup("shuffle"),
+                                FunctionRegistry.comptimeLookup("array_splice"),
+                                FunctionRegistry.comptimeLookup("array_walk"),
+                                => true,
+                                else => false,
+                            } else false;
+                            if (is_byref_first) {
+                                try byref_regs.put(call_op.args[0].id, {});
                             }
                         }
                     }
@@ -7797,10 +7806,10 @@ pub const NativeLinker = struct {
                 }
             },
             .call => |op| {
-                // @ 错误抑制运算符：直接调用运行时函数
-                if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
+                // @ 错误抑制运算符：FunctionId 快速路径
+                if (op.function_id == FunctionRegistry.comptimeLookup("php_error_suppress_push")) {
                     try writer.writeAll("    runtime.php_error_suppress_push();\n");
-                } else if (std.mem.eql(u8, op.func_name, "php_error_suppress_pop")) {
+                } else if (op.function_id == FunctionRegistry.comptimeLookup("php_error_suppress_pop")) {
                     try writer.writeAll("    runtime.php_error_suppress_pop();\n");
                 } else {
 
@@ -15143,10 +15152,10 @@ pub const NativeLinker = struct {
             //   使用 try 传播错误到调用者
             // ========================================================================
             .call => |op| {
-                // @ 错误抑制运算符：直接调用运行时函数
-                if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
+                // @ 错误抑制运算符：FunctionId 快速路径
+                if (op.function_id == FunctionRegistry.comptimeLookup("php_error_suppress_push")) {
                     try writer.writeAll("    runtime.php_error_suppress_push();\n");
-                } else if (std.mem.eql(u8, op.func_name, "php_error_suppress_pop")) {
+                } else if (op.function_id == FunctionRegistry.comptimeLookup("php_error_suppress_pop")) {
                     try writer.writeAll("    runtime.php_error_suppress_pop();\n");
                 } else {
 

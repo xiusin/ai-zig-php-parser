@@ -5911,340 +5911,121 @@ pub const IRGenerator = struct {
         else
             0;
 
-        // Builtins with optional boolean flag: print_r($v[, $return]) / var_export($v[, $return])
-        if (pad_fid == FunctionRegistry.comptimeLookup("print_r") or
-            pad_fid == FunctionRegistry.comptimeLookup("var_export"))
-        {
-            if (args.len == 1) {
-                const padded = try self.allocator.alloc(Register, 2);
-                padded[0] = args[0];
-                padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+        // ================================================================
+        // 声明式自动参数补齐 — 由 FunctionMeta.default_args 驱动
+        // 当 args.len < default_args.len 时，用声明的默认值填充缺失参数
+        // 特殊逻辑（preg_match alloca / password_hash 截断）单独处理
+        // ================================================================
+        if (pad_fid != 0) {
+            const pad_meta = FunctionRegistry.getMeta(pad_fid);
+            const defs = pad_meta.default_args;
+
+            // 通用自动补齐路径
+            if (defs.len > 0 and args.len < defs.len) {
+                const padded = try self.allocator.alloc(Register, defs.len);
+                for (padded, 0..) |*slot, i| {
+                    if (i < args.len) {
+                        slot.* = args[i];
+                    } else {
+                        slot.* = switch (defs[i]) {
+                            .none => args[i], // unreachable in practice
+                            .int_val => |v| try self.emitWithResult(.{ .const_int = v }, .i64),
+                            .null_val => try self.emitWithResult(.{ .const_null = {} }, .php_value),
+                            .bool_val => |v| try self.emitWithResult(.{ .const_bool = v }, .bool),
+                            .string_val => |s| blk: {
+                                const sid = try self.module.?.internString(s);
+                                break :blk try self.emitWithResult(.{ .const_string = sid }, .php_value);
+                            },
+                            .missing => try self.emitWithResult(.{ .const_missing = {} }, .php_value),
+                        };
+                    }
+                }
                 args = padded;
             }
-        }
 
-        // ================================================================
-        // 参数补齐 switch — 替代 ~24 条 if/else 字符串比较
-        // 编译器将 switch 优化为 jump table，O(1) 分发
-        // ================================================================
-        if (pad_fid != 0) switch (pad_fid) {
-            FunctionRegistry.comptimeLookup("strpos"),
-            FunctionRegistry.comptimeLookup("stripos"),
-            FunctionRegistry.comptimeLookup("strrpos"),
-            FunctionRegistry.comptimeLookup("strripos"),
-            => {
-                if (args.len == 2) {
-                    const padded = try self.allocator.alloc(Register, 3);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("substr") => {
-                if (args.len == 2) {
-                    const padded = try self.allocator.alloc(Register, 3);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("trim"),
-            FunctionRegistry.comptimeLookup("ltrim"),
-            FunctionRegistry.comptimeLookup("rtrim"),
-            => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("preg_match") => {
-                // preg_match有3个参数时，第3个是引用参数matches
-                if (args.len == 3) {
-                    const matches_arg_idx = positional_args.items[2];
-                    const matches_node = self.getNode(matches_arg_idx);
+            // 特殊处理：preg_match / preg_match_all（含 alloca + func_name 修改）
+            switch (pad_fid) {
+                FunctionRegistry.comptimeLookup("preg_match") => {
+                    if (args.len == 3) {
+                        const matches_arg_idx = positional_args.items[2];
+                        const matches_node = self.getNode(matches_arg_idx);
 
-                    if (matches_node != null and matches_node.?.tag == .variable) {
-                        const var_name = self.getString(matches_node.?.data.variable.name);
-                        const is_local = self.getVarRegister(var_name) != null;
+                        if (matches_node != null and matches_node.?.tag == .variable) {
+                            const var_name = self.getString(matches_node.?.data.variable.name);
+                            const is_local = self.getVarRegister(var_name) != null;
 
-                        if (!is_local) {
-                            const func = self.current_function orelse return error.NoCurrentFunction;
-                            const alloca_type = Type{ .php_value = {} };
-                            const type_ptr = try self.allocator.create(Type);
-                            type_ptr.* = alloca_type;
-                            const ptr_type = Type{ .ptr = type_ptr };
-                            const temp_reg = func.newRegister(ptr_type);
+                            if (!is_local) {
+                                const func = self.current_function orelse return error.NoCurrentFunction;
+                                const alloca_type = Type{ .php_value = {} };
+                                const type_ptr = try self.allocator.create(Type);
+                                type_ptr.* = alloca_type;
+                                const ptr_type = Type{ .ptr = type_ptr };
+                                const temp_reg = func.newRegister(ptr_type);
 
-                            const alloca_inst = try self.allocator.create(Instruction);
-                            alloca_inst.* = .{
-                                .result = temp_reg,
-                                .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
-                                .location = self.current_location,
-                            };
-                            try self.entry_allocas.append(self.allocator, alloca_inst);
+                                const alloca_inst = try self.allocator.create(Instruction);
+                                alloca_inst.* = .{
+                                    .result = temp_reg,
+                                    .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                                    .location = self.current_location,
+                                };
+                                try self.entry_allocas.append(self.allocator, alloca_inst);
 
-                            const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+                                const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
 
-                            args[2] = temp_reg;
-                            try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
-                        } else {
-                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                            args[2] = var_reg;
+                                args[2] = temp_reg;
+                                try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
+                            } else {
+                                const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                                args[2] = var_reg;
+                            }
+                        }
+                        func_name = "preg_match_with_matches";
+                    }
+                },
+                FunctionRegistry.comptimeLookup("preg_match_all") => {
+                    if (args.len >= 3) {
+                        const matches_arg_idx = positional_args.items[2];
+                        const matches_node = self.getNode(matches_arg_idx);
+
+                        if (matches_node != null and matches_node.?.tag == .variable) {
+                            const var_name = self.getString(matches_node.?.data.variable.name);
+                            const is_global = self.global_vars.contains(var_name);
+
+                            if (is_global) {
+                                const func = self.current_function orelse return error.NoCurrentFunction;
+                                const alloca_type = Type{ .php_value = {} };
+                                const type_ptr = try self.allocator.create(Type);
+                                type_ptr.* = alloca_type;
+                                const ptr_type = Type{ .ptr = type_ptr };
+                                const temp_reg = func.newRegister(ptr_type);
+
+                                const alloca_inst = try self.allocator.create(Instruction);
+                                alloca_inst.* = .{
+                                    .result = temp_reg,
+                                    .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                                    .location = self.current_location,
+                                };
+                                try self.entry_allocas.append(self.allocator, alloca_inst);
+
+                                const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+
+                                args[2] = temp_reg;
+                                try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
+                            } else {
+                                const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                                args[2] = var_reg;
+                            }
                         }
                     }
-
-                    // 修改函数名
-                    func_name = "preg_match_with_matches";
-                }
-            },
-            FunctionRegistry.comptimeLookup("preg_match_all") => {
-                // preg_match_all有3个参数时，第3个是引用参数matches
-                if (args.len >= 3) {
-                    const matches_arg_idx = positional_args.items[2];
-                    const matches_node = self.getNode(matches_arg_idx);
-
-                    if (matches_node != null and matches_node.?.tag == .variable) {
-                        const var_name = self.getString(matches_node.?.data.variable.name);
-                        const is_global = self.global_vars.contains(var_name);
-
-                        if (is_global) {
-                            const func = self.current_function orelse return error.NoCurrentFunction;
-                            const alloca_type = Type{ .php_value = {} };
-                            const type_ptr = try self.allocator.create(Type);
-                            type_ptr.* = alloca_type;
-                            const ptr_type = Type{ .ptr = type_ptr };
-                            const temp_reg = func.newRegister(ptr_type);
-
-                            const alloca_inst = try self.allocator.create(Instruction);
-                            alloca_inst.* = .{
-                                .result = temp_reg,
-                                .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
-                                .location = self.current_location,
-                            };
-                            try self.entry_allocas.append(self.allocator, alloca_inst);
-
-                            const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
-
-                            args[2] = temp_reg;
-                            try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
-                        } else {
-                            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                            args[2] = var_reg;
-                        }
-                    }
-                }
-            },
-            FunctionRegistry.comptimeLookup("preg_grep") => {
-                if (args.len == 2) {
-                    const padded = try self.allocator.alloc(Register, 3);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("preg_quote") => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("explode") => {
-                if (args.len == 2) {
-                    const padded = try self.allocator.alloc(Register, 3);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("str_replace"),
-            FunctionRegistry.comptimeLookup("str_ireplace"),
-            => {
-                if (args.len == 3) {
-                    const padded = try self.allocator.alloc(Register, 4);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = args[2];
-                    padded[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("ucwords") => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("str_split") => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("str_pad") => {
-                if (args.len == 2) {
-                    const sid_space = try self.module.?.internString(" ");
-                    const padded = try self.allocator.alloc(Register, 4);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_string = sid_space }, .php_value);
-                    padded[3] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
-                    args = padded;
-                } else if (args.len == 3) {
-                    const padded = try self.allocator.alloc(Register, 4);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = args[2];
-                    padded[3] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("chunk_split") => {
-                if (args.len < 3) {
-                    const sid_end = try self.module.?.internString("\r\n");
-                    const padded = try self.allocator.alloc(Register, 3);
-                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
-                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 76 }, .i64);
-                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_end }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("wordwrap") => {
-                if (args.len < 4) {
-                    const sid_break = try self.module.?.internString("\n");
-                    const padded = try self.allocator.alloc(Register, 4);
-                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
-                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 75 }, .i64);
-                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_break }, .php_value);
-                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = false }, .bool);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("nl2br") => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_bool = true }, .bool);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("strip_tags") => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("htmlspecialchars"),
-            FunctionRegistry.comptimeLookup("htmlentities"),
-            => {
-                if (args.len < 4) {
-                    const sid_utf8 = try self.module.?.internString("UTF-8");
-                    const padded = try self.allocator.alloc(Register, 4);
-                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = try self.module.?.internString("") }, .php_value);
-                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
-                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_utf8 }, .php_value);
-                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = true }, .bool);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("htmlspecialchars_decode") => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("number_format") => {
-                if (args.len < 4) {
-                    const sid_dot = try self.module.?.internString(".");
-                    const sid_comma = try self.module.?.internString(",");
-                    const padded = try self.allocator.alloc(Register, 4);
-                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
-                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
-                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_dot }, .php_value);
-                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_string = sid_comma }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("md5"),
-            FunctionRegistry.comptimeLookup("sha1"),
-            FunctionRegistry.comptimeLookup("base64_decode"),
-            => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("uniqid") => {
-                if (args.len < 2) {
-                    const sid_empty = try self.module.?.internString("");
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_string = sid_empty }, .php_value);
-                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_bool = false }, .bool);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("json_decode") => {
-                if (args.len == 1) {
-                    const padded = try self.allocator.alloc(Register, 2);
-                    padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("array_walk"),
-            FunctionRegistry.comptimeLookup("array_walk_recursive"),
-            => {
-                if (args.len == 2) {
-                    const padded = try self.allocator.alloc(Register, 3);
-                    padded[0] = args[0];
-                    padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            FunctionRegistry.comptimeLookup("array_splice") => {
-                if (args.len < 4) {
-                    const padded = try self.allocator.alloc(Register, 4);
-                    padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_int = 0 }, .i64);
-                    padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    args = padded;
-                }
-            },
-            else => {},
-        };
-        
-        // password_hash(password, algo, options=[]) — runtime只接受2个Value参数，截断options
-        if (pad_fid == FunctionRegistry.comptimeLookup("password_hash") and args.len > 2) {
-            args = args[0..2];
-        }
-
-        // 特殊处理：iterator_to_array 第二个参数可选，默认为true
-        if (pad_fid == FunctionRegistry.comptimeLookup("iterator_to_array") and args.len == 1) {
-            const padded = try self.allocator.alloc(Register, 2);
-            padded[0] = args[0];
-            padded[1] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
-            args = padded;
+                },
+                FunctionRegistry.comptimeLookup("password_hash") => {
+                    // runtime只接受2个Value参数，截断options
+                    if (args.len > 2) args = args[0..2];
+                },
+                else => {},
+            }
         }
 
         if (indirect_callee) |callee_reg| {
