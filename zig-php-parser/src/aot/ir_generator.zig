@@ -5923,8 +5923,16 @@ pub const IRGenerator = struct {
             }
         }
 
-        if (pad_fid != 0) {
-            if (std.mem.eql(u8, func_name, "strpos") or std.mem.eql(u8, func_name, "stripos") or std.mem.eql(u8, func_name, "strrpos") or std.mem.eql(u8, func_name, "strripos")) {
+        // ================================================================
+        // 参数补齐 switch — 替代 ~24 条 if/else 字符串比较
+        // 编译器将 switch 优化为 jump table，O(1) 分发
+        // ================================================================
+        if (pad_fid != 0) switch (pad_fid) {
+            FunctionRegistry.comptimeLookup("strpos"),
+            FunctionRegistry.comptimeLookup("stripos"),
+            FunctionRegistry.comptimeLookup("strrpos"),
+            FunctionRegistry.comptimeLookup("strripos"),
+            => {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
@@ -5932,7 +5940,8 @@ pub const IRGenerator = struct {
                     padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "substr")) {
+            },
+            FunctionRegistry.comptimeLookup("substr") => {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
@@ -5940,29 +5949,29 @@ pub const IRGenerator = struct {
                     padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "trim") or std.mem.eql(u8, func_name, "ltrim") or std.mem.eql(u8, func_name, "rtrim")) {
+            },
+            FunctionRegistry.comptimeLookup("trim"),
+            FunctionRegistry.comptimeLookup("ltrim"),
+            FunctionRegistry.comptimeLookup("rtrim"),
+            => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "preg_match")) {
+            },
+            FunctionRegistry.comptimeLookup("preg_match") => {
                 // preg_match有3个参数时，第3个是引用参数matches
                 if (args.len == 3) {
-                    // 第3个参数需要转换为引用
-                    // 获取原始参数表达式
                     const matches_arg_idx = positional_args.items[2];
                     const matches_node = self.getNode(matches_arg_idx);
 
                     if (matches_node != null and matches_node.?.tag == .variable) {
                         const var_name = self.getString(matches_node.?.data.variable.name);
-
-                        // 检查是否是局部变量（在var_registers中）
                         const is_local = self.getVarRegister(var_name) != null;
 
                         if (!is_local) {
-                            // 全局变量或未声明变量：创建临时alloca
                             const func = self.current_function orelse return error.NoCurrentFunction;
                             const alloca_type = Type{ .php_value = {} };
                             const type_ptr = try self.allocator.create(Type);
@@ -5978,20 +5987,13 @@ pub const IRGenerator = struct {
                             };
                             try self.entry_allocas.append(self.allocator, alloca_inst);
 
-                            // 初始化为null（不读取未定义的变量）
                             const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                             _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
 
-                            // 直接使用alloca指针
                             args[2] = temp_reg;
-
-                            // 记录需要写回
                             try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
                         } else {
-                            // 局部变量：获取或创建alloca
                             const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-
-                            // 直接使用alloca指针（preg_match_with_matches需要*Value）
                             args[2] = var_reg;
                         }
                     }
@@ -5999,10 +6001,10 @@ pub const IRGenerator = struct {
                     // 修改函数名
                     func_name = "preg_match_with_matches";
                 }
-            } else if (std.mem.eql(u8, func_name, "preg_match_all")) {
+            },
+            FunctionRegistry.comptimeLookup("preg_match_all") => {
                 // preg_match_all有3个参数时，第3个是引用参数matches
                 if (args.len >= 3) {
-                    // 第3个参数需要转换为引用（与preg_match相同逻辑）
                     const matches_arg_idx = positional_args.items[2];
                     const matches_node = self.getNode(matches_arg_idx);
 
@@ -6011,7 +6013,6 @@ pub const IRGenerator = struct {
                         const is_global = self.global_vars.contains(var_name);
 
                         if (is_global) {
-                            // 全局变量：创建临时alloca
                             const func = self.current_function orelse return error.NoCurrentFunction;
                             const alloca_type = Type{ .php_value = {} };
                             const type_ptr = try self.allocator.create(Type);
@@ -6027,26 +6028,19 @@ pub const IRGenerator = struct {
                             };
                             try self.entry_allocas.append(self.allocator, alloca_inst);
 
-                            // 初始化为null（不读取未定义的变量）
                             const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                             _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
 
-                            // 直接使用alloca指针
                             args[2] = temp_reg;
-
-                            // 记录需要写回
                             try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
                         } else {
-                            // 局部变量：获取或创建alloca
                             const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-
-                            // 直接使用alloca指针
                             args[2] = var_reg;
                         }
                     }
                 }
-            } else if (std.mem.eql(u8, func_name, "preg_grep")) {
-                // preg_grep($pattern, $array, $flags = 0)
+            },
+            FunctionRegistry.comptimeLookup("preg_grep") => {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
@@ -6054,15 +6048,16 @@ pub const IRGenerator = struct {
                     padded[2] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "preg_quote")) {
-                // preg_quote($str, $delimiter = null)
+            },
+            FunctionRegistry.comptimeLookup("preg_quote") => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "explode")) {
+            },
+            FunctionRegistry.comptimeLookup("explode") => {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
@@ -6070,7 +6065,10 @@ pub const IRGenerator = struct {
                     padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "str_replace") or std.mem.eql(u8, func_name, "str_ireplace")) {
+            },
+            FunctionRegistry.comptimeLookup("str_replace"),
+            FunctionRegistry.comptimeLookup("str_ireplace"),
+            => {
                 if (args.len == 3) {
                     const padded = try self.allocator.alloc(Register, 4);
                     padded[0] = args[0];
@@ -6079,21 +6077,24 @@ pub const IRGenerator = struct {
                     padded[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "ucwords")) {
+            },
+            FunctionRegistry.comptimeLookup("ucwords") => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "str_split")) {
+            },
+            FunctionRegistry.comptimeLookup("str_split") => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "str_pad")) {
+            },
+            FunctionRegistry.comptimeLookup("str_pad") => {
                 if (args.len == 2) {
                     const sid_space = try self.module.?.internString(" ");
                     const padded = try self.allocator.alloc(Register, 4);
@@ -6110,7 +6111,8 @@ pub const IRGenerator = struct {
                     padded[3] = try self.emitWithResult(.{ .const_int = 1 }, .i64);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "chunk_split")) {
+            },
+            FunctionRegistry.comptimeLookup("chunk_split") => {
                 if (args.len < 3) {
                     const sid_end = try self.module.?.internString("\r\n");
                     const padded = try self.allocator.alloc(Register, 3);
@@ -6119,7 +6121,8 @@ pub const IRGenerator = struct {
                     padded[2] = if (args.len >= 3) args[2] else try self.emitWithResult(.{ .const_string = sid_end }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "wordwrap")) {
+            },
+            FunctionRegistry.comptimeLookup("wordwrap") => {
                 if (args.len < 4) {
                     const sid_break = try self.module.?.internString("\n");
                     const padded = try self.allocator.alloc(Register, 4);
@@ -6129,21 +6132,26 @@ pub const IRGenerator = struct {
                     padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = false }, .bool);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "nl2br")) {
+            },
+            FunctionRegistry.comptimeLookup("nl2br") => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_bool = true }, .bool);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "strip_tags")) {
+            },
+            FunctionRegistry.comptimeLookup("strip_tags") => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "htmlspecialchars") or std.mem.eql(u8, func_name, "htmlentities")) {
+            },
+            FunctionRegistry.comptimeLookup("htmlspecialchars"),
+            FunctionRegistry.comptimeLookup("htmlentities"),
+            => {
                 if (args.len < 4) {
                     const sid_utf8 = try self.module.?.internString("UTF-8");
                     const padded = try self.allocator.alloc(Register, 4);
@@ -6153,14 +6161,16 @@ pub const IRGenerator = struct {
                     padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_bool = true }, .bool);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "htmlspecialchars_decode")) {
+            },
+            FunctionRegistry.comptimeLookup("htmlspecialchars_decode") => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_int = 0 }, .i64);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "number_format")) {
+            },
+            FunctionRegistry.comptimeLookup("number_format") => {
                 if (args.len < 4) {
                     const sid_dot = try self.module.?.internString(".");
                     const sid_comma = try self.module.?.internString(",");
@@ -6171,14 +6181,19 @@ pub const IRGenerator = struct {
                     padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_string = sid_comma }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "md5") or std.mem.eql(u8, func_name, "sha1") or std.mem.eql(u8, func_name, "base64_decode")) {
+            },
+            FunctionRegistry.comptimeLookup("md5"),
+            FunctionRegistry.comptimeLookup("sha1"),
+            FunctionRegistry.comptimeLookup("base64_decode"),
+            => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "uniqid")) {
+            },
+            FunctionRegistry.comptimeLookup("uniqid") => {
                 if (args.len < 2) {
                     const sid_empty = try self.module.?.internString("");
                     const padded = try self.allocator.alloc(Register, 2);
@@ -6186,14 +6201,18 @@ pub const IRGenerator = struct {
                     padded[1] = if (args.len >= 2) args[1] else try self.emitWithResult(.{ .const_bool = false }, .bool);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "json_decode")) {
+            },
+            FunctionRegistry.comptimeLookup("json_decode") => {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
                     padded[1] = try self.emitWithResult(.{ .const_bool = false }, .bool);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "array_walk") or std.mem.eql(u8, func_name, "array_walk_recursive")) {
+            },
+            FunctionRegistry.comptimeLookup("array_walk"),
+            FunctionRegistry.comptimeLookup("array_walk_recursive"),
+            => {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
@@ -6201,8 +6220,8 @@ pub const IRGenerator = struct {
                     padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            } else if (std.mem.eql(u8, func_name, "array_splice")) {
-                // array_splice(array &$array, int $offset, ?int $length = null, mixed $replacement = []): array
+            },
+            FunctionRegistry.comptimeLookup("array_splice") => {
                 if (args.len < 4) {
                     const padded = try self.allocator.alloc(Register, 4);
                     padded[0] = if (args.len >= 1) args[0] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
@@ -6211,8 +6230,9 @@ pub const IRGenerator = struct {
                     padded[3] = if (args.len >= 4) args[3] else try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     args = padded;
                 }
-            }
-        }
+            },
+            else => {},
+        };
         
         // password_hash(password, algo, options=[]) — runtime只接受2个Value参数，截断options
         if (pad_fid == FunctionRegistry.comptimeLookup("password_hash") and args.len > 2) {

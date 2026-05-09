@@ -605,6 +605,7 @@ pub fn lookupByName(php_name: []const u8) ?FunctionId {
 /// 仅用于生成 switch case 常量，编译期零开销
 /// 找不到时触发 @compileError
 pub fn comptimeLookup(comptime php_name: []const u8) FunctionId {
+    @setEvalBranchQuota(100000);
     inline for (0..REGISTRY_SIZE) |i| {
         if (comptime std.mem.eql(u8, registry[i].php_name, php_name)) {
             return @intCast(i);
